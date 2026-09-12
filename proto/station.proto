@@ -1,0 +1,22 @@
+syntax = "proto3";
+package station;
+
+// Minimal gRPC contract for stationd: just enough to check it's alive and
+// ask it to stop. Will grow later (playlists, roles...), but we're
+// deliberately starting small.
+service Station {
+  rpc Status (StatusRequest) returns (StatusReply);
+  rpc Quit (QuitRequest) returns (QuitReply);
+}
+
+message StatusRequest {}
+
+message StatusReply {
+  string station_name = 1;
+  uint64 uptime_seconds = 2;
+  uint32 pid = 3;
+}
+
+message QuitRequest {}
+
+message QuitReply {}

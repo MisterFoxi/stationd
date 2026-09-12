@@ -1,0 +1,15 @@
+[station]
+name = "My Radio"
+
+[server]
+grpc_bind = "127.0.0.1:50051"
+
+[database]
+path = "./data/stationd.db"
+
+[media]
+library_path = "./media"
+
+# Optional — defaults to "info" if absent
+[logging]
+level = "info"
