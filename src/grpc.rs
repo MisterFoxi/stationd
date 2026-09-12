@@ -1,6 +1,8 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
+use sqlx::SqlitePool;
 use tokio::sync::{oneshot, Mutex};
 use tonic::{Request, Response, Status as TonicStatus};
 
@@ -10,7 +12,12 @@ pub mod station {
 }
 
 use station::station_server::Station;
-use station::{QuitReply, QuitRequest, StatusReply, StatusRequest};
+use station::{
+    PlaylistAddReply, PlaylistAddRequest, PlaylistSyncError, PlaylistSyncReply,
+    PlaylistSyncRequest, QuitReply, QuitRequest, StatusReply, StatusRequest,
+};
+
+use crate::playlist::{self, Playlist};
 
 /// Implementation of the `Station` gRPC service.
 ///
@@ -21,6 +28,8 @@ use station::{QuitReply, QuitRequest, StatusReply, StatusRequest};
 pub struct StationService {
     station_name: String,
     started_at: Instant,
+    db: SqlitePool,
+    playlist_root: PathBuf,
     // A `oneshot::Sender` only fires once. The `Mutex<Option<_>>` lets us
     // "consume" it (`.take()`) on the first `quit` received without
     // panicking if a misbehaving client calls `quit` twice.
@@ -28,12 +37,47 @@ pub struct StationService {
 }
 
 impl StationService {
-    pub fn new(station_name: String, shutdown: oneshot::Sender<()>) -> Self {
+    pub fn new(
+        station_name: String,
+        db: SqlitePool,
+        playlist_root: PathBuf,
+        shutdown: oneshot::Sender<()>,
+    ) -> Self {
         Self {
             station_name,
             started_at: Instant::now(),
+            db,
+            playlist_root,
             shutdown: Arc::new(Mutex::new(Some(shutdown))),
         }
+    }
+
+    /// Shared reconciliation of one playlist's TOML into the SQLite view:
+    /// parse (strict) → validate (business rules) → assign a UUID
+    /// losslessly → upsert the view. stationd is the single writer. Both
+    /// `playlist_add` (one file) and `playlist_sync` (a whole tree) go
+    /// through here, so the two paths can never diverge.
+    ///
+    /// Returns the rewritten TOML and the effective id.
+    async fn reconcile_one(&self, toml_content: &str) -> Result<(String, String), String> {
+        let playlist = Playlist::parse(toml_content).map_err(|e| e.to_string())?;
+        playlist.validate().map_err(|e| e.to_string())?;
+
+        let (rewritten, id) = playlist::assign_id(toml_content).map_err(|e| e.to_string())?;
+
+        sqlx::query(
+            "INSERT INTO playlists (id, name, enabled, toml) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(id) DO UPDATE SET name = ?2, enabled = ?3, toml = ?4",
+        )
+        .bind(id.to_string())
+        .bind(&playlist.name)
+        .bind(playlist.enabled as i64)
+        .bind(&rewritten)
+        .execute(&self.db)
+        .await
+        .map_err(|e| format!("could not update playlist view: {e}"))?;
+
+        Ok((rewritten, id.to_string()))
     }
 }
 
@@ -62,5 +106,94 @@ impl Station for StationService {
             let _ = tx.send(());
         }
         Ok(Response::new(QuitReply {}))
+    }
+
+    async fn playlist_add(
+        &self,
+        request: Request<PlaylistAddRequest>,
+    ) -> Result<Response<PlaylistAddReply>, TonicStatus> {
+        let toml_content = request.into_inner().toml_content;
+
+        // All the metier (parse, validate, id, view update) lives in
+        // `reconcile_one`, shared with `playlist_sync` so the two can never
+        // diverge. stationd is the single writer of the SQLite view.
+        let (rewritten, id) = self
+            .reconcile_one(&toml_content)
+            .await
+            .map_err(TonicStatus::invalid_argument)?;
+
+        Ok(Response::new(PlaylistAddReply {
+            toml_content: rewritten,
+            id,
+        }))
+    }
+
+    async fn playlist_sync(
+        &self,
+        _request: Request<PlaylistSyncRequest>,
+    ) -> Result<Response<PlaylistSyncReply>, TonicStatus> {
+        // stationd reads its own playlist root here — it is the legitimate
+        // reader of its source-of-truth directory (and will watch it). This
+        // is distinct from `playlist_add`, where a client brings in one file
+        // from outside; there the I/O is delegated to the CLI.
+        let root = &self.playlist_root;
+
+        let mut added: u32 = 0;
+        let mut errors: Vec<PlaylistSyncError> = Vec::new();
+
+        // Recursive walk from the root; ignore anything that is not a
+        // regular *.toml file. Best-effort: a bad file is reported, never
+        // fatal — the valid ones are still applied.
+        for entry in walkdir::WalkDir::new(root).into_iter().filter_map(Result::ok) {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            if path.extension().and_then(|e| e.to_str()) != Some("toml") {
+                continue;
+            }
+
+            // Path shown in the report, relative to the root when possible.
+            let rel = path
+                .strip_prefix(root)
+                .unwrap_or(path)
+                .display()
+                .to_string();
+
+            let content = match std::fs::read_to_string(path) {
+                Ok(c) => c,
+                Err(e) => {
+                    errors.push(PlaylistSyncError {
+                        path: rel,
+                        message: format!("cannot read: {e}"),
+                    });
+                    continue;
+                }
+            };
+
+            match self.reconcile_one(&content).await {
+                Ok((rewritten, _id)) => {
+                    // Write back only if assign_id changed the file (a
+                    // freshly added playlist gets its id injected). Avoids
+                    // rewriting — and churning git — files already carrying
+                    // an id.
+                    if rewritten != content {
+                        if let Err(e) = std::fs::write(path, &rewritten) {
+                            errors.push(PlaylistSyncError {
+                                path: rel,
+                                message: format!("reconciled but could not write id back: {e}"),
+                            });
+                            continue;
+                        }
+                    }
+                    added += 1;
+                }
+                Err(msg) => {
+                    errors.push(PlaylistSyncError { path: rel, message: msg });
+                }
+            }
+        }
+
+        Ok(Response::new(PlaylistSyncReply { added, errors }))
     }
 }

@@ -8,6 +8,7 @@ pub struct Config {
     pub server: ServerConfig,
     pub database: DatabaseConfig,
     pub media: MediaConfig,
+    pub playlist: PlaylistConfig,
     #[serde(default)]
     pub logging: LoggingConfig,
 }
@@ -31,6 +32,15 @@ pub struct DatabaseConfig {
 #[derive(Debug, Deserialize)]
 pub struct MediaConfig {
     pub library_path: PathBuf,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PlaylistConfig {
+    /// Directory holding the per-playlist TOML files. These files are the
+    /// source of truth (file-first): SQLite is only a rebuildable view of
+    /// them. Edited both by a human (editor / `git pull`) and by stationd
+    /// itself — never by `api`.
+    pub path: PathBuf,
 }
 
 #[derive(Debug, Deserialize)]
@@ -99,9 +109,13 @@ mod tests {
 
             [media]
             library_path = "./media"
+
+            [playlist]
+            path = "./playlist"
         "#;
         let config: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(config.station.name, "Test Radio");
+        assert_eq!(config.playlist.path, PathBuf::from("./playlist"));
         assert_eq!(config.logging.level, "info"); // default value
     }
 

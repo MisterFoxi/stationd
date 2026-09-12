@@ -1,6 +1,7 @@
 mod config;
 mod db;
 mod grpc;
+mod playlist;
 
 use std::path::PathBuf;
 
@@ -42,11 +43,19 @@ async fn main() -> anyhow::Result<()> {
     info!(station = %cfg.station.name, "stationd starting");
     info!(db_path = ?cfg.database.path, "SQLite database");
     info!(media_path = ?cfg.media.library_path, "media library");
+    info!(playlist_path = ?cfg.playlist.path, "playlist directory (source of truth)");
 
     if !cfg.media.library_path.exists() {
         warn!(
             path = ?cfg.media.library_path,
             "media directory does not exist yet (not a problem for now)"
+        );
+    }
+
+    if !cfg.playlist.path.exists() {
+        warn!(
+            path = ?cfg.playlist.path,
+            "playlist directory does not exist yet (not a problem for now)"
         );
     }
 
@@ -60,7 +69,12 @@ async fn main() -> anyhow::Result<()> {
 
     let addr = cfg.server.grpc_bind.parse()?;
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
-    let service = grpc::StationService::new(cfg.station.name.clone(), shutdown_tx);
+    let service = grpc::StationService::new(
+        cfg.station.name.clone(),
+        db_pool.clone(),
+        cfg.playlist.path.clone(),
+        shutdown_tx,
+    );
 
     info!(%addr, "gRPC server listening (status, quit)");
 

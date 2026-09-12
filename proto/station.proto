@@ -7,6 +7,8 @@ package station;
 service Station {
   rpc Status (StatusRequest) returns (StatusReply);
   rpc Quit (QuitRequest) returns (QuitReply);
+  rpc PlaylistAdd (PlaylistAddRequest) returns (PlaylistAddReply);
+  rpc PlaylistSync (PlaylistSyncRequest) returns (PlaylistSyncReply);
 }
 
 message StatusRequest {}
@@ -20,3 +22,35 @@ message StatusReply {
 message QuitRequest {}
 
 message QuitReply {}
+
+// `playlist add`: the CLI ships the raw TOML content (it does only a
+// syntactic pre-check locally, then delegates the I/O of *sending*).
+// stationd parses, validates, generates the UUID, updates its SQLite view
+// (single writer), and returns the losslessly-rewritten TOML plus the id.
+// The CLI then writes that content back to disk.
+message PlaylistAddRequest {
+  string toml_content = 1;
+}
+
+message PlaylistAddReply {
+  string toml_content = 1; // rewritten TOML, with the id injected
+  string id = 2;           // the effective UUID
+}
+
+// `playlist sync`: stationd scans its own playlist root (recursively, from
+// `[playlist] path` in its config) and reconciles every *.toml into the
+// SQLite view. Best-effort: a bad file is reported, not fatal — the valid
+// ones are still applied. stationd reads its own root here (it is the
+// legitimate reader of its source-of-truth directory, and will watch it),
+// so the CLI passes no path.
+message PlaylistSyncRequest {}
+
+message PlaylistSyncReply {
+  uint32 added = 1;               // files successfully reconciled
+  repeated PlaylistSyncError errors = 2; // files rejected, with reason
+}
+
+message PlaylistSyncError {
+  string path = 1;    // file that failed (relative to the playlist root)
+  string message = 2; // why it was rejected
+}

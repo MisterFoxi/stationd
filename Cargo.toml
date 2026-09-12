@@ -18,6 +18,9 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
 tonic = "0.12"
 prost = "0.13"
 sqlx = { version = "0.7", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+toml_edit = "0.22"
+walkdir = "2"
 
 [build-dependencies]
 tonic-build = "0.12"

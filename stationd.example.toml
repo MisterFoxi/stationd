@@ -10,6 +10,10 @@ path = "./data/stationd.db"
 [media]
 library_path = "./media"
 
+# Directory holding the per-playlist TOML files (the source of truth).
+[playlist]
+path = "./playlist"
+
 # Optional — defaults to "info" if absent
 [logging]
 level = "info"
