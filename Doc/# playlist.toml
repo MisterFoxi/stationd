@@ -1,0 +1,87 @@
+# playlist.toml
+# ─────────────────────────────────────────────────────────────────────────
+# Playlist simple, sélection dynamique, rotation générale
+[[playlist]]
+id      = "hits-recents"        # clé stable (référencée par groupes / CLI / gRPC)
+name    = "Hits récents"        # affichage seulement
+enabled = true
+
+[playlist.selection]            # ── QUOI ──
+mode  = "dynamic"               # "static" | "dynamic" | "remote" | "group"
+match = "all"                   # "all" = ET, "any" = OU entre les filtres
+[[playlist.selection.filter]]
+field = "genre"; op = "in"; value = ["pop", "dance", "rock"]
+[[playlist.selection.filter]]
+field = "year";  op = ">=";  value = 2018
+[[playlist.selection.filter]]
+field = "rating"; op = ">="; value = 3
+
+[playlist.broadcast]            # ── QUAND / COMMENT ──
+type   = "general"              # participe à la rotation générale
+weight = 5                      # fréquence relative
+order  = "shuffle"              # "shuffle" | "sequential" | "random"
+[playlist.broadcast.constraints]
+no_same_artist_within = "30m"
+no_same_track_within  = "3h"
+
+# ─────────────────────────────────────────────────────────────────────────
+# Playlist statique, intercalée (jingles)
+[[playlist]]
+id      = "jingles"
+name    = "Jingles station"
+enabled = true
+
+[playlist.selection]
+mode  = "static"
+files = ["jingles/id-01.wav", "jingles/id-02.wav"]
+
+[playlist.broadcast]
+type         = "interval"
+every_tracks = 4                # 1 élément toutes les 4 pistes
+# every_time = "15m"            # variante temporelle (champ distinct, pas de type polymorphe)
+order        = "random"
+
+# ─────────────────────────────────────────────────────────────────────────
+# Playlist programmée (créneau exclusif)
+[[playlist]]
+id      = "classiques-nuit"
+name    = "Classiques de nuit"
+enabled = true
+
+[playlist.selection]
+mode  = "dynamic"
+match = "all"
+[[playlist.selection.filter]]
+field = "year"; op = "<="; value = 1990
+
+[playlist.broadcast]
+type  = "scheduled"
+order = "shuffle"
+[[playlist.broadcast.schedule]]
+start = "00:00"
+end   = "06:00"
+days  = ["mon","tue","wed","thu","fri","sat","sun"]
+# date_start / date_end optionnels pour un créneau temporaire
+
+# ─────────────────────────────────────────────────────────────────────────
+# Playlist de GROUPE : combine d'autres playlists
+[[playlist]]
+id      = "matinee"
+name    = "Matinée"
+enabled = true
+
+[playlist.selection]
+mode     = "group"
+strategy = "weighted"           # "weighted" | "rotate" | "sequence"
+members  = [
+  { ref = "hits-recents",    weight = 5 },
+  { ref = "classiques-nuit", weight = 2 },
+  { ref = "jingles" },          # garde son intercalage propre
+]
+
+[playlist.broadcast]
+type = "scheduled"
+[[playlist.broadcast.schedule]]
+start = "06:00"
+end   = "10:00"
+days  = ["mon","tue","wed","thu","fri"]
