@@ -11,154 +11,181 @@ Dernière mise à jour : 2026-09-13.
 
 ## Où on en est en une phrase
 
-Le circuit playlists est fonctionnel de bout en bout : config → parser TOML →
-`add` / `sync` / `list` via gRPC, avec validation métier (par fichier + sur
-l'ensemble) et une vue SQLite. Le crate est passé en **lib + bin** (option A),
-la logique de `sync` est extraite dans un module `sync` testable hors tonic, et
-un test d'intégration `tests/sync.rs` la couvre de bout en bout. 40 tests
-unitaires verts (migration lib+bin validée) et 4 tests d'intégration `sync`
-verts. Le câblage Liquidsoap/Icecast et le résolveur de
-programmation ne sont pas commencés.
+Le circuit playlists était déjà fonctionnel de bout en bout ; cette session a
+bâti **toute la couche grille / résolveur** : du cœur pur `resolve_next`
+jusqu'à un RPC `ScheduleService.ResolveNext` servi et joignable via
+`stationctl schedule next`, avec temps correct DST (`jiff`), état de lecture
+persisté et index des règles en SQLite. Tout ce qui va jusqu'à `grid_engine` +
+`config` est **compilé et vert** ; le dernier lot (câblage gRPC du service
+scheduling, option A) **compile** (`cargo build` OK). Reste à confirmer la
+suite de tests complète et l'essai bout-en-bout — cf. tâche d'entrée.
+
+---
+
+## ⭐ TÂCHE D'ENTRÉE PROCHAINE SESSION
+
+1. **`cargo build` : OK ✓** — le câblage gRPC scheduling compile (proto généré,
+   `prost-types` aligné, trait `ScheduleService`, glu `stationctl`). Reste à
+   lancer **`cargo test -p stationd`** (suite complète) pour confirmer l'absence
+   de régression ; la glu transport n'a pas de tests propres.
+2. **Test bout en bout** : lancer `stationd`, injecter une règle
+   (`grid_index::insert_rule`, ou attendre l'apply grille), puis
+   `stationctl schedule next --at 32400` (09:00 UTC) → doit rendre `origin` +
+   `playlist_ref`. Première réponse de la grille au CLI.
+3. **Décision suivante : grammaire TOML de la grille (point « 2b »).** Le
+   chargement grille est fait *depuis SQLite* ; le format fichier des règles
+   (4 familles, portée de validité, `soft|hard`, péremption) n'est pas conçu.
+   C'est l'équivalent grille de la grammaire playlists — à faire avant
+   d'implémenter `ApplyGrid`/`ValidateGrid`/`ExportGrid` (aujourd'hui
+   `UNIMPLEMENTED`).
 
 ---
 
 ## Fait
 
-### Config
-- Section `[playlist] path` dans `stationd.toml` : racine des playlists,
-  scannée récursivement. Chemin relatif au CWD (piège systemd noté plus bas).
-- `config.rs` : `PlaylistConfig { path }`, champ requis (absence = erreur au
-  démarrage, no-silent-failure).
+### — Couche grille / résolveur (cette session) —
 
-### Modèle & parser (`src/playlist.rs`)
-- Un fichier = une playlist. Table racine (`id`/`name`/`enabled` +
-  sous-tables `[selection]`/`[broadcast]`). Désérialisation serde stricte
-  (`deny_unknown_fields`).
-- 5 modes : `static`, `dynamic`, `remote`, `queue`, `group`.
-  - `remote` = un flux distant relayé (`url` + `name`). Distinct du podcast
-    (podcast = fichier partagé entre applis, hors scope ici).
-- `id` = UUID v4, **généré par le système**, absent d'un fichier écrit à la
-  main (`id: Option<Uuid>`). `assign_id` l'injecte via `toml_edit` (lossless,
-  commentaires/format préservés), idempotent.
-- Validation par fichier : `order` selon `mode`, `take`/`weight` selon la
-  strategy de groupe, cohérence des champs par mode, `url` réservé à `remote`.
-- Validation d'ensemble (`validate_set`, pure, sans DB) : résolution des refs
-  de groupe + détection de cycles.
-  - `ref` d'un membre = **chemin relatif du fichier** (pas l'UUID, qui est
-    cuisine interne). Ex. `ref = "nuit/goodnight"`.
-  - `normalize_ref` : `\`→`/`, sans `.toml`, minuscules, anti-`..`, anti-`/`
-    initial. Appliqué symétriquement au ref et au chemin scanné.
+**Invariant structurant, gravé partout : deux familles de tables.**
+(A) index reconstructible (dérivé des TOML, `apply` fait DROP+rebuild) ;
+(B) état durable (jamais dérivable, `apply` n'y touche jamais). Visible jusque
+dans le découpage des modules (`grid_index` = A, `grid_store` = B).
 
-### gRPC (`proto/station.proto`, `src/grpc.rs`)
-- RPC : `Status`, `Quit`, `PlaylistAdd`, `PlaylistSync`, `PlaylistList`.
-- `add` : le CLI lit le fichier + pré-check syntaxique, envoie le contenu ;
-  stationd parse/valide/génère l'UUID/écrit la vue, renvoie le TOML réécrit ;
-  le CLI réécrit le fichier. (I/O délégué au CLI, métier dans stationd.)
-- `sync` : stationd scanne **sa propre** racine (récursif), en 3 passes :
-  1. chargement + validation par fichier (best-effort, collision de clés
-     détectée) ; 2. `validate_set` (refs + cycles) ; 3. persistance des seuls
-     survivants + réécriture ciblée (fichiers sans id uniquement, pas de churn
-     git). Rapport d'erreurs nommées, exit ≠ 0 côté CLI si erreurs.
-- `list` : lecture de la vue, tri par `rel_path` (NULL en dernier).
+#### Résolveur pur (`src/resolver.rs`, 13 tests)
+- `resolve_next(now, grid, state) -> GridDecision` : **pur, sans fuseau, sans
+  I/O**. Reçoit un `LocalNow` déjà décomposé → testable sans wall-clock.
+- 4 familles : `BaseRotation` (plancher), `DayPart` (fenêtre qui sélectionne la
+  base), `AtClock` (rendez-vous horloge), `Every` (cadence glissante).
+- Ordre de collision fixe : `AtClock hard > AtClock soft > Every > base
+  (DayPart → BaseRotation) > fallback`.
+- `DayPart.end` = borne de validité (`start ≤ now < end`), **jamais une coupe**
+  (borne molle : la dernière piste déborde).
+- `AtClock` : ancrage `EveryMinutes(N)` XOR `At(hh:mm)`, `soft|hard`, péremption
+  par règle (`expiry_secs`), token d'occurrence anti-rejeu. `soft` = rattrapage
+  au prochain bord de piste, repères dépassés **fusionnés** (pas de rafale).
+- `Epoch(i64)` newtype (jamais `i64` nu, cf. `time.md`).
 
-### Persistance (`src/store.rs`, `migrations/`)
-- `store.rs` : `upsert` / `list` (fonctions pures sur `&SqlitePool`), type
-  `PlaylistRow`. Les handlers gRPC délèguent ici (transport mince).
-- Migrations : `0001` (mécanisme), `0002` (table `playlists` : id, name,
-  enabled, toml brut), `0003` (colonne `rel_path` + index UNIQUE).
-- **La vue stocke le TOML brut**, pas encore une vue « riche » requêtable.
+#### Frontière temps / DST (`src/clock.rs`, `jiff` 0.2, 4 tests)
+- `to_local_now(epoch, tz) -> LocalNow` : **seul endroit** qui décompose epoch
+  UTC → civil local avec DST. Fuseau inconnu → `ClockError` (pas d'avalage).
+- Tests anti-DST Europe/Paris : nuit de printemps (02:30 inexistant, le mur
+  saute 01:30→03:30), nuit d'automne (02:30 deux fois, epochs distincts).
 
-### CLI (`src/bin/stationctl.rs`)
-- `status`, `quit`, `playlist add <path>`, `playlist sync`, `playlist list`.
+#### État durable grille — famille (B) (`src/grid_store.rs`, migration `0005`, 5 tests)
+- Tables `every_state` (compteurs `tracks_since` / `last_played` par règle) et
+  `at_clock_taken` (tokens d'occurrences consommées). **Aucune FK vers (A)** →
+  survit au rebuild de l'index.
+- Fonctions : `load_playback_state`, `ensure_every_rows`, `bump_tracks_since`,
+  `reset_every`, `record_at_clock_taken`. Ordre d'appel documenté en tête
+  (c'est la boucle qui l'orchestre). Test-clé : `ensure` idempotent **ne remet
+  pas** un compteur à zéro au reload.
 
-### Structure : lib + bin (option A, fait)
-- `src/lib.rs` expose `pub mod config; db; grpc; playlist; store; sync;`.
-  `main.rs` est devenu un binaire mince (`use stationd::…`). `stationctl.rs`
-  reste autonome (proto généré chez lui, ne tire rien de la lib).
-- Le Linux-only (`signal::unix`) reste dans `main.rs`, hors de la lib, pour ne
-  pas contaminer sa portabilité. `Cargo.toml` inchangé : l'auto-détection
-  lib+bin+bin suffit. **Migration validée : 40 tests verts, comportement
-  constant.**
+#### Index des règles — famille (A) (`src/grid_index.rs`, migration `0006`, 3 tests)
+- Table `grid_rule` + une table de détail par variante (`grid_base_rotation`,
+  `grid_day_part`, `grid_at_clock`, `grid_every`) + `grid_rule_weekday` (aucune
+  ligne = tous les jours). XOR ancrage/cadence en `CHECK` (état illégal non
+  représentable).
+- `load_grid(pool) -> Grid` (lignes plates → enum `RuleKind`) ; `insert_rule`
+  transactionnel. Test bout en bout : DB → `load_grid` → `resolve_next` rend
+  `jazz` à 09:00.
 
-### Sync : logique extraite du handler (`src/sync.rs`)
-- Le corps de `playlist_sync` vivait *dans* le handler gRPC (métier dans le
-  transport). Extrait dans `sync::sync_root(db, root) -> SyncOutcome`, fonction
-  sans dépendance tonic, appelable depuis `tests/`. Renvoie des types métier
-  (`SyncOutcome`/`SyncError`), pas du proto — même discipline que `store` avec
-  `PlaylistRow`. Le handler mappe `SyncError` → `PlaylistSyncError`.
+#### Boucle vivante (`src/grid_engine.rs`, 3 tests)
+- `GridEngine { pool, tz }` : `next(now)` = `clock` → `load_grid` +
+  `load_playback_state` → `resolve_next` → persistance des effets
+  (`record_at_clock_taken`, `reset_every`). `on_track_completed` (bump),
+  `sync_grid` (ensure au démarrage, catch-up).
+- Choix assumés : recharge à chaque appel (correct/simple ; cible = tâche
+  tokio possédante + mpsc, optimisation) ; `next` et `on_track_completed` sont
+  deux événements distincts.
 
-### Robustesse
-- `build.rs` : `rerun-if-changed=migrations` (+ proto). Corrige le bug
-  rencontré : un binaire qui n'embarquait pas une migration fraîchement
-  ajoutée et loggait quand même « migrations applied ».
-- **40 tests unitaires** : 35 purs (`playlist.rs`) + 5 base (`store.rs`, vraie
-  base migrée). **+ `tests/sync.rs`** : 4 tests d'intégration de bout en bout
-  (best-effort, non-`.toml` ignoré, exclusion de cycle, collision de clés,
-  réécriture ciblée de l'id) — tous verts.
+#### Config : fuseau station (`src/config.rs`, 3 tests)
+- `StationConfig.timezone` (IANA, **obligatoire**), validé au load via `jiff`
+  → fuseau bidon = pas de démarrage (no-silent-failure). `stationd.toml` +
+  `.example` mis à jour.
+
+#### Protos & câblage gRPC (option A — **compile ✓**)
+- `proto/schedule_v1.proto` : `ScheduleService` (grille + `ResolveNext` +
+  `Preview`), 4 familles, `soft|hard`, péremption, portée de validité.
+  Compilé par `build.rs` (+ `prost-types`).
+- `src/schedule_grpc.rs` : handler mince sur `GridEngine`. **`resolve_next`
+  réel** ; `apply/validate/export/list_rules/preview` = `UNIMPLEMENTED`
+  (attendent la grammaire TOML grille / la projection).
+- `main.rs` : construit `GridEngine`, `sync_grid` au démarrage, second
+  `add_service(ScheduleServiceServer)` sur le même serveur/port.
+- `stationctl schedule next [--at <epoch>]` : client du même endpoint.
+
+#### Migration `0004` (vue matérialisée riche playlists)
+- `ALTER` de `playlists` : `handle`, `ref_effective = handle ?? name`
+  (VIRTUAL — SQLite interdit d'ajouter une STORED générée), `mode`, colonnes
+  `broadcast`, tables de détail (`playlist_static/_dynamic/_group` + fichiers/
+  filtres/membres), famille (B) playlists (`episode_play`, `broadcast_log`,
+  `playlist_suspension`). Arêtes de groupe par `id`, pas par ref.
+- **Index UNIQUE sur `ref_effective` volontairement différé** : le code
+  (`store::upsert`) ne peuple pas encore `handle` et laisse `name` libre →
+  l'imposer casserait. Unicité au service pour l'instant ; migration ultérieure
+  quand `handle` sera câblé. `rel_path` (0003) rétrogradé en localisation de
+  fichier.
+- ⚠ La migration ajoute la STRUCTURE, ne rétro-remplit pas (une migration SQL
+  ne parse pas de TOML) : les colonnes/détails restent NULL/vides jusqu'à un
+  `apply`/reload complet.
+
+### — Playlists (sessions précédentes, inchangé) —
+- Config `[playlist] path`, parser strict (`src/playlist.rs`), 5 modes, `id`
+  UUID assigné (`assign_id` lossless), validation fichier + ensemble
+  (`validate_set` : refs + cycles), `ref` = chemin relatif normalisé.
+- gRPC `station.proto` : `Status`/`Quit`/`PlaylistAdd`/`PlaylistSync`/
+  `PlaylistList`. Persistance `store.rs` (TOML brut en vue). `sync.rs` extrait,
+  `tests/sync.rs` (4 tests). Structure lib+bin.
+- ⚠ `proto/playlist_v1.proto` (slice Homestone : identité 3 étages, oneof
+  sélection, groupe sequence, `member`) existe **mais n'est pas encore compilé
+  par `build.rs` ni servi** — seuls `station.proto` et `schedule_v1.proto` le
+  sont.
 
 ---
 
 ## Reste à faire
 
-### ⭐ PROCHAINE SESSION : premier proto du résolveur (scheduler)
+### Grille / scheduler (suite directe)
+- **Confirmer le build** (tâche d'entrée) puis **grammaire TOML grille** (2b),
+  puis implémenter `ApplyGrid`/`ValidateGrid`/`ExportGrid`/`ListRules`.
+- **`Preview`** : projection de grille sur une fenêtre (pas une sim
+  piste-à-piste, durées dynamiques) — RPC déclaré, à implémenter.
+- **Étage sélection** : `playlist_ref` → média concret (le `Decision.media_path`
+  est vide pour l'instant ; c'est le moteur de sélection du slice playlist).
+- **Refacto acteur** : `GridEngine` en tâche tokio possédante, grille en
+  mémoire invalidée à l'apply, mutations par mpsc.
+- **`DayPart` cross-minuit** : `window_covers` renvoie `None` (TODO signalé).
 
-Le refactor lib+bin (A) et le test d'intégration de `sync` sont faits et verts.
-Le prochain cœur, d'après
-`Doc/modele-programmation.md`, c'est le **résolveur de programmation** — et son
-point d'entrée obligé est le **schéma proto d'une règle** (« C'est le premier
-proto à écrire ; le reste du scheduling en découle »).
+### Playlists (périmètre existant)
+- Compiler+servir `playlist_v1.proto` (nouveau contrat) et migrer le code
+  (`store`/`playlist`/`sync`) vers l'identité `name`/`handle` → alors seulement
+  reposer l'index UNIQUE `ref_effective`.
+- Vraie vue matérialisée **peuplée** (l'apply qui éclate le TOML dans les tables
+  de `0004`). CRUD `remove`/`export`, reload/watch. Rapport de cycle exact
+  (Tarjan). Points ouverts `Doc/playlists.md`.
 
-Cible : le message d'une règle avec `kind` (`AtClock`/`Every`/`DayPart`/
-`BaseRotation`), portée de validité (toujours / plage récurrente / bornée à des
-dates), mode `soft|hard`, flag de péremption. Puis `resolve_next(now, état) ->
-Décision` et `stationctl schedule preview --at … / --next 24h` (simulable sans
-attendre le wall-clock). À trancher au passage : la crate temps (`jiff` penché
-dans le doc), premier type temps du projet.
-
-### Autres tâches dans le périmètre playlists
-- **Rapport de cycle partiel** : `validate_set` détecte toujours un cycle
-  (sûreté OK, pas de boucle infinie possible) mais ne nomme pas forcément
-  *tous* les fichiers du cycle. Rendre le rapport exact = Tarjan / composantes
-  fortement connexes. Confort de diagnostic, non urgent.
-- **Vraie vue matérialisée SQLite** : colonnes/tables pour `selection` /
-  `broadcast`, pour requêter vite (drag & drop, prog). Aujourd'hui = TOML brut.
-- **CRUD restant** : `remove`, `export` (redéverser la vue en TOML), évoqués
-  dans les docs.
-- **Reload / watch** : stationd surveille la racine et recharge sur édition
-  externe (`stationctl reload`). Le `sync` en est la version manuelle.
-- Points ouverts listés dans `Doc/playlists.md` (partage vs exclusivité d'un
-  membre de groupe, précédence `limit` vs `constraints`, défaut de
-  `on_exhausted`, sémantique du `schedule`, source feed podcast, mode
-  `episodic` dédié).
-
-### Hors périmètre playlists (chantiers suivants)
-- **Résolveur / scheduler** (`Doc/modele-programmation.md`) : `resolve_next`,
-  les 4 familles de règles, `soft`/`hard`, péremption des `AtClock`, état de
-  lecture persisté. C'est le cœur suivant. Premier proto à écrire d'après le
-  doc : le schéma d'une règle.
-- **Câblage Liquidsoap / Icecast** : rien de branché (stationd ne pilote
-  encore rien). `request.dynamic` + fallback côté Liquidsoap.
-- **Scan de la bibliothèque média** (lecture des tags).
-- **Gestion du temps** : crate à trancher (`jiff` vs `chrono`+`chrono-tz` ;
-  `modele-programmation.md` penche `jiff`). Pas encore de type temps dans le
-  code.
-- **Rôles / permissions** : différés (enum fixe prévu, liste à définir).
-- **Plugins WASM**, **mTLS gRPC** : reportés.
+### Hors périmètre (chantiers suivants)
+- Câblage Liquidsoap/Icecast (`request.dynamic` + fallback). Scan biblio
+  (tags). Rôles/permissions (différés). Plugins WASM, mTLS gRPC (reportés).
+- Maintenance : `apalis` (scan, retry NFS) — `Doc/modele-programmation.md`.
 
 ---
 
-## Pièges & points de vigilance (vécus ou anticipés)
+## Pièges & points de vigilance
 
-- **`signal::unix` dans `main.rs`** ne compile que sur Linux. Dev sous
-  Windows (lecteur `X:`) mais build/run sur Linux (`/data/dev/stationd`).
-- **Chemins relatifs de config** (`./playlist`, `./media`) résolus depuis le
-  CWD, pas depuis l'emplacement du binaire ni du `stationd.toml`. À surveiller
-  le jour du `WorkingDirectory` systemd.
-- **`data/stationd.db` est jetable** (file-first) : en cas de souci de
-  migration/schéma, la supprimer + relancer + `playlist sync` reconstruit tout
-  depuis les TOML.
-- **Migration pas ré-embarquée** : réglé par `build.rs`. Si un doute subsiste,
-  recompilation forcée (`cargo clean -p stationd`) puis run.
+- **Base de dev à recréer** : migrations `0004`→`0006` sont neuves. En cas de
+  souci de schéma/checksum sqlx, `rm -rf data/` + relancer (file-first, la vue
+  est jetable). Ne JAMAIS éditer une migration déjà appliquée en prod.
+- **`resolver.rs` doit rester pur / std-only** : c'est ce qui le rend testable
+  et simulable sans horloge. Toute conversion de fuseau passe par `clock`.
+- **`AtClock` soft sans `expiry`** peut se déclencher tard (au prochain bord de
+  piste), repères intermédiaires sautés (fusion). Pour taper l'heure pile :
+  `Mode::Hard` + `expiry` court.
+- **`ref_effective` pas encore unique en base** (index différé, cf. 0004).
+- **`signal::unix` dans `main.rs`** = Linux only. Dev Windows (`X:`) / build+run
+  Linux (`/data/dev/stationd`). `X:\stationd` = `\\devradio.lan\dev\stationd`
+  (même dépôt, lecteur mappé).
+- **Chemins relatifs de config** résolus depuis le CWD (piège `WorkingDirectory`
+  systemd).
 
 ---
 
@@ -166,16 +193,22 @@ dans le doc), premier type temps du projet.
 
 | Fichier | Rôle |
 |---|---|
-| `src/lib.rs` | Racine de la lib : `pub mod` des modules partagés |
-| `src/config.rs` | Chargement config TOML |
-| `src/playlist.rs` | Modèle, parser, validation (fichier + ensemble), assign_id |
-| `src/store.rs` | Persistance vue (upsert/list), tests base |
-| `src/sync.rs` | Réconciliation `sync_root` (walk + validate + persist), hors tonic |
-| `src/grpc.rs` | Service gRPC (handlers minces, délèguent à store/sync) |
+| `src/resolver.rs` | Cœur pur `resolve_next` + 4 familles (std-only, 13 tests) |
+| `src/clock.rs` | Frontière temps epoch↔civil local, DST (`jiff`, 4 tests) |
+| `src/grid_index.rs` | Index règles famille (A) : `load_grid`/`insert_rule` |
+| `src/grid_store.rs` | État durable famille (B) : compteurs Every / tokens AtClock |
+| `src/grid_engine.rs` | Boucle vivante (résolution + persistance) |
+| `src/schedule_grpc.rs` | Service gRPC scheduling (`ResolveNext` réel) |
+| `src/config.rs` | Config TOML + fuseau station validé |
+| `src/playlist.rs` | Modèle/parser/validation playlists |
+| `src/store.rs` / `src/sync.rs` | Vue playlists / réconciliation |
+| `src/grpc.rs` | Service `Station` (status/quit/playlist*) |
 | `src/db.rs` | Init pool SQLite + migrations |
-| `src/main.rs` | Binaire mince : démarrage daemon, shutdown (Linux `signal::unix`) |
-| `src/bin/stationctl.rs` | CLI client gRPC (autonome) |
-| `tests/sync.rs` | Test d'intégration de `sync` (base temp + arbre tempdir) |
-| `proto/station.proto` | Contrat gRPC |
-| `migrations/*.sql` | Schéma (0001→0003) |
+| `src/main.rs` | Daemon : démarrage, 2 services gRPC, shutdown |
+| `src/bin/stationctl.rs` | CLI (station + `schedule next`) |
+| `proto/station.proto` | Contrat `Station` |
+| `proto/schedule_v1.proto` | Contrat `ScheduleService` (compilé/servi) |
+| `proto/playlist_v1.proto` | Contrat playlist v1 (⚠ pas encore compilé/servi) |
+| `migrations/0001→0006` | Schéma (0004 vue riche, 0005 état grille, 0006 règles) |
+| `tests/sync.rs` | Intégration `sync` |
 | `Doc/*.md` | Décisions d'architecture (référence durable) |

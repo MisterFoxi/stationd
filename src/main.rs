@@ -7,6 +7,9 @@ use tonic::transport::Server;
 use tracing::{info, warn};
 
 use stationd::grpc::station::station_server::StationServer;
+use stationd::schedule_grpc::schedule::schedule_service_server::ScheduleServiceServer;
+use stationd::grid_engine::GridEngine;
+use stationd::schedule_grpc::ScheduleGrpc;
 use stationd::{config, db, grpc};
 
 /// stationd — the webradio's core daemon.
@@ -63,6 +66,13 @@ async fn main() -> anyhow::Result<()> {
 
     // TODO: Liquidsoap/Icecast control — deliberately absent at this stage
 
+    // Grid engine: the live resolver over the SQLite-backed grid, in the
+    // station timezone. `sync_grid` reconciles the Every counter rows for the
+    // current grid (catch-up on start-up); it never resets an existing counter.
+    let engine = GridEngine::new(db_pool.clone(), cfg.station.timezone.clone());
+    engine.sync_grid().await?;
+    let schedule_service = ScheduleGrpc::new(engine);
+
     let addr = cfg.server.grpc_bind.parse()?;
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let service = grpc::StationService::new(
@@ -72,7 +82,7 @@ async fn main() -> anyhow::Result<()> {
         shutdown_tx,
     );
 
-    info!(%addr, "gRPC server listening (status, quit)");
+    info!(%addr, "gRPC server listening (status, quit, schedule)");
 
     // Three ways to shut down cleanly: via `stationctl quit` (shutdown_rx,
     // triggered by the service's `quit` handler), or via a signal — Ctrl+C
@@ -98,6 +108,7 @@ async fn main() -> anyhow::Result<()> {
 
     Server::builder()
         .add_service(StationServer::new(service))
+        .add_service(ScheduleServiceServer::new(schedule_service))
         .serve_with_shutdown(addr, shutdown_signal)
         .await?;
 

@@ -16,6 +16,11 @@ pub struct Config {
 #[derive(Debug, Deserialize)]
 pub struct StationConfig {
     pub name: String,
+    /// IANA timezone of the station (e.g. "Europe/Paris"). One reference zone
+    /// per node: the scheduler resolves every civil time against it. Validated
+    /// at load — an unknown name stops start-up rather than mis-scheduling
+    /// silently later.
+    pub timezone: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -75,6 +80,8 @@ pub enum ConfigError {
         #[source]
         source: toml::de::Error,
     },
+    #[error("unknown IANA station timezone {name:?}")]
+    UnknownTimeZone { name: String },
 }
 
 impl Config {
@@ -86,6 +93,14 @@ impl Config {
         let config: Config = toml::from_str(&contents).map_err(|source| ConfigError::Parse {
             path: path.to_path_buf(),
             source,
+        })?;
+        // Fail fast on an unknown station timezone: the scheduler resolves all
+        // civil times against it, so a bogus name must stop start-up, not
+        // surface later as silent mis-scheduling.
+        jiff::tz::TimeZone::get(&config.station.timezone).map_err(|_| {
+            ConfigError::UnknownTimeZone {
+                name: config.station.timezone.clone(),
+            }
         })?;
         Ok(config)
     }
@@ -100,6 +115,7 @@ mod tests {
         let toml_str = r#"
             [station]
             name = "Test Radio"
+            timezone = "Europe/Paris"
 
             [server]
             grpc_bind = "127.0.0.1:50051"
@@ -115,8 +131,37 @@ mod tests {
         "#;
         let config: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(config.station.name, "Test Radio");
+        assert_eq!(config.station.timezone, "Europe/Paris");
         assert_eq!(config.playlist.path, PathBuf::from("./playlist"));
         assert_eq!(config.logging.level, "info"); // default value
+    }
+
+    #[test]
+    fn rejects_unknown_timezone() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("c.toml");
+        std::fs::write(
+            &p,
+            r#"
+            [station]
+            name = "R"
+            timezone = "Mars/Olympus_Mons"
+            [server]
+            grpc_bind = "127.0.0.1:50051"
+            [database]
+            path = "./d.db"
+            [media]
+            library_path = "./media"
+            [playlist]
+            path = "./playlist"
+        "#,
+        )
+        .unwrap();
+        // A syntactically valid config with a bogus zone must not start up.
+        assert!(matches!(
+            Config::load(&p),
+            Err(ConfigError::UnknownTimeZone { .. })
+        ));
     }
 
     #[test]

@@ -9,8 +9,14 @@ pub mod station {
     tonic::include_proto!("station");
 }
 
+pub mod schedule {
+    tonic::include_proto!("webradio.schedule.v1");
+}
+
 use station::station_client::StationClient;
 use station::{PlaylistAddRequest, PlaylistListRequest, PlaylistSyncRequest, QuitRequest, StatusRequest};
+use schedule::schedule_service_client::ScheduleServiceClient;
+use schedule::ResolveNextRequest;
 
 use std::path::PathBuf;
 
@@ -34,6 +40,22 @@ enum Command {
     /// Playlist operations
     #[command(subcommand)]
     Playlist(PlaylistCommand),
+    /// Grid / scheduler operations
+    #[command(subcommand)]
+    Schedule(ScheduleCommand),
+}
+
+#[derive(Subcommand, Debug)]
+enum ScheduleCommand {
+    /// Resolve which source the grid would pull now (or at a given instant).
+    /// This is the live resolver path, so it persists side effects (a consumed
+    /// AtClock mark, an Every reset) exactly as a real track boundary would.
+    Next {
+        /// Evaluate at this instant (epoch seconds, UTC) instead of now.
+        /// RFC3339 parsing can come later; epoch keeps the client dependency-free.
+        #[arg(long)]
+        at: Option<i64>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -54,7 +76,7 @@ enum PlaylistCommand {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
-    let mut client = StationClient::connect(args.addr).await?;
+    let mut client = StationClient::connect(args.addr.clone()).await?;
 
     match args.command {
         Command::Status => {
@@ -131,6 +153,27 @@ async fn main() -> anyhow::Result<()> {
                     let state = if p.enabled { "enabled" } else { "disabled" };
                     println!("{handle}  [{}]  {}  ({state})  {}", p.mode, p.name, p.id);
                 }
+            }
+        }
+        Command::Schedule(ScheduleCommand::Next { at }) => {
+            // The scheduler lives behind its own service on the same server.
+            let mut sched = ScheduleServiceClient::connect(args.addr.clone()).await?;
+            let now = at.map(|seconds| ::prost_types::Timestamp { seconds, nanos: 0 });
+            let reply = sched
+                .resolve_next(ResolveNextRequest { now })
+                .await?
+                .into_inner();
+
+            let origin = schedule::decision::Origin::try_from(reply.origin)
+                .map(|o| o.as_str_name())
+                .unwrap_or("UNKNOWN");
+            println!("origin:        {origin}");
+            println!(
+                "playlist_ref:  {}",
+                if reply.playlist_ref.is_empty() { "(fallback)" } else { &reply.playlist_ref }
+            );
+            if !reply.rule_id.is_empty() {
+                println!("rule:          {}", reply.rule_id);
             }
         }
     }
