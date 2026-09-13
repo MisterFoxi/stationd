@@ -1,9 +1,3 @@
-mod config;
-mod db;
-mod grpc;
-mod playlist;
-mod store;
-
 use std::path::PathBuf;
 
 use clap::Parser;
@@ -12,7 +6,8 @@ use tokio::sync::oneshot;
 use tonic::transport::Server;
 use tracing::{info, warn};
 
-use grpc::station::station_server::StationServer;
+use stationd::grpc::station::station_server::StationServer;
+use stationd::{config, db, grpc};
 
 /// stationd — the webradio's core daemon.
 /// Owns the station's state, drives Liquidsoap/Icecast (single writer),
