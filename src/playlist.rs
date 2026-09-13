@@ -312,9 +312,10 @@ impl Playlist {
             return Err(err("`url` is only valid for mode `remote`"));
         }
 
-        // TODO(reconciliation): group cycle detection (DAG) + referential
-        // integrity of member `ref`s and static `files` — needs the whole
-        // playlist set / media library, not just this one file.
+        // Cross-playlist checks (group cycle detection, referential
+        // integrity of member `ref`s) are NOT done here — a single file
+        // cannot see the whole set. They live in `validate_set`, called by
+        // the sync pass once every file is loaded.
 
         Ok(())
     }
@@ -354,6 +355,160 @@ pub fn assign_id(toml_str: &str) -> Result<(String, Uuid), PlaylistError> {
     let id = Uuid::new_v4();
     doc["id"] = toml_edit::value(id.to_string());
     Ok((doc.to_string(), id))
+}
+
+// ---------------------------------------------------------------------------
+// Cross-playlist validation (the whole set): reference resolution + cycle
+// detection. Done on the files alone — no database needed — which is why it
+// lives here as a pure function the sync handler calls after loading every
+// file. `add` (one file) cannot do this; only `sync` sees the whole set.
+// ---------------------------------------------------------------------------
+
+/// Normalize a playlist reference / relative path into a canonical key used
+/// both for `ref`s and for the scanned files' relative paths, so the two
+/// compare reliably across OSes:
+///
+/// - `\` → `/` (portable: a ref written on Windows must resolve on Linux)
+/// - a trailing `.toml` is stripped (refs name the playlist, not the file)
+/// - lowercased (case-insensitive matching, decided for portability)
+/// - a leading `/` and empty/`.` segments are rejected or dropped
+/// - `..` is rejected outright (no escaping the playlist root)
+///
+/// Returns the canonical key, or an error describing why the ref is unsafe.
+pub fn normalize_ref(raw: &str) -> Result<String, String> {
+    let unified = raw.replace('\\', "/");
+    let trimmed = unified.strip_suffix(".toml").unwrap_or(&unified);
+
+    if trimmed.starts_with('/') {
+        return Err(format!("`{raw}` must be relative to the playlist root (no leading `/`)"));
+    }
+
+    let mut segments = Vec::new();
+    for seg in trimmed.split('/') {
+        match seg {
+            "" | "." => continue, // collapse `a//b` and `./a`
+            ".." => return Err(format!("`{raw}` must not contain `..` (cannot escape the root)")),
+            s => segments.push(s.to_lowercase()),
+        }
+    }
+
+    if segments.is_empty() {
+        return Err(format!("`{raw}` is an empty reference"));
+    }
+
+    Ok(segments.join("/"))
+}
+
+/// One entry to validate as part of the whole set: its canonical key (the
+/// normalized relative path, from the file's location) and the parsed
+/// playlist.
+pub struct SetEntry {
+    pub key: String,
+    pub playlist: Playlist,
+}
+
+/// An error tied to one playlist within the set.
+pub struct SetError {
+    pub key: String,
+    pub message: String,
+}
+
+/// Validate the whole set of playlists together: every group member `ref`
+/// resolves to a known playlist, and the group graph has no cycle. Pure and
+/// database-free — operates only on what was scanned from the files.
+///
+/// Best-effort spirit: collects *all* problems rather than stopping at the
+/// first, so `sync` can report them together.
+pub fn validate_set(entries: &[SetEntry]) -> Vec<SetError> {
+    use std::collections::{HashMap, HashSet};
+
+    let mut errors = Vec::new();
+
+    // Index by canonical key for ref resolution.
+    let known: HashSet<String> = entries.iter().map(|e| e.key.clone()).collect();
+
+    // Build the group graph (edges = normalized member refs), reporting
+    // unresolvable or unsafe refs as we go. Keys are owned Strings to keep
+    // the recursive DFS below free of lifetime gymnastics.
+    let mut edges: HashMap<String, Vec<String>> = HashMap::new();
+    for e in entries {
+        if e.playlist.selection.mode != Mode::Group {
+            continue;
+        }
+        let mut targets = Vec::new();
+        for m in &e.playlist.selection.members {
+            match normalize_ref(&m.r#ref) {
+                Ok(key) => {
+                    if !known.contains(&key) {
+                        errors.push(SetError {
+                            key: e.key.clone(),
+                            message: format!("member `{}` refers to unknown playlist `{key}`", m.r#ref),
+                        });
+                    }
+                    targets.push(key);
+                }
+                Err(msg) => {
+                    errors.push(SetError { key: e.key.clone(), message: msg });
+                }
+            }
+        }
+        edges.insert(e.key.clone(), targets);
+    }
+
+    // Cycle detection over the group graph (DFS with a recursion stack).
+    // Reports each node that sits on a cycle. Covers self-reference
+    // (a group listing itself) and transitive loops (A→B→C→A).
+    #[derive(Clone, Copy, PartialEq)]
+    enum Mark {
+        Visiting,
+        Done,
+    }
+    fn dfs(
+        node: &str,
+        edges: &HashMap<String, Vec<String>>,
+        marks: &mut HashMap<String, Mark>,
+        on_cycle: &mut HashSet<String>,
+    ) {
+        marks.insert(node.to_string(), Mark::Visiting);
+        if let Some(targets) = edges.get(node).cloned() {
+            for t in &targets {
+                match marks.get(t).copied() {
+                    Some(Mark::Visiting) => {
+                        // Back-edge: both ends are on a cycle.
+                        on_cycle.insert(node.to_string());
+                        on_cycle.insert(t.clone());
+                    }
+                    Some(Mark::Done) => {}
+                    None => {
+                        // Only recurse into targets that are themselves
+                        // groups (present as graph nodes). A ref to a
+                        // non-group leaf can't extend a cycle.
+                        if edges.contains_key(t) {
+                            dfs(t, edges, marks, on_cycle);
+                        }
+                    }
+                }
+            }
+        }
+        marks.insert(node.to_string(), Mark::Done);
+    }
+
+    let mut marks: HashMap<String, Mark> = HashMap::new();
+    let mut on_cycle: HashSet<String> = HashSet::new();
+    let node_keys: Vec<String> = edges.keys().cloned().collect();
+    for node in &node_keys {
+        if marks.get(node).is_none() {
+            dfs(node, &edges, &mut marks, &mut on_cycle);
+        }
+    }
+    for key in on_cycle {
+        errors.push(SetError {
+            key: key.clone(),
+            message: "is part of a group cycle (a group cannot reference itself, directly or transitively)".to_string(),
+        });
+    }
+
+    errors
 }
 
 #[cfg(test)]
@@ -728,5 +883,123 @@ mod tests {
             type = "general"
         "#;
         assert!(assign_id(bad_id).is_err(), "a present non-UUID id is a loud error");
+    }
+
+    // ----- normalize_ref ----------------------------------------------
+
+    #[test]
+    fn normalize_ref_canonicalizes() {
+        assert_eq!(normalize_ref("nuit/goodnight").unwrap(), "nuit/goodnight");
+        assert_eq!(normalize_ref("nuit/goodnight.toml").unwrap(), "nuit/goodnight");
+        // Windows separator folded to `/`.
+        assert_eq!(normalize_ref("nuit\\goodnight").unwrap(), "nuit/goodnight");
+        // Case folded.
+        assert_eq!(normalize_ref("Nuit/GoodNight").unwrap(), "nuit/goodnight");
+        // Redundant segments collapsed.
+        assert_eq!(normalize_ref("./nuit//goodnight").unwrap(), "nuit/goodnight");
+    }
+
+    #[test]
+    fn normalize_ref_rejects_unsafe() {
+        assert!(normalize_ref("../secret").is_err(), "no escaping the root");
+        assert!(normalize_ref("/etc/passwd").is_err(), "no absolute path");
+        assert!(normalize_ref("").is_err(), "no empty ref");
+        assert!(normalize_ref("nuit/../../x").is_err(), "no `..` anywhere");
+    }
+
+    // ----- validate_set: refs + cycles --------------------------------
+
+    /// Build a minimal group entry referring to the given members.
+    fn group_entry(key: &str, refs: &[&str]) -> SetEntry {
+        let members = refs
+            .iter()
+            .map(|r| format!("{{ ref = \"{r}\", weight = 1 }}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let toml_str = format!(
+            r#"
+                name = "{key}"
+                [selection]
+                mode = "group"
+                strategy = "weighted"
+                members = [{members}]
+                [broadcast]
+                type = "scheduled"
+            "#
+        );
+        SetEntry {
+            key: key.to_string(),
+            playlist: Playlist::parse(&toml_str).expect("group parses"),
+        }
+    }
+
+    /// A trivial leaf (non-group) entry, so refs can resolve to it.
+    fn leaf_entry(key: &str) -> SetEntry {
+        let toml_str = r#"
+            name = "leaf"
+            [selection]
+            mode = "dynamic"
+            [broadcast]
+            type = "general"
+        "#;
+        SetEntry {
+            key: key.to_string(),
+            playlist: Playlist::parse(toml_str).expect("leaf parses"),
+        }
+    }
+
+    #[test]
+    fn set_valid_group_resolves() {
+        let entries = vec![
+            leaf_entry("a"),
+            leaf_entry("b"),
+            group_entry("morning", &["a", "b"]),
+        ];
+        assert!(validate_set(&entries).is_empty(), "all refs resolve, no cycle");
+    }
+
+    #[test]
+    fn set_reports_unknown_ref() {
+        let entries = vec![leaf_entry("a"), group_entry("morning", &["a", "ghost"])];
+        let errors = validate_set(&entries);
+        assert!(
+            errors.iter().any(|e| e.message.contains("ghost")),
+            "the missing member must be reported"
+        );
+    }
+
+    #[test]
+    fn set_detects_self_reference() {
+        let entries = vec![group_entry("loop", &["loop"])];
+        let errors = validate_set(&entries);
+        assert!(
+            errors.iter().any(|e| e.message.contains("cycle")),
+            "a group referencing itself is a cycle"
+        );
+    }
+
+    #[test]
+    fn set_detects_transitive_cycle() {
+        // a -> b -> c -> a
+        let entries = vec![
+            group_entry("a", &["b"]),
+            group_entry("b", &["c"]),
+            group_entry("c", &["a"]),
+        ];
+        let errors = validate_set(&entries);
+        assert!(
+            errors.iter().any(|e| e.message.contains("cycle")),
+            "A->B->C->A must be detected"
+        );
+    }
+
+    #[test]
+    fn set_case_insensitive_ref_resolves() {
+        // ref written with different case than the key must still resolve.
+        let entries = vec![leaf_entry("nuit/goodnight"), group_entry("g", &["Nuit/GoodNight"])];
+        assert!(
+            validate_set(&entries).is_empty(),
+            "case-folded ref should resolve to the lowercased key"
+        );
     }
 }

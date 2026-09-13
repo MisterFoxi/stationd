@@ -13,11 +13,13 @@ pub mod station {
 
 use station::station_server::Station;
 use station::{
-    PlaylistAddReply, PlaylistAddRequest, PlaylistSyncError, PlaylistSyncReply,
-    PlaylistSyncRequest, QuitReply, QuitRequest, StatusReply, StatusRequest,
+    PlaylistAddReply, PlaylistAddRequest, PlaylistListReply, PlaylistListRequest, PlaylistSummary,
+    PlaylistSyncError, PlaylistSyncReply, PlaylistSyncRequest, QuitReply, QuitRequest, StatusReply,
+    StatusRequest,
 };
 
 use crate::playlist::{self, Playlist};
+use crate::store;
 
 /// Implementation of the `Station` gRPC service.
 ///
@@ -52,32 +54,19 @@ impl StationService {
         }
     }
 
-    /// Shared reconciliation of one playlist's TOML into the SQLite view:
-    /// parse (strict) → validate (business rules) → assign a UUID
-    /// losslessly → upsert the view. stationd is the single writer. Both
-    /// `playlist_add` (one file) and `playlist_sync` (a whole tree) go
-    /// through here, so the two paths can never diverge.
-    ///
-    /// Returns the rewritten TOML and the effective id.
-    async fn reconcile_one(&self, toml_content: &str) -> Result<(String, String), String> {
-        let playlist = Playlist::parse(toml_content).map_err(|e| e.to_string())?;
-        playlist.validate().map_err(|e| e.to_string())?;
-
-        let (rewritten, id) = playlist::assign_id(toml_content).map_err(|e| e.to_string())?;
-
-        sqlx::query(
-            "INSERT INTO playlists (id, name, enabled, toml) VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(id) DO UPDATE SET name = ?2, enabled = ?3, toml = ?4",
-        )
-        .bind(id.to_string())
-        .bind(&playlist.name)
-        .bind(playlist.enabled as i64)
-        .bind(&rewritten)
-        .execute(&self.db)
-        .await
-        .map_err(|e| format!("could not update playlist view: {e}"))?;
-
-        Ok((rewritten, id.to_string()))
+    /// Upsert one already-parsed playlist into the SQLite view. Thin
+    /// wrapper over `store::upsert` (the metier lives there so it can be
+    /// tested without a gRPC server). stationd is the single writer.
+    async fn upsert_view(
+        &self,
+        id: &str,
+        playlist: &Playlist,
+        rewritten: &str,
+        rel_path: Option<&str>,
+    ) -> Result<(), String> {
+        store::upsert(&self.db, id, playlist, rewritten, rel_path)
+            .await
+            .map_err(|e| format!("could not update playlist view: {e}"))
     }
 }
 
@@ -114,17 +103,28 @@ impl Station for StationService {
     ) -> Result<Response<PlaylistAddReply>, TonicStatus> {
         let toml_content = request.into_inner().toml_content;
 
-        // All the metier (parse, validate, id, view update) lives in
-        // `reconcile_one`, shared with `playlist_sync` so the two can never
-        // diverge. stationd is the single writer of the SQLite view.
-        let (rewritten, id) = self
-            .reconcile_one(&toml_content)
+        // Per-file metier: parse (strict) + validate (business rules).
+        // Cross-playlist checks (refs/cycles) are NOT done here — a single
+        // file cannot see the whole set; that is `sync`'s job.
+        let playlist = Playlist::parse(&toml_content)
+            .map_err(|e| TonicStatus::invalid_argument(e.to_string()))?;
+        playlist
+            .validate()
+            .map_err(|e| TonicStatus::invalid_argument(e.to_string()))?;
+
+        let (rewritten, id) = playlist::assign_id(&toml_content)
+            .map_err(|e| TonicStatus::invalid_argument(e.to_string()))?;
+
+        // A file brought in from outside has no position in the tree → no
+        // rel_path. A later `sync` will set it if the file lives under the
+        // root.
+        self.upsert_view(&id.to_string(), &playlist, &rewritten, None)
             .await
-            .map_err(TonicStatus::invalid_argument)?;
+            .map_err(TonicStatus::internal)?;
 
         Ok(Response::new(PlaylistAddReply {
             toml_content: rewritten,
-            id,
+            id: id.to_string(),
         }))
     }
 
@@ -138,12 +138,25 @@ impl Station for StationService {
         // from outside; there the I/O is delegated to the CLI.
         let root = &self.playlist_root;
 
-        let mut added: u32 = 0;
         let mut errors: Vec<PlaylistSyncError> = Vec::new();
 
-        // Recursive walk from the root; ignore anything that is not a
-        // regular *.toml file. Best-effort: a bad file is reported, never
-        // fatal — the valid ones are still applied.
+        // ---- Pass 1: load + per-file validation ----------------------
+        // Collect the files that pass parse + per-file validation, each with
+        // its canonical key (normalized relative path) and rewritten TOML.
+        // Bad files are reported but do not stop the pass (best-effort).
+        struct Loaded {
+            rel_display: String, // path as shown to the user
+            key: String,         // canonical key (normalized)
+            disk_path: std::path::PathBuf,
+            content: String,
+            rewritten: String,
+            id: String,
+            playlist: Playlist,
+        }
+        let mut loaded: Vec<Loaded> = Vec::new();
+        let mut seen_keys: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+
         for entry in walkdir::WalkDir::new(root).into_iter().filter_map(Result::ok) {
             let path = entry.path();
             if !path.is_file() {
@@ -153,47 +166,147 @@ impl Station for StationService {
                 continue;
             }
 
-            // Path shown in the report, relative to the root when possible.
-            let rel = path
-                .strip_prefix(root)
-                .unwrap_or(path)
-                .display()
-                .to_string();
+            let rel = path.strip_prefix(root).unwrap_or(path);
+            let rel_display = rel.display().to_string();
+
+            // Canonical key from the file's relative path.
+            let key = match playlist::normalize_ref(&rel.to_string_lossy()) {
+                Ok(k) => k,
+                Err(msg) => {
+                    errors.push(PlaylistSyncError { path: rel_display, message: msg });
+                    continue;
+                }
+            };
+
+            // Two files normalizing to the same key = conflict (e.g. case).
+            if let Some(prev) = seen_keys.get(&key) {
+                errors.push(PlaylistSyncError {
+                    path: rel_display.clone(),
+                    message: format!("path collides with `{prev}` (same normalized key `{key}`)"),
+                });
+                continue;
+            }
 
             let content = match std::fs::read_to_string(path) {
                 Ok(c) => c,
                 Err(e) => {
                     errors.push(PlaylistSyncError {
-                        path: rel,
+                        path: rel_display,
                         message: format!("cannot read: {e}"),
                     });
                     continue;
                 }
             };
 
-            match self.reconcile_one(&content).await {
-                Ok((rewritten, _id)) => {
-                    // Write back only if assign_id changed the file (a
-                    // freshly added playlist gets its id injected). Avoids
-                    // rewriting — and churning git — files already carrying
-                    // an id.
-                    if rewritten != content {
-                        if let Err(e) = std::fs::write(path, &rewritten) {
-                            errors.push(PlaylistSyncError {
-                                path: rel,
-                                message: format!("reconciled but could not write id back: {e}"),
-                            });
-                            continue;
-                        }
-                    }
-                    added += 1;
+            let playlist = match Playlist::parse(&content) {
+                Ok(p) => p,
+                Err(e) => {
+                    errors.push(PlaylistSyncError { path: rel_display, message: e.to_string() });
+                    continue;
                 }
-                Err(msg) => {
-                    errors.push(PlaylistSyncError { path: rel, message: msg });
+            };
+            if let Err(e) = playlist.validate() {
+                errors.push(PlaylistSyncError { path: rel_display, message: e.to_string() });
+                continue;
+            }
+            let (rewritten, id) = match playlist::assign_id(&content) {
+                Ok(r) => r,
+                Err(e) => {
+                    errors.push(PlaylistSyncError { path: rel_display, message: e.to_string() });
+                    continue;
+                }
+            };
+
+            seen_keys.insert(key.clone(), rel_display.clone());
+            loaded.push(Loaded {
+                rel_display,
+                key,
+                disk_path: path.to_path_buf(),
+                content,
+                rewritten,
+                id: id.to_string(),
+                playlist,
+            });
+        }
+
+        // ---- Pass 2: whole-set validation (refs + cycles) ------------
+        // Pure, database-free. Any entry flagged here is excluded from the
+        // write below — we never persist a playlist that fails set-level
+        // validation.
+        let set_entries: Vec<playlist::SetEntry> = loaded
+            .iter()
+            .map(|l| playlist::SetEntry {
+                key: l.key.clone(),
+                playlist: l.playlist.clone(),
+            })
+            .collect();
+        let set_errors = playlist::validate_set(&set_entries);
+
+        let mut bad_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for se in set_errors {
+            bad_keys.insert(se.key.clone());
+            // Map the key back to a displayable path for the report.
+            let path = loaded
+                .iter()
+                .find(|l| l.key == se.key)
+                .map(|l| l.rel_display.clone())
+                .unwrap_or(se.key);
+            errors.push(PlaylistSyncError { path, message: se.message });
+        }
+
+        // ---- Pass 3: persist the survivors ---------------------------
+        // Only files that passed BOTH per-file and set-level validation are
+        // written to the view and (if needed) rewritten with their id.
+        let mut added: u32 = 0;
+        for l in &loaded {
+            if bad_keys.contains(&l.key) {
+                continue;
+            }
+            if let Err(e) = self
+                .upsert_view(&l.id, &l.playlist, &l.rewritten, Some(&l.key))
+                .await
+            {
+                errors.push(PlaylistSyncError { path: l.rel_display.clone(), message: e });
+                continue;
+            }
+            // Write the id back only if assign_id changed the file (avoids
+            // churning git on files that already carry an id).
+            if l.rewritten != l.content {
+                if let Err(e) = std::fs::write(&l.disk_path, &l.rewritten) {
+                    errors.push(PlaylistSyncError {
+                        path: l.rel_display.clone(),
+                        message: format!("reconciled but could not write id back: {e}"),
+                    });
+                    continue;
                 }
             }
+            added += 1;
         }
 
         Ok(Response::new(PlaylistSyncReply { added, errors }))
+    }
+
+    async fn playlist_list(
+        &self,
+        _request: Request<PlaylistListRequest>,
+    ) -> Result<Response<PlaylistListReply>, TonicStatus> {
+        // Read from the view via `store::list`; the handler only maps the
+        // metier rows to the proto message.
+        let rows = store::list(&self.db)
+            .await
+            .map_err(|e| TonicStatus::internal(format!("could not read playlist view: {e}")))?;
+
+        let playlists = rows
+            .into_iter()
+            .map(|r| PlaylistSummary {
+                id: r.id,
+                rel_path: r.rel_path.unwrap_or_default(),
+                name: r.name,
+                mode: r.mode,
+                enabled: r.enabled,
+            })
+            .collect();
+
+        Ok(Response::new(PlaylistListReply { playlists }))
     }
 }

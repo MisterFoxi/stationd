@@ -10,7 +10,7 @@ pub mod station {
 }
 
 use station::station_client::StationClient;
-use station::{PlaylistAddRequest, PlaylistSyncRequest, QuitRequest, StatusRequest};
+use station::{PlaylistAddRequest, PlaylistListRequest, PlaylistSyncRequest, QuitRequest, StatusRequest};
 
 use std::path::PathBuf;
 
@@ -47,6 +47,8 @@ enum PlaylistCommand {
     /// Reconcile every *.toml under stationd's playlist root (recursive)
     /// into its view. Best-effort: bad files are reported, not fatal.
     Sync,
+    /// List the playlists currently in stationd's view.
+    List,
 }
 
 #[tokio::main]
@@ -109,6 +111,26 @@ async fn main() -> anyhow::Result<()> {
                 }
                 // Non-zero exit so scripts / CI notice something was rejected.
                 std::process::exit(1);
+            }
+        }
+        Command::Playlist(PlaylistCommand::List) => {
+            let reply = client
+                .playlist_list(PlaylistListRequest {})
+                .await?
+                .into_inner();
+
+            if reply.playlists.is_empty() {
+                println!("(no playlists in the view)");
+            } else {
+                for p in &reply.playlists {
+                    let handle = if p.rel_path.is_empty() {
+                        "(no path)"
+                    } else {
+                        &p.rel_path
+                    };
+                    let state = if p.enabled { "enabled" } else { "disabled" };
+                    println!("{handle}  [{}]  {}  ({state})  {}", p.mode, p.name, p.id);
+                }
             }
         }
     }

@@ -9,6 +9,7 @@ service Station {
   rpc Quit (QuitRequest) returns (QuitReply);
   rpc PlaylistAdd (PlaylistAddRequest) returns (PlaylistAddReply);
   rpc PlaylistSync (PlaylistSyncRequest) returns (PlaylistSyncReply);
+  rpc PlaylistList (PlaylistListRequest) returns (PlaylistListReply);
 }
 
 message StatusRequest {}
@@ -53,4 +54,19 @@ message PlaylistSyncReply {
 message PlaylistSyncError {
   string path = 1;    // file that failed (relative to the playlist root)
   string message = 2; // why it was rejected
+}
+
+// `playlist list`: read-only listing of what is currently in the view.
+message PlaylistListRequest {}
+
+message PlaylistListReply {
+  repeated PlaylistSummary playlists = 1;
+}
+
+message PlaylistSummary {
+  string id = 1;        // internal UUID
+  string rel_path = 2;  // human handle (canonical relative path); may be empty for an add-only entry
+  string name = 3;      // display name
+  string mode = 4;      // selection mode (static/dynamic/remote/queue/group)
+  bool enabled = 5;
 }

@@ -2,6 +2,7 @@ mod config;
 mod db;
 mod grpc;
 mod playlist;
+mod store;
 
 use std::path::PathBuf;
 
