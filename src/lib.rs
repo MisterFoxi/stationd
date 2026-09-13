@@ -13,5 +13,6 @@ pub mod config;
 pub mod db;
 pub mod grpc;
 pub mod playlist;
+pub mod resolver;
 pub mod store;
 pub mod sync;

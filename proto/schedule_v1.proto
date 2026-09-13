@@ -1,0 +1,179 @@
+// schedule_v1.proto
+// ─────────────────────────────────────────────────────────────────────────
+// La GRILLE : concept top-level distinct qui RÉFÉRENCE des playlists (par
+// ref_effective). Répond à « quoi jouer à l'instant now ». C'est le premier
+// proto dont modele-programmation.md dit que « le reste du scheduling découle ».
+//
+// Quatre familles de règles, distinguées par leur POINT D'ANCRAGE :
+//   BaseRotation — aucun ancrage, toujours résolvable : le PLANCHER.
+//   DayPart      — fenêtre horaire : sélectionne quelle base est active.
+//   AtClock      — horloge murale absolue : rendez-vous (top d'heure, news).
+//   Every        — dernier passage (temps OU compteur) : cooldown.
+//
+// Sélection vs injection : BaseRotation/DayPart RÉSOLVENT la base active ;
+// AtClock/Every la PONCTUENT (la base reprend derrière).
+//
+// Ordre de résolution des collisions (priorité décroissante) :
+//   AtClock hard > AtClock soft > Every > base (DayPart → BaseRotation)
+
+syntax = "proto3";
+
+package webradio.schedule.v1;
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/duration.proto";
+
+// ─────────────────────────────────────────────────────────────────────────
+// Règle
+// ─────────────────────────────────────────────────────────────────────────
+
+message Rule {
+  string id = 1;                    // handle stable de la règle (CLI/diagnostics)
+  bool   enabled = 2;               // absent → true (service)
+
+  // Portée de validité — « fixe » et « override daté » = MÊME mécanisme, deux
+  // formes de validité (simplifie le proto). Vide → toujours valide.
+  Validity validity = 3;
+
+  oneof kind {
+    BaseRotation base_rotation = 10;
+    DayPart      day_part      = 11;
+    AtClock      at_clock      = 12;
+    Every        every         = 13;
+  }
+}
+
+message Validity {
+  // Récurrence : jours de la semaine où la règle s'applique. Vide → tous.
+  repeated Weekday days = 1;
+  // Bornes de dates optionnelles (override daté). Inclusives. En date CIVILE
+  // du fuseau station, pas en instant — l'expansion en epoch applique le DST
+  // à la volée (cf. time.md : règle = civil + fuseau IANA, jamais offset gelé).
+  string date_start = 2;            // "YYYY-MM-DD", optionnel
+  string date_end   = 3;            // "YYYY-MM-DD", optionnel, ≥ date_start
+}
+
+enum Weekday {
+  WEEKDAY_UNSPECIFIED = 0;
+  MON = 1; TUE = 2; WED = 3; THU = 4; FRI = 5; SAT = 6; SUN = 7;
+}
+
+// ── Le plancher : toujours résolvable, priorité la plus basse ───────────────
+message BaseRotation {
+  string playlist_ref = 1;          // ref_effective (typiquement un groupe weighted)
+}
+
+// ── Fenêtre qui SÉLECTIONNE quelle base est active ──────────────────────────
+// `end` ici = borne de VALIDITÉ d'un prédicat sur `now` (8h ≤ now < 10h),
+// évaluée en frontière de piste. JAMAIS une coupe de contenu : la dernière
+// piste déborde, le changement se fait au titre suivant (borne molle).
+message DayPart {
+  string    playlist_ref = 1;       // la base active pendant la fenêtre
+  WallClock start = 2;              // heure civile locale, incluse
+  WallClock end   = 3;              // heure civile locale, exclue
+}
+
+// ── Rendez-vous à l'horloge absolue (recalculable depuis now seul) ──────────
+message AtClock {
+  string playlist_ref = 1;
+  // Repères dans l'heure. Réutilise la sémantique alignment=hour : minutes
+  // 0, N, 2N… < 60 ; N doit diviser proprement (1..60). Ex. 15 → :00 :15 :30 :45.
+  uint32 every_minutes = 2;         // 1..60
+  // OU une heure fixe unique si every_minutes = 0.
+  WallClock at = 3;
+
+  Mode mode = 4;                    // UNSPECIFIED → SOFT
+  // Péremption PAR RÈGLE (pas globale) : fenêtre de tolérance d'un rendez-vous
+  // manqué (restart à XX:04). Dépassée → périmé, on attend le prochain.
+  // Absent → pas de péremption (jingle station « encore bon »).
+  google.protobuf.Duration expiry = 5;
+
+  enum Mode {
+    MODE_UNSPECIFIED = 0;           // → SOFT
+    SOFT = 1;                       // attend la frontière de piste
+    HARD = 2;                       // préempte (duck/fade) pour taper l'instant pile
+  }
+}
+
+// ── Cadence glissante : cooldown depuis le dernier passage ──────────────────
+// Toujours soft (évalué en frontière). État PERSISTÉ (famille B) : sans ça un
+// restart casse la cadence. Exactement un des deux ancrages.
+message Every {
+  string playlist_ref = 1;
+  oneof cadence {
+    google.protobuf.Duration elapsed = 2;   // temps écoulé depuis last_played_at
+    uint32                   tracks  = 3;    // pistes station depuis le dernier passage
+  }
+}
+
+// Heure civile locale (fuseau = config station, pas répété ici).
+message WallClock { uint32 hour = 1; uint32 minute = 2; }  // 0..23 / 0..59
+
+// ─────────────────────────────────────────────────────────────────────────
+// Résolveur — resolve_next(now, état) -> Decision
+// ─────────────────────────────────────────────────────────────────────────
+
+message ResolveNextRequest {
+  // Instant d'évaluation. Absent → maintenant. Fourni → simulation (preview),
+  // testable sans attendre le wall-clock (stationctl schedule preview --at).
+  google.protobuf.Timestamp now = 1;
+}
+message Decision {
+  string media_path   = 1;          // le média concret à tendre à Liquidsoap
+  string playlist_ref = 2;          // playlist résolue
+  string rule_id      = 3;          // règle gagnante (introspection)
+  Origin origin       = 4;
+  enum Origin {
+    ORIGIN_UNSPECIFIED = 0;
+    AT_CLOCK_HARD = 1;
+    AT_CLOCK_SOFT = 2;
+    EVERY = 3;
+    DAY_PART = 4;
+    BASE_ROTATION = 5;              // le plancher a rempli
+    FALLBACK = 6;                   // aucune règle → filet de sécurité (jamais un blanc)
+  }
+}
+
+// Une occurrence future (preview). Simule la grille sur une fenêtre.
+message Occurrence {
+  google.protobuf.Timestamp at_utc = 1;   // instant, epoch UTC
+  string at_local = 2;                     // même instant rendu en local nommé (anti-DST)
+  string rule_id = 3;
+  string playlist_ref = 4;
+  Decision.Origin origin = 5;
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Service grille (CLI-first — stationctl schedule …)
+// ─────────────────────────────────────────────────────────────────────────
+
+service ScheduleService {
+  // CRUD grille (comme playlists : apply/validate/export sur TOML → contrat).
+  rpc ApplyGrid(ApplyGridRequest)   returns (ApplyGridResponse);
+  rpc ValidateGrid(ApplyGridRequest) returns (ValidateGridResponse);
+  rpc ExportGrid(ExportGridRequest) returns (ExportGridResponse);
+  rpc ListRules(ListRulesRequest)   returns (ListRulesResponse);
+
+  // Le résolveur en direct : ce que Liquidsoap demande à chaque frontière.
+  // Remplace l'Activate stub du slice comme vrai point d'entrée.
+  rpc ResolveNext(ResolveNextRequest) returns (Decision);
+
+  // Simulation sans wall-clock : stationctl schedule preview --at / --next 24h.
+  // Sert de test anti-DST (fenêtre sur nuit de bascule → révèle trou/doublon).
+  rpc Preview(PreviewRequest) returns (PreviewResponse);
+}
+
+message GridFile { string path = 1; string toml = 2; }
+message ApplyGridRequest    { repeated GridFile files = 1; }
+message ApplyGridResponse   { bool ok = 1; repeated string applied_rule_ids = 2; }  // diagnostics : réutiliser playlist.v1.Diagnostic
+message ValidateGridResponse{ bool ok = 1; }
+message ExportGridRequest   { repeated string rule_ids = 1; }
+message ExportGridResponse  { repeated GridFile files = 1; }
+message ListRulesRequest    {}
+message ListRulesResponse   { repeated Rule rules = 1; }
+
+message PreviewRequest {
+  google.protobuf.Timestamp from = 1;      // absent → maintenant
+  google.protobuf.Duration  window = 2;    // ex. 24h
+}
+message PreviewResponse { repeated Occurrence occurrences = 1; }

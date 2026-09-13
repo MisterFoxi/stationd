@@ -1,0 +1,318 @@
+// playlist_v1.proto
+// ─────────────────────────────────────────────────────────────────────────
+// Slice « Homestone chronicles » du contrat playlist.
+//
+// Périmètre (cf. proposition §10, « premier périmètre recommandé ») :
+//   format individuel · identité 3 étages · static · dynamic (newest +
+//   order_by + path/prefix) · group/sequence · member · activate manuel.
+//
+// HORS slice, volontairement absents (ajoutés quand leur contrat est stable) :
+//   modes queue / remote · stratégies group rotate / weighted (présentes en
+//   enum pour ne pas renuméroter plus tard, mais non couvertes) · le « QUAND »
+//   (general/interval/scheduled) qui vit désormais dans la GRILLE, pas ici.
+//
+// Décisions gravées dans ce proto :
+//   1. Le « quand » a quitté la playlist. `Broadcast` ne porte plus que le
+//      COMMENT intrinsèque (quota, répétition, épuisement, anti-répétition) +
+//      l'adressabilité. Le déclenchement est une règle de grille (2e proto)
+//      qui référence la playlist par son référent humain.
+//   2. Identité 3 étages : `uuid` interne immuable (jointures/historique/
+//      arêtes de groupe) · `name` requis · `handle` optionnel. Le service
+//      calcule ref_effective = handle ?? name ; c'est LUI le référent des
+//      membres et des futures règles. Une ref non résolue = erreur bruyante,
+//      jamais un repli (cas A, pas B).
+//   3. `oneof mode` : un mode = un message. Poser un champ d'un autre mode
+//      devient STRUCTURELLEMENT impossible — remonte au type toute une classe
+//      des rejets « champ inapplicable » de §9. Idem `order` : une enum par
+//      mode, donc `newest` sur `static` n'existe pas dans le type.
+
+syntax = "proto3";
+
+package webradio.playlist.v1;
+
+import "google/protobuf/duration.proto";
+
+// NB codegen : `static`/`dynamic`/`group` sont des mots-clés dans certains
+// langages cibles (Rust → r#static). Choix assumé pour l'alignement 1:1 avec
+// `mode = "..."` du TOML ; le mangling est géré par prost.
+
+// ─────────────────────────────────────────────────────────────────────────
+// Racine
+// ─────────────────────────────────────────────────────────────────────────
+
+message Playlist {
+  // Identité interne. Immuable. Vide à la création (attribué par le système),
+  // stable ensuite. Un renommage de fichier / de `name` ne le change JAMAIS :
+  // c'est lui qui permet au service de réécrire atomiquement les référenceurs.
+  string uuid = 1;
+
+  // Référent humain par défaut + affichage. Requis, non blanc.
+  // Tant qu'aucun `handle` n'est fourni, `name` EST le référent → il hérite
+  // des contraintes de clé (unique par station, sobre). Il n'est librement
+  // renommable/traduisible que si un `handle` explicite le libère.
+  string name = 2;
+
+  // Référent explicite. Présent → l'emporte sur `name` comme ref_effective.
+  // Absent (cas A) → le référent est `name`.
+  optional string handle = 3;
+
+  // Absent → true (défaut appliqué par le service, pas par le schéma).
+  optional bool enabled = 4;
+
+  Selection selection = 5;   // le QUOI
+  Broadcast broadcast = 6;   // le COMMENT (plus le QUAND)
+
+  // schema_version vit au niveau du TOML (garde-fou format historique),
+  // vérifié à la frontière Apply. Pas de champ proto : le proto est versionné
+  // par le package (v1) et son évolution.
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Sélection — le QUOI
+// ─────────────────────────────────────────────────────────────────────────
+
+message Selection {
+  oneof mode {
+    StaticSelection  static  = 1;
+    DynamicSelection dynamic = 2;
+    GroupSelection   group   = 3;
+    // queue, remote : hors slice.
+  }
+}
+
+message StaticSelection {
+  // Non vide, sans doublon. Chemins relatifs à media/, séparateur `/`,
+  // pas de `..`/absolu/NUL (validé service). Casse conservée.
+  repeated string files = 1;
+  // UNSPECIFIED → SEQUENTIAL.
+  StaticOrder order = 2;
+}
+
+message DynamicSelection {
+  // Non vide (validé service). Pas de filtre ≠ « toute la biblio » :
+  // pour tout prendre, filtre explicite path/prefix "".
+  repeated Filter filter = 1;
+  // UNSPECIFIED → ALL.
+  MatchMode match = 2;
+  // UNSPECIFIED → SHUFFLE.
+  DynamicOrder order = 3;
+  // Requis ssi order ∈ {NEWEST, OLDEST} ; interdit sinon (règle croisée →
+  // service, le proto ne peut pas lier deux champs).
+  OrderBy order_by = 4;
+  // Défaut false. Autorisé ssi order daté. Anti-répétition à expiration
+  // infinie, keyé par identité d'épisode (SQLite, état durable).
+  bool unplayed_only = 5;
+}
+
+message GroupSelection {
+  GroupStrategy strategy = 1;
+  // Non vide. `ref` = ref_effective d'une autre playlist. Cycles + refs
+  // inconnues rejetés avant apply (graphe validé comme DAG).
+  repeated GroupMember members = 2;
+  // UNSPECIFIED → ABORT.
+  OnMemberUnavailable on_member_unavailable = 3;
+}
+
+message GroupMember {
+  string ref = 1;
+  // sequence uniquement. Défaut 1. Interdit ailleurs (validé service).
+  // Sur un membre-groupe : N activations complètes (ne coupe pas l'outro).
+  optional uint32 take = 2;
+  // weighted uniquement. 0..50, défaut 15. 0 = exclu du tirage (≠ désactivé),
+  // d'où `optional` : distinguer 0 (sémantique) de l'absence (→ 15).
+  optional uint32 weight = 3;
+}
+
+message Filter {
+  FilterField field = 1;
+  FilterOp    op    = 2;
+  oneof value {
+    string     string_value = 3;   // path/prefix, title/contains…
+    int64      int_value    = 4;   // year/>=…
+    StringList string_list  = 5;   // genre/has_any, in/not_in textuel…
+    Int64List  int_list     = 6;   // year/in…
+  }
+}
+message StringList { repeated string values = 1; }
+message Int64List  { repeated int64  values = 1; }
+
+// ─────────────────────────────────────────────────────────────────────────
+// Broadcast — le COMMENT intrinsèque (le QUAND est parti dans la grille)
+// ─────────────────────────────────────────────────────────────────────────
+
+message Broadcast {
+  // static/dynamic/queue. Défaut 1. `optional` : 0 n'est pas un quota valide,
+  // l'absence → 1 appliqué par le service.
+  optional uint32 limit = 1;
+  // static/dynamic. Défaut false. Interdit avec unplayed_only=true (service).
+  bool repeat = 2;
+  // UNSPECIFIED → FALLTHROUGH. (stop/hold retirés en v1.)
+  OnExhausted on_exhausted = 3;
+  // Historique STATION-GLOBAL, jamais relâché implicitement. Reste global même
+  // quand la grille bascule la base active — invariant à préserver.
+  Constraints constraints = 4;
+  // Remplace l'ancien type="member". true → brique de groupe uniquement,
+  // NON adressable par une règle de grille. Défaut false (adressable).
+  bool member_only = 5;
+}
+
+message Constraints {
+  google.protobuf.Duration no_same_artist_within = 1;
+  google.protobuf.Duration no_same_track_within  = 2;
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Enums (UNSPECIFIED = 0 = « omis » → défaut appliqué par le service)
+// ─────────────────────────────────────────────────────────────────────────
+
+enum MatchMode {
+  MATCH_MODE_UNSPECIFIED = 0;   // → ALL
+  MATCH_MODE_ALL = 1;           // ET
+  MATCH_MODE_ANY = 2;           // OU
+}
+
+enum StaticOrder {
+  STATIC_ORDER_UNSPECIFIED = 0; // → SEQUENTIAL
+  STATIC_ORDER_SEQUENTIAL = 1;
+  STATIC_ORDER_SHUFFLE = 2;
+}
+
+enum DynamicOrder {
+  DYNAMIC_ORDER_UNSPECIFIED = 0; // → SHUFFLE
+  DYNAMIC_ORDER_SEQUENTIAL = 1;
+  DYNAMIC_ORDER_SHUFFLE = 2;
+  DYNAMIC_ORDER_NEWEST = 3;      // exige order_by
+  DYNAMIC_ORDER_OLDEST = 4;      // exige order_by
+}
+
+enum OrderBy {
+  ORDER_BY_UNSPECIFIED = 0;
+  ORDER_BY_FILENAME = 1;         // défaut recommandé (local) ; tri lexical
+  ORDER_BY_MTIME = 2;
+  ORDER_BY_PUBLISHED = 3;        // source feed uniquement
+}
+
+enum GroupStrategy {
+  GROUP_STRATEGY_UNSPECIFIED = 0;
+  GROUP_STRATEGY_SEQUENCE = 1;   // slice
+  GROUP_STRATEGY_ROTATE = 2;     // hors slice
+  GROUP_STRATEGY_WEIGHTED = 3;   // hors slice
+}
+
+enum OnMemberUnavailable {
+  ON_MEMBER_UNAVAILABLE_UNSPECIFIED = 0; // → ABORT
+  ON_MEMBER_UNAVAILABLE_ABORT = 1;       // abandonne le reste + diagnostic
+  ON_MEMBER_UNAVAILABLE_SKIP  = 2;       // membre suivant
+}
+
+enum OnExhausted {
+  ON_EXHAUSTED_UNSPECIFIED = 0;  // → FALLTHROUGH
+  ON_EXHAUSTED_FALLTHROUGH = 1;  // termine l'activation, rend la main
+  ON_EXHAUSTED_DISABLE = 2;      // suspend (état d'exécution, NE réécrit PAS enabled)
+}
+
+// Catalogue minimal du slice + quelques entrées pour montrer le motif.
+// S'étend (proposition §4.1) ; l'ajout est additif tant que les numéros ne
+// bougent pas.
+enum FilterField {
+  FILTER_FIELD_UNSPECIFIED = 0;
+  FILTER_FIELD_PATH = 1;         // slice : path/prefix
+  FILTER_FIELD_TITLE = 2;
+  FILTER_FIELD_ARTIST = 3;
+  FILTER_FIELD_ALBUM = 4;
+  FILTER_FIELD_GENRE = 5;
+  FILTER_FIELD_YEAR = 6;
+  FILTER_FIELD_DURATION = 7;
+}
+
+enum FilterOp {
+  FILTER_OP_UNSPECIFIED = 0;
+  FILTER_OP_EQ = 1;
+  FILTER_OP_NE = 2;
+  FILTER_OP_PREFIX = 3;          // slice : littéral, ni glob ni regex
+  FILTER_OP_CONTAINS = 4;
+  FILTER_OP_IN = 5;
+  FILTER_OP_NOT_IN = 6;
+  FILTER_OP_HAS = 7;
+  FILTER_OP_HAS_ANY = 8;
+  FILTER_OP_HAS_ALL = 9;
+  FILTER_OP_LT = 10;
+  FILTER_OP_LE = 11;
+  FILTER_OP_GT = 12;
+  FILTER_OP_GE = 13;
+  // Couple field/op/value validé au service (§9) : le proto ne peut pas
+  // interdire genre/`>=` ni year/`prefix`.
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Diagnostics — format d'erreur §9 (fichier + chemin logique + rejeté + attendu)
+// ─────────────────────────────────────────────────────────────────────────
+
+message Diagnostic {
+  enum Severity { SEVERITY_UNSPECIFIED = 0; ERROR = 1; WARNING = 2; }
+  Severity severity = 1;
+  string file = 2;         // fichier concerné
+  string field_path = 3;   // ex. "selection.order"
+  string rejected = 4;     // valeur rejetée
+  string expected = 5;     // valeurs attendues quand finies
+  string message = 6;      // ex. `"shuffle" interdit pour mode "queue"`
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Service (CLI-first : tout ici est atteignable en `stationctl`)
+// ─────────────────────────────────────────────────────────────────────────
+
+service PlaylistService {
+  // Réconcilie un lot de fichiers TOML vers l'index (kubectl apply).
+  // Parse dans stationd → CLI mince, parsing centralisé. N'écrit QUE l'index
+  // reconstructible, JAMAIS l'état durable (compteurs, déjà-joué, historique).
+  rpc Apply(ApplyRequest) returns (ApplyResponse);
+
+  // Même entrée, ne persiste rien : renvoie les diagnostics.
+  rpc Validate(ApplyRequest) returns (ValidateResponse);
+
+  // Redéverse l'état courant en TOML (round-trip lossless côté impl).
+  rpc Export(ExportRequest) returns (ExportResponse);
+
+  rpc GetPlaylist(GetPlaylistRequest) returns (Playlist);
+  rpc ListPlaylists(ListPlaylistsRequest) returns (ListPlaylistsResponse);
+
+  // STUB de slice : déclenche une activation à la main pour tester sélection +
+  // composition end-to-end SANS la grille. Remplacé par la règle de grille
+  // (AtClock soft, etc.) au 2e proto.
+  rpc Activate(ActivateRequest) returns (ActivateResponse);
+}
+
+message PlaylistFile {
+  string path = 1;   // chemin relatif racine playlists (sans extension = référent fichier)
+  string toml = 2;   // contenu brut
+}
+
+message ApplyRequest  { repeated PlaylistFile files = 1; }
+message ApplyResponse {
+  bool ok = 1;
+  repeated Diagnostic diagnostics = 2;
+  repeated string applied_uuids = 3;
+}
+message ValidateResponse {
+  bool ok = 1;
+  repeated Diagnostic diagnostics = 2;
+}
+
+message ExportRequest  { repeated string refs = 1; }  // vide → tout
+message ExportResponse { repeated PlaylistFile files = 1; }
+
+message GetPlaylistRequest  { string ref = 1; }        // ref_effective
+message ListPlaylistsRequest {}
+message ListPlaylistsResponse { repeated Playlist playlists = 1; }
+
+message ActivateRequest  { string ref = 1; }
+message ActivateResponse {
+  // Ce que la sélection/composition produit, à plat, pour inspection.
+  repeated ResolvedTrack tracks = 1;
+  repeated Diagnostic diagnostics = 2;
+}
+message ResolvedTrack {
+  string media_path = 1;
+  string source_ref = 2;   // quelle playlist/membre a produit la piste (debug composition)
+}
