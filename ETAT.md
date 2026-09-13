@@ -7,6 +7,21 @@ chaque session.
 
 Dernière mise à jour : 2026-09-13.
 
+
+## Ajout : TUI d'administration (correctif préparé, compilation à confirmer)
+
+Premier jalon Ratatui derrière la feature `tui` : `stationd-tui`, vues
+Status/Playlists/Grid et polling gRPC. Modules générés partagés dans `proto`,
+`ListRules` relié à la lecture de l'index, `stationctl schedule list` ajouté.
+Aucun appel au résolveur vivant pour afficher les données.
+
+**Validation restante :** `cargo build --features tui` puis
+`cargo test --features tui`, et essai terminal avec le daemon reconstruit.
+Rust/Cargo/protoc indisponibles dans l'environnement de préparation ; le
+lockfile doit être actualisé par le premier build. Les indications plus bas
+sur `ListRules` non implémenté décrivent l'état antérieur à ce correctif.
+Voir `Doc/tui-dev.md` pour le périmètre, les commandes et les limites.
+
 ---
 
 ## Où on en est en une phrase

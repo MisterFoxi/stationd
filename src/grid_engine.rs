@@ -43,6 +43,11 @@ impl GridEngine {
         Self { pool, tz: tz.into() }
     }
 
+    /// Read the configured rules without resolving or touching playback state.
+    pub async fn list_rules(&self) -> Result<Vec<crate::resolver::Rule>, EngineError> {
+        Ok(grid_index::load_grid(&self.pool).await?.rules)
+    }
+
     /// Ensure every `Every` rule has a counter row, so its cadence advances
     /// from the first track on. Call at start-up and after each grid apply /
     /// reload. Idempotent; never resets an existing counter (family B).

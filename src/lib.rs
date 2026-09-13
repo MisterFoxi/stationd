@@ -17,6 +17,7 @@ pub mod grid_index;
 pub mod grid_store;
 pub mod grpc;
 pub mod playlist;
+pub mod proto;
 pub mod resolver;
 pub mod schedule_grpc;
 pub mod store;

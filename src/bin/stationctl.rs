@@ -5,13 +5,7 @@
 
 use clap::{Parser, Subcommand};
 
-pub mod station {
-    tonic::include_proto!("station");
-}
-
-pub mod schedule {
-    tonic::include_proto!("webradio.schedule.v1");
-}
+use stationd::proto::{schedule, station};
 
 use station::station_client::StationClient;
 use station::{PlaylistAddRequest, PlaylistListRequest, PlaylistSyncRequest, QuitRequest, StatusRequest};
@@ -47,6 +41,8 @@ enum Command {
 
 #[derive(Subcommand, Debug)]
 enum ScheduleCommand {
+    /// List the grid rules without advancing playback state.
+    List,
     /// Resolve which source the grid would pull now (or at a given instant).
     /// This is the live resolver path, so it persists side effects (a consumed
     /// AtClock mark, an Every reset) exactly as a real track boundary would.
@@ -154,6 +150,16 @@ async fn main() -> anyhow::Result<()> {
                     let state = if p.enabled { "enabled" } else { "disabled" };
                     println!("{handle}  [{}]  {}  ({state})  {}", p.mode, p.name, p.id);
                 }
+            }
+        }
+        Command::Schedule(ScheduleCommand::List) => {
+            let mut sched = ScheduleServiceClient::connect(args.addr.clone()).await?;
+            let reply = sched.list_rules(schedule::ListRulesRequest {}).await?.into_inner();
+            if reply.rules.is_empty() {
+                println!("(no rules in the view)");
+            }
+            for rule in reply.rules {
+                println!("{rule:#?}");
             }
         }
         Command::Schedule(ScheduleCommand::Next { at }) => {
