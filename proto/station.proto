@@ -18,6 +18,7 @@ message StatusReply {
   string station_name = 1;
   uint64 uptime_seconds = 2;
   uint32 pid = 3;
+  string timezone = 4; // IANA station timezone (config)
 }
 
 message QuitRequest {}

@@ -82,6 +82,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Status => {
             let reply = client.status(StatusRequest {}).await?.into_inner();
             println!("station:  {}", reply.station_name);
+            println!("timezone: {}", reply.timezone);
             println!("uptime:   {}s", reply.uptime_seconds);
             println!("pid:      {}", reply.pid);
         }

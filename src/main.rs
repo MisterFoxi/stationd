@@ -77,6 +77,7 @@ async fn main() -> anyhow::Result<()> {
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let service = grpc::StationService::new(
         cfg.station.name.clone(),
+        cfg.station.timezone.clone(),
         db_pool.clone(),
         cfg.playlist.path.clone(),
         shutdown_tx,

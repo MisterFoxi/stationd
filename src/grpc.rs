@@ -29,6 +29,7 @@ use crate::store;
 /// starting in proto/station.proto.
 pub struct StationService {
     station_name: String,
+    timezone: String,
     started_at: Instant,
     db: SqlitePool,
     playlist_root: PathBuf,
@@ -41,12 +42,14 @@ pub struct StationService {
 impl StationService {
     pub fn new(
         station_name: String,
+        timezone: String,
         db: SqlitePool,
         playlist_root: PathBuf,
         shutdown: oneshot::Sender<()>,
     ) -> Self {
         Self {
             station_name,
+            timezone,
             started_at: Instant::now(),
             db,
             playlist_root,
@@ -80,6 +83,7 @@ impl Station for StationService {
             station_name: self.station_name.clone(),
             uptime_seconds: self.started_at.elapsed().as_secs(),
             pid: std::process::id(),
+            timezone: self.timezone.clone(),
         };
         Ok(Response::new(reply))
     }
