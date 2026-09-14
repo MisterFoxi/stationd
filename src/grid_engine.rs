@@ -22,7 +22,9 @@ use crate::clock::{self, ClockError};
 use crate::grid_index::{self, GridLoadError};
 use crate::grid_store;
 use crate::grid_toml;
-use crate::resolver::{resolve_next, Epoch, GridDecision, Origin, Rule, RuleKind};
+use crate::resolver::{
+    resolve_next, Epoch, Grid, GridDecision, LocalNow, Origin, PlaybackState, Rule, RuleKind,
+};
 use crate::store;
 
 #[derive(Debug, thiserror::Error)]
@@ -51,6 +53,18 @@ pub struct GridEngine {
     pool: SqlitePool,
     /// IANA name of the station timezone (config), e.g. "Europe/Paris".
     tz: String,
+}
+
+/// One entry of a grid projection ([`GridEngine::preview`]): the instant a
+/// resolved decision *starts*, in epoch UTC and rendered in station-local
+/// time. Empty `rule_id`/`playlist_ref` = the fallback filled in.
+#[derive(Debug, Clone)]
+pub struct PreviewOccurrence {
+    pub epoch: Epoch,
+    pub at_local: String,
+    pub origin: Origin,
+    pub rule_id: String,
+    pub playlist_ref: String,
 }
 
 impl GridEngine {
@@ -141,6 +155,74 @@ impl GridEngine {
         grid_toml::to_toml(&rules).map_err(|m| GridOpError::Invalid(vec![m]))
     }
 
+    /// Project the grid over `[from, from + window)` **without** touching
+    /// playback state or the wall clock — the `stationctl schedule preview`
+    /// path, and the DST test (a window over a transition night reveals a
+    /// hole or a doubled hour in the local column).
+    ///
+    /// It is a *projection*, not a track-by-track simulation: track durations
+    /// are dynamic and unknown here, so we report the clock-driven structure
+    /// only. We walk minute by minute (every DayPart/AtClock boundary is
+    /// minute-aligned) and emit an occurrence whenever the resolved decision
+    /// changes. Consumed AtClock marks are carried forward exactly as the live
+    /// loop persists them, so a mark punctuates a single instant instead of
+    /// swallowing its whole slot. `Every` rules are omitted: their cadence is
+    /// driven by real playback (tracks/elapsed), not by the calendar, so they
+    /// have no meaning in a clock projection.
+    pub async fn preview(
+        &self,
+        from: Epoch,
+        window_secs: i64,
+    ) -> Result<Vec<PreviewOccurrence>, EngineError> {
+        let loaded = grid_index::load_grid(&self.pool).await?;
+        // Drop Every (playback-driven, not projectable on the clock).
+        let grid = Grid {
+            rules: loaded
+                .rules
+                .into_iter()
+                .filter(|r| !matches!(r.kind, RuleKind::Every { .. }))
+                .collect(),
+        };
+
+        // Bound the walk: ignore a non-positive window, cap at 31 days so a
+        // pathological request can't spin for ages (minute granularity).
+        let window = window_secs.clamp(0, 31 * 86_400);
+        let end = from.0.saturating_add(window);
+
+        let mut sim = PlaybackState::default();
+        let mut out: Vec<PreviewOccurrence> = Vec::new();
+        let mut prev_key: Option<(Origin, String, String)> = None;
+
+        let mut secs = from.0;
+        while secs < end {
+            let epoch = Epoch(secs);
+            let local = clock::to_local_now(epoch, &self.tz)?;
+            let decision = resolve_next(local, &grid, &sim);
+
+            // Consume the mark so the next minute in this slot yields the base,
+            // mirroring the live loop (a mark is an instant, not a segment).
+            if let Some(token) = &decision.mark_taken {
+                sim.at_clock_taken.insert(token.clone());
+            }
+
+            let rule_id = decision.rule_id.clone().unwrap_or_default();
+            let playlist_ref = decision.playlist_ref.clone().unwrap_or_default();
+            let key = (decision.origin.clone(), rule_id.clone(), playlist_ref.clone());
+            if prev_key.as_ref() != Some(&key) {
+                out.push(PreviewOccurrence {
+                    epoch,
+                    at_local: fmt_local(&local, &self.tz),
+                    origin: decision.origin.clone(),
+                    rule_id,
+                    playlist_ref,
+                });
+                prev_key = Some(key);
+            }
+            secs += 60;
+        }
+        Ok(out)
+    }
+
     /// Resolve the source to pull at a track boundary for instant `now`, and
     /// persist the decision's side effects (a consumed AtClock occurrence, an
     /// `Every` cooldown reset). Pure resolution, durable bookkeeping.
@@ -161,6 +243,16 @@ impl GridEngine {
         }
         Ok(decision)
     }
+}
+
+/// Render a `LocalNow` as `YYYY-MM-DD HH:MM <IANA zone>` — named zone, not a
+/// frozen offset (per the time doc). Enough to read a preview and to spot a
+/// DST hole/doubling when paired with the epoch-UTC column.
+fn fmt_local(local: &LocalNow, tz: &str) -> String {
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02} {tz}",
+        local.date.year, local.date.month, local.date.day, local.wall.hour, local.wall.minute
+    )
 }
 
 #[cfg(test)]
@@ -248,5 +340,83 @@ mod tests {
         // Same mark again (09:16 still floors to :15) → already consumed → base.
         let second = eng.next(at(9, 16)).await.unwrap();
         assert_eq!(second.origin, Origin::BaseRotation);
+    }
+
+    #[tokio::test]
+    async fn preview_projects_base_daypart_and_marks() {
+        let (_dir, eng) = engine().await; // tz = UTC
+        insert_rule(&eng.pool, &rule("floor", RuleKind::BaseRotation { playlist_ref: "general".into() }))
+            .await
+            .unwrap();
+        insert_rule(
+            &eng.pool,
+            &rule(
+                "mid",
+                RuleKind::DayPart {
+                    playlist_ref: "jazz".into(),
+                    start: crate::resolver::WallClock { hour: 9, minute: 0 },
+                    end: crate::resolver::WallClock { hour: 10, minute: 0 },
+                },
+            ),
+        )
+        .await
+        .unwrap();
+        insert_rule(
+            &eng.pool,
+            &rule(
+                "top",
+                RuleKind::AtClock {
+                    playlist_ref: "jingle".into(),
+                    anchor: ClockAnchor::EveryMinutes(30),
+                    mode: Mode::Soft,
+                    expiry_secs: None,
+                },
+            ),
+        )
+        .await
+        .unwrap();
+        // An Every rule must NOT appear in a projection.
+        insert_rule(
+            &eng.pool,
+            &rule("cool", RuleKind::Every { playlist_ref: "never".into(), cadence: Cadence::Tracks(1) }),
+        )
+        .await
+        .unwrap();
+
+        // Window 08:00 → 11:00 (UTC, so wall == epoch hour).
+        let occ = eng.preview(at(8, 0), 3 * 3600).await.unwrap();
+
+        // First occurrence starts exactly at `from`.
+        assert_eq!(occ.first().unwrap().epoch, at(8, 0));
+        // No two consecutive occurrences share the same decision (change-only).
+        for w in occ.windows(2) {
+            assert_ne!(
+                (&w[0].origin, &w[0].playlist_ref),
+                (&w[1].origin, &w[1].playlist_ref),
+                "consecutive occurrences must differ"
+            );
+        }
+        // The DayPart shows up as jazz, the marks as jingle, and Every never.
+        assert!(occ.iter().any(|o| o.origin == Origin::DayPart && o.playlist_ref == "jazz"));
+        assert!(occ.iter().any(|o| o.origin == Origin::AtClockSoft && o.playlist_ref == "jingle"));
+        assert!(occ.iter().all(|o| o.origin != Origin::Every));
+        // A mark is an instant, not a segment: the 08:30 jingle is followed by
+        // a return to the floor at 08:31.
+        let mark = occ.iter().position(|o| o.epoch == at(8, 30)).expect("08:30 mark");
+        assert_eq!(occ[mark].origin, Origin::AtClockSoft);
+        assert_eq!(occ[mark + 1].epoch, at(8, 31));
+        assert_eq!(occ[mark + 1].origin, Origin::BaseRotation);
+    }
+
+    #[tokio::test]
+    async fn preview_of_a_bare_floor_is_a_single_segment() {
+        let (_dir, eng) = engine().await;
+        insert_rule(&eng.pool, &rule("floor", RuleKind::BaseRotation { playlist_ref: "general".into() }))
+            .await
+            .unwrap();
+        let occ = eng.preview(at(0, 0), 6 * 3600).await.unwrap();
+        assert_eq!(occ.len(), 1, "nothing changes → one segment");
+        assert_eq!(occ[0].origin, Origin::BaseRotation);
+        assert_eq!(occ[0].playlist_ref, "general");
     }
 }

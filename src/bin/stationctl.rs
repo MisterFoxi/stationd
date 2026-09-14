@@ -10,7 +10,7 @@ use stationd::proto::{schedule, station};
 use station::station_client::StationClient;
 use station::{PlaylistAddRequest, PlaylistListRequest, PlaylistSyncRequest, QuitRequest, StatusRequest};
 use schedule::schedule_service_client::ScheduleServiceClient;
-use schedule::{ApplyGridRequest, ExportGridRequest, GridFile, ResolveNextRequest};
+use schedule::{ApplyGridRequest, ExportGridRequest, GridFile, PreviewRequest, ResolveNextRequest};
 
 use std::path::PathBuf;
 
@@ -72,6 +72,17 @@ enum ScheduleCommand {
         /// Write to this file instead of stdout.
         #[arg(long)]
         out: Option<PathBuf>,
+    },
+    /// Project the grid over a window without waiting for the wall clock.
+    /// Each occurrence is shown in epoch UTC and station-local time (the
+    /// anti-DST view). Playback-driven `every` rules are not projected.
+    Preview {
+        /// Start instant (epoch seconds, UTC). Default: now (server-side).
+        #[arg(long)]
+        at: Option<i64>,
+        /// Window length in seconds. Default: 24h.
+        #[arg(long, default_value_t = 86_400)]
+        window: i64,
     },
 }
 
@@ -258,6 +269,36 @@ async fn main() -> anyhow::Result<()> {
                     println!("exported: {}", path.display());
                 }
                 None => print!("{toml}"),
+            }
+        }
+        Command::Schedule(ScheduleCommand::Preview { at, window }) => {
+            let mut sched = ScheduleServiceClient::connect(args.addr.clone()).await?;
+            let reply = sched
+                .preview(PreviewRequest {
+                    from: at.map(|seconds| ::prost_types::Timestamp { seconds, nanos: 0 }),
+                    window: Some(::prost_types::Duration { seconds: window, nanos: 0 }),
+                })
+                .await?
+                .into_inner();
+            if reply.occurrences.is_empty() {
+                println!("(no occurrences in the window)");
+            }
+            for o in reply.occurrences {
+                let origin = schedule::decision::Origin::try_from(o.origin)
+                    .map(|x| x.as_str_name())
+                    .unwrap_or("UNKNOWN");
+                let utc = o.at_utc.map(|t| t.seconds).unwrap_or(0);
+                let pl = if o.playlist_ref.is_empty() {
+                    "(fallback)".to_string()
+                } else {
+                    o.playlist_ref
+                };
+                let rule = if o.rule_id.is_empty() {
+                    String::new()
+                } else {
+                    format!("  [{}]", o.rule_id)
+                };
+                println!("{utc:>11}  {}  {origin:<13}  {pl}{rule}", o.at_local);
             }
         }
     }

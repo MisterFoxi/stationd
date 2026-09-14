@@ -26,32 +26,34 @@ Voir `Doc/tui-dev.md` pour le périmètre, les commandes et les limites.
 
 ## Où on en est en une phrase
 
-La **grille est pilotable de bout en bout en CLI** : `grid.toml` (4 familles) →
-`stationctl schedule validate|apply|export|list|next` → gRPC → moteur → SQLite,
-testé en vrai (apply de 4 règles, `next` rend `AT_CLOCK_SOFT`, export round-trip
-stable). Le cœur (`resolve_next` pur, `clock`/DST `jiff`, familles A/B) était
-déjà vert ; cette session a ajouté la grammaire `grid.toml`, les RPC
-apply/validate/export et la glu CLI. `cargo build` + `cargo test -p stationd`
-OK. Il reste `Preview` et l'étage sélection `playlist_ref` → média.
+La **grille est pilotable de bout en bout en CLI**, projection comprise :
+`grid.toml` (4 familles) → `stationctl schedule validate|apply|export|list|next|preview`
+→ gRPC → moteur → SQLite. Testé en vrai : apply de 4 règles, `next` rend
+`AT_CLOCK_SOFT`, export round-trip stable, `preview` projette 24h avec rendu
+UTC + local nommé (test anti-DST 2026-10-25 : 02:30 deux fois, epochs
+distincts). Cœur pur (`resolve_next`, `clock`/DST `jiff`, familles A/B) vert,
+grammaire + les 6 RPC réels. `cargo build` + `cargo test -p stationd` OK. Il
+reste l'étage sélection `playlist_ref` → média (`Decision.media_path` vide).
 
 ---
 
 ## ⭐ TÂCHE D'ENTRÉE PROCHAINE SESSION
 
-**Build/tests/bout-en-bout : OK ✓** (grille appliquée en vrai depuis le CLI).
+**Grille pilotable + projetable en CLI, validée en vrai (DST compris).**
 Prochain chantier grille :
 
-1. **`Preview`** (`stationctl schedule preview --at … / --next 24h`) : projeter
-   la grille sur une fenêtre sans attendre le wall-clock — occurrences en UTC
-   **et** local (test anti-DST). RPC `Preview` déjà déclaré, encore
-   `UNIMPLEMENTED`. Sert de projection, pas de sim piste-à-piste.
-2. **Étage sélection** : `playlist_ref` → média concret (`Decision.media_path`
-   est vide aujourd'hui) — le moteur de sélection du slice playlist.
-3. **`DayPart` cross-minuit** : `window_covers` renvoie `None` (TODO) — bloquant
+1. **Étage sélection** : `playlist_ref` → média concret. `Decision.media_path`
+   est vide aujourd'hui — la grille résout *quelle source*, pas *quelle piste*.
+   C'est le moteur de sélection du slice playlist (résoudre le pool depuis la
+   biblio + politique d'ordre + anti-répétition). Sans ça, rien à tendre à
+   Liquidsoap.
+2. **`DayPart` cross-minuit** : `window_covers` renvoie `None` (TODO) — bloquant
    pour une base de nuit 22:00→06:00.
-4. **Refacto acteur** : `GridEngine` en tâche tokio possédante, grille en
+3. **Refacto acteur** : `GridEngine` en tâche tokio possédante, grille en
    mémoire invalidée à l'apply, mutations par mpsc (aujourd'hui recharge à
    chaque appel).
+4. Puis câblage Liquidsoap (`request.dynamic` + fallback) : la grille a de quoi
+   répondre « next », il manque l'exécutant.
 
 ---
 
@@ -88,6 +90,21 @@ rejeté en v1), `at_clock` = `every_minutes` XOR `at` + `soft|hard` + `expiry`,
 - **Validé en vrai** : `validate`/`apply` (4 règles) → `list` → `next`
   (`AT_CLOCK_SOFT` à 00:00, ordre de collision correct) → `export` (round-trip
   stable, `enabled=true` omis). `cargo build` + `cargo test -p stationd` verts.
+
+### — Preview : projection de la grille (2026-09-14) —
+
+- `GridEngine::preview(from, window_secs)` (2 tests) : balayage minute par
+  minute, une `PreviewOccurrence` à **chaque changement** de décision. Marks
+  `AtClock` consommés au fil de l'eau (comme la boucle live) → un repère est un
+  **instant**, pas un segment. **`Every` exclu** (cadence pilotée par la
+  lecture, non projetable sur l'horloge). Fenêtre bornée (≤ 31 j), rendu local
+  via `clock` (DST réel).
+- `src/schedule_grpc.rs` : `preview` réel (occurrences `at_utc` + `at_local`
+  nommé). **Les 6 RPC sont désormais réels ; plus aucun `UNIMPLEMENTED`.**
+- `src/bin/stationctl.rs` : `schedule preview [--at <epoch>] [--window <secs>]`
+  (défaut 24 h), colonne UTC + local.
+- **Validé en vrai** : projection 24 h (alternance repère `:00/:30` → plancher)
+  et test anti-DST 2026-10-25 (02:30 rejoué, epochs distincts).
 
 ### — Couche grille / résolveur (session précédente) —
 
@@ -148,13 +165,13 @@ dans le découpage des modules (`grid_index` = A, `grid_store` = B).
   → fuseau bidon = pas de démarrage (no-silent-failure). `stationd.toml` +
   `.example` mis à jour.
 
-#### Protos & câblage gRPC (option A — **compile ✓**)
+#### Protos & câblage gRPC (**les 6 RPC réels**)
 - `proto/schedule_v1.proto` : `ScheduleService` (grille + `ResolveNext` +
   `Preview`), 4 familles, `soft|hard`, péremption, portée de validité.
   Compilé par `build.rs` (+ `prost-types`).
-- `src/schedule_grpc.rs` : handler mince sur `GridEngine`. **`resolve_next`,
-  `list_rules`, `apply_grid`, `validate_grid`, `export_grid` réels** ; seul
-  `preview` reste `UNIMPLEMENTED` (projection à concevoir).
+- `src/schedule_grpc.rs` : handler mince sur `GridEngine`. `resolve_next`,
+  `list_rules`, `apply_grid`, `validate_grid`, `export_grid`, `preview` **tous
+  réels** — plus aucun `UNIMPLEMENTED`.
 - `main.rs` : construit `GridEngine`, `sync_grid` au démarrage, second
   `add_service(ScheduleServiceServer)` sur le même serveur/port.
 - `stationctl schedule next [--at <epoch>]` : client du même endpoint.
@@ -191,8 +208,6 @@ dans le découpage des modules (`grid_index` = A, `grid_store` = B).
 ## Reste à faire
 
 ### Grille / scheduler (suite directe)
-- **`Preview`** : projection de grille sur une fenêtre (pas une sim
-  piste-à-piste, durées dynamiques) — RPC déclaré, à implémenter.
 - **Étage sélection** : `playlist_ref` → média concret (le `Decision.media_path`
   est vide pour l'instant ; c'est le moteur de sélection du slice playlist).
 - **Refacto acteur** : `GridEngine` en tâche tokio possédante, grille en
@@ -242,17 +257,17 @@ dans le découpage des modules (`grid_index` = A, `grid_store` = B).
 | `src/grid_index.rs` | Index règles famille (A) : `load_grid`/`insert_rule`/`replace_grid` |
 | `src/grid_toml.rs` | Grammaire `grid.toml` : `parse_grid`/`validate_refs`/`to_toml` (15 tests) |
 | `src/grid_store.rs` | État durable famille (B) : compteurs Every / tokens AtClock |
-| `src/grid_engine.rs` | Boucle vivante (résolution + persistance) |
-| `src/schedule_grpc.rs` | Service gRPC scheduling (resolve/list/apply/validate/export réels) |
+| `src/grid_engine.rs` | Boucle vivante (résolution + persistance) + `preview` (projection) |
+| `src/schedule_grpc.rs` | Service gRPC scheduling (6 RPC réels, `preview` compris) |
 | `src/config.rs` | Config TOML + fuseau station validé |
 | `src/playlist.rs` | Modèle/parser/validation playlists |
 | `src/store.rs` / `src/sync.rs` | Vue playlists / réconciliation |
 | `src/grpc.rs` | Service `Station` (status/quit/playlist*) |
 | `src/db.rs` | Init pool SQLite + migrations |
 | `src/main.rs` | Daemon : démarrage, 2 services gRPC, shutdown |
-| `src/bin/stationctl.rs` | CLI (station + `schedule next/list/validate/apply/export`) |
+| `src/bin/stationctl.rs` | CLI (station + `schedule next/list/validate/apply/export/preview`) |
 | `proto/station.proto` | Contrat `Station` |
-| `proto/schedule_v1.proto` | Contrat `ScheduleService` (compilé/servi ; apply/validate/export réels) |
+| `proto/schedule_v1.proto` | Contrat `ScheduleService` (compilé/servi ; 6 RPC réels) |
 | `Doc/proposition-grammaire-grille-v1.md` | Contrat grammaire `grid.toml` (référence durable) |
 | `proto/playlist_v1.proto` | Contrat playlist v1 (⚠ pas encore compilé/servi) |
 | `migrations/0001→0006` | Schéma (0004 vue riche, 0005 état grille, 0006 règles) |

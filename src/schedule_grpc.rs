@@ -156,13 +156,35 @@ impl ScheduleService for ScheduleGrpc {
         Ok(Response::new(ListRulesResponse { rules }))
     }
 
+    /// Project the grid over a window (default 24h). A pure clock projection
+    /// (`GridEngine::preview`): occurrences carry epoch UTC **and** a local
+    /// rendering, so a window over a DST night shows the hole/doubling.
     async fn preview(
         &self,
-        _request: Request<PreviewRequest>,
+        request: Request<PreviewRequest>,
     ) -> Result<Response<PreviewResponse>, Status> {
-        Err(Status::unimplemented(
-            "preview is a grid projection, not yet implemented",
-        ))
+        let req = request.into_inner();
+        let from = match req.from {
+            Some(ts) => Epoch(ts.seconds),
+            None => Epoch(now_epoch_seconds()),
+        };
+        // Absent window → 24h; a non-positive window yields no occurrences.
+        let window_secs = req.window.map(|d| d.seconds).unwrap_or(24 * 3600);
+        let occurrences = self
+            .engine
+            .preview(from, window_secs)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?
+            .into_iter()
+            .map(|o| schedule::Occurrence {
+                at_utc: Some(prost_types::Timestamp { seconds: o.epoch.0, nanos: 0 }),
+                at_local: o.at_local,
+                rule_id: o.rule_id,
+                playlist_ref: o.playlist_ref,
+                origin: map_origin(o.origin) as i32,
+            })
+            .collect();
+        Ok(Response::new(PreviewResponse { occurrences }))
     }
 }
 
