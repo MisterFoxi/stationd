@@ -1,5 +1,7 @@
 //! Optional terminal admin client; stationd continues running when this exits.
 mod app;
+mod agenda;
+mod agenda_ui;
 mod client;
 mod playlist_form;
 mod ui;
@@ -23,6 +25,7 @@ use app::App;
 use playlist_form::{FormAction, PlaylistForm};
 
 enum JobResult {
+    Preview(agenda::Window, client::ReadResult<Vec<agenda::Entry>>),
     Saved(Result<PathBuf, String>),
     Synced(client::ReadResult<stationd::proto::station::PlaylistSyncReply>),
 }
@@ -67,6 +70,16 @@ fn main() -> anyhow::Result<()> {
     let runtime = tokio::runtime::Runtime::new()?;
     let sync_endpoint = endpoint.clone().timeout(Duration::from_secs(60));
     let (job_tx, job_rx) = std::sync::mpsc::channel();
+    let (preview_tx, mut preview_rx) = tokio::sync::mpsc::channel::<agenda::Window>(1);
+    let preview_endpoint = endpoint.clone();
+    let preview_result_tx = job_tx.clone();
+    runtime.spawn(async move {
+        let channel = preview_endpoint.connect_lazy();
+        while let Some(window) = preview_rx.recv().await {
+            let result = client::preview(channel.clone(), &window).await;
+            if preview_result_tx.send(JobResult::Preview(window, result)).is_err() { break; }
+        }
+    });
     let (request_tx, mut request_rx) = tokio::sync::mpsc::channel::<()>(1);
     let (snapshot_tx, snapshot_rx) = std::sync::mpsc::channel();
     runtime.spawn(async move {
@@ -106,6 +119,7 @@ fn main() -> anyhow::Result<()> {
     while !stopping.load(Ordering::Relaxed) {
         while let Ok(result) = job_rx.try_recv() {
             match result {
+                JobResult::Preview(window, result) => app.agenda.finish(window, result),
                 JobResult::Saved(Ok(path)) => {
                     app.form = None;
                     app.report = Some(format!("Saved: {}\n\nThe TOML is on disk; it has not been synchronized.\nClose this message, then press s in Playlists to sync.\nSync scans the daemon's configured directory; for a remote daemon,\nthe local directory must be shared with it.", path.display()));
@@ -142,11 +156,17 @@ fn main() -> anyhow::Result<()> {
             app.loading = true;
             requested = false;
         }
+        if app.tab == 3 {
+            if let Some(window) = app.agenda.take_request(app.auto, interval) {
+                preview_tx.try_send(window)?;
+            }
+        }
         terminal.draw(|frame| ui::draw(frame, &mut app, &args.addr))?;
         if !event::poll(Duration::from_millis(50))? { continue; }
         let event = event::read()?;
         if let Event::Paste(text) = &event {
             if let Some(form) = &mut app.form { form.paste(text); }
+            else if app.tab == 3 { app.agenda.paste_date(text); }
         }
         if let Event::Key(key) = event {
             if key.kind == KeyEventKind::Release { continue; }
@@ -175,11 +195,24 @@ fn main() -> anyhow::Result<()> {
                 }
                 continue;
             }
+            if app.tab == 3 && app.agenda.date_input.is_some() {
+                app.agenda.handle(key);
+                continue;
+            }
             if key.code == KeyCode::Char('q') || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL)) {
                 break;
             }
             if app.help {
                 if matches!(key.code, KeyCode::Esc | KeyCode::Char('?')) { app.help = false; }
+                continue;
+            }
+            if app.tab == 3 && matches!(key.code,
+                KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down |
+                KeyCode::PageUp | KeyCode::PageDown | KeyCode::Home | KeyCode::End | KeyCode::Enter |
+                KeyCode::Char('d' | 'w' | 't' | 'g' | '[' | ']' | '+' | '=' | '-' | 'j' | 'k')) {
+                if let agenda::Action::Detail(text) = app.agenda.handle(key) {
+                    app.report = Some(text); app.report_scroll = 0;
+                }
                 continue;
             }
             match key.code {
@@ -204,16 +237,17 @@ fn main() -> anyhow::Result<()> {
                 KeyCode::Char('1') => app.select_tab(0),
                 KeyCode::Char('2') => app.select_tab(1),
                 KeyCode::Char('3') => app.select_tab(2),
+                KeyCode::Char('4') => app.select_tab(3),
                 KeyCode::Tab | KeyCode::Right => app.select_tab(app.tab + 1),
-                KeyCode::BackTab | KeyCode::Left => app.select_tab(app.tab + 2),
+                KeyCode::BackTab | KeyCode::Left => app.select_tab(app.tab + 3),
                 KeyCode::Down | KeyCode::Char('j') => app.move_selection(1),
                 KeyCode::Up | KeyCode::Char('k') => app.move_selection(-1),
                 KeyCode::Home => app.move_selection(isize::MIN),
                 KeyCode::End => app.move_selection(isize::MAX),
                 KeyCode::PageDown => app.detail_scroll = app.detail_scroll.saturating_add(5),
                 KeyCode::PageUp => app.detail_scroll = app.detail_scroll.saturating_sub(5),
-                KeyCode::Char('r') => { if !app.loading { requested = true; } },
-                KeyCode::Char('a') => { app.auto = !app.auto; if app.auto { requested = true; } },
+                KeyCode::Char('r') => { requested = true; app.agenda.request(); },
+                KeyCode::Char('a') => { app.auto = !app.auto; if app.auto { requested = true; app.agenda.request(); } },
                 _ => {},
             }
         }

@@ -43,3 +43,12 @@ pub async fn sync_playlists(channel: Channel) -> ReadResult<station::PlaylistSyn
     client.playlist_sync(station::PlaylistSyncRequest {}).await
         .map(|r| r.into_inner()).map_err(|e| format!("{}: {}", e.code(), e.message()))
 }
+
+pub async fn preview(channel: Channel, window: &super::agenda::Window) -> ReadResult<Vec<super::agenda::Entry>> {
+    let mut client = schedule::schedule_service_client::ScheduleServiceClient::new(channel);
+    let response = bounded(client.preview(schedule::PreviewRequest {
+        from: Some(prost_types::Timestamp { seconds: window.from.as_second(), nanos: 0 }),
+        window: Some(prost_types::Duration { seconds: window.to.as_second() - window.from.as_second(), nanos: 0 }),
+    })).await?;
+    super::agenda::entries(window, response)
+}

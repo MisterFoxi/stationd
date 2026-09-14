@@ -45,6 +45,7 @@ impl<T> Resource<T> {
 #[derive(Default)]
 pub struct App {
     pub tab: usize,
+    pub agenda: super::agenda::Agenda,
     pub status: Resource<station::StatusReply>,
     pub playlists: Resource<Vec<station::PlaylistSummary>>,
     pub rules: Resource<Vec<schedule::Rule>>,
@@ -77,6 +78,9 @@ impl App {
         self.status.apply(snapshot.status);
         self.playlists.apply(snapshot.playlists);
         self.rules.apply(snapshot.rules);
+        if let Some(status) = &self.status.value {
+            self.agenda.set_zone(&status.timezone);
+        }
         if let Some(items) = &self.playlists.value {
             let ids: Vec<&str> = items.iter().map(|p| p.id.as_str()).collect();
             preserve_selection(&mut self.playlist_selection, &ids, playlist_id.as_deref());
@@ -89,7 +93,8 @@ impl App {
     }
 
     pub fn select_tab(&mut self, tab: usize) {
-        self.tab = tab % 3;
+        self.tab = tab % 4;
+        if self.tab == 3 { self.agenda.request(); }
         self.detail_scroll = 0;
     }
 

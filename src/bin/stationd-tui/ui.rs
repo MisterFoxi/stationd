@@ -124,31 +124,34 @@ pub fn draw(frame: &mut Frame, app: &mut App, addr: &str) {
     let layout = Layout::vertical([Constraint::Length(header.len() as u16), Constraint::Length(3),
         Constraint::Min(1), Constraint::Length(2)]).split(area);
     frame.render_widget(Paragraph::new(header).style(Style::default().fg(Color::Cyan)), layout[0]);
-    frame.render_widget(Tabs::new(["1 Status", "2 Playlists", "3 Grid"])
+    frame.render_widget(Tabs::new(["1 Status", "2 Playlists", "3 Grid", "4 Agenda"])
         .select(app.tab).block(block("Administration"))
         .highlight_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)), layout[1]);
     match app.tab {
         1 => playlists(frame, app, layout[2]),
         2 => rules(frame, app, layout[2]),
+        3 => super::agenda_ui::draw(frame, &mut app.agenda, &app.rules, &app.playlists, layout[2]),
         _ => status(frame, app, layout[2]),
     }
-    let footer = if app.tab == 1 {
-        "n: new playlist  s: sync  r: refresh\nTab/1-3: view  ?: help  q: quit"
-    } else { "Tab/1-3: view  Up/Down: select  r: refresh\na: auto/manual  ?: help  q: quit" };
+    let footer = if app.tab == 3 {
+        "d/w: day/week  PgUp/PgDn: period  +/-: zoom  g: date\nt: today  Enter: detail  r: refresh  Tab/1-4: view  ?: help"
+    } else if app.tab == 1 {
+        "n: new playlist  s: sync  r: refresh\nTab/1-4: view  ?: help  q: quit"
+    } else { "Tab/1-4: view  Up/Down: select  r: refresh\na: auto/manual  ?: help  q: quit" };
     frame.render_widget(Paragraph::new(footer), layout[3]);
     if app.help {
         let width = area.width.min(76);
-        let height = area.height.min(19);
+        let height = area.height.min(24);
         let popup = Rect::new(area.x + (area.width - width) / 2, area.y + (area.height - height) / 2, width, height);
         frame.render_widget(Clear, popup);
         frame.render_widget(Paragraph::new(Text::from(
-            "Tab / Shift-Tab / Left / Right: change view\n1 / 2 / 3: Status / Playlists / Grid\nUp / Down or k / j: select item\nHome / End: first / last item\nPgUp / PgDn: scroll detail\nr: refresh (one request at a time)\na: toggle automatic refresh\nn: new local TOML (Playlists)\ns: sync daemon playlists (Playlists)\nq / Ctrl-C: close this client\nEsc / ?: close help\n\nLocal creation also works while the daemon is offline.\nClosing this client leaves stationd running."
+            "Tab / Shift-Tab or 1-4: change view\nUp / Down or k / j: select item\nHome/End: first/last item or hour\nPgUp/PgDn: scroll detail (Agenda: period)\nr: refresh; a: auto/manual\nn: new local TOML (Playlists)\ns: sync daemon playlists (Playlists)\n\nAgenda: d/w day/week; t today; g YYYY-MM-DD\nLeft/Right: day; Up/Down: hour\nPgUp/PgDn or [ / ]: previous/next period\n+/-: 15/30/60-minute buckets; Enter: details\n! hard mark; * soft mark; D day part; B base; F fallback\nEvery cadences depend on playback and are not projected.\nRepeated civil hours have a/b rows; missing hours show DST.\n\nq / Ctrl-C: close this client\nEsc / ?: close help\nClosing this client leaves stationd running."
         )).block(block("Keyboard help")).wrap(Wrap { trim: false }), popup);
     }
     if let Some(report) = &app.report {
         frame.render_widget(Clear, area);
         frame.render_widget(Paragraph::new(report.as_str())
-            .block(block("Playlist operation | Esc/Enter: close | PgUp/PgDn"))
+            .block(block("Details / report | Esc/Enter: close | PgUp/PgDn"))
             .wrap(Wrap { trim: false }).scroll((app.report_scroll, 0)), area);
     }
 }
@@ -310,7 +313,7 @@ mod tests {
     fn views_handle_small_and_resized_terminals() {
         let mut app = App::default();
         for (width, height) in [(0, 0), (20, 5), (40, 12), (80, 24), (120, 36)] {
-            for tab in 0..3 {
+            for tab in 0..4 {
                 app.tab = tab;
                 screen(&mut app, width, height);
                 app.help = true;
@@ -342,5 +345,41 @@ mod tests {
         let rendered = screen(&mut app, 80, 24);
         assert!(rendered.contains("TOML preview"));
         assert!(rendered.contains("Ctrl-S: save new file"));
+    }
+
+    #[test]
+    fn agenda_renders_dst_rows_resize_fallback_and_rpc_failures() {
+        use crate::agenda::Entry;
+        use stationd::proto::schedule::decision::Origin;
+        use crossterm::event::{KeyCode, KeyEvent};
+        let mut app = App { tab: 3, ..App::default() };
+        app.agenda.set_zone("Europe/Paris");
+        app.agenda.handle(KeyEvent::from(KeyCode::Char('g')));
+        app.agenda.paste_date("2026-10-25");
+        app.agenda.handle(KeyEvent::from(KeyCode::Enter));
+        let from = app.agenda.window.as_ref().unwrap().from;
+        app.agenda.data.apply(Ok(vec![
+            Entry { at: from, origin: Origin::BaseRotation, rule_id: "base".into(), playlist: "Hits".into() },
+            Entry { at: "2026-10-25T00:30:00Z".parse().unwrap(), origin: Origin::AtClockSoft, rule_id: "news".into(), playlist: "News".into() },
+            Entry { at: "2026-10-25T00:31:00Z".parse().unwrap(), origin: Origin::BaseRotation, rule_id: "base".into(), playlist: "Hits".into() },
+            Entry { at: "2026-10-25T01:30:00Z".parse().unwrap(), origin: Origin::AtClockSoft, rule_id: "news".into(), playlist: "News".into() },
+        ]));
+        app.agenda.row = 2;
+        app.agenda.scroll = 0;
+        let rendered = screen(&mut app, 120, 36);
+        assert!(rendered.contains("02:00a") && rendered.contains("02:00b"));
+        assert!(rendered.contains("*02:30 News"));
+        assert!(app.agenda.details().contains("UTC: 2026-10-25T00:30:00Z"));
+        app.agenda.handle(KeyEvent::from(KeyCode::Char('w')));
+        let narrow = screen(&mut app, 80, 30);
+        assert!(narrow.contains("selected day"));
+        let wide = screen(&mut app, 120, 36);
+        assert!(wide.contains("Mon 19/10") && wide.contains("Sun 25/10"));
+        assert!(!wide.contains("selected day (week needs"));
+        app.agenda.data.apply(Err("Unimplemented: Preview unavailable".into()));
+        assert!(screen(&mut app, 120, 36).contains("Unimplemented"));
+        app.agenda.handle(KeyEvent::from(KeyCode::Char('g')));
+        assert!(screen(&mut app, 80, 30).contains("Go to date"));
+        for size in [(0, 0), (20, 5), (40, 12), (40, 22), (80, 24)] { screen(&mut app, size.0, size.1); }
     }
 }
