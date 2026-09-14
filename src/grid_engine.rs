@@ -14,12 +14,16 @@
 //! holding the grid in memory, invalidated on apply/reload, mutations sent over
 //! an mpsc channel — same actor model as the rest of stationd.
 
+use std::collections::HashSet;
+
 use sqlx::SqlitePool;
 
 use crate::clock::{self, ClockError};
 use crate::grid_index::{self, GridLoadError};
 use crate::grid_store;
-use crate::resolver::{resolve_next, Epoch, GridDecision, Origin, RuleKind};
+use crate::grid_toml;
+use crate::resolver::{resolve_next, Epoch, GridDecision, Origin, Rule, RuleKind};
+use crate::store;
 
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
@@ -29,6 +33,17 @@ pub enum EngineError {
     Clock(#[from] ClockError),
     #[error(transparent)]
     Sqlx(#[from] sqlx::Error),
+}
+
+/// Splits infrastructure failure (→ gRPC `internal`) from a rejected grid
+/// (→ `invalid_argument`, and — no-silent-failure — never replaces the last
+/// valid grid).
+#[derive(Debug, thiserror::Error)]
+pub enum GridOpError {
+    #[error(transparent)]
+    Infra(#[from] EngineError),
+    #[error("grid rejected: {}", .0.join("; "))]
+    Invalid(Vec<String>),
 }
 
 /// Live resolver over a SQLite-backed grid, in the station timezone.
@@ -68,6 +83,62 @@ impl GridEngine {
     pub async fn on_track_completed(&self) -> Result<(), EngineError> {
         grid_store::bump_tracks_since(&self.pool).await?;
         Ok(())
+    }
+
+    fn parse_all(files: &[(String, String)]) -> Result<Vec<Rule>, Vec<String>> {
+        let mut rules = Vec::new();
+        let mut errors = Vec::new();
+        for (path, toml) in files {
+            match grid_toml::parse_grid(toml) {
+                Ok(mut rs) => rules.append(&mut rs),
+                Err(e) => errors.push(format!("{path}: {e}")),
+            }
+        }
+        if !errors.is_empty() { return Err(errors); }
+        let mut seen: HashSet<&str> = HashSet::new();
+        for r in &rules {
+            if !seen.insert(r.id.as_str()) {
+                errors.push(format!("duplicate rule id {:?} across grid files", r.id));
+            }
+        }
+        let bases = rules.iter().filter(|r| matches!(r.kind, RuleKind::BaseRotation { .. })).count();
+        if bases > 1 {
+            errors.push(format!("{bases} base_rotation rules across grid files; at most one is allowed"));
+        }
+        if errors.is_empty() { Ok(rules) } else { Err(errors) }
+    }
+
+    async fn known_playlist_keys(&self) -> Result<HashSet<String>, EngineError> {
+        Ok(store::list(&self.pool).await?.into_iter().filter_map(|r| r.rel_path).collect())
+    }
+
+    pub async fn validate_grid(&self, files: &[(String, String)]) -> Result<(), GridOpError> {
+        let rules = Self::parse_all(files).map_err(GridOpError::Invalid)?;
+        let known = self.known_playlist_keys().await?;
+        let ref_errors = grid_toml::validate_refs(&rules, &known);
+        if !ref_errors.is_empty() { return Err(GridOpError::Invalid(ref_errors)); }
+        Ok(())
+    }
+
+    pub async fn apply_grid(&self, files: &[(String, String)]) -> Result<Vec<String>, GridOpError> {
+        let rules = Self::parse_all(files).map_err(GridOpError::Invalid)?;
+        let known = self.known_playlist_keys().await?;
+        let ref_errors = grid_toml::validate_refs(&rules, &known);
+        if !ref_errors.is_empty() { return Err(GridOpError::Invalid(ref_errors)); }
+        grid_index::replace_grid(&self.pool, &rules).await.map_err(EngineError::from)?;
+        self.sync_grid().await?;
+        Ok(rules.iter().map(|r| r.id.clone()).collect())
+    }
+
+    pub async fn export_grid(&self, rule_ids: &[String]) -> Result<String, GridOpError> {
+        let grid = grid_index::load_grid(&self.pool).await.map_err(EngineError::from)?;
+        let rules: Vec<Rule> = if rule_ids.is_empty() {
+            grid.rules
+        } else {
+            let want: HashSet<&str> = rule_ids.iter().map(String::as_str).collect();
+            grid.rules.into_iter().filter(|r| want.contains(r.id.as_str())).collect()
+        };
+        grid_toml::to_toml(&rules).map_err(|m| GridOpError::Invalid(vec![m]))
     }
 
     /// Resolve the source to pull at a track boundary for instant `now`, and

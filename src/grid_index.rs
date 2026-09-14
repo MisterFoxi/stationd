@@ -174,10 +174,42 @@ pub async fn load_grid(pool: &SqlitePool) -> Result<Grid, GridLoadError> {
 }
 
 /// Insert one rule into the index (base row + validity days + the one detail
-/// row), transactionally. Used by tests today and the grid `apply` later.
+/// row), transactionally. Used by tests today and by `replace_grid`.
 pub async fn insert_rule(pool: &SqlitePool, rule: &Rule) -> Result<(), sqlx::Error> {
     let mut tx = pool.begin().await?;
+    insert_rule_in_tx(&mut tx, rule).await?;
+    tx.commit().await
+}
 
+/// Replace the whole rule index (family A) with `rules`, transactionally —
+/// what a grid `apply` runs: DROP-then-rebuild of the reconstructible side.
+/// Family B (migration 0005) is deliberately NOT touched. FK cascade is not
+/// relied upon (no `PRAGMA foreign_keys`), so every table is cleared explicitly.
+pub async fn replace_grid(pool: &SqlitePool, rules: &[Rule]) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    for table in [
+        "grid_rule_weekday",
+        "grid_base_rotation",
+        "grid_day_part",
+        "grid_at_clock",
+        "grid_every",
+        "grid_rule",
+    ] {
+        sqlx::query(&format!("DELETE FROM {table}"))
+            .execute(&mut *tx)
+            .await?;
+    }
+    for rule in rules {
+        insert_rule_in_tx(&mut tx, rule).await?;
+    }
+    tx.commit().await
+}
+
+/// Shared body: write one rule's rows onto an already-open transaction.
+async fn insert_rule_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    rule: &Rule,
+) -> Result<(), sqlx::Error> {
     let kind = match &rule.kind {
         RuleKind::BaseRotation { .. } => "base_rotation",
         RuleKind::DayPart { .. } => "day_part",
@@ -190,14 +222,14 @@ pub async fn insert_rule(pool: &SqlitePool, rule: &Rule) -> Result<(), sqlx::Err
         .bind(kind)
         .bind(rule.validity.date_start.map(fmt_date))
         .bind(rule.validity.date_end.map(fmt_date))
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
 
     for day in &rule.validity.days {
         sqlx::query("INSERT INTO grid_rule_weekday (rule_id, weekday) VALUES (?1, ?2)")
             .bind(&rule.id)
             .bind(weekday_str(*day))
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
     }
 
@@ -206,7 +238,7 @@ pub async fn insert_rule(pool: &SqlitePool, rule: &Rule) -> Result<(), sqlx::Err
             sqlx::query("INSERT INTO grid_base_rotation (rule_id, playlist_ref) VALUES (?1,?2)")
                 .bind(&rule.id)
                 .bind(playlist_ref)
-                .execute(&mut *tx)
+                .execute(&mut **tx)
                 .await?;
         }
         RuleKind::DayPart { playlist_ref, start, end } => {
@@ -221,7 +253,7 @@ pub async fn insert_rule(pool: &SqlitePool, rule: &Rule) -> Result<(), sqlx::Err
             .bind(start.minute as i64)
             .bind(end.hour as i64)
             .bind(end.minute as i64)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
         }
         RuleKind::AtClock { playlist_ref, anchor, mode, expiry_secs } => {
@@ -241,7 +273,7 @@ pub async fn insert_rule(pool: &SqlitePool, rule: &Rule) -> Result<(), sqlx::Err
             .bind(at_m)
             .bind(if *mode == Mode::Hard { "hard" } else { "soft" })
             .bind(expiry_secs.map(|s| s as i64))
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
         }
         RuleKind::Every { playlist_ref, cadence } => {
@@ -257,12 +289,12 @@ pub async fn insert_rule(pool: &SqlitePool, rule: &Rule) -> Result<(), sqlx::Err
             .bind(playlist_ref)
             .bind(elapsed)
             .bind(tracks)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
         }
     }
 
-    tx.commit().await
+    Ok(())
 }
 
 // --- small mappings -------------------------------------------------------
@@ -432,5 +464,19 @@ mod tests {
         let d = resolve_next(now, &grid, &PlaybackState::default());
         assert_eq!(d.origin, Origin::DayPart);
         assert_eq!(d.playlist_ref.as_deref(), Some("jazz"));
+    }
+
+    #[tokio::test]
+    async fn replace_grid_swaps_the_whole_index() {
+        let (_dir, pool) = fresh_db().await;
+        insert_rule(&pool, &rule("old", RuleKind::BaseRotation { playlist_ref: "a".into() }))
+            .await.unwrap();
+        insert_rule(&pool, &rule("stale", RuleKind::Every { playlist_ref: "x".into(), cadence: Cadence::Tracks(3) }))
+            .await.unwrap();
+        replace_grid(&pool, &[rule("new", RuleKind::BaseRotation { playlist_ref: "b".into() })])
+            .await.unwrap();
+        let grid = load_grid(&pool).await.unwrap();
+        assert_eq!(grid.rules.len(), 1, "old rules must be gone");
+        assert_eq!(grid.rules[0].id, "new");
     }
 }

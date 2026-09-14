@@ -15,6 +15,7 @@ pub mod db;
 pub mod grid_engine;
 pub mod grid_index;
 pub mod grid_store;
+pub mod grid_toml;
 pub mod grpc;
 pub mod playlist;
 pub mod proto;
