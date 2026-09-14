@@ -1,4 +1,4 @@
-//! Read-only RPC adapter. No filesystem, SQL, resolver or mutation calls here.
+//! RPC adapter. Reads for polling; sync only on an explicit user action.
 use std::time::Duration;
 
 use stationd::proto::{schedule, station};
@@ -36,4 +36,10 @@ pub async fn refresh(channel: Channel) -> Snapshot {
         playlists: playlists.map(|r| r.playlists),
         rules: rules.map(|r| r.rules),
     }
+}
+
+pub async fn sync_playlists(channel: Channel) -> ReadResult<station::PlaylistSyncReply> {
+    let mut client = station::station_client::StationClient::new(channel);
+    client.playlist_sync(station::PlaylistSyncRequest {}).await
+        .map(|r| r.into_inner()).map_err(|e| format!("{}: {}", e.code(), e.message()))
 }

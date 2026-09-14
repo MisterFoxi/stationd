@@ -5,7 +5,7 @@ sans reconstruire le contexte. À distinguer des docs de `Doc/` (décisions
 d'architecture durables) : ce fichier-ci est volatil, à mettre à jour à
 chaque session.
 
-Dernière mise à jour : 2026-09-13.
+Dernière mise à jour : 2026-09-14.
 
 
 ## Ajout : TUI d'administration (correctif préparé, compilation à confirmer)
@@ -39,26 +39,51 @@ suite de tests complète et l'essai bout-en-bout — cf. tâche d'entrée.
 
 ## ⭐ TÂCHE D'ENTRÉE PROCHAINE SESSION
 
-1. **`cargo build` : OK ✓** — le câblage gRPC scheduling compile (proto généré,
-   `prost-types` aligné, trait `ScheduleService`, glu `stationctl`). Reste à
-   lancer **`cargo test -p stationd`** (suite complète) pour confirmer l'absence
-   de régression ; la glu transport n'a pas de tests propres.
-2. **Test bout en bout** : lancer `stationd`, injecter une règle
-   (`grid_index::insert_rule`, ou attendre l'apply grille), puis
-   `stationctl schedule next --at 32400` (09:00 UTC) → doit rendre `origin` +
-   `playlist_ref`. Première réponse de la grille au CLI.
-3. **Décision suivante : grammaire TOML de la grille (point « 2b »).** Le
-   chargement grille est fait *depuis SQLite* ; le format fichier des règles
-   (4 familles, portée de validité, `soft|hard`, péremption) n'est pas conçu.
-   C'est l'équivalent grille de la grammaire playlists — à faire avant
-   d'implémenter `ApplyGrid`/`ValidateGrid`/`ExportGrid` (aujourd'hui
-   `UNIMPLEMENTED`).
+1. **Compiler + tester** (Rust indispo dans l'env de prépa) :
+   `cargo build` puis `cargo test -p stationd`. Nouveau module `grid_toml` +
+   `grid_index::replace_grid` + méthodes `GridEngine::{validate,apply,export}_grid`
+   + 3 RPC `ApplyGrid`/`ValidateGrid`/`ExportGrid` branchés. Points de
+   vigilance build ci-dessous.
+2. **Glu CLI `stationctl schedule apply|validate|export`** (délibérément
+   différée cette session) : lire `src/bin/stationctl.rs`, ajouter les
+   sous-commandes (lecture fichier `grid.toml` côté client → `GridFile`, appel
+   du même endpoint que `schedule next`). C'est ce qui rend la grille pilotable
+   en CLI de bout en bout (invariant CLI-first).
+3. **Test bout en bout** : `stationctl schedule apply grid.toml`, puis
+   `stationctl schedule next --at 32400` (09:00 UTC) → `origin` + `playlist_ref`.
+4. **Ensuite** : `Preview` (projection grille sur fenêtre), étage sélection
+   `playlist_ref` → média, refacto acteur `GridEngine`, `DayPart` cross-minuit.
 
 ---
 
 ## Fait
 
-### — Couche grille / résolveur (cette session) —
+### — Grammaire TOML de la grille + apply/validate/export (2026-09-14) —
+
+**Point « 2b » terminé.** Contrat figé dans
+`Doc/proposition-grammaire-grille-v1.md` : un `grid.toml` unique,
+`schema_version = 1` obligatoire, conteneur `[[rule]]` (une règle n'est jamais
+référencée → divergence assumée vs playlists), `kind` qui gate les champs
+(comme `mode` playlist), fenêtre `day_part` `[start,end)` molle (cross-minuit
+rejeté en v1), `at_clock` = `every_minutes` XOR `at` + `soft|hard` + `expiry`,
+`every` = `min_tracks` XOR `min_elapsed`, durées `[1-9][0-9]*(s|m|h|d)`.
+
+- `src/grid_toml.rs` (pur/std-only, 15 tests) : `parse_grid` (parse strict
+  `deny_unknown_fields` → `Vec<Rule>`, fail-fast avec id de règle ; set-level :
+  ids uniques, ≤ 1 `base_rotation`), `validate_refs` (best-effort, refs vs
+  clés playlists connues, via `playlist::normalize_ref`), `to_toml` (export,
+  sortie stable, non lossless). ⚠ doublon assumé de `parse_date`/`parse_weekday`
+  avec `grid_index` (copies std-only, portées séparées).
+- `src/grid_index.rs` : `replace_grid(pool, &[Rule])` — DROP+rebuild famille
+  (A) transactionnel (les 6 tables vidées explicitement, cascade FK non
+  activée), famille (B) intacte. Corps d'insertion partagé `insert_rule_in_tx`.
+- `src/grid_engine.rs` : `GridOpError` (Invalid → `invalid_argument`, Infra →
+  `internal`), `validate_grid`/`apply_grid`/`export_grid` + `known_playlist_keys`
+  (refs résolues vs `rel_path` de la vue). `apply` rejette **sans rien écrire**
+  si une ref est inconnue.
+- `src/schedule_grpc.rs` : 3 RPC branchés sur le moteur (fin des `UNIMPLEMENTED`).
+
+### — Couche grille / résolveur (session précédente) —
 
 **Invariant structurant, gravé partout : deux familles de tables.**
 (A) index reconstructible (dérivé des TOML, `apply` fait DROP+rebuild) ;
@@ -121,9 +146,9 @@ dans le découpage des modules (`grid_index` = A, `grid_store` = B).
 - `proto/schedule_v1.proto` : `ScheduleService` (grille + `ResolveNext` +
   `Preview`), 4 familles, `soft|hard`, péremption, portée de validité.
   Compilé par `build.rs` (+ `prost-types`).
-- `src/schedule_grpc.rs` : handler mince sur `GridEngine`. **`resolve_next`
-  réel** ; `apply/validate/export/list_rules/preview` = `UNIMPLEMENTED`
-  (attendent la grammaire TOML grille / la projection).
+- `src/schedule_grpc.rs` : handler mince sur `GridEngine`. **`resolve_next`,
+  `list_rules`, `apply_grid`, `validate_grid`, `export_grid` réels** ; seul
+  `preview` reste `UNIMPLEMENTED` (projection à concevoir).
 - `main.rs` : construit `GridEngine`, `sync_grid` au démarrage, second
   `add_service(ScheduleServiceServer)` sur le même serveur/port.
 - `stationctl schedule next [--at <epoch>]` : client du même endpoint.
@@ -160,8 +185,9 @@ dans le découpage des modules (`grid_index` = A, `grid_store` = B).
 ## Reste à faire
 
 ### Grille / scheduler (suite directe)
-- **Confirmer le build** (tâche d'entrée) puis **grammaire TOML grille** (2b),
-  puis implémenter `ApplyGrid`/`ValidateGrid`/`ExportGrid`/`ListRules`.
+- **Confirmer build+tests** (tâche d'entrée), puis **glu CLI
+  `stationctl schedule apply|validate|export`** (RPC prêts côté serveur, CLI à
+  écrire).
 - **`Preview`** : projection de grille sur une fenêtre (pas une sim
   piste-à-piste, durées dynamiques) — RPC déclaré, à implémenter.
 - **Étage sélection** : `playlist_ref` → média concret (le `Decision.media_path`
@@ -210,7 +236,8 @@ dans le découpage des modules (`grid_index` = A, `grid_store` = B).
 |---|---|
 | `src/resolver.rs` | Cœur pur `resolve_next` + 4 familles (std-only, 13 tests) |
 | `src/clock.rs` | Frontière temps epoch↔civil local, DST (`jiff`, 4 tests) |
-| `src/grid_index.rs` | Index règles famille (A) : `load_grid`/`insert_rule` |
+| `src/grid_index.rs` | Index règles famille (A) : `load_grid`/`insert_rule`/`replace_grid` |
+| `src/grid_toml.rs` | Grammaire `grid.toml` : `parse_grid`/`validate_refs`/`to_toml` (15 tests) |
 | `src/grid_store.rs` | État durable famille (B) : compteurs Every / tokens AtClock |
 | `src/grid_engine.rs` | Boucle vivante (résolution + persistance) |
 | `src/schedule_grpc.rs` | Service gRPC scheduling (`ResolveNext` réel) |
@@ -222,7 +249,8 @@ dans le découpage des modules (`grid_index` = A, `grid_store` = B).
 | `src/main.rs` | Daemon : démarrage, 2 services gRPC, shutdown |
 | `src/bin/stationctl.rs` | CLI (station + `schedule next`) |
 | `proto/station.proto` | Contrat `Station` |
-| `proto/schedule_v1.proto` | Contrat `ScheduleService` (compilé/servi) |
+| `proto/schedule_v1.proto` | Contrat `ScheduleService` (compilé/servi ; apply/validate/export réels) |
+| `Doc/proposition-grammaire-grille-v1.md` | Contrat grammaire `grid.toml` (référence durable) |
 | `proto/playlist_v1.proto` | Contrat playlist v1 (⚠ pas encore compilé/servi) |
 | `migrations/0001→0006` | Schéma (0004 vue riche, 0005 état grille, 0006 règles) |
 | `tests/sync.rs` | Intégration `sync` |

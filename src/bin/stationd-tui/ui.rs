@@ -1,7 +1,7 @@
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
-    text::{Line, Text},
+    text::{Line, Span, Text},
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Tabs, Wrap},
     Frame,
 };
@@ -88,6 +88,10 @@ fn detail(frame: &mut Frame, area: Rect, text: String, scroll: u16) {
 
 pub fn draw(frame: &mut Frame, app: &mut App, addr: &str) {
     let area = frame.area();
+    if let Some(form) = &mut app.form {
+        draw_form(frame, form);
+        return;
+    }
     if area.width < 40 || area.height < 12 {
         frame.render_widget(Paragraph::new("StationD\nResize terminal to at least 40 x 12.\nq: quit")
             .wrap(Wrap { trim: false }), area);
@@ -128,16 +132,93 @@ pub fn draw(frame: &mut Frame, app: &mut App, addr: &str) {
         2 => rules(frame, app, layout[2]),
         _ => status(frame, app, layout[2]),
     }
-    frame.render_widget(Paragraph::new("Tab/1-3: view  Up/Down: select  r: refresh\na: auto/manual  ?: help  q: quit"), layout[3]);
+    let footer = if app.tab == 1 {
+        "n: new playlist  s: sync  r: refresh\nTab/1-3: view  ?: help  q: quit"
+    } else { "Tab/1-3: view  Up/Down: select  r: refresh\na: auto/manual  ?: help  q: quit" };
+    frame.render_widget(Paragraph::new(footer), layout[3]);
     if app.help {
         let width = area.width.min(76);
         let height = area.height.min(19);
         let popup = Rect::new(area.x + (area.width - width) / 2, area.y + (area.height - height) / 2, width, height);
         frame.render_widget(Clear, popup);
         frame.render_widget(Paragraph::new(Text::from(
-            "Tab / Shift-Tab / Left / Right: change view\n1 / 2 / 3: Status / Playlists / Grid\nUp / Down or k / j: select item\nHome / End: first / last item\nPgUp / PgDn: scroll detail\nr: refresh (one request at a time)\na: toggle automatic refresh\nq / Ctrl-C: close this client\nEsc / ?: close help\n\nOnly Status, PlaylistList and ListRules are called.\nClosing this client leaves stationd running."
+            "Tab / Shift-Tab / Left / Right: change view\n1 / 2 / 3: Status / Playlists / Grid\nUp / Down or k / j: select item\nHome / End: first / last item\nPgUp / PgDn: scroll detail\nr: refresh (one request at a time)\na: toggle automatic refresh\nn: new local TOML (Playlists)\ns: sync daemon playlists (Playlists)\nq / Ctrl-C: close this client\nEsc / ?: close help\n\nLocal creation also works while the daemon is offline.\nClosing this client leaves stationd running."
         )).block(block("Keyboard help")).wrap(Wrap { trim: false }), popup);
     }
+    if let Some(report) = &app.report {
+        frame.render_widget(Clear, area);
+        frame.render_widget(Paragraph::new(report.as_str())
+            .block(block("Playlist operation | Esc/Enter: close | PgUp/PgDn"))
+            .wrap(Wrap { trim: false }).scroll((app.report_scroll, 0)), area);
+    }
+}
+
+fn draw_form(frame: &mut Frame, form: &mut super::playlist_form::PlaylistForm) {
+    let area = frame.area();
+    if area.width < 40 || area.height < 16 {
+        frame.render_widget(Paragraph::new("Playlist draft preserved.\nResize to at least 40 x 16.\nEsc: cancel / return to form").wrap(Wrap { trim: false }), area);
+        return;
+    }
+    if let Some(text) = &form.preview {
+        let layout = Layout::vertical([Constraint::Length(2), Constraint::Min(1), Constraint::Length(3), Constraint::Length(2)]).split(area);
+        frame.render_widget(Paragraph::new(format!("Create: {}", form.root.join(form.get("path")).display())).wrap(Wrap { trim: false }), layout[0]);
+        frame.render_widget(Paragraph::new(text.as_str()).block(block("TOML preview"))
+            .wrap(Wrap { trim: false }).scroll((form.preview_scroll, 0)), layout[1]);
+        let notice = if form.message.is_empty() { "Validated with StationD's playlist parser. Group references/cycles are checked during sync." } else { &form.message };
+        frame.render_widget(Paragraph::new(notice).style(Style::default().fg(Color::Yellow)).wrap(Wrap { trim: false }), layout[2]);
+        frame.render_widget(Paragraph::new("Ctrl-S: save new file  Esc: edit\nUp/Down/PgUp/PgDn: scroll"), layout[3]);
+        return;
+    }
+    let layout = Layout::vertical([Constraint::Length(2), Constraint::Length(1), Constraint::Min(3), Constraint::Length(2), Constraint::Length(3), Constraint::Length(2)]).split(area);
+    frame.render_widget(Paragraph::new(format!("New playlist | Local directory: {}", form.root.display()))
+        .style(Style::default().fg(Color::Cyan)).wrap(Wrap { trim: false }), layout[0]);
+    frame.render_widget(Tabs::new(["General", "Selection", "Broadcast"]).select(form.page)
+        .highlight_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)), layout[1]);
+    let selected = form.selection.selected().unwrap_or(0);
+    let fields = form.fields();
+    let rows: Vec<ListItem> = fields.iter().enumerate().map(|(i, f)| {
+        let value = form.get(&f.key);
+        let line = if !f.choices.is_empty() {
+            Line::from(format!("  < {} >", if value.is_empty() { "default" } else { value }))
+        } else if i == selected {
+            let input = &form.inputs[&f.key];
+            input_line(input, layout[2].width.saturating_sub(6) as usize)
+        } else {
+            Line::from(format!("  {}", if value.is_empty() { "(empty)" } else { value }))
+        };
+        ListItem::new(vec![Line::from(f.label.clone()), line])
+    }).collect();
+    frame.render_stateful_widget(List::new(rows).block(block("Fields | Tab: next | Left/Right: choice or cursor"))
+        .highlight_symbol("> ").highlight_style(Style::default().fg(Color::Cyan)), layout[2], &mut form.selection);
+    frame.render_widget(Paragraph::new(form.hint()).wrap(Wrap { trim: false }), layout[3]);
+    frame.render_widget(Paragraph::new(form.message.as_str()).style(Style::default().fg(Color::Yellow))
+        .wrap(Wrap { trim: false }), layout[4]);
+    frame.render_widget(Paragraph::new("F4: section  F5/Ctrl-S: preview\nEsc: cancel  Ctrl-U: clear field"), layout[5]);
+    if form.discard {
+        let popup = Rect::new(area.x + 2, area.y + area.height / 2 - 2, area.width - 4, 5);
+        frame.render_widget(Clear, popup);
+        frame.render_widget(Paragraph::new("Discard this unsaved playlist?\ny: discard   n / Esc: keep editing")
+            .block(block("Unsaved draft")).wrap(Wrap { trim: false }), popup);
+    }
+}
+
+fn input_line(input: &super::playlist_form::Input, width: usize) -> Line<'static> {
+    let before = &input.text[..input.cursor];
+    let mut start = input.cursor;
+    let mut used = 0;
+    for (index, c) in before.char_indices().rev() {
+        let w = Line::from(c.to_string()).width();
+        if used + w > width.saturating_sub(3) { break; }
+        used += w;
+        start = index;
+    }
+    let after = &input.text[input.cursor..];
+    let cursor = after.chars().next();
+    let rest = &after[cursor.map_or(0, char::len_utf8)..];
+    Line::from(vec![Span::raw(if start > 0 { " <" } else { "  " }),
+        Span::raw(before[start..].to_owned()),
+        Span::styled(cursor.unwrap_or(' ').to_string(), Style::default().add_modifier(Modifier::REVERSED)),
+        Span::raw(rest.to_owned())])
 }
 
 fn status(frame: &mut Frame, app: &App, area: Rect) {
@@ -237,5 +318,29 @@ mod tests {
                 app.help = false;
             }
         }
+    }
+
+    #[test]
+    fn local_form_renders_offline_in_all_sections_and_keeps_long_input_visible() {
+        use crate::playlist_form::PlaylistForm;
+        let mut app = App { form: Some(PlaylistForm::new("/tmp/playlist".into())), ..App::default() };
+        app.form.as_mut().unwrap().paste("a/very/long/directory/with/unicode/été/last-file.toml");
+        for (width, height) in [(20, 5), (40, 16), (80, 24), (120, 36)] {
+            for page in 0..3 {
+                app.form.as_mut().unwrap().page = page;
+                let rendered = screen(&mut app, width, height);
+                if width >= 40 { assert!(rendered.contains("F4: section")); }
+            }
+        }
+        app.form.as_mut().unwrap().page = 0;
+        assert!(screen(&mut app, 40, 16).contains("last-file.toml"));
+        app.form.as_mut().unwrap().discard = true;
+        assert!(screen(&mut app, 80, 24).contains("Discard this unsaved playlist?"));
+        let form = app.form.as_mut().unwrap();
+        form.discard = false;
+        form.preview = Some("name = \"Demo\"".into());
+        let rendered = screen(&mut app, 80, 24);
+        assert!(rendered.contains("TOML preview"));
+        assert!(rendered.contains("Ctrl-S: save new file"));
     }
 }

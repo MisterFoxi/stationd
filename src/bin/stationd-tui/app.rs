@@ -4,6 +4,7 @@ use ratatui::widgets::ListState;
 use stationd::proto::{schedule, station};
 
 use super::client::{ReadResult, Snapshot};
+use super::playlist_form::PlaylistForm;
 
 /// Keep the last good value, but explicitly mark it stale after a failed read.
 pub struct Resource<T> {
@@ -53,6 +54,10 @@ pub struct App {
     pub auto: bool,
     pub loading: bool,
     pub help: bool,
+    pub form: Option<PlaylistForm>,
+    pub report: Option<String>,
+    pub report_scroll: u16,
+    pub syncing: bool,
 }
 
 fn preserve_selection(state: &mut ListState, ids: &[&str], previous_id: Option<&str>) {

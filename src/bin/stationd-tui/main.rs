@@ -1,16 +1,18 @@
 //! Optional terminal admin client; stationd continues running when this exits.
 mod app;
 mod client;
+mod playlist_form;
 mod ui;
 
 use std::io::{self, IsTerminal};
+use std::path::PathBuf;
 use std::sync::{atomic::{AtomicBool, Ordering}, Arc};
 use std::time::{Duration, Instant};
 
 use clap::Parser;
 use crossterm::{
     cursor::Show,
-    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
+    event::{self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -18,9 +20,15 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 use tonic::transport::Endpoint;
 
 use app::App;
+use playlist_form::{FormAction, PlaylistForm};
+
+enum JobResult {
+    Saved(Result<PathBuf, String>),
+    Synced(client::ReadResult<stationd::proto::station::PlaylistSyncReply>),
+}
 
 #[derive(Parser)]
-#[command(name = "stationd-tui", version, about = "Terminal administration for stationd (read-only v1)")]
+#[command(name = "stationd-tui", version, about = "StationD terminal client and local playlist authoring")]
 struct Args {
     /// Same gRPC endpoint as stationctl
     #[arg(long, default_value = "http://127.0.0.1:50051")]
@@ -31,11 +39,17 @@ struct Args {
     /// Start with automatic refresh disabled; r still refreshes
     #[arg(long)]
     manual: bool,
+    /// Local playlist directory for TOML creation (overrides --config)
+    #[arg(long)]
+    playlist_root: Option<PathBuf>,
+    /// Local daemon configuration, used only to locate the playlist directory
+    #[arg(long, default_value = "stationd.toml")]
+    config: PathBuf,
 }
 
 fn restore_terminal() {
     let _ = disable_raw_mode();
-    let _ = execute!(io::stdout(), LeaveAlternateScreen, Show);
+    let _ = execute!(io::stdout(), DisableBracketedPaste, LeaveAlternateScreen, Show);
 }
 
 struct TerminalGuard;
@@ -51,6 +65,8 @@ fn main() -> anyhow::Result<()> {
         .connect_timeout(Duration::from_secs(3))
         .timeout(Duration::from_secs(5));
     let runtime = tokio::runtime::Runtime::new()?;
+    let sync_endpoint = endpoint.clone().timeout(Duration::from_secs(60));
+    let (job_tx, job_rx) = std::sync::mpsc::channel();
     let (request_tx, mut request_rx) = tokio::sync::mpsc::channel::<()>(1);
     let (snapshot_tx, snapshot_rx) = std::sync::mpsc::channel();
     runtime.spawn(async move {
@@ -80,7 +96,7 @@ fn main() -> anyhow::Result<()> {
     std::panic::set_hook(Box::new(move |info| { restore_terminal(); previous_hook(info); }));
     enable_raw_mode()?;
     let _guard = TerminalGuard;
-    execute!(io::stdout(), EnterAlternateScreen)?;
+    execute!(io::stdout(), EnterAlternateScreen, EnableBracketedPaste)?;
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     terminal.clear()?;
     let mut app = App { auto: !args.manual, ..App::default() };
@@ -88,6 +104,31 @@ fn main() -> anyhow::Result<()> {
     let mut next_refresh = Instant::now();
     let mut requested = true;
     while !stopping.load(Ordering::Relaxed) {
+        while let Ok(result) = job_rx.try_recv() {
+            match result {
+                JobResult::Saved(Ok(path)) => {
+                    app.form = None;
+                    app.report = Some(format!("Saved: {}\n\nThe TOML is on disk; it has not been synchronized.\nClose this message, then press s in Playlists to sync.\nSync scans the daemon's configured directory; for a remote daemon,\nthe local directory must be shared with it.", path.display()));
+                    app.report_scroll = 0;
+                }
+                JobResult::Saved(Err(error)) => {
+                    if let Some(form) = &mut app.form { form.saving = false; form.message = error; }
+                }
+                JobResult::Synced(result) => {
+                    app.syncing = false;
+                    app.report = Some(match result {
+                        Ok(reply) => {
+                            let mut report = format!("Synchronized: {} playlist(s)\nErrors: {}", reply.added, reply.errors.len());
+                            for error in reply.errors { report.push_str(&format!("\n\n{}\n{}", error.path, error.message)); }
+                            report
+                        }
+                        Err(error) => format!("Sync failed: {error}\n\nLocal TOML files are still available.\nIf the connection was lost, check the daemon before retrying."),
+                    });
+                    app.report_scroll = 0;
+                    requested = true;
+                }
+            }
+        }
         match snapshot_rx.try_recv() {
             Ok(snapshot) => {
                 app.apply(snapshot);
@@ -103,8 +144,37 @@ fn main() -> anyhow::Result<()> {
         }
         terminal.draw(|frame| ui::draw(frame, &mut app, &args.addr))?;
         if !event::poll(Duration::from_millis(50))? { continue; }
-        if let Event::Key(key) = event::read()? {
+        let event = event::read()?;
+        if let Event::Paste(text) = &event {
+            if let Some(form) = &mut app.form { form.paste(text); }
+        }
+        if let Event::Key(key) = event {
             if key.kind == KeyEventKind::Release { continue; }
+            // Editor keys are handled first: q, r, a, n and s are normal text.
+            if let Some(form) = &mut app.form {
+                match form.handle(key) {
+                    FormAction::None => {},
+                    FormAction::Close => app.form = None,
+                    FormAction::Save { path, toml } => {
+                        let root = form.root.clone();
+                        let tx = job_tx.clone();
+                        runtime.spawn_blocking(move || {
+                            let result = playlist_form::save_new(&root, &path, &toml).map_err(|e| format!("{e:#}"));
+                            let _ = tx.send(JobResult::Saved(result));
+                        });
+                    }
+                }
+                continue;
+            }
+            if app.report.is_some() {
+                match key.code {
+                    KeyCode::Esc | KeyCode::Enter => app.report = None,
+                    KeyCode::PageDown | KeyCode::Down => app.report_scroll = app.report_scroll.saturating_add(5),
+                    KeyCode::PageUp | KeyCode::Up => app.report_scroll = app.report_scroll.saturating_sub(5),
+                    _ => {},
+                }
+                continue;
+            }
             if key.code == KeyCode::Char('q') || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL)) {
                 break;
             }
@@ -113,6 +183,23 @@ fn main() -> anyhow::Result<()> {
                 continue;
             }
             match key.code {
+                KeyCode::Char('n') if app.tab == 1 => {
+                    match playlist_form::playlist_root(args.playlist_root.as_deref(), &args.config) {
+                        Ok(root) => app.form = Some(PlaylistForm::new(root)),
+                        Err(e) => { app.report = Some(format!("{e:#}")); app.report_scroll = 0; }
+                    }
+                }
+                KeyCode::Char('s') if app.tab == 1 && !app.syncing => {
+                    app.syncing = true;
+                    app.report = Some("Synchronizing the daemon's playlist directory...".into());
+                    app.report_scroll = 0;
+                    let endpoint = sync_endpoint.clone();
+                    let tx = job_tx.clone();
+                    runtime.spawn(async move {
+                        let result = client::sync_playlists(endpoint.connect_lazy()).await;
+                        let _ = tx.send(JobResult::Synced(result));
+                    });
+                }
                 KeyCode::Char('?') => app.help = true,
                 KeyCode::Char('1') => app.select_tab(0),
                 KeyCode::Char('2') => app.select_tab(1),
