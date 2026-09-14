@@ -10,7 +10,7 @@ use stationd::proto::{schedule, station};
 use station::station_client::StationClient;
 use station::{PlaylistAddRequest, PlaylistListRequest, PlaylistSyncRequest, QuitRequest, StatusRequest};
 use schedule::schedule_service_client::ScheduleServiceClient;
-use schedule::ResolveNextRequest;
+use schedule::{ApplyGridRequest, ExportGridRequest, GridFile, ResolveNextRequest};
 
 use std::path::PathBuf;
 
@@ -51,6 +51,27 @@ enum ScheduleCommand {
         /// RFC3339 parsing can come later; epoch keeps the client dependency-free.
         #[arg(long)]
         at: Option<i64>,
+    },
+    /// Validate a grid.toml without installing it (parse + kind gating +
+    /// ref resolution). Writes nothing; a rejected grid exits non-zero.
+    Validate {
+        /// Path to the grid .toml file
+        path: PathBuf,
+    },
+    /// Validate and install a grid.toml: rebuilds the rule index (family A),
+    /// preserving the durable playback state (family B). Rejects atomically.
+    Apply {
+        /// Path to the grid .toml file
+        path: PathBuf,
+    },
+    /// Export the current grid back to TOML (stdout, or a file with --out).
+    Export {
+        /// Only export these rule ids (repeatable). Omitted → the whole grid.
+        #[arg(long = "rule")]
+        rules: Vec<String>,
+        /// Write to this file instead of stdout.
+        #[arg(long)]
+        out: Option<PathBuf>,
     },
 }
 
@@ -183,7 +204,75 @@ async fn main() -> anyhow::Result<()> {
                 println!("rule:          {}", reply.rule_id);
             }
         }
+        Command::Schedule(ScheduleCommand::Validate { path }) => {
+            let content = read_grid_toml(&path)?;
+            let mut sched = ScheduleServiceClient::connect(args.addr.clone()).await?;
+            // A rejected grid comes back as a gRPC error (invalid_argument);
+            // `?` surfaces the joined diagnostics and exits non-zero.
+            sched
+                .validate_grid(ApplyGridRequest {
+                    files: vec![GridFile {
+                        path: path.display().to_string(),
+                        toml: content,
+                    }],
+                })
+                .await?;
+            println!("valid:  {}", path.display());
+        }
+        Command::Schedule(ScheduleCommand::Apply { path }) => {
+            let content = read_grid_toml(&path)?;
+            let mut sched = ScheduleServiceClient::connect(args.addr.clone()).await?;
+            let reply = sched
+                .apply_grid(ApplyGridRequest {
+                    files: vec![GridFile {
+                        path: path.display().to_string(),
+                        toml: content,
+                    }],
+                })
+                .await?
+                .into_inner();
+            println!("applied: {}", path.display());
+            println!("rules:   {}", reply.applied_rule_ids.len());
+            for id in &reply.applied_rule_ids {
+                println!("  - {id}");
+            }
+        }
+        Command::Schedule(ScheduleCommand::Export { rules, out }) => {
+            let mut sched = ScheduleServiceClient::connect(args.addr.clone()).await?;
+            let reply = sched
+                .export_grid(ExportGridRequest { rule_ids: rules })
+                .await?
+                .into_inner();
+            // The server returns a single grid.toml; join defensively in case
+            // that ever changes.
+            let toml = reply
+                .files
+                .into_iter()
+                .map(|f| f.toml)
+                .collect::<Vec<_>>()
+                .join("\n");
+            match out {
+                Some(path) => {
+                    std::fs::write(&path, &toml)
+                        .map_err(|e| anyhow::anyhow!("cannot write {}: {e}", path.display()))?;
+                    println!("exported: {}", path.display());
+                }
+                None => print!("{toml}"),
+            }
+        }
     }
 
     Ok(())
+}
+
+/// Read a grid TOML file and fail fast if it isn't well-formed TOML. Business
+/// validation (kinds, refs) happens in stationd; this only avoids a pointless
+/// round-trip on an obviously broken file, mirroring `playlist add`.
+fn read_grid_toml(path: &std::path::Path) -> anyhow::Result<String> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| anyhow::anyhow!("cannot read {}: {e}", path.display()))?;
+    content
+        .parse::<toml::Table>()
+        .map_err(|e| anyhow::anyhow!("{} is not well-formed TOML: {e}", path.display()))?;
+    Ok(content)
 }

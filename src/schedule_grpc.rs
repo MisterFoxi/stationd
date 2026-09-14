@@ -10,7 +10,7 @@
 
 use tonic::{Request, Response, Status};
 
-use crate::grid_engine::GridEngine;
+use crate::grid_engine::{GridEngine, GridOpError};
 use crate::resolver::{Epoch, Origin};
 
 // Keep the existing public path available to callers.
@@ -18,7 +18,7 @@ pub use crate::proto::schedule;
 
 use schedule::schedule_service_server::ScheduleService;
 use schedule::{
-    ApplyGridRequest, ApplyGridResponse, Decision, ExportGridRequest, ExportGridResponse,
+    ApplyGridRequest, ApplyGridResponse, Decision, ExportGridRequest, ExportGridResponse, GridFile,
     ListRulesRequest, ListRulesResponse, PreviewRequest, PreviewResponse, ResolveNextRequest,
     ValidateGridResponse,
 };
@@ -39,6 +39,19 @@ fn now_epoch_seconds() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+/// A rejected grid is the caller's fault → `invalid_argument`; an
+/// infrastructure failure is ours → `internal`.
+fn map_grid_op_error(e: GridOpError) -> Status {
+    match e {
+        GridOpError::Invalid(msgs) => Status::invalid_argument(msgs.join("; ")),
+        GridOpError::Infra(inner) => Status::internal(inner.to_string()),
+    }
+}
+
+fn grid_files(files: Vec<GridFile>) -> Vec<(String, String)> {
+    files.into_iter().map(|f| (f.path, f.toml)).collect()
 }
 
 fn map_origin(o: Origin) -> schedule::decision::Origin {
@@ -82,31 +95,54 @@ impl ScheduleService for ScheduleGrpc {
         }))
     }
 
+    /// Validate + install a grid (family A rebuilt, family B preserved). The
+    /// TOML grammar and its checks live in `grid_toml`/`GridEngine`; this is a
+    /// thin translator.
     async fn apply_grid(
         &self,
-        _request: Request<ApplyGridRequest>,
+        request: Request<ApplyGridRequest>,
     ) -> Result<Response<ApplyGridResponse>, Status> {
-        Err(Status::unimplemented(
-            "grid apply awaits the grid TOML grammar",
-        ))
+        let files = grid_files(request.into_inner().files);
+        let applied_rule_ids = self
+            .engine
+            .apply_grid(&files)
+            .await
+            .map_err(map_grid_op_error)?;
+        Ok(Response::new(ApplyGridResponse {
+            ok: true,
+            applied_rule_ids,
+        }))
     }
 
+    /// Dry-run of `apply_grid`: same parse + ref checks, nothing written.
     async fn validate_grid(
         &self,
-        _request: Request<ApplyGridRequest>,
+        request: Request<ApplyGridRequest>,
     ) -> Result<Response<ValidateGridResponse>, Status> {
-        Err(Status::unimplemented(
-            "grid validate awaits the grid TOML grammar",
-        ))
+        let files = grid_files(request.into_inner().files);
+        self.engine
+            .validate_grid(&files)
+            .await
+            .map_err(map_grid_op_error)?;
+        Ok(Response::new(ValidateGridResponse { ok: true }))
     }
 
+    /// Project the current index back to a single `grid.toml`.
     async fn export_grid(
         &self,
-        _request: Request<ExportGridRequest>,
+        request: Request<ExportGridRequest>,
     ) -> Result<Response<ExportGridResponse>, Status> {
-        Err(Status::unimplemented(
-            "grid export awaits the grid TOML grammar",
-        ))
+        let toml = self
+            .engine
+            .export_grid(&request.into_inner().rule_ids)
+            .await
+            .map_err(map_grid_op_error)?;
+        Ok(Response::new(ExportGridResponse {
+            files: vec![GridFile {
+                path: "grid.toml".to_string(),
+                toml,
+            }],
+        }))
     }
 
     async fn list_rules(
