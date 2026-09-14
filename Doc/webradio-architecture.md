@@ -75,6 +75,11 @@ l'entrée du média dans le monde de stationd.
   si un titre finit avant une borne suppose de connaître sa durée). La leçon
   « échec silencieux » s'applique ici côté lecture : tag manquant/malformé →
   erreur remontée et loggée, jamais un champ vide avalé sans bruit.
+  **Périmètre fermé aux champs standard** (titre, artiste, album, genre,
+  année, durée, + n° de piste natif) : les seuls que la sélection, la rotation
+  et le scheduler consomment. Tout attribut non standard relève d'un plugin
+  (cf. hors core) — le catalogue de `field` du filtre playlist reste donc fermé
+  et standard.
 - **Capture brute de la timeline de diffusion** : flux d'événements (titre X
   démarré à T / terminé, échantillon de listeners relevé sur l'API admin
   Icecast à T). Persisté en SQLite quoi qu'il arrive. En core pour trois
@@ -110,6 +115,16 @@ l'entrée du média dans le monde de stationd.
 - Stats dérivées : agrégats, dashboards, pic/moyenne d'auditeurs, durée de
   session, export vers service externe, scrobble ListenBrainz… construits
   au-dessus de la capture brute.
+- **Attributs média non standard** : tags custom arbitraires (mood, campagne
+  publicitaire datée, n° de séquence propre, flags fonctionnels…) *et* le
+  critère de sélection qui les exploite. Enrichir un média avec des clés hors
+  du catalogue standard est du dérivé → plugin ; le mettre dans le cœur
+  rouvrirait une surface de contrat générique (`field: tag:*`, table
+  clé/valeur) contraire au principe « path-first, un seul concept ». Les
+  besoins courants se couvrent **sans plugin** par le rangement en dossiers
+  (`ads/`, `jingles/id/` → filtre `path prefix`) et l'ordre daté
+  (`order_by = "filename"`, ou n° de piste natif) ; le plugin n'est requis que
+  pour un attribut qui n'est ni une catégorie de rangement ni un ordre.
 
 **À trancher (tag-adjacent) :** ReplayGain/R128 (normalisation loudness) et
 cue points. Soit pré-ingest (l'outil externe calcule et écrit, stationd lit),
@@ -409,7 +424,12 @@ writer de son répertoire). Deux writers sur le même fichier = à proscrire.
 - Liste précise des rôles et de leurs capacités (différé au proto — cf.
   Rôles).
 - Points d'accroche exacts des plugins (hooks côté `stationd`) et fonctions
-  hôte à leur exposer.
+  hôte à leur exposer. Deux accroches déjà identifiées par le besoin
+  « attributs média non standard » (cf. Périmètre) : (a) enrichir un média au
+  scan — lire des clés hors catalogue standard et les persister en dérivé ;
+  (b) apporter un critère / proposer / filtrer une sélection. Où vit le
+  dérivé (store possédé par le plugin vs table clé/valeur du core peuplée via
+  fonction hôte) reste à trancher.
 - mTLS sur le canal gRPC interne (reporté).
 - Fonctionnalités précises d'AzuraCast à porter (probablement sous forme de
   plugins) plutôt qu'à réinventer.

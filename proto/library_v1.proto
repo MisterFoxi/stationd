@@ -1,0 +1,76 @@
+// library_v1.proto
+// ─────────────────────────────────────────────────────────────────────────
+// La BIBLIOTHÈQUE média : index (famille A) reconstructible par scan du
+// filesystem (racine = config station `media.library_path`). stationd LIT les
+// tags STANDARD (titre/artiste/album/genre/année/durée) — cf. « Périmètre de
+// stationd » : tout attribut non standard relève d'un plugin, le catalogue de
+// champs est fermé.
+//
+// No-silent-failure : un fichier illisible / de durée nulle n'entre pas dans
+// l'index, il est REMONTÉ dans le rapport de scan (Skip), jamais avalé. Une
+// extension non-audio est simplement ignorée (pas une erreur).
+//
+// Réconciliation (pas de DROP brutal) : un scan repasse tout `available = 0`
+// puis ré-affirme les fichiers vus ; un disparu reste connu, marqué indispo.
+
+syntax = "proto3";
+
+package webradio.library.v1;
+
+// CLI-first : stationctl library scan|list passe directement par ce contrat.
+service LibraryService {
+  // Scanne la racine média configurée et réconcilie l'index. Côté serveur, le
+  // travail lourd (walk + parse des tags) part sur un pool bloquant ; l'acteur
+  // biblio sérialise les scans (jamais deux en parallèle).
+  rpc Scan(ScanRequest) returns (ScanResponse);
+
+  // Liste l'index média. `only_available` exclut les fichiers disparus (gardés
+  // en base, marqués indisponibles).
+  rpc ListMedia(ListMediaRequest) returns (ListMediaResponse);
+}
+
+message ScanRequest {}
+
+message ScanResponse {
+  uint32 found       = 1;   // fichiers jouables trouvés à ce scan
+  uint32 skipped     = 2;   // fichiers d'extension audio écartés (avec raison)
+  uint32 present     = 3;   // lignes available après réconciliation
+  uint32 unavailable = 4;   // lignes connues mais disparues (available = 0)
+  repeated Skip skips = 5;
+}
+
+// Un fichier d'extension audio écarté, avec sa raison — surfacé, jamais avalé.
+message Skip {
+  string path   = 1;        // rel_path (ou chemin brut si hors racine)
+  Reason reason = 2;
+  string detail = 3;        // message lofty/IO pour UNREADABLE / WALK_ERROR
+  enum Reason {
+    REASON_UNSPECIFIED = 0;
+    UNREADABLE    = 1;      // lofty n'a pas pu parser (corrompu, tronqué…)
+    ZERO_DURATION = 2;      // durée nulle → impossible à placer par le scheduler
+    WALK_ERROR    = 3;      // échec du parcours (permissions…)
+  }
+}
+
+message ListMediaRequest {
+  bool only_available = 1;
+}
+
+message ListMediaResponse {
+  repeated Media media = 1;
+}
+
+// Champs STANDARD uniquement. year = 0 / chaînes vides = métadonnée absente
+// (source dégradée, pas une erreur). duration_ms strictement positif par
+// construction (une durée nulle est écartée au scan).
+message Media {
+  string rel_path        = 1;   // relatif à media/, séparateur '/', casse conservée
+  string title           = 2;
+  string artist          = 3;
+  string album           = 4;
+  uint32 year            = 5;
+  uint64 duration_ms     = 6;
+  uint64 size_bytes      = 7;
+  bool   available       = 8;
+  repeated string genres = 9;   // ensemble (0..n)
+}

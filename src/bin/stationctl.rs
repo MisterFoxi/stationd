@@ -5,12 +5,14 @@
 
 use clap::{Parser, Subcommand};
 
-use stationd::proto::{schedule, station};
+use stationd::proto::{library, schedule, station};
 
 use station::station_client::StationClient;
 use station::{PlaylistAddRequest, PlaylistListRequest, PlaylistSyncRequest, QuitRequest, StatusRequest};
 use schedule::schedule_service_client::ScheduleServiceClient;
 use schedule::{ApplyGridRequest, ExportGridRequest, GridFile, PreviewRequest, ResolveNextRequest};
+use library::library_service_client::LibraryServiceClient;
+use library::{ListMediaRequest, ScanRequest};
 
 use std::path::PathBuf;
 
@@ -37,6 +39,24 @@ enum Command {
     /// Grid / scheduler operations
     #[command(subcommand)]
     Schedule(ScheduleCommand),
+    /// Media library operations
+    #[command(subcommand)]
+    Library(LibraryCommand),
+}
+
+#[derive(Subcommand, Debug)]
+enum LibraryCommand {
+    /// Scan the configured media root and reconcile the index. Heavy work runs
+    /// off the async runtime server-side; a skipped audio file is reported,
+    /// not fatal (the scan itself succeeds).
+    Scan,
+    /// List the media index. Available files only, unless --all also shows
+    /// vanished-but-known files (available = 0).
+    List {
+        /// Include vanished-but-known files.
+        #[arg(long)]
+        all: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -299,6 +319,50 @@ async fn main() -> anyhow::Result<()> {
                     format!("  [{}]", o.rule_id)
                 };
                 println!("{utc:>11}  {}  {origin:<13}  {pl}{rule}", o.at_local);
+            }
+        }
+        Command::Library(LibraryCommand::Scan) => {
+            let mut lib = LibraryServiceClient::connect(args.addr.clone()).await?;
+            let reply = lib.scan(ScanRequest {}).await?.into_inner();
+            println!("found:       {}", reply.found);
+            println!("skipped:     {}", reply.skipped);
+            println!("present:     {}", reply.present);
+            println!("unavailable: {}", reply.unavailable);
+            if !reply.skips.is_empty() {
+                println!("skips:");
+                for s in &reply.skips {
+                    let reason = library::skip::Reason::try_from(s.reason)
+                        .map(|r| r.as_str_name())
+                        .unwrap_or("UNKNOWN");
+                    let detail = if s.detail.is_empty() {
+                        String::new()
+                    } else {
+                        format!("  ({})", s.detail)
+                    };
+                    println!("  - {reason:<13} {}{detail}", s.path);
+                }
+            }
+            // A skipped audio file is diagnostic, not a failure: exit zero.
+        }
+        Command::Library(LibraryCommand::List { all }) => {
+            let mut lib = LibraryServiceClient::connect(args.addr.clone()).await?;
+            let reply = lib
+                .list_media(ListMediaRequest { only_available: !all })
+                .await?
+                .into_inner();
+            if reply.media.is_empty() {
+                println!("(no media in the index)");
+            }
+            for m in &reply.media {
+                let secs = m.duration_ms / 1000;
+                let dur = format!("{}:{:02}", secs / 60, secs % 60);
+                let flag = if m.available { "" } else { "  (unavailable)" };
+                let who = match (m.artist.is_empty(), m.title.is_empty()) {
+                    (false, false) => format!("{} \u{2014} {}", m.artist, m.title),
+                    (true, false) => m.title.clone(),
+                    _ => "(no tags)".to_string(),
+                };
+                println!("{dur:>7}  {}  {who}{flag}", m.rel_path);
             }
         }
     }

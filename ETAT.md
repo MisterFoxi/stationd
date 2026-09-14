@@ -32,32 +32,83 @@ La **grille est pilotable de bout en bout en CLI**, projection comprise :
 `AT_CLOCK_SOFT`, export round-trip stable, `preview` projette 24h avec rendu
 UTC + local nommé (test anti-DST 2026-10-25 : 02:30 deux fois, epochs
 distincts). Cœur pur (`resolve_next`, `clock`/DST `jiff`, familles A/B) vert,
-grammaire + les 6 RPC réels. `cargo build` + `cargo test -p stationd` OK. Il
-reste l'étage sélection `playlist_ref` → média (`Decision.media_path` vide).
+grammaire + les 6 RPC réels. `cargo build` + `cargo test -p stationd` OK.
+Biblio média scannée et pilotable au CLI (`library scan|list`), table `media`
+peuplée et validée en réel. Reste l'étage sélection `playlist_ref` → média
+(`Decision.media_path` vide).
 
 ---
 
 ## ⭐ TÂCHE D'ENTRÉE PROCHAINE SESSION
 
-**Grille pilotable + projetable en CLI, validée en vrai (DST compris).**
-Prochain chantier grille :
+**Étage sélection : `playlist_ref` → média concret.** Le scan biblio est en
+place et validé en réel (table `media` peuplée, atteignable au CLI) ; la grille
+résout déjà *quelle source* mais `Decision.media_path` reste vide. C'est le
+moteur de sélection du slice playlist :
 
-1. **Étage sélection** : `playlist_ref` → média concret. `Decision.media_path`
-   est vide aujourd'hui — la grille résout *quelle source*, pas *quelle piste*.
-   C'est le moteur de sélection du slice playlist (résoudre le pool depuis la
-   biblio + politique d'ordre + anti-répétition). Sans ça, rien à tendre à
+1. Résoudre le pool d'une playlist depuis la table `media` (available only) +
+   politique d'ordre (`shuffle`/`sequential`/`newest`/`oldest`) + anti-répétition
+   (`no_same_artist_within`, `no_same_track_within`). Brancher sur
+   `GridEngine::next` pour remplir `media_path`. Sans ça, rien à tendre à
    Liquidsoap.
 2. **`DayPart` cross-minuit** : `window_covers` renvoie `None` (TODO) — bloquant
    pour une base de nuit 22:00→06:00.
-3. **Refacto acteur** : `GridEngine` en tâche tokio possédante, grille en
-   mémoire invalidée à l'apply, mutations par mpsc (aujourd'hui recharge à
-   chaque appel).
-4. Puis câblage Liquidsoap (`request.dynamic` + fallback) : la grille a de quoi
-   répondre « next », il manque l'exécutant.
+3. **Refacto acteur `GridEngine`** : tâche tokio possédante, grille en mémoire
+   invalidée à l'apply, mutations par mpsc. **Gabarit déjà écrit** :
+   `library_actor.rs` (spawn + Handle + mpsc<Command>) — le recopier.
+4. Puis câblage Liquidsoap (`request.dynamic` + fallback).
 
 ---
 
 ## Fait
+
+### — Slice gRPC + CLI de la biblio (2026-09-14) —
+
+Le scan est atteignable au contrat (CLI-first), validé en réel (3 fichiers
+Homestone : durée lue partout, tags là où ils existent, WAV sans tag → stocké
+comme dégradé, pas d'erreur).
+
+- `proto/library_v1.proto` : `LibraryService { Scan, ListMedia }`. `Skip`
+  (path + Reason + detail) remonte les fichiers écartés ; `Media` = champs
+  standard uniquement.
+- `src/library_actor.rs` : **acteur possédant** — `spawn(pool, root) ->
+  LibraryHandle` + `mpsc<Command>`. Scan lourd en `spawn_blocking` ; les scans
+  sont sérialisés par la boucle mono-consommateur (garantie anti-concurrence
+  *par construction*, pas de flag). C'est le **gabarit** du futur refacto
+  `GridEngine`. 2 tests (dir vide, racine absente via le canal).
+- `src/library_grpc.rs` : traducteur mince acteur↔proto. BadRoot →
+  `failed_precondition`, reste → `internal`. Un skip est diagnostic → le scan
+  sort en code 0 (contrairement à un apply rejeté).
+- `build.rs`/`proto.rs`/`lib.rs`/`main.rs` : câblage (3ᵉ service sur le port).
+- `stationctl library scan|list [--all]`.
+
+### — Socle scan bibliothèque média (2026-09-14) —
+
+Nouveau chantier « biblio », côté données uniquement (gRPC/CLI = slice suivant).
+Table `media` = **famille (A)** reconstructible ; l'historique (B) référencera
+par identité (rel_path + garde-fou), jamais par FK.
+
+- `Cargo.toml` : + `lofty` 0.24 (tags + durée, pur-Rust → build statique/cross OK).
+- `migrations/0007_media_library.sql` : `media` (rel_path clé, **casse
+  conservée**, `duration_ms > 0`, garde-fou `size_bytes`+`mtime_ns`, `available`)
+  + `media_genre` (genre = ensemble). Index `available`/`artist`.
+- `src/media.rs` (**pur**, walkdir + lofty, ni sqlx ni tokio ; 5 tests dont un
+  WAV minimal généré à la volée) : `scan_library(root) -> ScanReport { media,
+  skipped }`. No-silent-failure : durée nulle / fichier illisible → `ScanSkip`
+  remonté, jamais avalé ; extension non-audio simplement ignorée (pas une
+  erreur). Racine absente = seule erreur dure. À envelopper dans `spawn_blocking`.
+- `src/media_index.rs` (persistance famille A ; 4 tests DB migrée) :
+  `replace_library` = réconciliation en **une transaction** (tout `available=0`
+  puis ré-affirme les vus) — un disparu reste connu, marqué indisponible (pas de
+  DROP). `list(only_available)`. Remplacement explicite du set de genres.
+- `src/lib.rs` : `media` + `media_index` exposés.
+
+⚠ **Anomalie relevée** : `migrations/0004_playlist_materialized_view.sql` est
+ABSENT du dossier (0001-0003, 0005-0006 seulement) alors qu'ETAT le décrit
+(vue riche playlists + famille B `episode_play`/`broadcast_log`/
+`playlist_suspension`). Ces tables **n'existent donc pas** en base : bloquant
+pour `unplayed_only`/historique le jour venu. À retrancher (recréer 0004 ou
+renuméroter). N'impacte pas le scan média (tables neuves en 0007).
 
 ### — Grammaire TOML de la grille + apply/validate/export (2026-09-14) —
 
@@ -231,9 +282,17 @@ dans le découpage des modules (`grid_index` = A, `grid_store` = B).
 
 ## Pièges & points de vigilance
 
-- **Base de dev à recréer** : migrations `0004`→`0006` sont neuves. En cas de
+- **Base de dev à recréer** : migrations `0005`→`0007` sont neuves. En cas de
   souci de schéma/checksum sqlx, `rm -rf data/` + relancer (file-first, la vue
   est jetable). Ne JAMAIS éditer une migration déjà appliquée en prod.
+- **`0004` manquant** : le fichier de migration de la vue riche playlists est
+  absent du dossier (cf. Fait). `unplayed_only`/historique n'ont donc pas leur
+  socle SQL tant que ce n'est pas retranché.
+- **`lofty` ajouté** : premier `cargo build` doit actualiser `Cargo.lock`
+  (Rust indispo dans l'env de préparation).
+- **Casse des chemins** : `media.rel_path` CONSERVE la casse (fichiers réels,
+  FS potentiellement sensible à la casse) ; les refs playlists sont, elles,
+  normalisées en minuscules. Ne pas traiter les deux pareil.
 - **`resolver.rs` doit rester pur / std-only** : c'est ce qui le rend testable
   et simulable sans horloge. Toute conversion de fuseau passe par `clock`.
 - **`AtClock` soft sans `expiry`** peut se déclencher tard (au prochain bord de
@@ -262,14 +321,19 @@ dans le découpage des modules (`grid_index` = A, `grid_store` = B).
 | `src/config.rs` | Config TOML + fuseau station validé |
 | `src/playlist.rs` | Modèle/parser/validation playlists |
 | `src/store.rs` / `src/sync.rs` | Vue playlists / réconciliation |
+| `src/media.rs` | Scan biblio **pur** (walkdir + lofty → `ScanReport`, 5 tests) |
+| `src/media_index.rs` | Vue média famille (A) : `replace_library` (réconciliation) / `list` (4 tests) |
+| `src/library_actor.rs` | Acteur biblio possédant (mpsc, spawn_blocking) — gabarit refacto |
+| `src/library_grpc.rs` | Transport gRPC biblio (traducteur mince acteur↔proto) |
 | `src/grpc.rs` | Service `Station` (status/quit/playlist*) |
 | `src/db.rs` | Init pool SQLite + migrations |
-| `src/main.rs` | Daemon : démarrage, 2 services gRPC, shutdown |
-| `src/bin/stationctl.rs` | CLI (station + `schedule next/list/validate/apply/export/preview`) |
+| `src/main.rs` | Daemon : démarrage, 3 services gRPC, shutdown |
+| `src/bin/stationctl.rs` | CLI (station + `schedule …` + `library scan/list`) |
 | `proto/station.proto` | Contrat `Station` |
 | `proto/schedule_v1.proto` | Contrat `ScheduleService` (compilé/servi ; 6 RPC réels) |
+| `proto/library_v1.proto` | Contrat `LibraryService` (compilé/servi ; Scan + ListMedia) |
 | `Doc/proposition-grammaire-grille-v1.md` | Contrat grammaire `grid.toml` (référence durable) |
 | `proto/playlist_v1.proto` | Contrat playlist v1 (⚠ pas encore compilé/servi) |
-| `migrations/0001→0006` | Schéma (0004 vue riche, 0005 état grille, 0006 règles) |
+| `migrations/0001→0007` | Schéma (0005 état grille, 0006 règles, 0007 biblio média ; ⚠ 0004 absent) |
 | `tests/sync.rs` | Intégration `sync` |
 | `Doc/*.md` | Décisions d'architecture (référence durable) |

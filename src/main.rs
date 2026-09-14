@@ -8,7 +8,9 @@ use tracing::{info, warn};
 
 use stationd::grpc::station::station_server::StationServer;
 use stationd::schedule_grpc::schedule::schedule_service_server::ScheduleServiceServer;
+use stationd::library_grpc::library::library_service_server::LibraryServiceServer;
 use stationd::grid_engine::GridEngine;
+use stationd::library_grpc::LibraryGrpc;
 use stationd::schedule_grpc::ScheduleGrpc;
 use stationd::{config, db, grpc};
 
@@ -73,6 +75,12 @@ async fn main() -> anyhow::Result<()> {
     engine.sync_grid().await?;
     let schedule_service = ScheduleGrpc::new(engine);
 
+    // Media library: single owning actor over the `media` view. The heavy scan
+    // runs off the async runtime (spawn_blocking); scans are serialised by the
+    // actor's command loop. Reachable via `stationctl library scan|list`.
+    let library = stationd::library_actor::spawn(db_pool.clone(), cfg.media.library_path.clone());
+    let library_service = LibraryGrpc::new(library);
+
     let addr = cfg.server.grpc_bind.parse()?;
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let service = grpc::StationService::new(
@@ -83,7 +91,7 @@ async fn main() -> anyhow::Result<()> {
         shutdown_tx,
     );
 
-    info!(%addr, "gRPC server listening (status, quit, schedule)");
+    info!(%addr, "gRPC server listening (status, quit, schedule, library)");
 
     // Three ways to shut down cleanly: via `stationctl quit` (shutdown_rx,
     // triggered by the service's `quit` handler), or via a signal — Ctrl+C
@@ -110,6 +118,7 @@ async fn main() -> anyhow::Result<()> {
     Server::builder()
         .add_service(StationServer::new(service))
         .add_service(ScheduleServiceServer::new(schedule_service))
+        .add_service(LibraryServiceServer::new(library_service))
         .serve_with_shutdown(addr, shutdown_signal)
         .await?;
 
