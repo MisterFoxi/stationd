@@ -26,33 +26,32 @@ Voir `Doc/tui-dev.md` pour le périmètre, les commandes et les limites.
 
 ## Où on en est en une phrase
 
-Le circuit playlists était déjà fonctionnel de bout en bout ; cette session a
-bâti **toute la couche grille / résolveur** : du cœur pur `resolve_next`
-jusqu'à un RPC `ScheduleService.ResolveNext` servi et joignable via
-`stationctl schedule next`, avec temps correct DST (`jiff`), état de lecture
-persisté et index des règles en SQLite. Tout ce qui va jusqu'à `grid_engine` +
-`config` est **compilé et vert** ; le dernier lot (câblage gRPC du service
-scheduling, option A) **compile** (`cargo build` OK). Reste à confirmer la
-suite de tests complète et l'essai bout-en-bout — cf. tâche d'entrée.
+La **grille est pilotable de bout en bout en CLI** : `grid.toml` (4 familles) →
+`stationctl schedule validate|apply|export|list|next` → gRPC → moteur → SQLite,
+testé en vrai (apply de 4 règles, `next` rend `AT_CLOCK_SOFT`, export round-trip
+stable). Le cœur (`resolve_next` pur, `clock`/DST `jiff`, familles A/B) était
+déjà vert ; cette session a ajouté la grammaire `grid.toml`, les RPC
+apply/validate/export et la glu CLI. `cargo build` + `cargo test -p stationd`
+OK. Il reste `Preview` et l'étage sélection `playlist_ref` → média.
 
 ---
 
 ## ⭐ TÂCHE D'ENTRÉE PROCHAINE SESSION
 
-1. **Compiler + tester** (Rust indispo dans l'env de prépa) :
-   `cargo build` puis `cargo test -p stationd`. Nouveau module `grid_toml` +
-   `grid_index::replace_grid` + méthodes `GridEngine::{validate,apply,export}_grid`
-   + 3 RPC `ApplyGrid`/`ValidateGrid`/`ExportGrid` branchés. Points de
-   vigilance build ci-dessous.
-2. **Glu CLI `stationctl schedule apply|validate|export`** (délibérément
-   différée cette session) : lire `src/bin/stationctl.rs`, ajouter les
-   sous-commandes (lecture fichier `grid.toml` côté client → `GridFile`, appel
-   du même endpoint que `schedule next`). C'est ce qui rend la grille pilotable
-   en CLI de bout en bout (invariant CLI-first).
-3. **Test bout en bout** : `stationctl schedule apply grid.toml`, puis
-   `stationctl schedule next --at 32400` (09:00 UTC) → `origin` + `playlist_ref`.
-4. **Ensuite** : `Preview` (projection grille sur fenêtre), étage sélection
-   `playlist_ref` → média, refacto acteur `GridEngine`, `DayPart` cross-minuit.
+**Build/tests/bout-en-bout : OK ✓** (grille appliquée en vrai depuis le CLI).
+Prochain chantier grille :
+
+1. **`Preview`** (`stationctl schedule preview --at … / --next 24h`) : projeter
+   la grille sur une fenêtre sans attendre le wall-clock — occurrences en UTC
+   **et** local (test anti-DST). RPC `Preview` déjà déclaré, encore
+   `UNIMPLEMENTED`. Sert de projection, pas de sim piste-à-piste.
+2. **Étage sélection** : `playlist_ref` → média concret (`Decision.media_path`
+   est vide aujourd'hui) — le moteur de sélection du slice playlist.
+3. **`DayPart` cross-minuit** : `window_covers` renvoie `None` (TODO) — bloquant
+   pour une base de nuit 22:00→06:00.
+4. **Refacto acteur** : `GridEngine` en tâche tokio possédante, grille en
+   mémoire invalidée à l'apply, mutations par mpsc (aujourd'hui recharge à
+   chaque appel).
 
 ---
 
@@ -82,6 +81,13 @@ rejeté en v1), `at_clock` = `every_minutes` XOR `at` + `soft|hard` + `expiry`,
   (refs résolues vs `rel_path` de la vue). `apply` rejette **sans rien écrire**
   si une ref est inconnue.
 - `src/schedule_grpc.rs` : 3 RPC branchés sur le moteur (fin des `UNIMPLEMENTED`).
+- `src/bin/stationctl.rs` : sous-commandes `schedule validate|apply|export`
+  (pré-check TOML côté client, `GridFile` envoyé au même endpoint, sortie
+  non-zéro sur rejet). Boucle CLI complète, invariant CLI-first tenu.
+- `grid.toml` (racine) : exemple des 4 familles, calé sur les refs de la vue.
+- **Validé en vrai** : `validate`/`apply` (4 règles) → `list` → `next`
+  (`AT_CLOCK_SOFT` à 00:00, ordre de collision correct) → `export` (round-trip
+  stable, `enabled=true` omis). `cargo build` + `cargo test -p stationd` verts.
 
 ### — Couche grille / résolveur (session précédente) —
 
@@ -185,9 +191,6 @@ dans le découpage des modules (`grid_index` = A, `grid_store` = B).
 ## Reste à faire
 
 ### Grille / scheduler (suite directe)
-- **Confirmer build+tests** (tâche d'entrée), puis **glu CLI
-  `stationctl schedule apply|validate|export`** (RPC prêts côté serveur, CLI à
-  écrire).
 - **`Preview`** : projection de grille sur une fenêtre (pas une sim
   piste-à-piste, durées dynamiques) — RPC déclaré, à implémenter.
 - **Étage sélection** : `playlist_ref` → média concret (le `Decision.media_path`
@@ -240,14 +243,14 @@ dans le découpage des modules (`grid_index` = A, `grid_store` = B).
 | `src/grid_toml.rs` | Grammaire `grid.toml` : `parse_grid`/`validate_refs`/`to_toml` (15 tests) |
 | `src/grid_store.rs` | État durable famille (B) : compteurs Every / tokens AtClock |
 | `src/grid_engine.rs` | Boucle vivante (résolution + persistance) |
-| `src/schedule_grpc.rs` | Service gRPC scheduling (`ResolveNext` réel) |
+| `src/schedule_grpc.rs` | Service gRPC scheduling (resolve/list/apply/validate/export réels) |
 | `src/config.rs` | Config TOML + fuseau station validé |
 | `src/playlist.rs` | Modèle/parser/validation playlists |
 | `src/store.rs` / `src/sync.rs` | Vue playlists / réconciliation |
 | `src/grpc.rs` | Service `Station` (status/quit/playlist*) |
 | `src/db.rs` | Init pool SQLite + migrations |
 | `src/main.rs` | Daemon : démarrage, 2 services gRPC, shutdown |
-| `src/bin/stationctl.rs` | CLI (station + `schedule next`) |
+| `src/bin/stationctl.rs` | CLI (station + `schedule next/list/validate/apply/export`) |
 | `proto/station.proto` | Contrat `Station` |
 | `proto/schedule_v1.proto` | Contrat `ScheduleService` (compilé/servi ; apply/validate/export réels) |
 | `Doc/proposition-grammaire-grille-v1.md` | Contrat grammaire `grid.toml` (référence durable) |
