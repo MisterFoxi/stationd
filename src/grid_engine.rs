@@ -55,6 +55,9 @@ pub struct GridEngine {
     pool: SqlitePool,
     /// IANA name of the station timezone (config), e.g. "Europe/Paris".
     tz: String,
+    /// Plugins to notify of decisions (best-effort, fire-and-forget). `None`
+    /// when no plugin system is wired (e.g. in unit tests).
+    plugins: Option<crate::plugin::PluginHandle>,
 }
 
 /// One entry of a grid projection ([`GridEngine::preview`]): the instant a
@@ -80,7 +83,13 @@ pub struct ResolvedDecision {
 
 impl GridEngine {
     pub fn new(pool: SqlitePool, tz: impl Into<String>) -> Self {
-        Self { pool, tz: tz.into() }
+        Self { pool, tz: tz.into(), plugins: None }
+    }
+
+    /// Attach the plugin system so decisions are broadcast to plugins.
+    pub fn with_plugins(mut self, plugins: crate::plugin::PluginHandle) -> Self {
+        self.plugins = Some(plugins);
+        self
     }
 
     /// Read the configured rules without resolving or touching playback state.
@@ -270,6 +279,18 @@ impl GridEngine {
             Some(r) => Some(crate::selection::resolve_ref(&self.pool, r).await?),
             None => None,
         };
+
+        // Notify plugins (best-effort, never blocks this path). Observation
+        // only — a plugin cannot change the decision from here.
+        if let Some(plugins) = &self.plugins {
+            plugins.emit(crate::plugin::PluginEvent::TrackResolved {
+                media_path: media_path.clone(),
+                playlist_ref: decision.playlist_ref.clone(),
+                rule_id: decision.rule_id.clone(),
+                origin: format!("{:?}", decision.origin),
+            });
+        }
+
         Ok(ResolvedDecision { decision, media_path })
     }
 }

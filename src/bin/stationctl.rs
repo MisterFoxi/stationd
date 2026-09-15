@@ -5,7 +5,7 @@
 
 use clap::{Parser, Subcommand};
 
-use stationd::proto::{library, schedule, station};
+use stationd::proto::{library, plugin, schedule, station};
 
 use station::station_client::StationClient;
 use station::{PlaylistAddRequest, PlaylistListRequest, PlaylistSyncRequest, QuitRequest, StatusRequest};
@@ -13,6 +13,8 @@ use schedule::schedule_service_client::ScheduleServiceClient;
 use schedule::{ApplyGridRequest, ExportGridRequest, GridFile, PreviewRequest, ResolveNextRequest};
 use library::library_service_client::LibraryServiceClient;
 use library::{ListMediaRequest, ScanRequest};
+use plugin::plugin_service_client::PluginServiceClient;
+use plugin::{plugin_control_request::Action as PluginAction, PluginControlRequest, PluginListRequest};
 
 use std::path::PathBuf;
 
@@ -42,6 +44,23 @@ enum Command {
     /// Media library operations
     #[command(subcommand)]
     Library(LibraryCommand),
+    /// Plugin operations
+    #[command(subcommand)]
+    Plugin(PluginCommand),
+}
+
+#[derive(Subcommand, Debug)]
+enum PluginCommand {
+    /// List all declared plugins and their state
+    List,
+    /// Activate a stopped or failed plugin (on_load)
+    Start { name: String },
+    /// Deactivate a loaded plugin (on_unload)
+    Stop { name: String },
+    /// Stop then start, same artefact
+    Restart { name: String },
+    /// Reload the artefact from disk (== restart in native)
+    Reload { name: String },
 }
 
 #[derive(Subcommand, Debug)]
@@ -366,6 +385,50 @@ async fn main() -> anyhow::Result<()> {
                     _ => "(no tags)".to_string(),
                 };
                 println!("{dur:>7}  {}  {who}{flag}", m.rel_path);
+            }
+        }
+        Command::Plugin(PluginCommand::List) => {
+            let mut cli = PluginServiceClient::connect(args.addr.clone()).await?;
+            let reply = cli.list(PluginListRequest {}).await?.into_inner();
+            if reply.plugins.is_empty() {
+                println!("(no plugins declared)");
+            }
+            for p in &reply.plugins {
+                let en = if p.enabled { "enabled" } else { "disabled" };
+                let reason = if p.reason.is_empty() {
+                    String::new()
+                } else {
+                    format!("  \u{2014} {}", p.reason)
+                };
+                println!(
+                    "{:<16} {:<12} {:<9} order={:<3} failures={}{reason}",
+                    p.name, p.state, en, p.order, p.failures
+                );
+            }
+        }
+        Command::Plugin(cmd) => {
+            let (name, action) = match &cmd {
+                PluginCommand::Start { name } => (name, PluginAction::Start),
+                PluginCommand::Stop { name } => (name, PluginAction::Stop),
+                PluginCommand::Restart { name } => (name, PluginAction::Restart),
+                PluginCommand::Reload { name } => (name, PluginAction::Reload),
+                PluginCommand::List => unreachable!("handled above"),
+            };
+            let mut cli = PluginServiceClient::connect(args.addr.clone()).await?;
+            let reply = cli
+                .control(PluginControlRequest {
+                    name: name.clone(),
+                    action: action as i32,
+                })
+                .await?
+                .into_inner();
+            if let Some(p) = reply.plugin {
+                let reason = if p.reason.is_empty() {
+                    String::new()
+                } else {
+                    format!("  \u{2014} {}", p.reason)
+                };
+                println!("{}: {}{reason}", p.name, p.state);
             }
         }
     }

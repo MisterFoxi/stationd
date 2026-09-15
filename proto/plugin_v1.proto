@@ -1,0 +1,53 @@
+// plugin_v1.proto
+// ─────────────────────────────────────────────────────────────────────────
+// Pilotage des plugins (CLI-first) : lister l'état, contrôler le cycle de vie.
+// Cf. Doc/plugin-hooks.md. Le flux d'événements et la surface hôte ne sont pas
+// dans ce contrat (le core notifie / le plugin appelle — hors RPC).
+//
+// L'état d'un plugin reste VISIBLE même en échec (no-silent-failure) : un
+// plugin qui rate son chargement apparaît en `failed` avec sa raison, un
+// plugin mis en quarantaine (trop d'échecs) en `quarantined`.
+
+syntax = "proto3";
+
+package webradio.plugin.v1;
+
+service PluginService {
+  // État de tous les plugins déclarés (chargés, désactivés, en échec, en
+  // quarantaine).
+  rpc List(PluginListRequest) returns (PluginListResponse);
+
+  // Applique une action de cycle de vie à un plugin et renvoie son nouvel état.
+  rpc Control(PluginControlRequest) returns (PluginControlResponse);
+}
+
+message PluginListRequest {}
+
+message PluginListResponse {
+  repeated PluginInfo plugins = 1;
+}
+
+message PluginInfo {
+  string name     = 1;   // identité (= déclaration)
+  bool   enabled  = 2;   // intention de config
+  uint32 order    = 3;   // ordre d'application des hooks
+  string state    = 4;   // loaded | disabled | failed | quarantined
+  string reason   = 5;   // raison si failed/quarantined, sinon vide
+  uint32 failures = 6;   // échecs récents (fenêtre glissante)
+}
+
+message PluginControlRequest {
+  string name   = 1;
+  Action action = 2;
+  enum Action {
+    ACTION_UNSPECIFIED = 0;
+    START   = 1;   // réactive un plugin arrêté / en échec  (on_load)
+    STOP    = 2;   // désactive un plugin chargé            (on_unload)
+    RESTART = 3;   // stop puis start, même artefact
+    RELOAD  = 4;   // relit l'artefact (== restart en natif)
+  }
+}
+
+message PluginControlResponse {
+  PluginInfo plugin = 1;
+}

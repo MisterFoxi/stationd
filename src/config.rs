@@ -11,6 +11,11 @@ pub struct Config {
     pub playlist: PlaylistConfig,
     #[serde(default)]
     pub logging: LoggingConfig,
+    /// Plugins declared for this station (order + enable flag + opaque config).
+    /// Empty by default. Cf. Doc/plugin-hooks.md. TOML key is `[[plugin]]`
+    /// (singular, like `[[rule]]`), the field stays plural in Rust.
+    #[serde(default, rename = "plugin")]
+    pub plugins: Vec<crate::plugin::PluginDecl>,
 }
 
 #[derive(Debug, Deserialize)]

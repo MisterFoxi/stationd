@@ -37,31 +37,63 @@ Biblio média scannée et pilotable au CLI (`library scan|list`). **Étage
 sélection livré** : `playlist_ref` → `media_path` concret (shuffle, sequential,
 newest/oldest via curseur, groupe `sequence`). Validé en réel de bout en bout :
 grille → groupe intro / épisode le plus récent / outro → fichiers réels.
+**Système de plugins A1** : trait `Plugin`, acteur à état
+(`loaded`/`disabled`/`failed`/`quarantined`), `on_event` sur `TrackResolved`,
+`stationctl plugin list|start|stop|restart|reload`, plugin `logger` validé en
+réel. Contrats figés dans `Doc/plugin-{events,hooks,host}.md`.
 
 ---
 
 ## ⭐ TÂCHE D'ENTRÉE PROCHAINE SESSION
 
-**Trois chantiers ouverts, au choix :**
+**Plugins A2 — la surface hôte + les hooks synchrones.** A1 (registre, cycle de
+vie, `on_event`) tourne. Suite, dans l'ordre de valeur :
 
-1. **Câblage Liquidsoap** : `request.dynamic` + fallback. La grille sait
-   maintenant rendre un `media_path` concret (`schedule next`), il manque
-   l'exécutant qui le tend à Liquidsoap. C'est le vrai « ça diffuse » suivant.
-2. **Refacto acteur `GridEngine`** : tâche tokio possédante, grille en mémoire
-   invalidée à l'apply, mutations par mpsc. **Gabarit déjà écrit** :
-   `library_actor.rs` (spawn + Handle + mpsc<Command>).
-3. **`DayPart` cross-minuit** : `window_covers` renvoie `None` (TODO) — bloquant
-   pour une base de nuit 22:00→06:00. Petit, bien cerné.
+1. **Hook `filter_pool`** (le plus utile) : laisser un plugin filtrer/pondérer
+   le pool dans `selection`. **Synchrone** (retourne une valeur dans le chemin
+   de décision) → NE peut PAS passer par l'acteur fire-and-forget d'A1 ; à
+   concevoir (requête/réponse bornée, ou `Arc<Mutex>` partagé). Idem `on_scan`.
+2. **Surface hôte** (`Doc/plugin-host.md`) : `control` (Stop/Pause/Resume/
+   StopWhenIdle, first-class station + invocable plugin), `push_override`
+   (file lue par `next_media`, `soft` honoré / `hard`→LS), base par plugin
+   (ouverte par le core, kv/query). Puis le plugin `stop-when-idle` en
+   démonstration (compose `on_event(ListenersSampled)` + `control`).
+3. **Runtime WASM** (`extism`/`wasmtime`) : faire implémenter le trait par un
+   `.wasm`, `reload` diverge alors de `restart`.
 
-Sélection : reste au besoin — anti-répétition (`constraints`) et `unplayed_only`
-(réclament l'historique de diffusion, famille B jamais posée — cf. 0004 absent),
-`limit`/quota par activation, groupes `weighted`/`rotate`/imbriqués,
-`queue`/`remote`, et la résolution des refs de membres relatives au dossier du
-groupe (aujourd'hui chemin complet obligatoire).
+Autres chantiers ouverts (indépendants) : câblage Liquidsoap (le vrai « ça
+diffuse »), refacto acteur `GridEngine`, `DayPart` cross-minuit.
 
 ---
 
 ## Fait
+
+### — Système de plugins A1 : registre, cycle de vie, events (2026-09-15) —
+
+Natif (pas de WASM), in-process. Contrats figés d'abord dans
+`Doc/plugin-events.md` (le core notifie), `Doc/plugin-hooks.md` (le core
+appelle + cycle de vie + statut), `Doc/plugin-host.md` (le plugin appelle —
+pour A2). Validé en réel (`logger` chargé, `track resolved` loggé, stop/start).
+
+- `src/plugin.rs` (7 tests) : trait `Plugin` (`on_load`/`on_unload`/`on_event` ;
+  `on_scan`/`filter_pool` PAS encore câblés — hooks synchrones, design distinct
+  de l'acteur). **Acteur possédant** (gabarit `library_actor`) : `spawn(decls)`
+  → `PluginHandle` clonable. `emit` = fire-and-forget (`try_send`, ne bloque
+  jamais la décision). États `Loaded`/`Disabled`/`Failed{phase,reason}`/
+  `Quarantined{reason,failures}`. **Quarantaine** : fenêtre glissante, N=3
+  échecs → hooks coupés jusqu'à `restart` explicite (jamais de retry auto).
+  `catch_unwind` : un plugin qui panique ne fait pas tomber le core. Plugin
+  `logger` (logge chaque event ; `fail_on_load` pour tester le chemin `Failed`).
+- `PluginEvent` `#[non_exhaustive]` : A1 émet `TrackResolved` (seule source
+  réelle). Un plugin ignore les variantes inconnues (`_ => {}`).
+- `proto/plugin_v1.proto` + `src/plugin_grpc.rs` : `PluginService { List,
+  Control{Start|Stop|Restart|Reload} }`. `reload == restart` en natif.
+- `src/config.rs` : `[[plugin]]` (**clé singulier**, `#[serde(rename)]` ;
+  champ Rust `plugins`) — `name`/`enabled`/`order` (défaut 50)/`config` opaque.
+- `src/grid_engine.rs` : `with_plugins` + émission `TrackResolved` dans
+  `next_media` (best-effort).
+- `src/main.rs` : acteur spawné, branché au moteur, 5ᵉ service gRPC.
+- `stationctl plugin list|start|stop|restart|reload`.
 
 ### — Étage sélection : playlist_ref → média concret (2026-09-15) —
 
@@ -370,13 +402,17 @@ dans le découpage des modules (`grid_index` = A, `grid_store` = B).
 | `src/group_state.rs` | État de passage d'un groupe sequence famille (B) |
 | `src/library_actor.rs` | Acteur biblio possédant (mpsc, spawn_blocking) — gabarit refacto |
 | `src/library_grpc.rs` | Transport gRPC biblio (traducteur mince acteur↔proto) |
+| `src/plugin.rs` | Système de plugins A1 : trait, acteur à état, quarantaine, logger (7 tests) |
+| `src/plugin_grpc.rs` | Transport gRPC plugins (list + control) |
 | `src/grpc.rs` | Service `Station` (status/quit/playlist*) |
 | `src/db.rs` | Init pool SQLite + migrations |
-| `src/main.rs` | Daemon : démarrage, 3 services gRPC, shutdown |
-| `src/bin/stationctl.rs` | CLI (station + `schedule …` + `library scan/list`) |
+| `src/main.rs` | Daemon : démarrage, 5 services gRPC, shutdown |
+| `src/bin/stationctl.rs` | CLI (station + `schedule …` + `library …` + `plugin …`) |
 | `proto/station.proto` | Contrat `Station` |
 | `proto/schedule_v1.proto` | Contrat `ScheduleService` (compilé/servi ; 6 RPC réels) |
 | `proto/library_v1.proto` | Contrat `LibraryService` (compilé/servi ; Scan + ListMedia) |
+| `proto/plugin_v1.proto` | Contrat `PluginService` (compilé/servi ; List + Control) |
+| `Doc/plugin-{events,hooks,host}.md` | Contrats du système de plugins (référence durable) |
 | `Doc/proposition-grammaire-grille-v1.md` | Contrat grammaire `grid.toml` (référence durable) |
 | `proto/playlist_v1.proto` | Contrat playlist v1 (⚠ pas encore compilé/servi) |
 | `migrations/0001→0009` | Schéma (0005 état grille, 0006 règles, 0007 biblio, 0008 curseur, 0009 groupe ; ⚠ 0004 absent) |

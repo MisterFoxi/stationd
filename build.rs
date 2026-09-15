@@ -6,6 +6,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     tonic_build::compile_protos("proto/schedule_v1.proto")?;
     // The media library service (scan + list). No well-known-type imports.
     tonic_build::compile_protos("proto/library_v1.proto")?;
+    // The plugin service (list + lifecycle control).
+    tonic_build::compile_protos("proto/plugin_v1.proto")?;
 
     // Force a rebuild whenever a migration file is added, changed, or
     // removed. `sqlx::migrate!` embeds the migrations into the binary at
@@ -20,6 +22,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-changed=proto/station.proto");
     println!("cargo:rerun-if-changed=proto/schedule_v1.proto");
     println!("cargo:rerun-if-changed=proto/library_v1.proto");
+    println!("cargo:rerun-if-changed=proto/plugin_v1.proto");
 
     Ok(())
 }

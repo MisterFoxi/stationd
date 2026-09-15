@@ -9,8 +9,10 @@ use tracing::{info, warn};
 use stationd::grpc::station::station_server::StationServer;
 use stationd::schedule_grpc::schedule::schedule_service_server::ScheduleServiceServer;
 use stationd::library_grpc::library::library_service_server::LibraryServiceServer;
+use stationd::plugin_grpc::plugin::plugin_service_server::PluginServiceServer;
 use stationd::grid_engine::GridEngine;
 use stationd::library_grpc::LibraryGrpc;
+use stationd::plugin_grpc::PluginGrpc;
 use stationd::schedule_grpc::ScheduleGrpc;
 use stationd::{config, db, grpc};
 
@@ -68,10 +70,18 @@ async fn main() -> anyhow::Result<()> {
 
     // TODO: Liquidsoap/Icecast control — deliberately absent at this stage
 
+    // Plugin system: single owning actor over the declared plugins. Loads the
+    // enabled ones now (a failure is recorded, not fatal). The grid engine
+    // emits decisions to it (best-effort); it is also driven via
+    // `stationctl plugin list|start|stop|restart|reload`.
+    let plugins = stationd::plugin::spawn(cfg.plugins.clone());
+    let plugin_service = PluginGrpc::new(plugins.clone());
+
     // Grid engine: the live resolver over the SQLite-backed grid, in the
     // station timezone. `sync_grid` reconciles the Every counter rows for the
     // current grid (catch-up on start-up); it never resets an existing counter.
-    let engine = GridEngine::new(db_pool.clone(), cfg.station.timezone.clone());
+    let engine = GridEngine::new(db_pool.clone(), cfg.station.timezone.clone())
+        .with_plugins(plugins);
     engine.sync_grid().await?;
     let schedule_service = ScheduleGrpc::new(engine);
 
@@ -91,7 +101,7 @@ async fn main() -> anyhow::Result<()> {
         shutdown_tx,
     );
 
-    info!(%addr, "gRPC server listening (status, quit, schedule, library)");
+    info!(%addr, "gRPC server listening (status, quit, schedule, library, plugin)");
 
     // Three ways to shut down cleanly: via `stationctl quit` (shutdown_rx,
     // triggered by the service's `quit` handler), or via a signal — Ctrl+C
@@ -119,6 +129,7 @@ async fn main() -> anyhow::Result<()> {
         .add_service(StationServer::new(service))
         .add_service(ScheduleServiceServer::new(schedule_service))
         .add_service(LibraryServiceServer::new(library_service))
+        .add_service(PluginServiceServer::new(plugin_service))
         .serve_with_shutdown(addr, shutdown_signal)
         .await?;
 

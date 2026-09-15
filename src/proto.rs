@@ -10,3 +10,7 @@ pub mod schedule {
 pub mod library {
     tonic::include_proto!("webradio.library.v1");
 }
+
+pub mod plugin {
+    tonic::include_proto!("webradio.plugin.v1");
+}
