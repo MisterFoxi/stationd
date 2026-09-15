@@ -84,6 +84,21 @@ pub async fn list(pool: &SqlitePool) -> Result<Vec<PlaylistRow>, sqlx::Error> {
         .collect())
 }
 
+/// Fetch the raw canonical TOML of the playlist whose handle (`rel_path`)
+/// matches `reference`. `None` if no such playlist. Used by the selection
+/// stage to resolve a grid `playlist_ref` back to its definition (the stored
+/// TOML is the source the view keeps; there is no detail-column view yet).
+pub async fn playlist_toml_by_ref(
+    pool: &SqlitePool,
+    reference: &str,
+) -> Result<Option<String>, sqlx::Error> {
+    let row: Option<(String,)> = sqlx::query_as("SELECT toml FROM playlists WHERE rel_path = ?1")
+        .bind(reference)
+        .fetch_optional(pool)
+        .await?;
+    Ok(row.map(|(t,)| t))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -10,7 +10,7 @@
 
 use tonic::{Request, Response, Status};
 
-use crate::grid_engine::{GridEngine, GridOpError};
+use crate::grid_engine::{EngineError, GridEngine, GridOpError};
 use crate::resolver::{Epoch, Origin};
 
 // Keep the existing public path available to callers.
@@ -50,6 +50,27 @@ fn map_grid_op_error(e: GridOpError) -> Status {
     }
 }
 
+/// Map a live-resolve error to a status. A selection problem is the caller's
+/// (grid/playlist config): unknown ref or empty pool → `failed_precondition`,
+/// unsupported-yet mode/order/filter → `unimplemented`, a mistyped filter or
+/// unparsable stored TOML → `invalid_argument`. Infrastructure is ours →
+/// `internal`.
+fn map_next_error(e: EngineError) -> Status {
+    use crate::selection::SelectionError as S;
+    match &e {
+        EngineError::Selection(S::PlaylistNotFound(_)) | EngineError::Selection(S::PoolEmpty) => {
+            Status::failed_precondition(e.to_string())
+        }
+        EngineError::Selection(S::UnsupportedMode(_))
+        | EngineError::Selection(S::UnsupportedOrder(_))
+        | EngineError::Selection(S::UnsupportedFilter { .. }) => Status::unimplemented(e.to_string()),
+        EngineError::Selection(S::BadFilterValue { .. }) | EngineError::Selection(S::Parse(_)) => {
+            Status::invalid_argument(e.to_string())
+        }
+        _ => Status::internal(e.to_string()),
+    }
+}
+
 fn grid_files(files: Vec<GridFile>) -> Vec<(String, String)> {
     files.into_iter().map(|f| (f.path, f.toml)).collect()
 }
@@ -79,19 +100,20 @@ impl ScheduleService for ScheduleGrpc {
             Some(ts) => Epoch(ts.seconds),
             None => Epoch(now_epoch_seconds()),
         };
-        let decision = self
+        let resolved = self
             .engine
-            .next(now)
+            .next_media(now)
             .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(map_next_error)?;
+        let d = resolved.decision;
 
         Ok(Response::new(Decision {
-            // The grid resolves a source; turning a playlist_ref into a concrete
-            // media file is the downstream selection stage, not wired here yet.
-            media_path: String::new(),
-            playlist_ref: decision.playlist_ref.unwrap_or_default(),
-            rule_id: decision.rule_id.unwrap_or_default(),
-            origin: map_origin(decision.origin) as i32,
+            // The grid resolves a source; the selection stage turns that
+            // playlist_ref into a concrete media file (empty on a fallback).
+            media_path: resolved.media_path.unwrap_or_default(),
+            playlist_ref: d.playlist_ref.unwrap_or_default(),
+            rule_id: d.rule_id.unwrap_or_default(),
+            origin: map_origin(d.origin) as i32,
         }))
     }
 

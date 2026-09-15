@@ -234,6 +234,9 @@ async fn main() -> anyhow::Result<()> {
             if !reply.rule_id.is_empty() {
                 println!("rule:          {}", reply.rule_id);
             }
+            if !reply.media_path.is_empty() {
+                println!("media:         {}", reply.media_path);
+            }
         }
         Command::Schedule(ScheduleCommand::Validate { path }) => {
             let content = read_grid_toml(&path)?;

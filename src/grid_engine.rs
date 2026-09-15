@@ -35,6 +35,8 @@ pub enum EngineError {
     Clock(#[from] ClockError),
     #[error(transparent)]
     Sqlx(#[from] sqlx::Error),
+    #[error(transparent)]
+    Selection(#[from] crate::selection::SelectionError),
 }
 
 /// Splits infrastructure failure (→ gRPC `internal`) from a rejected grid
@@ -65,6 +67,15 @@ pub struct PreviewOccurrence {
     pub origin: Origin,
     pub rule_id: String,
     pub playlist_ref: String,
+}
+
+/// A grid decision plus the concrete media it resolves to (see
+/// [`GridEngine::next_media`]). `media_path` is `None` only for a fallback
+/// decision (no active source → Liquidsoap's safety net fills the air).
+#[derive(Debug, Clone)]
+pub struct ResolvedDecision {
+    pub decision: GridDecision,
+    pub media_path: Option<String>,
 }
 
 impl GridEngine {
@@ -242,6 +253,24 @@ impl GridEngine {
             }
         }
         Ok(decision)
+    }
+
+    /// Resolve a full decision AND the concrete media to pull: `next` decides
+    /// the source, the selection stage turns that `playlist_ref` into a media
+    /// file. A `Fallback` decision (no ref) yields `media_path = None` — the
+    /// Liquidsoap safety fallback fills the air, never a silent gap.
+    ///
+    /// Ordering note: `next` persists its side effects (a consumed AtClock
+    /// mark, an Every reset) before selection runs; if selection then fails,
+    /// the grid state has already advanced. Acceptable at this milestone (a
+    /// dev/CLI path); revisit when the live loop drives Liquidsoap.
+    pub async fn next_media(&self, now: Epoch) -> Result<ResolvedDecision, EngineError> {
+        let decision = self.next(now).await?;
+        let media_path = match &decision.playlist_ref {
+            Some(r) => Some(crate::selection::resolve_ref(&self.pool, r).await?),
+            None => None,
+        };
+        Ok(ResolvedDecision { decision, media_path })
     }
 }
 

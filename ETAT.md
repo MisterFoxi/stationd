@@ -5,7 +5,7 @@ sans reconstruire le contexte. À distinguer des docs de `Doc/` (décisions
 d'architecture durables) : ce fichier-ci est volatil, à mettre à jour à
 chaque session.
 
-Dernière mise à jour : 2026-09-14.
+Dernière mise à jour : 2026-09-15.
 
 
 ## Ajout : TUI d'administration (correctif préparé, compilation à confirmer)
@@ -33,34 +33,66 @@ La **grille est pilotable de bout en bout en CLI**, projection comprise :
 UTC + local nommé (test anti-DST 2026-10-25 : 02:30 deux fois, epochs
 distincts). Cœur pur (`resolve_next`, `clock`/DST `jiff`, familles A/B) vert,
 grammaire + les 6 RPC réels. `cargo build` + `cargo test -p stationd` OK.
-Biblio média scannée et pilotable au CLI (`library scan|list`), table `media`
-peuplée et validée en réel. Reste l'étage sélection `playlist_ref` → média
-(`Decision.media_path` vide).
+Biblio média scannée et pilotable au CLI (`library scan|list`). **Étage
+sélection livré** : `playlist_ref` → `media_path` concret (shuffle, sequential,
+newest/oldest via curseur, groupe `sequence`). Validé en réel de bout en bout :
+grille → groupe intro / épisode le plus récent / outro → fichiers réels.
 
 ---
 
 ## ⭐ TÂCHE D'ENTRÉE PROCHAINE SESSION
 
-**Étage sélection : `playlist_ref` → média concret.** Le scan biblio est en
-place et validé en réel (table `media` peuplée, atteignable au CLI) ; la grille
-résout déjà *quelle source* mais `Decision.media_path` reste vide. C'est le
-moteur de sélection du slice playlist :
+**Trois chantiers ouverts, au choix :**
 
-1. Résoudre le pool d'une playlist depuis la table `media` (available only) +
-   politique d'ordre (`shuffle`/`sequential`/`newest`/`oldest`) + anti-répétition
-   (`no_same_artist_within`, `no_same_track_within`). Brancher sur
-   `GridEngine::next` pour remplir `media_path`. Sans ça, rien à tendre à
-   Liquidsoap.
-2. **`DayPart` cross-minuit** : `window_covers` renvoie `None` (TODO) — bloquant
-   pour une base de nuit 22:00→06:00.
-3. **Refacto acteur `GridEngine`** : tâche tokio possédante, grille en mémoire
+1. **Câblage Liquidsoap** : `request.dynamic` + fallback. La grille sait
+   maintenant rendre un `media_path` concret (`schedule next`), il manque
+   l'exécutant qui le tend à Liquidsoap. C'est le vrai « ça diffuse » suivant.
+2. **Refacto acteur `GridEngine`** : tâche tokio possédante, grille en mémoire
    invalidée à l'apply, mutations par mpsc. **Gabarit déjà écrit** :
-   `library_actor.rs` (spawn + Handle + mpsc<Command>) — le recopier.
-4. Puis câblage Liquidsoap (`request.dynamic` + fallback).
+   `library_actor.rs` (spawn + Handle + mpsc<Command>).
+3. **`DayPart` cross-minuit** : `window_covers` renvoie `None` (TODO) — bloquant
+   pour une base de nuit 22:00→06:00. Petit, bien cerné.
+
+Sélection : reste au besoin — anti-répétition (`constraints`) et `unplayed_only`
+(réclament l'historique de diffusion, famille B jamais posée — cf. 0004 absent),
+`limit`/quota par activation, groupes `weighted`/`rotate`/imbriqués,
+`queue`/`remote`, et la résolution des refs de membres relatives au dossier du
+groupe (aujourd'hui chemin complet obligatoire).
 
 ---
 
 ## Fait
+
+### — Étage sélection : playlist_ref → média concret (2026-09-15) —
+
+Bout-en-bout **grille → média concret** enfin bouclé. `GridEngine::next_media`
+enrichit la décision d'un `media_path` ; `schedule next` l'affiche. Validé en
+réel : groupe `homestone-chronicles` → intro (un parmi N) / dernier épisode /
+outro, sur des fichiers réels rangés en sous-dossiers.
+
+- `src/selection.rs` (traducteur filtres pur + résolution DB, ~20 tests) :
+  `resolve_ref(pool, ref)` → charge le TOML de la vue, parse, résout.
+  - **Filtres dynamiques** → SQL paramétré, catalogue FERMÉ (path/title/artist/
+    album/genre/year/duration) ; field/op/valeur hors catalogue = erreur
+    bruyante. `match all/any`.
+  - **shuffle** stateless (`ORDER BY random()`). **newest** sans `unplayed_only`
+    = toujours le plus récent (tête, stateless). **sequential**/**oldest** =
+    curseur de parcours qui avance et boucle.
+  - **groupe `sequence`** : une piste par tour, `take` respecté, wrap = nouvelle
+    activation ; membres feuilles résolus SANS récursion async (via
+    `resolve_leaf`). `weighted`/`rotate`/imbriqués → erreurs explicites.
+  - Non honorés : `unplayed_only`, `order_by=published` (loud errors) ;
+    `constraints`, `limit` (tolérés, pas appliqués — famille B absente).
+- `migrations/0008_playlist_cursor.sql` + `src/playlist_cursor.rs` : curseur
+  (dernier rel_path rendu, robuste aux changements de pool). **Famille (B)**.
+- `migrations/0009_group_state.sql` + `src/group_state.rs` : état de passage
+  d'un groupe (member_idx, take_count). **Famille (B)**.
+- `src/grid_engine.rs` : `next_media` + `ResolvedDecision`. Caveat documenté :
+  `next()` persiste ses effets AVANT la sélection (chemin dev/CLI).
+- `src/schedule_grpc.rs` : `resolve_next` remplit `media_path` ; mapping erreurs
+  (ref inconnue → `failed_precondition`, non-supporté → `unimplemented`, valeur
+  → `invalid_argument`). `stationctl schedule next` affiche `media:`.
+- `src/store.rs` : `playlist_toml_by_ref`.
 
 ### — Slice gRPC + CLI de la biblio (2026-09-14) —
 
@@ -259,11 +291,17 @@ dans le découpage des modules (`grid_index` = A, `grid_store` = B).
 ## Reste à faire
 
 ### Grille / scheduler (suite directe)
-- **Étage sélection** : `playlist_ref` → média concret (le `Decision.media_path`
-  est vide pour l'instant ; c'est le moteur de sélection du slice playlist).
 - **Refacto acteur** : `GridEngine` en tâche tokio possédante, grille en
-  mémoire invalidée à l'apply, mutations par mpsc.
+  mémoire invalidée à l'apply, mutations par mpsc (gabarit `library_actor`).
 - **`DayPart` cross-minuit** : `window_covers` renvoie `None` (TODO signalé).
+- **Sélection — suite** : anti-répétition (`constraints`) + `unplayed_only`
+  (réclament l'historique famille B), `limit`/quota par activation, groupes
+  `weighted`/`rotate`/imbriqués, `queue`/`remote`.
+- **Refs de membres relatives au dossier du groupe** : `normalize_ref` ne
+  résout pas un `ref` de membre relativement à l'emplacement du groupe — il
+  faut aujourd'hui le chemin complet
+  (`homestone-chronicles/homestone-chronicles-intro`). À trancher : résolution
+  relative ou refs toujours absolues.
 
 ### Playlists (périmètre existant)
 - Compiler+servir `playlist_v1.proto` (nouveau contrat) et migrer le code
@@ -282,7 +320,7 @@ dans le découpage des modules (`grid_index` = A, `grid_store` = B).
 
 ## Pièges & points de vigilance
 
-- **Base de dev à recréer** : migrations `0005`→`0007` sont neuves. En cas de
+- **Base de dev à recréer** : migrations `0005`→`0009` sont neuves. En cas de
   souci de schéma/checksum sqlx, `rm -rf data/` + relancer (file-first, la vue
   est jetable). Ne JAMAIS éditer une migration déjà appliquée en prod.
 - **`0004` manquant** : le fichier de migration de la vue riche playlists est
@@ -290,6 +328,10 @@ dans le découpage des modules (`grid_index` = A, `grid_store` = B).
   socle SQL tant que ce n'est pas retranché.
 - **`lofty` ajouté** : premier `cargo build` doit actualiser `Cargo.lock`
   (Rust indispo dans l'env de préparation).
+- **Refs de membres = chemin complet** : un `ref` de membre de groupe doit être
+  le rel_path complet (`homestone-chronicles/homestone-chronicles-intro`), pas
+  relatif au dossier du groupe. Un ref court résout une clé absente → PoolEmpty
+  ou PlaylistNotFound. (cf. Reste à faire.)
 - **Casse des chemins** : `media.rel_path` CONSERVE la casse (fichiers réels,
   FS potentiellement sensible à la casse) ; les refs playlists sont, elles,
   normalisées en minuscules. Ne pas traiter les deux pareil.
@@ -323,6 +365,9 @@ dans le découpage des modules (`grid_index` = A, `grid_store` = B).
 | `src/store.rs` / `src/sync.rs` | Vue playlists / réconciliation |
 | `src/media.rs` | Scan biblio **pur** (walkdir + lofty → `ScanReport`, 5 tests) |
 | `src/media_index.rs` | Vue média famille (A) : `replace_library` (réconciliation) / `list` (4 tests) |
+| `src/selection.rs` | Étage sélection `playlist_ref`→média : filtres, ordres, curseur, groupe sequence (~20 tests) |
+| `src/playlist_cursor.rs` | Curseur de parcours famille (B) : dernier média rendu |
+| `src/group_state.rs` | État de passage d'un groupe sequence famille (B) |
 | `src/library_actor.rs` | Acteur biblio possédant (mpsc, spawn_blocking) — gabarit refacto |
 | `src/library_grpc.rs` | Transport gRPC biblio (traducteur mince acteur↔proto) |
 | `src/grpc.rs` | Service `Station` (status/quit/playlist*) |
@@ -334,6 +379,6 @@ dans le découpage des modules (`grid_index` = A, `grid_store` = B).
 | `proto/library_v1.proto` | Contrat `LibraryService` (compilé/servi ; Scan + ListMedia) |
 | `Doc/proposition-grammaire-grille-v1.md` | Contrat grammaire `grid.toml` (référence durable) |
 | `proto/playlist_v1.proto` | Contrat playlist v1 (⚠ pas encore compilé/servi) |
-| `migrations/0001→0007` | Schéma (0005 état grille, 0006 règles, 0007 biblio média ; ⚠ 0004 absent) |
+| `migrations/0001→0009` | Schéma (0005 état grille, 0006 règles, 0007 biblio, 0008 curseur, 0009 groupe ; ⚠ 0004 absent) |
 | `tests/sync.rs` | Intégration `sync` |
 | `Doc/*.md` | Décisions d'architecture (référence durable) |

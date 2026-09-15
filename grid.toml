@@ -9,33 +9,9 @@
 
 schema_version = 1
 
-# ── Le plancher : tourne quand rien d'autre ne s'applique ───────────────────
-[[rule]]
-id           = "plancher"
-kind         = "base_rotation"
-playlist_ref = "test"
 
-# ── Homestone chronicles : le dimanche 20:00–21:00 ──────────────────────────
-# (borne molle : la dernière piste déborde, jamais de coupe)
+
 [[rule]]
-id           = "homestone"
-kind         = "day_part"
+id = "floor"
+kind = "base_rotation"
 playlist_ref = "homestone-chronicles/homestone-chronicles"
-start        = "20:00"
-end          = "21:00"
-days         = ["sun"]
-
-# ── Intro calée montre : à :00 :30, attend la fin de piste ──────────────────
-[[rule]]
-id            = "intro-horaire"
-kind          = "at_clock"
-playlist_ref  = "homestone-chronicles/homestone-chronicles-intro"
-every_minutes = 30
-mode          = "soft"
-
-# ── Outro : au moins toutes les 4 pistes (cadence glissante) ────────────────
-[[rule]]
-id           = "outro-cadence"
-kind         = "every"
-playlist_ref = "homestone-chronicles/homestone-chronicles-outro"
-min_tracks   = 4
