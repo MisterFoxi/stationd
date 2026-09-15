@@ -37,36 +37,73 @@ Biblio média scannée et pilotable au CLI (`library scan|list`). **Étage
 sélection livré** : `playlist_ref` → `media_path` concret (shuffle, sequential,
 newest/oldest via curseur, groupe `sequence`). Validé en réel de bout en bout :
 grille → groupe intro / épisode le plus récent / outro → fichiers réels.
-**Système de plugins A1** : trait `Plugin`, acteur à état
-(`loaded`/`disabled`/`failed`/`quarantined`), `on_event` sur `TrackResolved`,
-`stationctl plugin list|start|stop|restart|reload`, plugin `logger` validé en
-réel. Contrats figés dans `Doc/plugin-{events,hooks,host}.md`.
+**Système de plugins** : A1 (registre, cycle de vie, `on_event`) + **hook
+`filter_pool`** (le pool est matérialisé puis filtré par les plugins avant le
+choix) + **runtime WASM (WASM-1)** — un `.wasm` externe (extism) implémente le
+trait via JSON. `stationctl plugin list|start|stop|restart|reload`, plugins
+`logger`/`blacklist` (natifs) et `require-title` (wasm) validés en réel.
+Contrats figés dans `Doc/plugin-{events,hooks,host}.md`.
 
 ---
 
 ## ⭐ TÂCHE D'ENTRÉE PROCHAINE SESSION
 
-**Plugins A2 — la surface hôte + les hooks synchrones.** A1 (registre, cycle de
-vie, `on_event`) tourne. Suite, dans l'ordre de valeur :
+**Plugins — suite, au choix :**
 
-1. **Hook `filter_pool`** (le plus utile) : laisser un plugin filtrer/pondérer
-   le pool dans `selection`. **Synchrone** (retourne une valeur dans le chemin
-   de décision) → NE peut PAS passer par l'acteur fire-and-forget d'A1 ; à
-   concevoir (requête/réponse bornée, ou `Arc<Mutex>` partagé). Idem `on_scan`.
-2. **Surface hôte** (`Doc/plugin-host.md`) : `control` (Stop/Pause/Resume/
-   StopWhenIdle, first-class station + invocable plugin), `push_override`
-   (file lue par `next_media`, `soft` honoré / `hard`→LS), base par plugin
-   (ouverte par le core, kv/query). Puis le plugin `stop-when-idle` en
-   démonstration (compose `on_event(ListenersSampled)` + `control`).
-3. **Runtime WASM** (`extism`/`wasmtime`) : faire implémenter le trait par un
-   `.wasm`, `reload` diverge alors de `restart`.
+1. **Config → guest** (reporté de WASM-1) : plumbing config d'un plugin wasm
+   (`Manifest` config extism côté host + lecture `extism_pdk::config` côté
+   guest), puis réécrire `blacklist` en `.wasm` configurable. **+ crate de
+   types partagé** (`Candidate`/`PluginEvent`) pour ne plus les dupliquer entre
+   host et guest (aujourd'hui recopiés dans `plugins/require-title-wasm`).
+2. **A2 — surface hôte** (`Doc/plugin-host.md`, *host functions* extism) :
+   `control` (Stop/Pause/Resume/StopWhenIdle, first-class station + invocable
+   plugin), `push_override` (file lue par `next_media`, `soft` honoré /
+   `hard`→LS), base par plugin. Puis le plugin `stop-when-idle` en démo
+   (`on_event(ListenersSampled)` + `control`) — note : `ListenersSampled` n'aura
+   de vraie source qu'avec Icecast, tester par injection.
+3. **`on_scan`** : dernier hook non câblé (enrichissement au scan biblio).
 
-Autres chantiers ouverts (indépendants) : câblage Liquidsoap (le vrai « ça
-diffuse »), refacto acteur `GridEngine`, `DayPart` cross-minuit.
+Autres chantiers indépendants : câblage Liquidsoap (le vrai « ça diffuse »),
+refacto acteur `GridEngine`, `DayPart` cross-minuit, historique de diffusion
+(famille B) qui débloque `constraints`/`unplayed_only`/`limit`.
 
 ---
 
 ## Fait
+
+### — filter_pool + runtime WASM (WASM-1) (2026-09-15) —
+
+Le hook qui *influence* la décision, puis le premier plugin `.wasm` externe.
+Validé en réel : `require-title` (wasm) retire du pool les fichiers sans titre,
+round-trip host→wasm→host confirmé (JSON, titres préservés).
+
+- **`filter_pool`** câblé dans `selection.rs` : le pool est **matérialisé**
+  (`Vec<Candidate>` : rel_path/artist/title/album/year/duration/**genres**/mtime,
+  genres via 2ᵉ requête) → passé aux plugins → puis choix (shuffle=`rand`,
+  sequential/oldest=curseur, newest=tête). `resolve_ref_with_plugins` côté
+  moteur, `resolve_ref` (plugins=None) côté tests. **Fail-closed (choix (b))** :
+  un filtre qui vide un pool non-vide → `PoolEmpty` remonte (fallback grille),
+  **+ warning** `tracing::warn` explicite avec le playlist responsable.
+- **Acteur plugins** : message `FilterPool` synchrone (oneshot), chaînage par
+  `order`, panique → pass-through + quarantaine. `Plugin::filter_pool` (défaut
+  identité). `Candidate` + `PluginEvent` dérivent `Serialize`/`Deserialize`.
+- **WASM** : `Cargo.toml` + `extism = "1"` (tire wasmtime 43, build lourd) +
+  `serde_json`. `WasmPlugin` (host) : `Manifest::new([Wasm::file])` →
+  `Plugin::new(&m, [], false)` → `call::<&str,String>(export, json)`.
+  `extism::Plugin` est **Send+Sync** → vit dans l'acteur tokio sans thread
+  dédié. Exports optionnels `filter_pool`/`on_event` (absent → pass-through /
+  ignore), erreur de frontière → dégradé. `PluginDecl.wasm = Option<String>`
+  (chemin) ; présent → wasm, absent → built-in par `name`.
+- **Plugin natif `blacklist`** : `exclude_path_prefixes`/`exclude_artists`
+  (via `filter_pool`), + test.
+- **Crate guest** `plugins/require-title-wasm/` (SÉPARÉ, `[workspace]` vide,
+  cible `wasm32-unknown-unknown`, extism-pdk) : exporte `filter_pool`. Struct
+  `Candidate` DUPLIQUÉE de l'host (→ crate de types partagé = TODO).
+- `.gitignore` : `target/` récursif (attrape le `target/` du crate wasm).
+
+Non fait (reporté) : config→guest (`Manifest.with_config`), host functions
+(A2), `on_scan`. Pas de test host du `WasmPlugin` (`cargo test` ne compile pas
+le wasm) — validé en réel.
 
 ### — Système de plugins A1 : registre, cycle de vie, events (2026-09-15) —
 
@@ -402,8 +439,9 @@ dans le découpage des modules (`grid_index` = A, `grid_store` = B).
 | `src/group_state.rs` | État de passage d'un groupe sequence famille (B) |
 | `src/library_actor.rs` | Acteur biblio possédant (mpsc, spawn_blocking) — gabarit refacto |
 | `src/library_grpc.rs` | Transport gRPC biblio (traducteur mince acteur↔proto) |
-| `src/plugin.rs` | Système de plugins A1 : trait, acteur à état, quarantaine, logger (7 tests) |
+| `src/plugin.rs` | Système de plugins : trait, acteur à état, quarantaine, `filter_pool`, `WasmPlugin` (extism), natifs logger/blacklist |
 | `src/plugin_grpc.rs` | Transport gRPC plugins (list + control) |
+| `plugins/require-title-wasm/` | Crate guest WASM de démo (séparé, cible wasm32) : exporte `filter_pool` |
 | `src/grpc.rs` | Service `Station` (status/quit/playlist*) |
 | `src/db.rs` | Init pool SQLite + migrations |
 | `src/main.rs` | Daemon : démarrage, 5 services gRPC, shutdown |

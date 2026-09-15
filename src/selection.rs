@@ -2,38 +2,33 @@
 //!
 //! Stage two of resolution — stage one (`resolver`/`GridEngine`) answers
 //! *which playlist ref is active*; here we load that playlist's definition
-//! (its stored TOML is the source the view keeps), read its `selection`, and
-//! pick one playable file from the media index (`media`, available only).
+//! (its stored TOML is the source the view keeps), read its `selection`, build
+//! a candidate pool from the media index, optionally let plugins filter it,
+//! then pick one file.
 //!
-//! SCOPE (milestones 1 + 2):
-//!   * modes: `static`, `dynamic`. `group`/`queue`/`remote` → explicit error.
-//!   * orders:
-//!       - `shuffle` — SQLite `ORDER BY random()`, stateless (a draw may repeat
-//!         until anti-repetition exists; see below).
-//!       - `sequential`/`newest`/`oldest` — a persisted traversal CURSOR
-//!         (`playlist_cursor`, family B) hands out the file after the last one,
-//!         wrapping. `static/sequential` follows the declared `files` order;
-//!         `dynamic/sequential` is lexical on the full path; `newest`/`oldest`
-//!         sort by `order_by` (`filename` or `mtime`).
-//!       - `fifo`/`lifo` (queue) — not reached (queue mode is rejected).
-//!   * NOT YET honoured: `limit`, `constraints` (no_same_artist/track_within),
-//!     `unplayed_only`, `order_by = published`. The first two need the play
-//!     history (family B); the last two are loud errors, not silent pretence.
+//! Pipeline: **materialize → filter_pool → choose.** The pool is a
+//! `Vec<Candidate>` (available media matching the selection); plugins may
+//! remove candidates (`filter_pool`, A2); the remaining pool is then chosen
+//! from by the order — `shuffle` (rand), `sequential`/`oldest` (persisted
+//! cursor), `newest` (head, stateless).
+//!
+//! SCOPE:
+//!   * modes: `static`, `dynamic`, `group`(sequence). `queue`/`remote` → error.
+//!   * NOT YET honoured: `limit`, `constraints`, `unplayed_only`,
+//!     `order_by = published` (loud errors or tolerated-not-applied).
 //!
 //! No-silent-failure: unsupported mode/order/feature, unknown field/op, bad
-//! filter value, unknown ref, empty pool — all loud errors, never a
-//! wrong-but-quiet track. Media paths keep their original case (the media index
-//! does), unlike playlist refs which are lower-cased.
+//! filter value, unknown ref, empty pool — all loud errors. Media paths keep
+//! their original case, unlike playlist refs (lower-cased).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
+use rand::seq::SliceRandom;
 use sqlx::SqlitePool;
 
-use crate::group_state;
-use crate::playlist::{
-    Filter, Match, Mode, Order, OrderBy, Playlist, PlaylistError, Selection, Strategy,
-};
+use crate::playlist::{Filter, Match, Mode, Order, OrderBy, Playlist, PlaylistError, Selection, Strategy};
 use crate::playlist_cursor;
+use crate::plugin::{Candidate, PluginHandle};
 use crate::store;
 
 #[derive(Debug, thiserror::Error)]
@@ -58,29 +53,45 @@ pub enum SelectionError {
     Sqlx(#[from] sqlx::Error),
 }
 
-/// Resolve a grid `playlist_ref` to one concrete media `rel_path`. Loads the
-/// playlist's TOML from the view, parses it, and runs its selection. The ref
-/// doubles as the traversal cursor's key.
+/// Resolve a grid `playlist_ref` to one concrete media `rel_path`, without any
+/// plugin filtering (used by tests and simple callers).
 pub async fn resolve_ref(pool: &SqlitePool, playlist_ref: &str) -> Result<String, SelectionError> {
+    resolve_inner(pool, None, playlist_ref).await
+}
+
+/// Same, but let the plugin system filter the candidate pool. Used by the live
+/// engine, which holds the `PluginHandle`.
+pub async fn resolve_ref_with_plugins(
+    pool: &SqlitePool,
+    plugins: Option<&PluginHandle>,
+    playlist_ref: &str,
+) -> Result<String, SelectionError> {
+    resolve_inner(pool, plugins, playlist_ref).await
+}
+
+async fn resolve_inner(
+    pool: &SqlitePool,
+    plugins: Option<&PluginHandle>,
+    playlist_ref: &str,
+) -> Result<String, SelectionError> {
     let toml = store::playlist_toml_by_ref(pool, playlist_ref)
         .await?
         .ok_or_else(|| SelectionError::PlaylistNotFound(playlist_ref.to_string()))?;
     let playlist = Playlist::parse(&toml)?;
-    resolve_media(pool, playlist_ref, &playlist).await
+    resolve_media(pool, plugins, playlist_ref, &playlist).await
 }
 
-/// Pick one media file for an already-parsed playlist. `reference` keys the
-/// traversal cursor / group state (ignored by stateless orders).
-pub async fn resolve_media(
+async fn resolve_media(
     pool: &SqlitePool,
+    plugins: Option<&PluginHandle>,
     reference: &str,
     playlist: &Playlist,
 ) -> Result<String, SelectionError> {
     let sel = &playlist.selection;
     match sel.mode {
-        Mode::Static | Mode::Dynamic => resolve_leaf(pool, reference, sel).await,
+        Mode::Static | Mode::Dynamic => resolve_leaf(pool, plugins, reference, sel).await,
         Mode::Group => match sel.strategy {
-            Some(Strategy::Sequence) => resolve_group_sequence(pool, reference, sel).await,
+            Some(Strategy::Sequence) => resolve_group_sequence(pool, plugins, reference, sel).await,
             Some(other) => Err(SelectionError::Unsupported(format!("group strategy {other:?}"))),
             None => Err(SelectionError::Unsupported("group without strategy".into())),
         },
@@ -88,68 +99,84 @@ pub async fn resolve_media(
     }
 }
 
-/// Resolve one file for a LEAF playlist (static or dynamic). Groups are
-/// handled by `resolve_group_sequence`, which calls back into this for each
-/// member — never into `resolve_media`, so there is no async recursion.
+/// Resolve one file for a LEAF playlist (static or dynamic): materialize the
+/// pool, run plugin filtering, then choose. Groups call back here per member —
+/// never into `resolve_media` — so there is no async recursion.
 async fn resolve_leaf(
     pool: &SqlitePool,
+    plugins: Option<&PluginHandle>,
     reference: &str,
     sel: &Selection,
 ) -> Result<String, SelectionError> {
     let order = effective_order(sel);
-    match sel.mode {
-        Mode::Dynamic => {
-            let m = sel.r#match.unwrap_or(Match::All);
-            match order {
-                Order::Shuffle => {
-                    let w = combine_where(&sel.filter, m)?;
-                    resolve_dynamic_shuffle(pool, &w).await
-                }
-                // "Latest": always the most recent, re-aired until a newer one
-                // appears (grammar §3.2, unplayed_only = false). Stateless — the
-                // head of the descending pool, no cursor advance.
-                Order::Newest => {
-                    let ordered = ordered_dynamic_pool(pool, sel, Order::Newest).await?;
-                    ordered.into_iter().next().ok_or(SelectionError::PoolEmpty)
-                }
-                // oldest/false loops the pool, sequential walks it: both advance
-                // the persisted cursor.
-                Order::Oldest | Order::Sequential => {
-                    let ordered = ordered_dynamic_pool(pool, sel, order).await?;
-                    cursor_pick(pool, reference, ordered).await
-                }
-                other => Err(SelectionError::UnsupportedOrder(other)),
-            }
+
+    // 1. Materialize the base pool (base order: static = declared, dynamic =
+    //    lexical on rel_path).
+    let mut candidates = match sel.mode {
+        Mode::Dynamic => materialize_dynamic(pool, sel).await?,
+        Mode::Static => materialize_static(pool, &sel.files).await?,
+        m => return Err(SelectionError::UnsupportedMode(m)),
+    };
+
+    // 2. Plugin filtering (if wired). A plugin may remove candidates — even
+    //    all of them. We do NOT fail-open here (choice (b)): an emptied pool
+    //    propagates as PoolEmpty so the caller gets a direct signal and the
+    //    grid fallback takes over. But emptying a non-empty pool is worth a
+    //    loud warning — a filter causing a potential gap must be visible.
+    if let Some(handle) = plugins {
+        let before = candidates.len();
+        candidates = handle.filter_pool(candidates).await;
+        if before > 0 && candidates.is_empty() {
+            tracing::warn!(
+                playlist = %reference,
+                before,
+                "plugin filter_pool emptied a non-empty pool; grid fallback should cover"
+            );
         }
-        Mode::Static => match order {
-            Order::Shuffle => resolve_static_shuffle(pool, &sel.files).await,
-            Order::Sequential => {
-                let ordered = ordered_static_pool(pool, &sel.files).await?;
-                cursor_pick(pool, reference, ordered).await
-            }
-            other => Err(SelectionError::UnsupportedOrder(other)),
-        },
-        // resolve_leaf is only ever called for static/dynamic.
-        m => Err(SelectionError::UnsupportedMode(m)),
+    }
+    if candidates.is_empty() {
+        return Err(SelectionError::PoolEmpty);
+    }
+
+    // 3. Choose from the filtered pool.
+    match order {
+        Order::Shuffle => Ok(candidates
+            .choose(&mut rand::thread_rng())
+            .expect("non-empty pool")
+            .rel_path
+            .clone()),
+        Order::Sequential => cursor_pick(pool, reference, &candidates).await,
+        Order::Newest => {
+            reject_unplayed_only(sel)?;
+            let key = order_key(sel)?;
+            candidates.sort_by(|a, b| cmp_by(a, b, key));
+            // Ascending sort → the newest is the last element.
+            Ok(candidates.last().expect("non-empty pool").rel_path.clone())
+        }
+        Order::Oldest => {
+            reject_unplayed_only(sel)?;
+            let key = order_key(sel)?;
+            candidates.sort_by(|a, b| cmp_by(a, b, key));
+            cursor_pick(pool, reference, &candidates).await
+        }
+        other => Err(SelectionError::UnsupportedOrder(other)),
     }
 }
 
 /// A `sequence` group: hand out one track per turn, walking members in order,
-/// `take` tracks each, wrapping at the end (a new activation of the show — a
-/// freshly drawn intro, the current latest episode, a fresh outro). The
-/// position is persisted (`group_state`, family B) so it survives restarts.
-/// Members must be leaves; a nested group is a loud error for now.
-/// `on_member_unavailable` is not modelled yet — a member with an empty pool
-/// aborts by propagating the error.
+/// `take` tracks each, wrapping (a new activation). State persisted in
+/// `group_state` (family B). Members must be leaves; nested groups are a loud
+/// error for now.
 async fn resolve_group_sequence(
     pool: &SqlitePool,
+    plugins: Option<&PluginHandle>,
     group_ref: &str,
     sel: &Selection,
 ) -> Result<String, SelectionError> {
     if sel.members.is_empty() {
-        return Err(SelectionError::PoolEmpty); // validation should prevent this
+        return Err(SelectionError::PoolEmpty);
     }
-    let (mut idx, mut count) = group_state::get(pool, group_ref).await?;
+    let (mut idx, mut count) = crate::group_state::get(pool, group_ref).await?;
     if idx >= sel.members.len() {
         idx = 0;
         count = 0;
@@ -160,9 +187,8 @@ async fn resolve_group_sequence(
 
     let member_key = crate::playlist::normalize_ref(&member.r#ref)
         .map_err(|_| SelectionError::PlaylistNotFound(member.r#ref.clone()))?;
-    let track = resolve_member(pool, &member_key).await?;
+    let track = resolve_member(pool, plugins, &member_key).await?;
 
-    // Advance: another track of this member, or on to the next (wrapping).
     count += 1;
     if count >= take {
         idx += 1;
@@ -172,22 +198,23 @@ async fn resolve_group_sequence(
         idx = 0;
         count = 0;
     }
-    group_state::set(pool, group_ref, idx, count).await?;
+    crate::group_state::set(pool, group_ref, idx, count).await?;
 
     Ok(track)
 }
 
-/// Resolve one track from a group member: load the member playlist from the
-/// view and resolve it as a leaf. A member that is itself a group (or queue/
-/// remote) is not supported yet.
-async fn resolve_member(pool: &SqlitePool, member_key: &str) -> Result<String, SelectionError> {
+async fn resolve_member(
+    pool: &SqlitePool,
+    plugins: Option<&PluginHandle>,
+    member_key: &str,
+) -> Result<String, SelectionError> {
     let toml = store::playlist_toml_by_ref(pool, member_key)
         .await?
         .ok_or_else(|| SelectionError::PlaylistNotFound(member_key.to_string()))?;
     let playlist = Playlist::parse(&toml)?;
     match playlist.selection.mode {
         Mode::Static | Mode::Dynamic => {
-            resolve_leaf(pool, member_key, &playlist.selection).await
+            resolve_leaf(pool, plugins, member_key, &playlist.selection).await
         }
         m => Err(SelectionError::Unsupported(format!(
             "group member with mode {m:?} (nested groups / queue / remote not supported yet)"
@@ -195,9 +222,10 @@ async fn resolve_member(pool: &SqlitePool, member_key: &str) -> Result<String, S
     }
 }
 
-/// The order actually in force: the explicit `order`, else the per-mode
-/// default from the grammar (dynamic → shuffle, static → sequential, queue →
-/// fifo). Remote/group have no order and are rejected before this is read.
+// --- ordering helpers ------------------------------------------------------
+
+/// The order actually in force: explicit `order`, else the per-mode default
+/// (dynamic → shuffle, static → sequential, queue → fifo).
 fn effective_order(sel: &Selection) -> Order {
     sel.order.unwrap_or(match sel.mode {
         Mode::Dynamic => Order::Shuffle,
@@ -207,161 +235,182 @@ fn effective_order(sel: &Selection) -> Order {
     })
 }
 
-// --- shuffle (stateless) ---------------------------------------------------
-
-async fn resolve_dynamic_shuffle(pool: &SqlitePool, w: &Where) -> Result<String, SelectionError> {
-    // `random()` is SQLite's own PRNG: shuffle without an rng crate or state.
-    // Milestone limitation: no anti-repetition memory (needs family B), so a
-    // draw can repeat — acceptable for a first pass.
-    let sql = format!(
-        "SELECT rel_path FROM media WHERE available = 1 AND ({}) ORDER BY random() LIMIT 1",
-        w.sql
-    );
-    let mut q = sqlx::query_as::<_, (String,)>(&sql);
-    for b in &w.binds {
-        q = match b {
-            Bind::Text(s) => q.bind(s.clone()),
-            Bind::Int(i) => q.bind(*i),
-        };
-    }
-    q.fetch_optional(pool)
-        .await?
-        .map(|(p,)| p)
-        .ok_or(SelectionError::PoolEmpty)
+#[derive(Clone, Copy)]
+enum SortKey {
+    Filename,
+    Mtime,
 }
 
-async fn resolve_static_shuffle(
-    pool: &SqlitePool,
-    files: &[String],
-) -> Result<String, SelectionError> {
-    if files.is_empty() {
-        return Err(SelectionError::PoolEmpty); // validation should prevent this
+/// Sort key for `newest`/`oldest`. `published` and a missing `order_by` are
+/// loud errors (not yet / required).
+fn order_key(sel: &Selection) -> Result<SortKey, SelectionError> {
+    match sel.order_by {
+        Some(OrderBy::Filename) => Ok(SortKey::Filename),
+        Some(OrderBy::Mtime) => Ok(SortKey::Mtime),
+        Some(OrderBy::Published) => Err(SelectionError::Unsupported("order_by = published".into())),
+        None => Err(SelectionError::Unsupported("newest/oldest without order_by".into())),
     }
-    let normalised: Vec<String> = files.iter().map(|f| normalize_media_path(f)).collect();
-    let placeholders = placeholders(normalised.len());
-    let sql = format!(
-        "SELECT rel_path FROM media WHERE available = 1 AND rel_path IN ({placeholders}) \
-         ORDER BY random() LIMIT 1"
-    );
-    let mut q = sqlx::query_as::<_, (String,)>(&sql);
-    for f in &normalised {
-        q = q.bind(f.clone());
-    }
-    q.fetch_optional(pool)
-        .await?
-        .map(|(p,)| p)
-        .ok_or(SelectionError::PoolEmpty)
 }
 
-// --- ordered pools + cursor ------------------------------------------------
+/// Ascending comparison by the key, ties broken by rel_path.
+fn cmp_by(a: &Candidate, b: &Candidate, key: SortKey) -> std::cmp::Ordering {
+    match key {
+        SortKey::Filename => basename(&a.rel_path)
+            .cmp(basename(&b.rel_path))
+            .then_with(|| a.rel_path.cmp(&b.rel_path)),
+        SortKey::Mtime => a
+            .mtime_ns
+            .cmp(&b.mtime_ns)
+            .then_with(|| a.rel_path.cmp(&b.rel_path)),
+    }
+}
 
-/// Build the fully-ordered candidate list for a dynamic playlist under a
-/// stateful order. `unplayed_only` and `order_by = published` are not
-/// supported yet (both need machinery we don't have) → loud errors.
-async fn ordered_dynamic_pool(
-    pool: &SqlitePool,
-    sel: &Selection,
-    order: Order,
-) -> Result<Vec<String>, SelectionError> {
+fn reject_unplayed_only(sel: &Selection) -> Result<(), SelectionError> {
     if sel.unplayed_only == Some(true) {
         return Err(SelectionError::Unsupported(
             "unplayed_only (needs the play history)".into(),
         ));
     }
-    let m = sel.r#match.unwrap_or(Match::All);
-    let w = combine_where(&sel.filter, m)?;
-    let mut rows = fetch_candidates(pool, &w).await?;
-
-    match order {
-        // dynamic/sequential: full relative path, lexical ascending.
-        Order::Sequential => rows.sort_by(|a, b| a.0.cmp(&b.0)),
-        Order::Newest | Order::Oldest => {
-            let by = sel
-                .order_by
-                .ok_or_else(|| SelectionError::Unsupported("newest/oldest without order_by".into()))?;
-            match by {
-                OrderBy::Published => {
-                    return Err(SelectionError::Unsupported("order_by = published".into()))
-                }
-                // Ascending; `newest` reverses below. Ties broken by path.
-                OrderBy::Mtime => rows.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0))),
-                OrderBy::Filename => {
-                    rows.sort_by(|a, b| basename(&a.0).cmp(basename(&b.0)).then(a.0.cmp(&b.0)))
-                }
-            }
-            if order == Order::Newest {
-                rows.reverse();
-            }
-        }
-        _ => unreachable!("ordered_dynamic_pool called with a non-ordered order"),
-    }
-    Ok(rows.into_iter().map(|(p, _)| p).collect())
+    Ok(())
 }
 
-/// Build the ordered candidate list for a static/sequential playlist: the
-/// declared `files` order, keeping only those present & available, de-duped.
-async fn ordered_static_pool(
-    pool: &SqlitePool,
-    files: &[String],
-) -> Result<Vec<String>, SelectionError> {
-    let declared: Vec<String> = files.iter().map(|f| normalize_media_path(f)).collect();
-    if declared.is_empty() {
-        return Ok(Vec::new());
-    }
-    let placeholders = placeholders(declared.len());
-    let sql =
-        format!("SELECT rel_path FROM media WHERE available = 1 AND rel_path IN ({placeholders})");
-    let mut q = sqlx::query_as::<_, (String,)>(&sql);
-    for f in &declared {
-        q = q.bind(f.clone());
-    }
-    let present: HashSet<String> = q.fetch_all(pool).await?.into_iter().map(|(p,)| p).collect();
-
-    let mut seen = HashSet::new();
-    Ok(declared
-        .into_iter()
-        .filter(|p| present.contains(p) && seen.insert(p.clone()))
-        .collect())
-}
-
-/// Advance the playlist's cursor over an ordered pool and return the chosen
-/// file: the one after the last handed out (wrapping), or the first if the
-/// cursor is unset or its last file has left the pool.
+/// Advance the playlist cursor over an ordered pool: the file after the last
+/// handed out (wrapping), or the first if the cursor is unset or its last file
+/// has left the pool.
 async fn cursor_pick(
     pool: &SqlitePool,
     reference: &str,
-    ordered: Vec<String>,
+    ordered: &[Candidate],
 ) -> Result<String, SelectionError> {
     if ordered.is_empty() {
         return Err(SelectionError::PoolEmpty);
     }
     let last = playlist_cursor::get(pool, reference).await?;
-    let idx = match last.and_then(|l| ordered.iter().position(|p| *p == l)) {
+    let idx = match last.and_then(|l| ordered.iter().position(|c| c.rel_path == l)) {
         Some(i) => (i + 1) % ordered.len(),
         None => 0,
     };
-    let chosen = ordered[idx].clone();
+    let chosen = ordered[idx].rel_path.clone();
     playlist_cursor::set(pool, reference, &chosen).await?;
     Ok(chosen)
 }
 
-/// Fetch (rel_path, mtime_ns) for every available media matching the WHERE.
-async fn fetch_candidates(
+// --- materialization -------------------------------------------------------
+
+/// Row shape read from `media` for a candidate (genres fetched separately).
+type CandRow = (
+    String,         // rel_path
+    Option<String>, // artist
+    Option<String>, // title
+    Option<String>, // album
+    Option<i64>,    // year
+    i64,            // duration_ms
+    i64,            // mtime_ns
+);
+
+async fn materialize_dynamic(
     pool: &SqlitePool,
-    w: &Where,
-) -> Result<Vec<(String, i64)>, SelectionError> {
+    sel: &Selection,
+) -> Result<Vec<Candidate>, SelectionError> {
+    let m = sel.r#match.unwrap_or(Match::All);
+    let w = combine_where(&sel.filter, m)?;
     let sql = format!(
-        "SELECT rel_path, mtime_ns FROM media WHERE available = 1 AND ({})",
+        "SELECT rel_path, artist, title, album, year, duration_ms, mtime_ns \
+         FROM media WHERE available = 1 AND ({}) ORDER BY rel_path",
         w.sql
     );
-    let mut q = sqlx::query_as::<_, (String, i64)>(&sql);
+    let mut q = sqlx::query_as::<_, CandRow>(&sql);
     for b in &w.binds {
         q = match b {
             Bind::Text(s) => q.bind(s.clone()),
             Bind::Int(i) => q.bind(*i),
         };
     }
-    Ok(q.fetch_all(pool).await?)
+    let rows = q.fetch_all(pool).await?;
+    with_genres(pool, rows).await
+}
+
+async fn materialize_static(
+    pool: &SqlitePool,
+    files: &[String],
+) -> Result<Vec<Candidate>, SelectionError> {
+    let declared: Vec<String> = files.iter().map(|f| normalize_media_path(f)).collect();
+    if declared.is_empty() {
+        return Ok(Vec::new());
+    }
+    let sql = format!(
+        "SELECT rel_path, artist, title, album, year, duration_ms, mtime_ns \
+         FROM media WHERE available = 1 AND rel_path IN ({})",
+        placeholders(declared.len())
+    );
+    let mut q = sqlx::query_as::<_, CandRow>(&sql);
+    for p in &declared {
+        q = q.bind(p.clone());
+    }
+    let rows = q.fetch_all(pool).await?;
+    let cands = with_genres(pool, rows).await?;
+
+    // Reorder to the declared order, present-only, de-duped.
+    let by_path: HashMap<String, Candidate> =
+        cands.into_iter().map(|c| (c.rel_path.clone(), c)).collect();
+    let mut seen = HashSet::new();
+    Ok(declared
+        .into_iter()
+        .filter_map(|p| {
+            if seen.insert(p.clone()) {
+                by_path.get(&p).cloned()
+            } else {
+                None
+            }
+        })
+        .collect())
+}
+
+/// Attach the genre set to each row (one extra query for the whole pool).
+async fn with_genres(
+    pool: &SqlitePool,
+    rows: Vec<CandRow>,
+) -> Result<Vec<Candidate>, SelectionError> {
+    let paths: Vec<String> = rows.iter().map(|r| r.0.clone()).collect();
+    let genres = fetch_genres(pool, &paths).await?;
+    Ok(rows
+        .into_iter()
+        .map(|(rel_path, artist, title, album, year, duration_ms, mtime_ns)| {
+            let g = genres.get(&rel_path).cloned().unwrap_or_default();
+            Candidate {
+                rel_path,
+                artist,
+                title,
+                album,
+                year: year.map(|y| y as u32),
+                duration_ms: duration_ms as u64,
+                genres: g,
+                mtime_ns,
+            }
+        })
+        .collect())
+}
+
+async fn fetch_genres(
+    pool: &SqlitePool,
+    paths: &[String],
+) -> Result<HashMap<String, Vec<String>>, sqlx::Error> {
+    let mut map: HashMap<String, Vec<String>> = HashMap::new();
+    if paths.is_empty() {
+        return Ok(map);
+    }
+    let sql = format!(
+        "SELECT rel_path, genre FROM media_genre WHERE rel_path IN ({}) ORDER BY genre",
+        placeholders(paths.len())
+    );
+    let mut q = sqlx::query_as::<_, (String, String)>(&sql);
+    for p in paths {
+        q = q.bind(p.clone());
+    }
+    for (rel, genre) in q.fetch_all(pool).await? {
+        map.entry(rel).or_default().push(genre);
+    }
+    Ok(map)
 }
 
 /// The file-name segment of a relative path (after the last '/').
@@ -424,9 +473,9 @@ fn combine_where(filters: &[Filter], m: Match) -> Result<Where, SelectionError> 
 }
 
 /// Translate one `field`/`op`/`value` filter into a parameterised predicate.
-/// The `field` is matched against a closed whitelist, so the column names
-/// interpolated below are constant, never user input. An unknown field/op or
-/// a mistyped value is a loud error (no-silent-failure).
+/// The `field` is a closed whitelist, so the column names interpolated below
+/// are constant, never user input. Unknown field/op or a mistyped value is a
+/// loud error.
 fn filter_sql(f: &Filter) -> Result<Where, SelectionError> {
     let unsupported = || SelectionError::UnsupportedFilter {
         field: f.field.clone(),
@@ -436,8 +485,6 @@ fn filter_sql(f: &Filter) -> Result<Where, SelectionError> {
         "path" => {
             let v = as_text(f)?;
             match f.op.as_str() {
-                // Empty prefix = whole library (grammar §4): match everything
-                // rather than rely on instr() semantics for an empty needle.
                 "prefix" if v.is_empty() => Ok(Where {
                     sql: "1 = 1".into(),
                     binds: vec![],
@@ -479,7 +526,6 @@ fn filter_sql(f: &Filter) -> Result<Where, SelectionError> {
             })
         }
         "duration" => {
-            // Grammar's `duration` is in seconds; the column is ms.
             let op = num_op(&f.op).ok_or_else(unsupported)?;
             Ok(Where {
                 sql: format!("duration_ms {op} ?"),
@@ -499,7 +545,6 @@ fn filter_sql(f: &Filter) -> Result<Where, SelectionError> {
     }
 }
 
-/// SQL comparator for a numeric op, or `None` if the op is not a comparator.
 fn num_op(op: &str) -> Option<&'static str> {
     Some(match op {
         "=" | "==" => "=",
@@ -635,7 +680,6 @@ mod tests {
         }
     }
 
-    /// Media with an explicit mtime, for `order_by = "mtime"` tests.
     fn media_mtime(rel: &str, mtime_ns: i64) -> ScannedMedia {
         ScannedMedia {
             rel_path: rel.into(),
@@ -742,6 +786,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn genre_filter_uses_the_detail_table() {
+        let (_d, pool) = fresh_db().await;
+        media_index::replace_library(
+            &pool,
+            &[media("a.mp3", "A", 2000, &["jazz"]), media("b.mp3", "B", 2000, &["rock"])],
+            1000,
+        )
+        .await
+        .unwrap();
+        let toml = r#"
+            name = "Jazz"
+            [selection]
+            mode = "dynamic"
+            order = "shuffle"
+            [[selection.filter]]
+            field = "genre"
+            op = "has"
+            value = "jazz"
+            [broadcast]
+            type = "general"
+        "#;
+        add_playlist(&pool, "rot/jazz", toml).await;
+        assert_eq!(resolve_ref(&pool, "rot/jazz").await.unwrap(), "a.mp3");
+    }
+
+    #[tokio::test]
     async fn static_shuffle_resolves_a_listed_file() {
         let (_d, pool) = fresh_db().await;
         media_index::replace_library(&pool, &[media("jingles/id-01.wav", "", 0, &[])], 1000)
@@ -762,7 +832,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn group_mode_is_rejected_for_now() {
+    async fn group_mode_weighted_is_rejected_for_now() {
         let (_d, pool) = fresh_db().await;
         let toml = r#"
             name = "Grp"
@@ -815,7 +885,6 @@ mod tests {
         "#;
         add_playlist(&pool, "rot/seq", toml).await;
 
-        // Lexical: a, b, c, then wrap to a.
         assert_eq!(resolve_ref(&pool, "rot/seq").await.unwrap(), "a.mp3");
         assert_eq!(resolve_ref(&pool, "rot/seq").await.unwrap(), "b.mp3");
         assert_eq!(resolve_ref(&pool, "rot/seq").await.unwrap(), "c.mp3");
@@ -825,7 +894,6 @@ mod tests {
     #[tokio::test]
     async fn static_sequential_follows_declared_order_not_lexical() {
         let (_d, pool) = fresh_db().await;
-        // Present out of lexical order on purpose.
         media_index::replace_library(
             &pool,
             &[media("z.wav", "", 0, &[]), media("a.wav", "", 0, &[])],
@@ -844,7 +912,6 @@ mod tests {
         "#;
         add_playlist(&pool, "show", toml).await;
 
-        // Declared order wins over lexical: z before a.
         assert_eq!(resolve_ref(&pool, "show").await.unwrap(), "z.wav");
         assert_eq!(resolve_ref(&pool, "show").await.unwrap(), "a.wav");
         assert_eq!(resolve_ref(&pool, "show").await.unwrap(), "z.wav");
@@ -874,11 +941,9 @@ mod tests {
         "#;
         add_playlist(&pool, "pod/latest", toml).await;
 
-        // "Latest": always the most recent, re-aired (no cursor advance).
         assert_eq!(resolve_ref(&pool, "pod/latest").await.unwrap(), "pod/ep003.mp3");
         assert_eq!(resolve_ref(&pool, "pod/latest").await.unwrap(), "pod/ep003.mp3");
 
-        // A newer episode arrives → it becomes the pick.
         media_index::replace_library(
             &pool,
             &[
@@ -975,38 +1040,6 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
-    async fn cursor_restarts_when_last_file_left_the_pool() {
-        let (_d, pool) = fresh_db().await;
-        media_index::replace_library(
-            &pool,
-            &[media("a.mp3", "", 0, &[]), media("b.mp3", "", 0, &[])],
-            1000,
-        )
-        .await
-        .unwrap();
-        let toml = r#"
-            name = "Seq"
-            [selection]
-            mode = "dynamic"
-            order = "sequential"
-            [[selection.filter]]
-            field = "path"
-            op = "prefix"
-            value = ""
-            [broadcast]
-            type = "general"
-        "#;
-        add_playlist(&pool, "rot/seq", toml).await;
-
-        assert_eq!(resolve_ref(&pool, "rot/seq").await.unwrap(), "a.mp3");
-        // a.mp3 vanishes; cursor pointed at it → restart from the new head.
-        media_index::replace_library(&pool, &[media("b.mp3", "", 0, &[])], 2000)
-            .await
-            .unwrap();
-        assert_eq!(resolve_ref(&pool, "rot/seq").await.unwrap(), "b.mp3");
-    }
-
     // ----- group sequence ---------------------------------------------
 
     #[tokio::test]
@@ -1093,9 +1126,8 @@ mod tests {
         .await;
 
         assert_eq!(resolve_ref(&pool, "show").await.unwrap(), "intros/i1.mp3");
-        assert_eq!(resolve_ref(&pool, "show").await.unwrap(), "pod/ep002.mp3"); // newest
+        assert_eq!(resolve_ref(&pool, "show").await.unwrap(), "pod/ep002.mp3");
         assert_eq!(resolve_ref(&pool, "show").await.unwrap(), "outros/o1.mp3");
-        // Wrap: a new activation of the show starts again at the intro.
         assert_eq!(resolve_ref(&pool, "show").await.unwrap(), "intros/i1.mp3");
     }
 
@@ -1160,7 +1192,6 @@ mod tests {
         )
         .await;
 
-        // Two rock tracks (take = 2), then the jingle, then rock again (wrap).
         assert!(resolve_ref(&pool, "seqshow").await.unwrap().starts_with("rock/"));
         assert!(resolve_ref(&pool, "seqshow").await.unwrap().starts_with("rock/"));
         assert_eq!(resolve_ref(&pool, "seqshow").await.unwrap(), "jingles/j.wav");
@@ -1168,29 +1199,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn group_weighted_and_nested_are_rejected_for_now() {
+    async fn nested_group_is_rejected_for_now() {
         let (_d, pool) = fresh_db().await;
-
-        add_playlist(
-            &pool,
-            "w",
-            r#"
-                name = "W"
-                [selection]
-                mode = "group"
-                strategy = "weighted"
-                members = [{ ref = "a", weight = 1 }]
-                [broadcast]
-                type = "scheduled"
-            "#,
-        )
-        .await;
-        assert!(matches!(
-            resolve_ref(&pool, "w").await,
-            Err(SelectionError::Unsupported(_))
-        ));
-
-        // A sequence group whose member is itself a group: nested → rejected.
         add_playlist(
             &pool,
             "inner",

@@ -276,7 +276,10 @@ impl GridEngine {
     pub async fn next_media(&self, now: Epoch) -> Result<ResolvedDecision, EngineError> {
         let decision = self.next(now).await?;
         let media_path = match &decision.playlist_ref {
-            Some(r) => Some(crate::selection::resolve_ref(&self.pool, r).await?),
+            Some(r) => Some(
+                crate::selection::resolve_ref_with_plugins(&self.pool, self.plugins.as_ref(), r)
+                    .await?,
+            ),
             None => None,
         };
 

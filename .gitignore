@@ -1,6 +1,13 @@
-/target
+# Artefacts de build Rust — racine ET crates imbriqués (les plugins WASM sous
+# plugins/*/target/, où est produit le .wasm). Le `/` final + pas de `/` initial
+# = tout dossier `target` à n'importe quelle profondeur.
+target/
+
+# Données / config locales au nœud (non versionnées)
 /data
 /media
 /playlist
 stationd.toml
+
+# Généré
 playlist.schema.json

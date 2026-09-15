@@ -27,7 +27,8 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-use serde::Deserialize;
+use extism::{Manifest, Plugin as ExtismPlugin, Wasm};
+use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
 
 /// Sliding-window failure policy: N failures within WINDOW → quarantine.
@@ -38,10 +39,27 @@ const WINDOW: Duration = Duration::from_secs(60);
 // Contract: the trait a plugin implements, and the events it observes
 // ---------------------------------------------------------------------------
 
+/// A resolved candidate handed to `filter_pool`. Standard media attributes
+/// (all from the media index) so a plugin can filter/score without its own
+/// catalogue. A plugin returns the subset it keeps (v1: filtering only —
+/// reordering/weighting comes later).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Candidate {
+    pub rel_path: String,
+    pub artist: Option<String>,
+    pub title: Option<String>,
+    pub album: Option<String>,
+    pub year: Option<u32>,
+    pub duration_ms: u64,
+    pub genres: Vec<String>,
+    pub mtime_ns: i64,
+}
+
 /// What a plugin implements. `Send` because plugins live on the actor task.
 ///
 /// A1 wires `on_load` / `on_unload` (lifecycle) and `on_event` (observation).
-/// `on_scan` / `filter_pool` will be added with their synchronous call sites.
+/// A2 adds `filter_pool` (synchronous, influences the decision). `on_scan`
+/// will follow with its call site.
 pub trait Plugin: Send {
     /// Stable name (matches the declaration). Identity for `plugin list`.
     fn name(&self) -> &str;
@@ -59,6 +77,16 @@ pub trait Plugin: Send {
     /// Observe a fact that already happened. Returns nothing, must not assume
     /// it influences anything. A panic is caught and counts as a failure.
     fn on_event(&mut self, _event: &PluginEvent) {}
+
+    /// Filter (v1) the resolved candidate pool just before the final pick.
+    /// Synchronous — it returns into the decision path, so it must be quick and
+    /// bounded. Default keeps everything. Returning fewer candidates removes
+    /// them; an empty pool means "nothing acceptable" (→ PoolEmpty downstream).
+    /// A panic is caught: that stage degrades to pass-through and counts as a
+    /// failure.
+    fn filter_pool(&mut self, candidates: Vec<Candidate>) -> Vec<Candidate> {
+        candidates
+    }
 }
 
 /// Facts the core notifies plugins about. `#[non_exhaustive]`: a plugin must
@@ -68,7 +96,7 @@ pub trait Plugin: Send {
 /// from `Doc/plugin-events.md` (`TrackSkipped`, `LibraryScanned`, `GridApplied`,
 /// `ListenersSampled`, …) are added as their sources come online.
 #[non_exhaustive]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum PluginEvent {
     /// A decision was just taken (`GridEngine::next_media`). `media_path` is
     /// `None` on a fallback. `origin` is the resolver origin, as a short label.
@@ -98,6 +126,10 @@ pub struct PluginDecl {
     /// broken by name for determinism.
     #[serde(default = "default_order")]
     pub order: u32,
+    /// Path to a `.wasm` module. When set, this is a WASM plugin loaded from
+    /// that file (via extism); when absent, `name` selects a built-in.
+    #[serde(default)]
+    pub wasm: Option<String>,
     #[serde(default)]
     pub config: toml::Table,
 }
@@ -115,6 +147,7 @@ pub enum Phase {
     Load,
     Unload,
     Event,
+    FilterPool,
 }
 
 /// Runtime state of a plugin — kept even when inactive, so it stays visible.
@@ -259,8 +292,12 @@ fn catch<R>(f: impl FnOnce() -> R) -> Result<R, String> {
 /// Map a declaration to a native plugin instance. A1 knows only `logger`; an
 /// unknown name is a loud (visible) failure, never silently ignored.
 fn build_plugin(decl: &PluginDecl) -> Result<Box<dyn Plugin>, String> {
+    if let Some(path) = &decl.wasm {
+        return WasmPlugin::new(decl.name.clone(), path).map(|p| Box::new(p) as Box<dyn Plugin>);
+    }
     match decl.name.as_str() {
         "logger" => Ok(Box::new(LoggerPlugin::from_config(&decl.config))),
+        "blacklist" => Ok(Box::new(BlacklistPlugin::from_config(&decl.config))),
         other => Err(format!("unknown plugin kind `{other}`")),
     }
 }
@@ -277,6 +314,10 @@ enum Msg {
         reply: oneshot::Sender<Result<PluginInfo, String>>,
     },
     Event(PluginEvent),
+    FilterPool {
+        candidates: Vec<Candidate>,
+        reply: oneshot::Sender<Vec<Candidate>>,
+    },
 }
 
 /// Cheap, clonable handle to the plugin actor. The only way to reach plugins.
@@ -290,6 +331,23 @@ impl PluginHandle {
     /// if the buffer is full the event is dropped (best-effort, as documented).
     pub fn emit(&self, event: PluginEvent) {
         let _ = self.tx.try_send(Msg::Event(event));
+    }
+
+    /// Run the candidate pool through every loaded plugin's `filter_pool`, in
+    /// `order`. Awaits a reply (it feeds the decision). If the actor is gone,
+    /// degrades to the unfiltered pool rather than failing the decision.
+    pub async fn filter_pool(&self, candidates: Vec<Candidate>) -> Vec<Candidate> {
+        let (reply, rx) = oneshot::channel();
+        let fallback = candidates.clone();
+        if self
+            .tx
+            .send(Msg::FilterPool { candidates, reply })
+            .await
+            .is_err()
+        {
+            return fallback;
+        }
+        rx.await.unwrap_or(fallback)
     }
 
     /// Snapshot of every declared plugin and its state.
@@ -343,6 +401,9 @@ pub fn spawn(mut decls: Vec<PluginDecl>) -> PluginHandle {
         while let Some(msg) = rx.recv().await {
             match msg {
                 Msg::Event(event) => dispatch_event(&mut slots, &event),
+                Msg::FilterPool { candidates, reply } => {
+                    let _ = reply.send(run_filters(&mut slots, candidates));
+                }
                 Msg::List(reply) => {
                     let _ = reply.send(slots.iter().map(Slot::info).collect());
                 }
@@ -391,6 +452,28 @@ fn dispatch_event(slots: &mut [Slot], event: &PluginEvent) {
             slot.note_failure(Phase::Event, reason);
         }
     }
+}
+
+/// Chain the candidate pool through every loaded plugin's `filter_pool`, in
+/// slot order (already sorted by `order`, then name). A plugin that panics
+/// degrades to pass-through for that stage and is counted as a failure.
+fn run_filters(slots: &mut [Slot], candidates: Vec<Candidate>) -> Vec<Candidate> {
+    let mut cur = candidates;
+    for slot in slots.iter_mut() {
+        if !matches!(slot.state, PluginState::Loaded) {
+            continue;
+        }
+        let outcome = slot.plugin.as_mut().map(|p| {
+            let input = cur.clone();
+            catch(move || p.filter_pool(input))
+        });
+        match outcome {
+            Some(Ok(kept)) => cur = kept,
+            Some(Err(reason)) => slot.note_failure(Phase::FilterPool, reason),
+            None => {}
+        }
+    }
+    cur
 }
 
 // ---------------------------------------------------------------------------
@@ -456,6 +539,140 @@ impl Plugin for LoggerPlugin {
     }
 }
 
+/// Blacklist plugin: drops candidates whose path starts with an excluded
+/// prefix, or whose artist is in the excluded list. Config (both optional):
+///   exclude_path_prefixes = ["Podcast/Jingles/end/"]
+///   exclude_artists       = ["Some Artist"]
+/// Comparison is case-sensitive (media paths keep case).
+struct BlacklistPlugin {
+    exclude_path_prefixes: Vec<String>,
+    exclude_artists: Vec<String>,
+}
+
+impl BlacklistPlugin {
+    fn from_config(config: &toml::Table) -> Self {
+        Self {
+            exclude_path_prefixes: string_list(config, "exclude_path_prefixes"),
+            exclude_artists: string_list(config, "exclude_artists"),
+        }
+    }
+}
+
+/// Read a config key as a list of strings (missing / wrong type → empty).
+fn string_list(config: &toml::Table, key: &str) -> Vec<String> {
+    config
+        .get(key)
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+impl Plugin for BlacklistPlugin {
+    fn name(&self) -> &str {
+        "blacklist"
+    }
+
+    fn on_load(&mut self) -> Result<(), String> {
+        tracing::info!(
+            paths = self.exclude_path_prefixes.len(),
+            artists = self.exclude_artists.len(),
+            "[blacklist] loaded"
+        );
+        Ok(())
+    }
+
+    fn filter_pool(&mut self, candidates: Vec<Candidate>) -> Vec<Candidate> {
+        candidates
+            .into_iter()
+            .filter(|c| {
+                let path_excluded = self
+                    .exclude_path_prefixes
+                    .iter()
+                    .any(|p| c.rel_path.starts_with(p));
+                let artist_excluded = c
+                    .artist
+                    .as_deref()
+                    .map_or(false, |a| self.exclude_artists.iter().any(|x| x == a));
+                !(path_excluded || artist_excluded)
+            })
+            .collect()
+    }
+}
+
+/// A WASM plugin loaded from a `.wasm` file via extism. Implements the same
+/// `Plugin` trait as the built-ins by delegating to the module's exports,
+/// serialising data to JSON at the boundary. `extism::Plugin` is `Send`, so
+/// this lives on the actor task like any other plugin.
+///
+/// WASM-1 scope: `filter_pool` and `on_event` exports (both optional — a
+/// missing export means "pass-through" / "ignore"). Host functions
+/// (`push_override`, `control`, db) are A2. Config-to-guest plumbing is the
+/// next increment.
+struct WasmPlugin {
+    name: String,
+    plugin: ExtismPlugin,
+    has_filter: bool,
+    has_event: bool,
+}
+
+impl WasmPlugin {
+    fn new(name: String, path: &str) -> Result<Self, String> {
+        let manifest = Manifest::new([Wasm::file(path)]);
+        let plugin = ExtismPlugin::new(&manifest, [], false).map_err(|e| e.to_string())?;
+        let has_filter = plugin.function_exists("filter_pool");
+        let has_event = plugin.function_exists("on_event");
+        Ok(Self {
+            name,
+            plugin,
+            has_filter,
+            has_event,
+        })
+    }
+}
+
+impl Plugin for WasmPlugin {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn on_event(&mut self, event: &PluginEvent) {
+        if !self.has_event {
+            return;
+        }
+        let input = match serde_json::to_string(event) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        // Best-effort: an event is fire-and-forget; a WASM error is logged, not
+        // propagated (nothing to return).
+        if let Err(e) = self.plugin.call::<&str, &str>("on_event", input.as_str()) {
+            tracing::warn!(plugin = %self.name, %e, "wasm on_event failed");
+        }
+    }
+
+    fn filter_pool(&mut self, candidates: Vec<Candidate>) -> Vec<Candidate> {
+        if !self.has_filter {
+            return candidates;
+        }
+        // Degrade to pass-through on any boundary error (serialise, call, parse).
+        let input = match serde_json::to_string(&candidates) {
+            Ok(s) => s,
+            Err(_) => return candidates,
+        };
+        match self.plugin.call::<&str, String>("filter_pool", input.as_str()) {
+            Ok(out) => serde_json::from_str::<Vec<Candidate>>(&out).unwrap_or(candidates),
+            Err(e) => {
+                tracing::warn!(plugin = %self.name, %e, "wasm filter_pool failed");
+                candidates
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -465,6 +682,7 @@ mod tests {
             name: name.to_string(),
             enabled,
             order: 50,
+            wasm: None,
             config,
         }
     }
@@ -552,5 +770,91 @@ mod tests {
         assert!(matches!(slots[0].state, PluginState::Quarantined { .. }));
         // Quarantined → no longer dispatched (no plugin instance held).
         assert!(slots[0].plugin.is_none());
+    }
+
+    // ----- filter_pool chaining (direct on a Slot, no actor) -----------
+
+    struct KeepContaining(&'static str);
+    impl Plugin for KeepContaining {
+        fn name(&self) -> &str {
+            "keep"
+        }
+        fn filter_pool(&mut self, candidates: Vec<Candidate>) -> Vec<Candidate> {
+            candidates
+                .into_iter()
+                .filter(|c| c.rel_path.contains(self.0))
+                .collect()
+        }
+    }
+
+    struct PanicFilter;
+    impl Plugin for PanicFilter {
+        fn name(&self) -> &str {
+            "pf"
+        }
+        fn filter_pool(&mut self, _candidates: Vec<Candidate>) -> Vec<Candidate> {
+            panic!("boom");
+        }
+    }
+
+    fn cand(rel: &str) -> Candidate {
+        Candidate {
+            rel_path: rel.into(),
+            artist: None,
+            title: None,
+            album: None,
+            year: None,
+            duration_ms: 1,
+            genres: vec![],
+            mtime_ns: 0,
+        }
+    }
+
+    fn loaded_slot(plugin: Box<dyn Plugin>) -> Slot {
+        Slot {
+            decl: decl("x", true, toml::Table::new()),
+            state: PluginState::Loaded,
+            plugin: Some(plugin),
+            failures: VecDeque::new(),
+        }
+    }
+
+    #[test]
+    fn filter_pool_removes_non_matching() {
+        let mut slots = vec![loaded_slot(Box::new(KeepContaining("keep")))];
+        let out = run_filters(&mut slots, vec![cand("a/keep.mp3"), cand("b/drop.mp3")]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].rel_path, "a/keep.mp3");
+    }
+
+    #[test]
+    fn panicking_filter_degrades_to_passthrough_and_counts_failure() {
+        let mut slots = vec![loaded_slot(Box::new(PanicFilter))];
+        let out = run_filters(&mut slots, vec![cand("x.mp3")]);
+        assert_eq!(out.len(), 1, "pool passes through unchanged on panic");
+        assert_eq!(slots[0].failures.len(), 1);
+    }
+
+    #[test]
+    fn blacklist_drops_by_path_prefix_and_artist() {
+        let mut cfg = toml::Table::new();
+        cfg.insert(
+            "exclude_path_prefixes".into(),
+            toml::Value::Array(vec![toml::Value::String("ads/".into())]),
+        );
+        cfg.insert(
+            "exclude_artists".into(),
+            toml::Value::Array(vec![toml::Value::String("Nope".into())]),
+        );
+        let mut p = BlacklistPlugin::from_config(&cfg);
+
+        let keep = cand("music/a.mp3");
+        let drop_path = cand("ads/b.mp3");
+        let mut drop_artist = cand("music/c.mp3");
+        drop_artist.artist = Some("Nope".into());
+
+        let out = p.filter_pool(vec![keep, drop_path, drop_artist]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].rel_path, "music/a.mp3");
     }
 }
