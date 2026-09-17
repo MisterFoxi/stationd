@@ -47,6 +47,7 @@ async fn main() -> anyhow::Result<()> {
     info!(db_path = ?cfg.database.path, "SQLite database");
     info!(media_path = ?cfg.media.library_path, "media library");
     info!(playlist_path = ?cfg.playlist.path, "playlist directory (source of truth)");
+    info!(station_timezone = %cfg.station.timezone, "timezone");
 
     if !cfg.media.library_path.exists() {
         warn!(
@@ -81,7 +82,8 @@ async fn main() -> anyhow::Result<()> {
     // station timezone. `sync_grid` reconciles the Every counter rows for the
     // current grid (catch-up on start-up); it never resets an existing counter.
     let engine = GridEngine::new(db_pool.clone(), cfg.station.timezone.clone())
-        .with_plugins(plugins);
+        .with_plugins(plugins)
+        .with_media_root(cfg.media.library_path.clone());
     engine.sync_grid().await?;
     let schedule_service = ScheduleGrpc::new(engine);
 
