@@ -1,0 +1,30 @@
+1) dans un groupe, les membres sont jouées en LIFO au lieu de suivre l'ordre normal.
+
+2)scheddule preview: 
+ les PL de type "Every" avec une ancre temps n'apparaissent pas.
+
+3) impossible de valider expiry ="30m" -> devrait apparaitre dans preview avec la fin qui est fixe.
+
+4) weight n'est pas accepté dans grid.toml
+
+5) accepter :
+[selection]
+mode = "group"
+strategy = "shuffle"
+members = [
+  { ref = "rockfm", expiry = "30m" },
+  { ref = "transfm", expiry = "1h" },
+  { ref = "classicfm", expiry="30m" },
+]
+
+[broadcast]
+on_exhausted = "fallthrough"
+
+et dans grid.toml:
+[[rule]]
+id="Filler"
+kind = "day_part"
+playlist_ref="Filler"
+start = "10:45"
+end = "15:00"
+

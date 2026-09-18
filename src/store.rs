@@ -109,8 +109,6 @@ mod tests {
         name = "Hits"
         [selection]
         mode = "dynamic"
-        [broadcast]
-        type = "general"
     "#;
 
     const REMOTE: &str = r#"
@@ -118,8 +116,6 @@ mod tests {
         [selection]
         mode = "remote"
         url = "http://nightmusic.live"
-        [broadcast]
-        type = "scheduled"
     "#;
 
     /// A fresh temp database with all real migrations applied. This is what

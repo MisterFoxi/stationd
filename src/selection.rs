@@ -26,7 +26,7 @@ use std::collections::{HashMap, HashSet};
 use rand::seq::SliceRandom;
 use sqlx::SqlitePool;
 
-use crate::playlist::{Filter, Match, Mode, Order, OrderBy, Playlist, PlaylistError, Selection, Strategy};
+use crate::playlist::{Filter, Match, MemberUnavailable, Mode, Order, OrderBy, Playlist, PlaylistError, Selection, Strategy};
 use crate::playlist_cursor;
 use crate::plugin::{Candidate, PluginHandle};
 use crate::store;
@@ -176,31 +176,56 @@ async fn resolve_group_sequence(
     if sel.members.is_empty() {
         return Err(SelectionError::PoolEmpty);
     }
+    let policy = sel
+        .on_member_unavailable
+        .unwrap_or(MemberUnavailable::Abort);
+    let n = sel.members.len();
     let (mut idx, mut count) = crate::group_state::get(pool, group_ref).await?;
-    if idx >= sel.members.len() {
-        idx = 0;
-        count = 0;
+
+    // Try members from the current position. With `skip`, an unavailable member
+    // (empty pool) is dropped and we advance to the next this turn; with
+    // `abort` (default) it fails the whole group → the grid falls through to a
+    // lower-priority source. Bounded to one full pass so we never loop forever.
+    for _ in 0..n {
+        if idx >= n {
+            idx = 0;
+            count = 0;
+        }
+        let member = &sel.members[idx];
+        let take = member.take.unwrap_or(1).max(1);
+        let member_key = crate::playlist::normalize_ref(&member.r#ref)
+            .map_err(|_| SelectionError::PlaylistNotFound(member.r#ref.clone()))?;
+        // TEMP debug: montre l'ordre réel de parcours des membres.
+        //tracing::info!(group = %group_ref, idx, count, n, member = %member_key, "group sequence pick");
+
+        match resolve_member(pool, plugins, &member_key).await {
+            Ok(track) => {
+                count += 1;
+                if count >= take {
+                    idx += 1;
+                    count = 0;
+                }
+                if idx >= n {
+                    idx = 0;
+                    count = 0;
+                }
+                crate::group_state::set(pool, group_ref, idx, count).await?;
+                return Ok(track);
+            }
+            // `skip`: drop this member and try the next one this turn.
+            Err(SelectionError::PoolEmpty) if policy == MemberUnavailable::Skip => {
+                idx += 1;
+                count = 0;
+                continue;
+            }
+            // `abort` (PoolEmpty) or a config error: propagate. An aborted group
+            // bubbles PoolEmpty to the grid, which falls through to the floor.
+            Err(e) => return Err(e),
+        }
     }
 
-    let member = &sel.members[idx];
-    let take = member.take.unwrap_or(1).max(1);
-
-    let member_key = crate::playlist::normalize_ref(&member.r#ref)
-        .map_err(|_| SelectionError::PlaylistNotFound(member.r#ref.clone()))?;
-    let track = resolve_member(pool, plugins, &member_key).await?;
-
-    count += 1;
-    if count >= take {
-        idx += 1;
-        count = 0;
-    }
-    if idx >= sel.members.len() {
-        idx = 0;
-        count = 0;
-    }
-    crate::group_state::set(pool, group_ref, idx, count).await?;
-
-    Ok(track)
+    // `skip` exhausted every member → the group produces nothing.
+    Err(SelectionError::PoolEmpty)
 }
 
 async fn resolve_member(
@@ -725,8 +750,6 @@ mod tests {
             field = "path"
             op = "prefix"
             value = "pop/"
-            [broadcast]
-            type = "general"
         "#;
         add_playlist(&pool, "rot/pop", toml).await;
 
@@ -753,8 +776,6 @@ mod tests {
             field = "year"
             op = ">="
             value = 2010
-            [broadcast]
-            type = "general"
         "#;
         add_playlist(&pool, "rot/recent", toml).await;
         assert_eq!(resolve_ref(&pool, "rot/recent").await.unwrap(), "new.mp3");
@@ -775,8 +796,6 @@ mod tests {
             field = "year"
             op = ">="
             value = 3000
-            [broadcast]
-            type = "general"
         "#;
         add_playlist(&pool, "rot/none", toml).await;
         assert!(matches!(
@@ -804,8 +823,6 @@ mod tests {
             field = "genre"
             op = "has"
             value = "jazz"
-            [broadcast]
-            type = "general"
         "#;
         add_playlist(&pool, "rot/jazz", toml).await;
         assert_eq!(resolve_ref(&pool, "rot/jazz").await.unwrap(), "a.mp3");
@@ -823,9 +840,6 @@ mod tests {
             mode = "static"
             order = "shuffle"
             files = ["jingles/id-01.wav"]
-            [broadcast]
-            type = "interval"
-            every_tracks = 4
         "#;
         add_playlist(&pool, "jingles", toml).await;
         assert_eq!(resolve_ref(&pool, "jingles").await.unwrap(), "jingles/id-01.wav");
@@ -840,8 +854,6 @@ mod tests {
             mode = "group"
             strategy = "weighted"
             members = [{ ref = "a", weight = 1 }]
-            [broadcast]
-            type = "scheduled"
         "#;
         add_playlist(&pool, "grp", toml).await;
         assert!(matches!(
@@ -880,8 +892,6 @@ mod tests {
             field = "path"
             op = "prefix"
             value = ""
-            [broadcast]
-            type = "general"
         "#;
         add_playlist(&pool, "rot/seq", toml).await;
 
@@ -907,8 +917,6 @@ mod tests {
             mode = "static"
             order = "sequential"
             files = ["z.wav", "a.wav"]
-            [broadcast]
-            type = "scheduled"
         "#;
         add_playlist(&pool, "show", toml).await;
 
@@ -936,8 +944,6 @@ mod tests {
             field = "path"
             op = "prefix"
             value = "pod/"
-            [broadcast]
-            type = "scheduled"
         "#;
         add_playlist(&pool, "pod/latest", toml).await;
 
@@ -983,8 +989,6 @@ mod tests {
             field = "path"
             op = "prefix"
             value = ""
-            [broadcast]
-            type = "general"
         "#;
         add_playlist(&pool, "rot/chrono", toml).await;
 
@@ -1011,8 +1015,6 @@ mod tests {
             field = "path"
             op = "prefix"
             value = "pod/"
-            [broadcast]
-            type = "scheduled"
         "#;
         add_playlist(&pool, "u", unplayed).await;
         assert!(matches!(
@@ -1030,8 +1032,6 @@ mod tests {
             field = "path"
             op = "prefix"
             value = "pod/"
-            [broadcast]
-            type = "scheduled"
         "#;
         add_playlist(&pool, "p", published).await;
         assert!(matches!(
@@ -1070,8 +1070,6 @@ mod tests {
                 field = "path"
                 op = "prefix"
                 value = "intros/"
-                [broadcast]
-                type = "general"
             "#,
         )
         .await;
@@ -1088,8 +1086,6 @@ mod tests {
                 field = "path"
                 op = "prefix"
                 value = "pod/"
-                [broadcast]
-                type = "scheduled"
             "#,
         )
         .await;
@@ -1105,8 +1101,6 @@ mod tests {
                 field = "path"
                 op = "prefix"
                 value = "outros/"
-                [broadcast]
-                type = "general"
             "#,
         )
         .await;
@@ -1119,8 +1113,6 @@ mod tests {
                 mode = "group"
                 strategy = "sequence"
                 members = [{ ref = "intro" }, { ref = "podcast" }, { ref = "outro" }]
-                [broadcast]
-                type = "scheduled"
             "#,
         )
         .await;
@@ -1157,8 +1149,6 @@ mod tests {
                 field = "path"
                 op = "prefix"
                 value = "rock/"
-                [broadcast]
-                type = "general"
             "#,
         )
         .await;
@@ -1171,9 +1161,6 @@ mod tests {
                 mode = "static"
                 order = "shuffle"
                 files = ["jingles/j.wav"]
-                [broadcast]
-                type = "interval"
-                every_tracks = 4
             "#,
         )
         .await;
@@ -1186,8 +1173,6 @@ mod tests {
                 mode = "group"
                 strategy = "sequence"
                 members = [{ ref = "rock", take = 2 }, { ref = "jingle", take = 1 }]
-                [broadcast]
-                type = "scheduled"
             "#,
         )
         .await;
@@ -1210,8 +1195,6 @@ mod tests {
                 mode = "group"
                 strategy = "sequence"
                 members = [{ ref = "leaf" }]
-                [broadcast]
-                type = "scheduled"
             "#,
         )
         .await;
@@ -1224,14 +1207,94 @@ mod tests {
                 mode = "group"
                 strategy = "sequence"
                 members = [{ ref = "inner" }]
-                [broadcast]
-                type = "scheduled"
             "#,
         )
         .await;
         assert!(matches!(
             resolve_ref(&pool, "outer").await,
             Err(SelectionError::Unsupported(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn group_sequence_skip_drops_an_empty_member() {
+        let (_d, pool) = fresh_db().await;
+        media_index::replace_library(
+            &pool,
+            &[media("intros/i1.mp3", "", 0, &[]), media("outros/o1.mp3", "", 0, &[])],
+            1000,
+        )
+        .await
+        .unwrap();
+        // podcast pool (pod/) is empty on purpose.
+        for (r, prefix) in [("intro", "intros/"), ("podcast", "pod/"), ("outro", "outros/")] {
+            add_playlist(
+                &pool,
+                r,
+                &format!(
+                    "name = \"{r}\"\n[selection]\nmode = \"dynamic\"\norder = \"shuffle\"\n\
+                     [[selection.filter]]\nfield = \"path\"\nop = \"prefix\"\nvalue = \"{prefix}\"\n"
+                ),
+            )
+            .await;
+        }
+        add_playlist(
+            &pool,
+            "show",
+            r#"
+                name = "Show"
+                [selection]
+                mode = "group"
+                strategy = "sequence"
+                on_member_unavailable = "skip"
+                members = [{ ref = "intro" }, { ref = "podcast" }, { ref = "outro" }]
+            "#,
+        )
+        .await;
+
+        // intro, then the empty podcast is skipped → outro, then wrap to intro.
+        assert_eq!(resolve_ref(&pool, "show").await.unwrap(), "intros/i1.mp3");
+        assert_eq!(resolve_ref(&pool, "show").await.unwrap(), "outros/o1.mp3");
+        assert_eq!(resolve_ref(&pool, "show").await.unwrap(), "intros/i1.mp3");
+    }
+
+    #[tokio::test]
+    async fn group_sequence_abort_bubbles_pool_empty() {
+        let (_d, pool) = fresh_db().await;
+        media_index::replace_library(&pool, &[media("intros/i1.mp3", "", 0, &[])], 1000)
+            .await
+            .unwrap();
+        for (r, prefix) in [("intro", "intros/"), ("podcast", "pod/")] {
+            add_playlist(
+                &pool,
+                r,
+                &format!(
+                    "name = \"{r}\"\n[selection]\nmode = \"dynamic\"\norder = \"shuffle\"\n\
+                     [[selection.filter]]\nfield = \"path\"\nop = \"prefix\"\nvalue = \"{prefix}\"\n"
+                ),
+            )
+            .await;
+        }
+        // Default (abort): no on_member_unavailable field.
+        add_playlist(
+            &pool,
+            "showabort",
+            r#"
+                name = "Abort"
+                [selection]
+                mode = "group"
+                strategy = "sequence"
+                members = [{ ref = "intro" }, { ref = "podcast" }]
+            "#,
+        )
+        .await;
+
+        // intro first turn; then the empty podcast aborts → PoolEmpty bubbles up
+        // (the grid would fall through to the floor).
+        assert_eq!(resolve_ref(&pool, "showabort").await.unwrap(), "intros/i1.mp3");
+        assert!(matches!(
+            resolve_ref(&pool, "showabort").await,
+            Err(SelectionError::PoolEmpty)
         ));
     }
 }

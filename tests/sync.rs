@@ -38,8 +38,6 @@ name = "grp"
 mode = "group"
 strategy = "weighted"
 members = [{{ ref = "{target}", weight = 1 }}]
-[broadcast]
-type = "scheduled"
 "#
     )
 }
@@ -49,8 +47,6 @@ name = "Hits"
 [selection]
 mode = "dynamic"
 order = "shuffle"
-[broadcast]
-type = "general"
 "#;
 
 const VALID_REMOTE: &str = r#"
@@ -58,8 +54,6 @@ name = "goodnight"
 [selection]
 mode = "remote"
 url = "http://nightmusic.live"
-[broadcast]
-type = "scheduled"
 "#;
 
 /// Best-effort: valid files are persisted, a broken file is reported but does
@@ -110,8 +104,6 @@ id = "b3c55b4e-168d-449e-9bd2-046b814cbbd9"
 name = "Already"
 [selection]
 mode = "dynamic"
-[broadcast]
-type = "general"
 "#;
     write_playlist(root, "kept.toml", with_id);
     let before_kept = fs::read_to_string(root.join("kept.toml")).unwrap();

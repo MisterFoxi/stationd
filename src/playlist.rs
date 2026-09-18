@@ -36,7 +36,9 @@ pub struct Playlist {
     pub enabled: bool,
 
     pub selection: Selection,
-    pub broadcast: Broadcast,
+    /// The playlist's own consumption policy — optional, NOT scheduling.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub broadcast: Option<Broadcast>,
 }
 
 fn default_enabled() -> bool {
@@ -85,6 +87,10 @@ pub struct Selection {
     pub strategy: Option<Strategy>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub members: Vec<Member>,
+    /// What a `sequence` group does when a member yields no media (group mode
+    /// only). Default `abort`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_member_unavailable: Option<MemberUnavailable>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -131,6 +137,17 @@ pub enum Strategy {
     Sequence,
 }
 
+/// What a `sequence` group does when a member produces no media:
+/// - `abort` (default): the whole group fails → the grid falls through to a
+///   lower-priority source (down to the BaseRotation floor);
+/// - `skip`: drop the unavailable member and continue the sequence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MemberUnavailable {
+    Abort,
+    Skip,
+}
+
 /// A dynamic-selection filter: structured `field`/`op`/`value`, no string
 /// DSL (keeps the parsing surface small, per the doc). `value` is a free
 /// TOML value (string, number, or array) — validated against `field`/`op`
@@ -155,35 +172,27 @@ pub struct Member {
     pub take: Option<u32>,
 }
 
-/// The *when/how*: how the playlist takes part in the broadcast.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// The playlist's own **consumption policy** — NOT scheduling. When (and
+/// whether) a playlist is on air is the GRID's job (`grid.toml`); a playlist
+/// only says how to consume its own source once the grid activates it. This
+/// deliberately no longer carries `type`/`weight`/`schedule`/`every_*`: those
+/// were ordering, they duplicated the grid, and are now a loud parse error
+/// (`deny_unknown_fields`). Optional — a playlist with no policy omits it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct Broadcast {
-    pub r#type: BroadcastType,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub weight: Option<u32>,
+    /// Max tracks emitted per activation before yielding the source.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub every_tracks: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub every_time: Option<String>,
+    /// Re-parse the pool within one activation once exhausted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repeat: Option<bool>,
+    /// Behaviour when a finite source is exhausted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_exhausted: Option<OnExhausted>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub schedule: Vec<Schedule>,
+    /// Anti-repetition constraints applied while sequencing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub constraints: Option<Constraints>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum BroadcastType {
-    General,
-    Interval,
-    Scheduled,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -193,18 +202,6 @@ pub enum OnExhausted {
     Stop,
     Disable,
     Hold,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Schedule {
-    pub start: String,
-    pub end: String,
-    pub days: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub date_start: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub date_end: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -527,8 +524,6 @@ mod tests {
         op = ">="
         value = 2018
         [broadcast]
-        type = "general"
-        weight = 5
         limit = 15
         [broadcast.constraints]
         no_same_artist_within = "30m"
@@ -550,8 +545,6 @@ mod tests {
             oops = "unknown"
             [selection]
             mode = "dynamic"
-            [broadcast]
-            type = "general"
         "#;
         assert!(Playlist::parse(toml_str).is_err());
     }
@@ -564,8 +557,6 @@ mod tests {
             mode = "group"
             strategy = "weighted"
             members = [{ ref = "a", take = 3 }]
-            [broadcast]
-            type = "scheduled"
         "#;
         let pl = Playlist::parse(toml_str).expect("parses");
         assert!(pl.validate().is_err(), "take needs a sequence group");
@@ -579,8 +570,6 @@ mod tests {
             mode = "static"
             order = "newest"
             files = ["a.mp3"]
-            [broadcast]
-            type = "general"
         "#;
         let pl = Playlist::parse(toml_str).expect("parses");
         assert!(pl.validate().is_err(), "newest is not valid for static");
@@ -604,12 +593,6 @@ mod tests {
             [selection]
             mode = "remote"
             url = "http://nightmusic.live"
-            [broadcast]
-            type = "scheduled"
-            [[broadcast.schedule]]
-            start = "00:00"
-            end = "06:00"
-            days = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
         "#;
         let pl = Playlist::parse(toml_str).expect("should parse");
         assert_eq!(pl.selection.mode, Mode::Remote);
@@ -623,8 +606,6 @@ mod tests {
             name = "goodnight"
             [selection]
             mode = "remote"
-            [broadcast]
-            type = "scheduled"
         "#;
         let pl = Playlist::parse(toml_str).expect("parses");
         assert!(pl.validate().is_err(), "remote needs a url");
@@ -637,8 +618,6 @@ mod tests {
             [selection]
             mode = "dynamic"
             url = "http://nope.live"
-            [broadcast]
-            type = "general"
         "#;
         let pl = Playlist::parse(toml_str).expect("parses");
         assert!(pl.validate().is_err(), "url only valid for remote");
@@ -664,9 +643,6 @@ mod tests {
             mode = "static"
             order = "sequential"
             files = ["jingles/id-01.wav", "jingles/id-02.wav"]
-            [broadcast]
-            type = "interval"
-            every_tracks = 4
         "#;
         validate_str(toml_str).expect("static with files is valid");
     }
@@ -679,9 +655,6 @@ mod tests {
             mode = "queue"
             order = "fifo"
             max_len = 20
-            [broadcast]
-            type = "interval"
-            every_tracks = 3
         "#;
         validate_str(toml_str).expect("queue with fifo is valid");
     }
@@ -694,8 +667,6 @@ mod tests {
             mode = "group"
             strategy = "weighted"
             members = [{ ref = "a", weight = 5 }, { ref = "b", weight = 2 }]
-            [broadcast]
-            type = "scheduled"
         "#;
         validate_str(toml_str).expect("weighted group with weights is valid");
     }
@@ -708,8 +679,6 @@ mod tests {
             mode = "group"
             strategy = "sequence"
             members = [{ ref = "a", take = 3 }, { ref = "b", take = 1 }]
-            [broadcast]
-            type = "scheduled"
         "#;
         validate_str(toml_str).expect("sequence group with take is valid");
     }
@@ -722,8 +691,6 @@ mod tests {
             name = "No enabled field"
             [selection]
             mode = "dynamic"
-            [broadcast]
-            type = "general"
         "#;
         let pl = Playlist::parse(toml_str).expect("parses");
         assert!(pl.enabled, "enabled should default to true when absent");
@@ -739,8 +706,6 @@ mod tests {
             mode = "group"
             strategy = "sequence"
             members = [{ ref = "a", weight = 5 }]
-            [broadcast]
-            type = "scheduled"
         "#;
         assert!(validate_str(toml_str).is_err(), "weight needs a weighted group");
     }
@@ -751,8 +716,6 @@ mod tests {
             name = "Empty static"
             [selection]
             mode = "static"
-            [broadcast]
-            type = "general"
         "#;
         assert!(validate_str(toml_str).is_err(), "static needs files");
     }
@@ -764,8 +727,6 @@ mod tests {
             [selection]
             mode = "group"
             strategy = "weighted"
-            [broadcast]
-            type = "scheduled"
         "#;
         assert!(validate_str(toml_str).is_err(), "group needs members");
     }
@@ -777,8 +738,6 @@ mod tests {
             [selection]
             mode = "group"
             members = [{ ref = "a" }]
-            [broadcast]
-            type = "scheduled"
         "#;
         assert!(validate_str(toml_str).is_err(), "group needs a strategy");
     }
@@ -792,8 +751,6 @@ mod tests {
             order = "shuffle"
             strategy = "weighted"
             members = [{ ref = "a", weight = 1 }]
-            [broadcast]
-            type = "scheduled"
         "#;
         assert!(validate_str(toml_str).is_err(), "a group must not carry order");
     }
@@ -806,8 +763,6 @@ mod tests {
             mode = "remote"
             order = "shuffle"
             url = "http://nightmusic.live"
-            [broadcast]
-            type = "scheduled"
         "#;
         assert!(validate_str(toml_str).is_err(), "a remote must not carry order");
     }
@@ -819,9 +774,6 @@ mod tests {
             [selection]
             mode = "queue"
             order = "shuffle"
-            [broadcast]
-            type = "interval"
-            every_tracks = 3
         "#;
         assert!(validate_str(toml_str).is_err(), "shuffle is not valid for queue");
     }
@@ -848,8 +800,6 @@ mod tests {
             name = "Typo"
             [selection]
             mode = "remoote"
-            [broadcast]
-            type = "general"
         "#;
         assert!(Playlist::parse(toml_str).is_err(), "unknown mode variant is rejected");
     }
@@ -923,8 +873,6 @@ mod tests {
                 mode = "group"
                 strategy = "weighted"
                 members = [{members}]
-                [broadcast]
-                type = "scheduled"
             "#
         );
         SetEntry {
@@ -939,8 +887,6 @@ mod tests {
             name = "leaf"
             [selection]
             mode = "dynamic"
-            [broadcast]
-            type = "general"
         "#;
         SetEntry {
             key: key.to_string(),

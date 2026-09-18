@@ -15,6 +15,8 @@
 //! an mpsc channel — same actor model as the rest of stationd.
 
 use std::collections::HashSet;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use sqlx::SqlitePool;
 
@@ -23,7 +25,8 @@ use crate::grid_index::{self, GridLoadError};
 use crate::grid_store;
 use crate::grid_toml;
 use crate::resolver::{
-    resolve_next, Epoch, Grid, GridDecision, LocalNow, Origin, PlaybackState, Rule, RuleKind,
+    resolve_next, resolve_ranked, Epoch, Grid, GridDecision, LocalNow, Origin, PlaybackState,
+    Rule, RuleKind,
 };
 use crate::store;
 
@@ -58,6 +61,11 @@ pub struct GridEngine {
     /// Plugins to notify of decisions (best-effort, fire-and-forget). `None`
     /// when no plugin system is wired (e.g. in unit tests).
     plugins: Option<crate::plugin::PluginHandle>,
+    /// Media root for the on-resolution existence check. `None` (tests) turns
+    /// the check off.
+    media_root: Option<PathBuf>,
+    /// Manual clock override for testing (`None` = real time).
+    now_override: Arc<Mutex<Option<Epoch>>>,
 }
 
 /// One entry of a grid projection ([`GridEngine::preview`]): the instant a
@@ -83,13 +91,91 @@ pub struct ResolvedDecision {
 
 impl GridEngine {
     pub fn new(pool: SqlitePool, tz: impl Into<String>) -> Self {
-        Self { pool, tz: tz.into(), plugins: None }
+        Self {
+            pool,
+            tz: tz.into(),
+            plugins: None,
+            media_root: None,
+            now_override: Arc::new(Mutex::new(None)),
+        }
     }
 
     /// Attach the plugin system so decisions are broadcast to plugins.
     pub fn with_plugins(mut self, plugins: crate::plugin::PluginHandle) -> Self {
         self.plugins = Some(plugins);
         self
+    }
+
+    /// Attach the media root so resolution can verify a chosen file still
+    /// exists on disk (and flip it unavailable if not). Without it, the check
+    /// is skipped.
+    pub fn with_media_root(mut self, root: impl Into<PathBuf>) -> Self {
+        self.media_root = Some(root.into());
+        self
+    }
+
+    /// Manual clock: freeze the instant `resolve_next` uses when the request
+    /// gives no explicit `now` (`Some`), or return to real time (`None`).
+    pub fn set_clock(&self, frozen: Option<Epoch>) {
+        *self.now_override.lock().unwrap() = frozen;
+    }
+
+    /// The current manual-clock override, if any.
+    pub fn clock_override(&self) -> Option<Epoch> {
+        *self.now_override.lock().unwrap()
+    }
+
+    /// The instant to resolve at: an explicit request `now`, else the manual
+    /// clock override, else real wall-clock time.
+    pub fn effective_now(&self, explicit: Option<Epoch>) -> Epoch {
+        explicit
+            .or_else(|| *self.now_override.lock().unwrap())
+            .unwrap_or_else(real_now)
+    }
+
+    /// Does the chosen media still exist under the media root? `true` when no
+    /// root is configured (check off, e.g. in tests).
+    fn media_exists(&self, rel_path: &str) -> bool {
+        match &self.media_root {
+            None => true,
+            Some(root) => root.join(rel_path).exists(),
+        }
+    }
+
+    /// Freeze the manual clock at a civil local time spec: "HH:MM" (today, in
+    /// the station timezone) or "YYYY-MM-DD HH:MM". The daemon owns the zone,
+    /// so the caller never computes an epoch.
+    pub fn set_clock_civil(&self, spec: &str) -> Result<(), ClockError> {
+        let epoch = self.parse_civil_spec(spec)?;
+        self.set_clock(Some(epoch));
+        Ok(())
+    }
+
+    fn parse_civil_spec(&self, spec: &str) -> Result<Epoch, ClockError> {
+        let spec = spec.trim();
+        let (date_part, time_part) = match spec.split_once(' ') {
+            Some((d, t)) => (Some(d.trim()), t.trim()),
+            None => (None, spec),
+        };
+        let (hour, minute) = parse_hh_mm(time_part)?;
+        let (year, month, day) = match date_part {
+            Some(dp) => parse_ymd(dp)?,
+            None => {
+                let today = clock::to_local_now(real_now(), &self.tz)?;
+                (
+                    today.date.year as i16,
+                    today.date.month as i8,
+                    today.date.day as i8,
+                )
+            }
+        };
+        clock::civil_to_epoch(&self.tz, year, month, day, hour, minute)
+    }
+
+    /// Render an epoch as station-local civil text (for display).
+    pub fn render_local(&self, epoch: Epoch) -> Result<String, ClockError> {
+        let ln = clock::to_local_now(epoch, &self.tz)?;
+        Ok(fmt_local(&ln, &self.tz))
     }
 
     /// Read the configured rules without resolving or touching playback state.
@@ -245,14 +331,115 @@ impl GridEngine {
 
     /// Resolve the source to pull at a track boundary for instant `now`, and
     /// persist the decision's side effects (a consumed AtClock occurrence, an
-    /// `Every` cooldown reset). Pure resolution, durable bookkeeping.
+    /// `Every` cooldown reset). Pure resolution, durable bookkeeping. This is
+    /// the source-only primitive (no media); the live path is `next_media`.
     pub async fn next(&self, now: Epoch) -> Result<GridDecision, EngineError> {
         let local = clock::to_local_now(now, &self.tz)?;
         let grid = grid_index::load_grid(&self.pool).await?;
         let state = grid_store::load_playback_state(&self.pool).await?;
 
         let decision = resolve_next(local, &grid, &state);
+        self.persist_effects(&decision, now).await?;
+        Ok(decision)
+    }
 
+    /// Resolve the source AND the concrete media to pull, with **grid
+    /// fallthrough**: ask the resolver for the applicable sources in priority
+    /// order and keep the first that actually yields a media. A source whose
+    /// pool is empty is skipped and we fall through to the next (down to the
+    /// BaseRotation floor) — no silent gap. Side effects (a consumed AtClock
+    /// mark, an `Every` reset) are persisted ONLY for the source that produced,
+    /// so an empty AtClock does not burn its occurrence.
+    ///
+    /// - every applicable source (incl. the floor) empty → `PoolEmpty` surfaced
+    ///   (legitimate dead air → Liquidsoap on-empty covers it);
+    /// - no rule covers `now` at all → a `Fallback` decision, media `None`.
+    pub async fn next_media(&self, now: Epoch) -> Result<ResolvedDecision, EngineError> {
+        let local = clock::to_local_now(now, &self.tz)?;
+        let grid = grid_index::load_grid(&self.pool).await?;
+        let state = grid_store::load_playback_state(&self.pool).await?;
+
+        let ranked = resolve_ranked(local, &grid, &state);
+        let had_candidates = !ranked.is_empty();
+
+        for decision in ranked {
+            let Some(playlist_ref) = decision.playlist_ref.clone() else {
+                continue;
+            };
+            // Bounded re-pick: a chosen file that vanished from disk (between
+            // scans) is flipped unavailable in the index and we re-pick from
+            // the same source. Capped so a pool of dead entries can't spin.
+            const MAX_DEAD_PICKS: u32 = 32;
+            let mut produced: Option<String> = None;
+            for _ in 0..MAX_DEAD_PICKS {
+                match crate::selection::resolve_ref_with_plugins(
+                    &self.pool,
+                    self.plugins.as_ref(),
+                    &playlist_ref,
+                )
+                .await
+                {
+                    Ok(media) if self.media_exists(&media) => {
+                        produced = Some(media);
+                        break;
+                    }
+                    Ok(missing) => {
+                        tracing::warn!(
+                            media = %missing,
+                            "resolved media missing on disk; marking unavailable and re-picking"
+                        );
+                        crate::media_index::mark_unavailable(&self.pool, &missing).await?;
+                        continue;
+                    }
+                    Err(crate::selection::SelectionError::PoolEmpty) => break,
+                    // A config error (unknown ref, unsupported order/mode, bad
+                    // filter value) is not an empty pool — surface it.
+                    Err(e) => return Err(EngineError::Selection(e)),
+                }
+            }
+
+            if let Some(media) = produced {
+                // Persist effects only now that this source actually produced.
+                self.persist_effects(&decision, now).await?;
+                self.emit_resolved(&decision, Some(&media));
+                return Ok(ResolvedDecision { decision, media_path: Some(media) });
+            }
+
+            tracing::info!(
+                rule = decision.rule_id.as_deref().unwrap_or("-"),
+                playlist = %playlist_ref,
+                origin = ?decision.origin,
+                "grid source produced no usable media; falling through to lower priority"
+            );
+        }
+
+        if had_candidates {
+            // Everything applicable, down to the floor, produced nothing:
+            // legitimate dead air → surface it (Liquidsoap on-empty covers).
+            return Err(EngineError::Selection(
+                crate::selection::SelectionError::PoolEmpty,
+            ));
+        }
+
+        // No rule covered `now` at all → fallback (Liquidsoap safety net).
+        let decision = GridDecision {
+            origin: Origin::Fallback,
+            rule_id: None,
+            playlist_ref: None,
+            mark_taken: None,
+        };
+        self.emit_resolved(&decision, None);
+        Ok(ResolvedDecision { decision, media_path: None })
+    }
+
+    /// Persist a decision's side effects — a consumed AtClock occurrence and an
+    /// `Every` cooldown reset. Called only once a source has actually produced
+    /// (or, from `next`, for the chosen source).
+    async fn persist_effects(
+        &self,
+        decision: &GridDecision,
+        now: Epoch,
+    ) -> Result<(), EngineError> {
         if let Some(token) = &decision.mark_taken {
             grid_store::record_at_clock_taken(&self.pool, token, now).await?;
         }
@@ -261,41 +448,62 @@ impl GridEngine {
                 grid_store::reset_every(&self.pool, rule_id, now).await?;
             }
         }
-        Ok(decision)
+        Ok(())
     }
 
-    /// Resolve a full decision AND the concrete media to pull: `next` decides
-    /// the source, the selection stage turns that `playlist_ref` into a media
-    /// file. A `Fallback` decision (no ref) yields `media_path = None` — the
-    /// Liquidsoap safety fallback fills the air, never a silent gap.
-    ///
-    /// Ordering note: `next` persists its side effects (a consumed AtClock
-    /// mark, an Every reset) before selection runs; if selection then fails,
-    /// the grid state has already advanced. Acceptable at this milestone (a
-    /// dev/CLI path); revisit when the live loop drives Liquidsoap.
-    pub async fn next_media(&self, now: Epoch) -> Result<ResolvedDecision, EngineError> {
-        let decision = self.next(now).await?;
-        let media_path = match &decision.playlist_ref {
-            Some(r) => Some(
-                crate::selection::resolve_ref_with_plugins(&self.pool, self.plugins.as_ref(), r)
-                    .await?,
-            ),
-            None => None,
-        };
-
-        // Notify plugins (best-effort, never blocks this path). Observation
-        // only — a plugin cannot change the decision from here.
+    /// Notify plugins of a decision (best-effort, fire-and-forget).
+    fn emit_resolved(&self, decision: &GridDecision, media_path: Option<&str>) {
         if let Some(plugins) = &self.plugins {
             plugins.emit(crate::plugin::PluginEvent::TrackResolved {
-                media_path: media_path.clone(),
+                media_path: media_path.map(|s| s.to_string()),
                 playlist_ref: decision.playlist_ref.clone(),
                 rule_id: decision.rule_id.clone(),
                 origin: format!("{:?}", decision.origin),
             });
         }
-
-        Ok(ResolvedDecision { decision, media_path })
     }
+}
+
+fn real_now() -> Epoch {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    Epoch(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0),
+    )
+}
+
+fn parse_hh_mm(s: &str) -> Result<(i8, i8), ClockError> {
+    let (h, m) = s
+        .split_once(':')
+        .ok_or_else(|| ClockError::BadCivilTime(format!("expected HH:MM, got {s:?}")))?;
+    let hour = h
+        .trim()
+        .parse()
+        .map_err(|_| ClockError::BadCivilTime(format!("bad hour in {s:?}")))?;
+    let minute = m
+        .trim()
+        .parse()
+        .map_err(|_| ClockError::BadCivilTime(format!("bad minute in {s:?}")))?;
+    Ok((hour, minute))
+}
+
+fn parse_ymd(s: &str) -> Result<(i16, i8, i8), ClockError> {
+    let parts: Vec<&str> = s.split('-').collect();
+    if parts.len() != 3 {
+        return Err(ClockError::BadCivilTime(format!("expected YYYY-MM-DD, got {s:?}")));
+    }
+    let year = parts[0]
+        .parse()
+        .map_err(|_| ClockError::BadCivilTime(format!("bad year in {s:?}")))?;
+    let month = parts[1]
+        .parse()
+        .map_err(|_| ClockError::BadCivilTime(format!("bad month in {s:?}")))?;
+    let day = parts[2]
+        .parse()
+        .map_err(|_| ClockError::BadCivilTime(format!("bad day in {s:?}")))?;
+    Ok((year, month, day))
 }
 
 /// Render a `LocalNow` as `YYYY-MM-DD HH:MM <IANA zone>` — named zone, not a
@@ -471,5 +679,62 @@ mod tests {
         assert_eq!(occ.len(), 1, "nothing changes → one segment");
         assert_eq!(occ[0].origin, Origin::BaseRotation);
         assert_eq!(occ[0].playlist_ref, "general");
+    }
+
+    #[tokio::test]
+    async fn next_media_falls_through_empty_daypart_to_floor() {
+        use crate::resolver::WallClock;
+        let (_dir, eng) = engine().await; // tz = UTC
+
+        // Media only under music/ — the floor can produce, the daypart cannot.
+        crate::media_index::replace_library(
+            &eng.pool,
+            &[crate::media::ScannedMedia {
+                rel_path: "music/a.mp3".into(),
+                title: Some("t".into()),
+                artist: None,
+                album: None,
+                year: None,
+                genres: vec![],
+                duration_ms: 1000,
+                size_bytes: 1,
+                mtime_ns: 0,
+            }],
+            1000,
+        )
+        .await
+        .unwrap();
+
+        for (r, prefix) in [("music", "music/"), ("jazz", "jazz/")] {
+            let toml = format!(
+                "name = \"{r}\"\n[selection]\nmode = \"dynamic\"\norder = \"shuffle\"\n\
+                 [[selection.filter]]\nfield = \"path\"\nop = \"prefix\"\nvalue = \"{prefix}\"\n"
+            );
+            let pl = crate::playlist::Playlist::parse(&toml).unwrap();
+            crate::store::upsert(&eng.pool, r, &pl, &toml, Some(r)).await.unwrap();
+        }
+
+        insert_rule(&eng.pool, &rule("floor", RuleKind::BaseRotation { playlist_ref: "music".into() }))
+            .await
+            .unwrap();
+        insert_rule(
+            &eng.pool,
+            &rule(
+                "jazz",
+                RuleKind::DayPart {
+                    playlist_ref: "jazz".into(),
+                    start: WallClock { hour: 8, minute: 0 },
+                    end: WallClock { hour: 10, minute: 0 },
+                },
+            ),
+        )
+        .await
+        .unwrap();
+
+        // 09:00: the jazz daypart outranks the floor but its pool is empty →
+        // fall through to the music floor rather than erroring.
+        let r = eng.next_media(at(9, 0)).await.unwrap();
+        assert_eq!(r.media_path.as_deref(), Some("music/a.mp3"));
+        assert_eq!(r.decision.origin, Origin::BaseRotation);
     }
 }

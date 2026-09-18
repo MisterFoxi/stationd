@@ -1,0 +1,76 @@
+# grid.toml
+# ─────────────────────────────────────────────────────────────────────────
+# La GRILLE : décide quoi jouer à l'instant `now`. Fichier unique, conteneur
+# [[rule]]. Chaque règle : id + kind + playlist_ref ; `kind` gouverne les
+# champs permis. Ordre de collision :
+#   at_clock hard > at_clock soft > every > day_part > base_rotation > fallback
+#
+# Refs = playlist_ref (rel_path de la vue). Doivent exister sinon `apply` rejette.
+
+schema_version = 1
+
+
+
+[[rule]]
+id = "floor"
+kind = "base_rotation"
+playlist_ref = "rotation"
+
+
+
+[[rule]]
+id="TransFM"
+kind ="at_clock"
+at = "09:00"
+playlist_ref="transfm"
+
+[[rule]]
+id="RockFM"
+kind ="at_clock"
+at = "10:00"
+expiry ="30m"
+playlist_ref="rockfm"
+
+
+[[rule]]
+id="Classic"
+kind="every"
+min_elapsed="15m"
+playlist_ref="classicfm"
+#weight="20"
+
+
+[[rule]]
+id="test"
+playlist_ref="test"
+kind="day_part"
+start="14:30"
+end = "15:50"
+
+
+
+[[rule]]
+id="Filler"
+kind = "day_part"
+playlist_ref="Filler"
+start = "10:45"
+end = "15:00"
+
+[[rule]]
+id="Filler2"
+playlist_ref="Filler"
+kind = "every"
+min_elapsed = "60m"
+
+
+
+# L'émission Homestone : au-dessus du plancher, sur un créneau. Si un membre
+# est vide (épisode manquant) et le groupe est en abort → on retombe sur le
+# plancher au lieu du dead-air.
+[[rule]]
+id = "homestone"
+kind = "day_part"
+playlist_ref = "homestone-chronicles/homestone-chronicles"
+start = "16:00"
+end   = "17:00"
+days  = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]

@@ -293,7 +293,8 @@ fn catch<R>(f: impl FnOnce() -> R) -> Result<R, String> {
 /// unknown name is a loud (visible) failure, never silently ignored.
 fn build_plugin(decl: &PluginDecl) -> Result<Box<dyn Plugin>, String> {
     if let Some(path) = &decl.wasm {
-        return WasmPlugin::new(decl.name.clone(), path).map(|p| Box::new(p) as Box<dyn Plugin>);
+        return WasmPlugin::new(decl.name.clone(), path, &decl.config)
+            .map(|p| Box::new(p) as Box<dyn Plugin>);
     }
     match decl.name.as_str() {
         "logger" => Ok(Box::new(LoggerPlugin::from_config(&decl.config))),
@@ -463,12 +464,23 @@ fn run_filters(slots: &mut [Slot], candidates: Vec<Candidate>) -> Vec<Candidate>
         if !matches!(slot.state, PluginState::Loaded) {
             continue;
         }
+        let before = cur.len();
         let outcome = slot.plugin.as_mut().map(|p| {
             let input = cur.clone();
             catch(move || p.filter_pool(input))
         });
         match outcome {
-            Some(Ok(kept)) => cur = kept,
+            Some(Ok(kept)) => {
+                if kept.len() != before {
+                    tracing::info!(
+                        plugin = %slot.decl.name,
+                        before,
+                        after = kept.len(),
+                        "filter_pool changed the pool"
+                    );
+                }
+                cur = kept;
+            }
             Some(Err(reason)) => slot.note_failure(Phase::FilterPool, reason),
             None => {}
         }
@@ -620,8 +632,12 @@ struct WasmPlugin {
 }
 
 impl WasmPlugin {
-    fn new(name: String, path: &str) -> Result<Self, String> {
-        let manifest = Manifest::new([Wasm::file(path)]);
+    fn new(name: String, path: &str, config: &toml::Table) -> Result<Self, String> {
+        // Pass the plugin's TOML config to the guest as a single JSON string
+        // under the key "config"; the guest reads it via `config::get("config")`.
+        let config_json = serde_json::to_string(config).unwrap_or_else(|_| "{}".to_string());
+        let manifest = Manifest::new([Wasm::file(path)])
+            .with_config([("config".to_string(), config_json)].into_iter());
         let plugin = ExtismPlugin::new(&manifest, [], false).map_err(|e| e.to_string())?;
         let has_filter = plugin.function_exists("filter_pool");
         let has_event = plugin.function_exists("on_event");

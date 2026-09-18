@@ -163,6 +163,17 @@ pub async fn list(pool: &SqlitePool, only_available: bool) -> Result<Vec<MediaRo
     Ok(out)
 }
 
+/// Flip a media row to unavailable — e.g. its file vanished from disk between
+/// scans and we found out at resolution time. Idempotent; a no-op if the path
+/// is unknown. Keeps the index honest without waiting for the next full scan.
+pub async fn mark_unavailable(pool: &SqlitePool, rel_path: &str) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE media SET available = 0 WHERE rel_path = ?1")
+        .bind(rel_path)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

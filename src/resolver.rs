@@ -234,15 +234,18 @@ pub struct Grid {
 // resolve_next
 // ---------------------------------------------------------------------------
 
-/// Resolve which source to pull at a track boundary. Pure: same inputs, same
-/// output. The collision order is fixed and applied top to bottom.
+/// Rank every applicable source at `now`, highest priority first, for the grid
+/// fallthrough: the engine tries them in order and keeps the first that yields
+/// a concrete media, so an empty pool at one level falls through to the next
+/// (down to the BaseRotation floor) instead of a silent gap. Pure.
 ///
-/// This is the boundary path (soft AtClock + Every + base). A `Hard` AtClock
-/// that must preempt *mid-track* is scheduled by a separate wall timer; when a
-/// hard rule is also due exactly at a boundary, its higher priority is honored
-/// here too.
-pub fn resolve_next(now: LocalNow, grid: &Grid, state: &PlaybackState) -> GridDecision {
-    // 1. AtClock due now — hard before soft, then earliest, then id.
+/// Order = the fixed collision order, flattened:
+///   AtClock (hard, then soft, ties by id) > Every (by id) > DayPart (narrowest
+///   first) > BaseRotation. An empty result means no rule covers `now`.
+pub fn resolve_ranked(now: LocalNow, grid: &Grid, state: &PlaybackState) -> Vec<GridDecision> {
+    let mut out = Vec::new();
+
+    // 1. AtClock due now — hard before soft, then id.
     let mut due: Vec<(&Rule, &str, Mode, String)> = Vec::new();
     for rule in grid.rules.iter().filter(|r| r.enabled) {
         if !rule.validity.applies(now) {
@@ -262,13 +265,12 @@ pub fn resolve_next(now: LocalNow, grid: &Grid, state: &PlaybackState) -> GridDe
             }
         }
     }
-    // Hard outranks soft; ties broken by rule id for determinism.
     due.sort_by(|a, b| {
         let rank = |m: Mode| if m == Mode::Hard { 0 } else { 1 };
         rank(a.2).cmp(&rank(b.2)).then_with(|| a.0.id.cmp(&b.0.id))
     });
-    if let Some((rule, playlist_ref, mode, token)) = due.into_iter().next() {
-        return GridDecision {
+    for (rule, playlist_ref, mode, token) in due {
+        out.push(GridDecision {
             origin: if mode == Mode::Hard {
                 Origin::AtClockHard
             } else {
@@ -277,10 +279,10 @@ pub fn resolve_next(now: LocalNow, grid: &Grid, state: &PlaybackState) -> GridDe
             rule_id: Some(rule.id.clone()),
             playlist_ref: Some(playlist_ref.to_string()),
             mark_taken: Some(token),
-        };
+        });
     }
 
-    // 2. Every satisfied (sliding cooldown). First match by id order.
+    // 2. Every satisfied (sliding cooldown), by id.
     let mut every: Vec<&Rule> = grid
         .rules
         .iter()
@@ -290,20 +292,18 @@ pub fn resolve_next(now: LocalNow, grid: &Grid, state: &PlaybackState) -> GridDe
     for rule in every {
         if let RuleKind::Every { playlist_ref, cadence } = &rule.kind {
             if every_due(&rule.id, *cadence, now, state) {
-                return GridDecision {
+                out.push(GridDecision {
                     origin: Origin::Every,
                     rule_id: Some(rule.id.clone()),
                     playlist_ref: Some(playlist_ref.clone()),
                     mark_taken: None,
-                };
+                });
             }
         }
     }
 
-    // 3. Base: the DayPart whose window covers `now`, else the BaseRotation.
-    // If several DayParts overlap, the narrowest window wins (most specific);
-    // ties broken by id.
-    let mut best_daypart: Option<(&Rule, &str, u32)> = None;
+    // 3. Base: covering DayParts (narrowest first), then the BaseRotation.
+    let mut dayparts: Vec<(&Rule, &str, u32)> = Vec::new();
     let mut base_rotation: Option<(&Rule, &str)> = None;
     for rule in grid.rules.iter().filter(|r| r.enabled) {
         if !rule.validity.applies(now) {
@@ -312,46 +312,44 @@ pub fn resolve_next(now: LocalNow, grid: &Grid, state: &PlaybackState) -> GridDe
         match &rule.kind {
             RuleKind::DayPart { playlist_ref, start, end } => {
                 if let Some(span) = window_covers(*start, *end, now.wall) {
-                    let better = match best_daypart {
-                        None => true,
-                        Some((cur_rule, _, cur_span)) => {
-                            span < cur_span || (span == cur_span && rule.id < cur_rule.id)
-                        }
-                    };
-                    if better {
-                        best_daypart = Some((rule, playlist_ref, span));
-                    }
+                    dayparts.push((rule, playlist_ref, span));
                 }
             }
-            RuleKind::BaseRotation { playlist_ref } => {
-                // Last one by id wins if several (config smell, but defined).
-                match base_rotation {
-                    Some((cur, _)) if cur.id <= rule.id => {}
-                    _ => base_rotation = Some((rule, playlist_ref)),
-                }
-            }
+            RuleKind::BaseRotation { playlist_ref } => match base_rotation {
+                Some((cur, _)) if cur.id <= rule.id => {}
+                _ => base_rotation = Some((rule, playlist_ref)),
+            },
             _ => {}
         }
     }
-    if let Some((rule, playlist_ref, _)) = best_daypart {
-        return GridDecision {
+    dayparts.sort_by(|a, b| a.2.cmp(&b.2).then_with(|| a.0.id.cmp(&b.0.id)));
+    for (rule, playlist_ref, _) in dayparts {
+        out.push(GridDecision {
             origin: Origin::DayPart,
             rule_id: Some(rule.id.clone()),
             playlist_ref: Some(playlist_ref.to_string()),
             mark_taken: None,
-        };
+        });
     }
     if let Some((rule, playlist_ref)) = base_rotation {
-        return GridDecision {
+        out.push(GridDecision {
             origin: Origin::BaseRotation,
             rule_id: Some(rule.id.clone()),
             playlist_ref: Some(playlist_ref.to_string()),
             mark_taken: None,
-        };
+        });
     }
 
-    // 4. Nothing applied — hand off to the Liquidsoap safety fallback.
-    GridDecision::fallback()
+    out
+}
+
+/// Resolve the single winning source at a track boundary — the top of
+/// [`resolve_ranked`], or the fallback if nothing applies. Pure.
+pub fn resolve_next(now: LocalNow, grid: &Grid, state: &PlaybackState) -> GridDecision {
+    resolve_ranked(now, grid, state)
+        .into_iter()
+        .next()
+        .unwrap_or_else(GridDecision::fallback)
 }
 
 // ---------------------------------------------------------------------------
@@ -674,5 +672,21 @@ mod tests {
         let grid = Grid { rules: vec![base("floor", "general"), r] };
         let d = resolve_next(now_at(9, 0), &grid, &PlaybackState::default());
         assert_eq!(d.origin, Origin::BaseRotation);
+    }
+
+    #[test]
+    fn resolve_ranked_orders_by_priority() {
+        let grid = Grid {
+            rules: vec![
+                base("floor", "general"),
+                daypart("morning", "jazz", (8, 0), (10, 0)),
+                at_clock("top", "jingle", 15, Mode::Soft, None),
+            ],
+        };
+        // At a :15 mark inside the morning window: AtClock, then DayPart, then
+        // the floor — exactly the fallthrough order the engine will try.
+        let ranked = resolve_ranked(now_at(9, 15), &grid, &PlaybackState::default());
+        let refs: Vec<_> = ranked.iter().map(|d| d.playlist_ref.as_deref().unwrap()).collect();
+        assert_eq!(refs, vec!["jingle", "jazz", "general"]);
     }
 }

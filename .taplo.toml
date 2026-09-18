@@ -1,0 +1,11 @@
+[[rule]]
+include = ["playlist/**/*.toml"]
+
+[rule.schema]
+path = "./schemas/playlist.schema.json"
+
+[[rule]]
+include = ["grids/**/*.toml"]
+
+[rule.schema]
+path = "./schemas/grid.schema.json"

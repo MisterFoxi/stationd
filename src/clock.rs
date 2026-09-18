@@ -23,6 +23,8 @@ pub enum ClockError {
     UnknownTimeZone(String),
     #[error("epoch out of representable range: {0}")]
     EpochOutOfRange(i64),
+    #[error("invalid civil time: {0}")]
+    BadCivilTime(String),
 }
 
 /// Decompose an epoch-UTC instant into the station's civil local time.
@@ -48,6 +50,31 @@ pub fn to_local_now(epoch: Epoch, tz_name: &str) -> Result<LocalNow, ClockError>
             minute: zoned.minute() as u8,
         },
     })
+}
+
+/// Convert a civil local time (in the station timezone) to an epoch-UTC
+/// instant — the inverse of [`to_local_now`], used by the manual clock so a
+/// human gives "20:00", not an epoch. DST is resolved by `jiff`'s compatible
+/// disambiguation (a nonexistent/doubled wall time is mapped to a sensible
+/// instant rather than rejected — acceptable for a test clock).
+pub fn civil_to_epoch(
+    tz_name: &str,
+    year: i16,
+    month: i8,
+    day: i8,
+    hour: i8,
+    minute: i8,
+) -> Result<Epoch, ClockError> {
+    let tz = TimeZone::get(tz_name).map_err(|_| ClockError::UnknownTimeZone(tz_name.to_string()))?;
+    let d = jiff::civil::Date::new(year, month, day)
+        .map_err(|e| ClockError::BadCivilTime(e.to_string()))?;
+    let t = jiff::civil::Time::new(hour, minute, 0, 0)
+        .map_err(|e| ClockError::BadCivilTime(e.to_string()))?;
+    let zoned = d
+        .to_datetime(t)
+        .to_zoned(tz)
+        .map_err(|e| ClockError::BadCivilTime(e.to_string()))?;
+    Ok(Epoch(zoned.timestamp().as_second()))
 }
 
 fn map_weekday(w: JiffWeekday) -> Weekday {

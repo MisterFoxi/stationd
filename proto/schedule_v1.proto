@@ -161,6 +161,10 @@ service ScheduleService {
   // Simulation sans wall-clock : stationctl schedule preview --at / --next 24h.
   // Sert de test anti-DST (fenêtre sur nuit de bascule → révèle trou/doublon).
   rpc Preview(PreviewRequest) returns (PreviewResponse);
+
+  // Horloge manuelle (test) : fige/relâche l'instant que ResolveNext utilise
+  // quand la requête ne fournit pas `now`. Sans changement demandé → reporte.
+  rpc SetClock(SetClockRequest) returns (ClockStatus);
 }
 
 message GridFile { string path = 1; string toml = 2; }
@@ -177,3 +181,19 @@ message PreviewRequest {
   google.protobuf.Duration  window = 2;    // ex. 24h
 }
 message PreviewResponse { repeated Occurrence occurrences = 1; }
+
+// Horloge manuelle. `real = true` → repasse en temps réel. Sinon `at` (s'il
+// est fourni) fige l'instant. Ni `real` ni `at` → aucun changement, reporte
+// juste l'état courant (sert de « clock show »).
+message SetClockRequest {
+  bool real = 1;
+  // Heure civile locale : "HH:MM" (aujourd'hui) ou "YYYY-MM-DD HH:MM". Le
+  // daemon convertit avec le fuseau station. Vide et real=false → aucun
+  // changement, reporte juste l'état (« clock show »).
+  string at = 2;
+}
+message ClockStatus {
+  bool frozen = 1;                         // true si une horloge manuelle est active
+  google.protobuf.Timestamp effective = 2; // l'instant que ResolveNext utilisera
+  string effective_local = 3;              // le même instant rendu en local nommé
+}

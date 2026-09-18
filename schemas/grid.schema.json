@@ -1,0 +1,386 @@
+{
+  "$schema": "http://json-schema.org/draft-04/schema#",
+  "title": "StationD — grille de programmation",
+  "description": "Grammaire et validations locales de grid_toml.rs. Restent vérifiés par stationd : unicité des id après trim, au plus une base_rotation (même désactivée), ordre des heures/dates, dépassement u64 des durées, normalisation et résolution des références.",
+  "x-source": {
+    "file": "grid_toml.rs",
+    "sha256": "56a985ca245281cc5b6cd78b7bf78ad3ca2f1157d3fa82ba0c9d09489959e704"
+  },
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "enum": [
+        1
+      ],
+      "description": "Version obligatoire du contrat."
+    },
+    "rule": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/rule"
+      },
+      "description": "Règles de programmation ; tableau facultatif, vide autorisé."
+    }
+  },
+  "required": [
+    "schema_version"
+  ],
+  "definitions": {
+    "rule": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Identifiant stable de la règle. stationd retire les espaces aux extrémités et contrôle son unicité.",
+          "pattern": "\\S"
+        },
+        "enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Active ou désactive la règle."
+        },
+        "kind": {
+          "type": "string",
+          "description": "Type de programmation.",
+          "enum": [
+            "base_rotation",
+            "day_part",
+            "at_clock",
+            "every"
+          ]
+        },
+        "playlist_ref": {
+          "type": "string",
+          "description": "Référence relative à une playlist, extension .toml facultative. Normalisation et existence vérifiées par stationd.",
+          "pattern": "\\S"
+        },
+        "days": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "description": "Jour de la semaine.",
+            "enum": [
+              "mon",
+              "tue",
+              "wed",
+              "thu",
+              "fri",
+              "sat",
+              "sun"
+            ]
+          },
+          "description": "Jours de validité. Absent ou vide : tous les jours.",
+          "uniqueItems": true
+        },
+        "date_start": {
+          "type": "string",
+          "description": "Date entre guillemets YYYY-MM-DD. Le parseur vérifie mois 01..12 et jour 01..31, sans vérifier le calendrier réel. stationd compare date_start et date_end.",
+          "pattern": "^[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])$(?![\\s\\S])"
+        },
+        "date_end": {
+          "type": "string",
+          "description": "Date entre guillemets YYYY-MM-DD. Le parseur vérifie mois 01..12 et jour 01..31, sans vérifier le calendrier réel. stationd compare date_start et date_end.",
+          "pattern": "^[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])$(?![\\s\\S])"
+        },
+        "start": {
+          "type": "string",
+          "description": "Heure locale, normalement HH:MM (00:00 à 23:59). Les formes numériques acceptées par le parseur Rust sont également admises.",
+          "pattern": "^\\+?0*(?:[0-9]|1[0-9]|2[0-3]):\\+?0*(?:[0-9]|[1-5][0-9])$(?![\\s\\S])",
+          "examples": [
+            "08:00",
+            "20:15"
+          ]
+        },
+        "end": {
+          "type": "string",
+          "description": "Heure locale, normalement HH:MM (00:00 à 23:59). Les formes numériques acceptées par le parseur Rust sont également admises.",
+          "pattern": "^\\+?0*(?:[0-9]|1[0-9]|2[0-3]):\\+?0*(?:[0-9]|[1-5][0-9])$(?![\\s\\S])",
+          "examples": [
+            "08:00",
+            "20:15"
+          ]
+        },
+        "every_minutes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 60,
+          "description": "Déclenchement toutes les N minutes à partir de l’heure pleine."
+        },
+        "at": {
+          "type": "string",
+          "description": "Heure locale, normalement HH:MM (00:00 à 23:59). Les formes numériques acceptées par le parseur Rust sont également admises.",
+          "pattern": "^\\+?0*(?:[0-9]|1[0-9]|2[0-3]):\\+?0*(?:[0-9]|[1-5][0-9])$(?![\\s\\S])",
+          "examples": [
+            "08:00",
+            "20:15"
+          ]
+        },
+        "mode": {
+          "type": "string",
+          "description": "Mode de déclenchement.",
+          "enum": [
+            "soft",
+            "hard"
+          ],
+          "default": "soft"
+        },
+        "expiry": {
+          "type": "string",
+          "description": "Durée strictement positive, une seule unité s/m/h/d, sans zéro initial. stationd vérifie aussi le dépassement de u64 après conversion en secondes.",
+          "pattern": "^[1-9][0-9]*[smhd]$(?![\\s\\S])",
+          "examples": [
+            "30s",
+            "15m",
+            "2h",
+            "1d"
+          ]
+        },
+        "min_tracks": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295,
+          "description": "Nombre minimal de titres entre déclenchements."
+        },
+        "min_elapsed": {
+          "type": "string",
+          "description": "Durée strictement positive, une seule unité s/m/h/d, sans zéro initial. stationd vérifie aussi le dépassement de u64 après conversion en secondes.",
+          "pattern": "^[1-9][0-9]*[smhd]$(?![\\s\\S])",
+          "examples": [
+            "30s",
+            "15m",
+            "2h",
+            "1d"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "playlist_ref"
+      ],
+      "description": "Règle de programmation. Les champs autorisés dépendent de kind. Pour day_part, stationd impose end > start ; pas de passage de minuit.",
+      "oneOf": [
+        {
+          "properties": {
+            "kind": {
+              "enum": [
+                "base_rotation"
+              ]
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "start"
+                ]
+              },
+              {
+                "required": [
+                  "end"
+                ]
+              },
+              {
+                "required": [
+                  "every_minutes"
+                ]
+              },
+              {
+                "required": [
+                  "at"
+                ]
+              },
+              {
+                "required": [
+                  "mode"
+                ]
+              },
+              {
+                "required": [
+                  "expiry"
+                ]
+              },
+              {
+                "required": [
+                  "min_tracks"
+                ]
+              },
+              {
+                "required": [
+                  "min_elapsed"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "properties": {
+            "kind": {
+              "enum": [
+                "day_part"
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "start",
+            "end"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "every_minutes"
+                ]
+              },
+              {
+                "required": [
+                  "at"
+                ]
+              },
+              {
+                "required": [
+                  "mode"
+                ]
+              },
+              {
+                "required": [
+                  "expiry"
+                ]
+              },
+              {
+                "required": [
+                  "min_tracks"
+                ]
+              },
+              {
+                "required": [
+                  "min_elapsed"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "properties": {
+            "kind": {
+              "enum": [
+                "at_clock"
+              ]
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "start"
+                ]
+              },
+              {
+                "required": [
+                  "end"
+                ]
+              },
+              {
+                "required": [
+                  "min_tracks"
+                ]
+              },
+              {
+                "required": [
+                  "min_elapsed"
+                ]
+              }
+            ]
+          },
+          "oneOf": [
+            {
+              "required": [
+                "every_minutes"
+              ]
+            },
+            {
+              "required": [
+                "at"
+              ]
+            }
+          ]
+        },
+        {
+          "properties": {
+            "kind": {
+              "enum": [
+                "every"
+              ]
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "start"
+                ]
+              },
+              {
+                "required": [
+                  "end"
+                ]
+              },
+              {
+                "required": [
+                  "every_minutes"
+                ]
+              },
+              {
+                "required": [
+                  "at"
+                ]
+              },
+              {
+                "required": [
+                  "mode"
+                ]
+              },
+              {
+                "required": [
+                  "expiry"
+                ]
+              }
+            ]
+          },
+          "oneOf": [
+            {
+              "required": [
+                "min_tracks"
+              ]
+            },
+            {
+              "required": [
+                "min_elapsed"
+              ]
+            }
+          ]
+        }
+      ],
+      "x-taplo": {
+        "initKeys": [
+          "id",
+          "kind",
+          "playlist_ref"
+        ]
+      }
+    }
+  }
+}

@@ -18,9 +18,9 @@ pub use crate::proto::schedule;
 
 use schedule::schedule_service_server::ScheduleService;
 use schedule::{
-    ApplyGridRequest, ApplyGridResponse, Decision, ExportGridRequest, ExportGridResponse, GridFile,
-    ListRulesRequest, ListRulesResponse, PreviewRequest, PreviewResponse, ResolveNextRequest,
-    ValidateGridResponse,
+    ApplyGridRequest, ApplyGridResponse, ClockStatus, Decision, ExportGridRequest,
+    ExportGridResponse, GridFile, ListRulesRequest, ListRulesResponse, PreviewRequest,
+    PreviewResponse, ResolveNextRequest, SetClockRequest, ValidateGridResponse,
 };
 
 pub struct ScheduleGrpc {
@@ -96,10 +96,9 @@ impl ScheduleService for ScheduleGrpc {
         &self,
         request: Request<ResolveNextRequest>,
     ) -> Result<Response<Decision>, Status> {
-        let now = match request.into_inner().now {
-            Some(ts) => Epoch(ts.seconds),
-            None => Epoch(now_epoch_seconds()),
-        };
+        let now = self
+            .engine
+            .effective_now(request.into_inner().now.map(|ts| Epoch(ts.seconds)));
         let resolved = self
             .engine
             .next_media(now)
@@ -207,6 +206,29 @@ impl ScheduleService for ScheduleGrpc {
             })
             .collect();
         Ok(Response::new(PreviewResponse { occurrences }))
+    }
+
+    /// Manual clock (testing): freeze/release the instant `resolve_next` uses
+    /// when no explicit `now` is given. No change requested → report only.
+    async fn set_clock(
+        &self,
+        request: Request<SetClockRequest>,
+    ) -> Result<Response<ClockStatus>, Status> {
+        let req = request.into_inner();
+        if req.real {
+            self.engine.set_clock(None);
+        } else if !req.at.trim().is_empty() {
+            self.engine
+                .set_clock_civil(&req.at)
+                .map_err(|e| Status::invalid_argument(e.to_string()))?;
+        }
+        let effective = self.engine.effective_now(None);
+        let effective_local = self.engine.render_local(effective).unwrap_or_default();
+        Ok(Response::new(ClockStatus {
+            frozen: self.engine.clock_override().is_some(),
+            effective: Some(prost_types::Timestamp { seconds: effective.0, nanos: 0 }),
+            effective_local,
+        }))
     }
 }
 

@@ -43,33 +43,112 @@ choix) + **runtime WASM (WASM-1)** — un `.wasm` externe (extism) implémente l
 trait via JSON. `stationctl plugin list|start|stop|restart|reload`, plugins
 `logger`/`blacklist` (natifs) et `require-title` (wasm) validés en réel.
 Contrats figés dans `Doc/plugin-{events,hooks,host}.md`.
+**Fallthrough grille** : une source au pool vide retombe sur la priorité
+inférieure jusqu'au plancher (fini le dead-air par sélection vide) ; groupe
+`sequence` avec `on_member_unavailable = abort|skip`. **Config→guest wasm** :
+`[plugin.config]` traverse jusqu'au `.wasm` (plugin `blacklist` wasm configurable).
 
 ---
 
 ## ⭐ TÂCHE D'ENTRÉE PROCHAINE SESSION
 
-**Plugins — suite, au choix :**
+**Plugins A2 — surface hôte** (`Doc/plugin-host.md`, *host functions* extism) :
+`control` (Stop/Pause/Resume/StopWhenIdle, first-class station + invocable
+plugin), `push_override` (file lue par `next_media`, `soft` honoré / `hard`→LS),
+base par plugin. Puis le plugin `stop-when-idle` en démo (`on_event(
+ListenersSampled)` + `control`) — `ListenersSampled` n'aura de vraie source
+qu'avec Icecast, tester par injection.
 
-1. **Config → guest** (reporté de WASM-1) : plumbing config d'un plugin wasm
-   (`Manifest` config extism côté host + lecture `extism_pdk::config` côté
-   guest), puis réécrire `blacklist` en `.wasm` configurable. **+ crate de
-   types partagé** (`Candidate`/`PluginEvent`) pour ne plus les dupliquer entre
-   host et guest (aujourd'hui recopiés dans `plugins/require-title-wasm`).
-2. **A2 — surface hôte** (`Doc/plugin-host.md`, *host functions* extism) :
-   `control` (Stop/Pause/Resume/StopWhenIdle, first-class station + invocable
-   plugin), `push_override` (file lue par `next_media`, `soft` honoré /
-   `hard`→LS), base par plugin. Puis le plugin `stop-when-idle` en démo
-   (`on_event(ListenersSampled)` + `control`) — note : `ListenersSampled` n'aura
-   de vraie source qu'avec Icecast, tester par injection.
-3. **`on_scan`** : dernier hook non câblé (enrichissement au scan biblio).
-
-Autres chantiers indépendants : câblage Liquidsoap (le vrai « ça diffuse »),
-refacto acteur `GridEngine`, `DayPart` cross-minuit, historique de diffusion
-(famille B) qui débloque `constraints`/`unplayed_only`/`limit`.
+Autres, indépendants :
+- **`on_scan`** : dernier hook non câblé (enrichissement au scan biblio).
+- **Crate de types partagé** `Candidate`/`PluginEvent` (host + guests wasm ne
+  les dupliquent plus — aujourd'hui recopiés dans les 2 crates guest).
+- **`DayPart` cross-minuit** : `window_covers` renvoie `None` (TODO).
+- **Refacto acteur `GridEngine`** (gabarit `library_actor`).
+- **Câblage Liquidsoap** (le vrai « ça diffuse » ; débloque aussi `hard`).
+- **Refs de membres relatives** au dossier du groupe (chemin complet requis).
 
 ---
 
 ## Fait
+
+### — REPRISE (bug LIFO en cours-> non reproductible) + contrat broadcast + clock (2026-09-16) —
+
+**À FAIRE EN PREMIER À LA REPRISE :**
+- `cargo test -p stationd` (reconfirmer le vert après les derniers edits store.rs/tests/sync.rs).
+- **Retirer la trace TEMP** dans `selection.rs` `resolve_group_sequence` :
+  `tracing::info!(... "group sequence pick")` (posée pour diagnostiquer le bug 1).
+- Nettoyer les `.toml` de playlists sur disque (voir Bug ci-dessous) : retirer
+  `type`/`weight`/`[[broadcast.schedule]]`/`every_*` ; typo `ClassicFM.toml`
+  `mode = "remore"` → `"remote"`.
+
+**Bug.txt — triage (5 points) :**
+1. **LIFO groupe** (membres joués dernier→premier, visible en `schedule next`).
+   *En cours.* Code `resolve_group_sequence` + test = ordre AVANT (idx 0→1→2) ;
+   je ne reproduis pas par lecture. Trace TEMP posée → il faut les 3 lignes
+   `group sequence pick` de 3 `schedule next` pour trancher : idx part de 2
+   (→ `group_state` obsolete, base propre `rm -rf data/`) ? membres inversés en
+   base (→ stockage/parse) ? Groupe testé : `homestone-chronicles` (sequence,
+   intro/podcast/outro, take=1).
+2. **preview des `every`** : accepté, PAS codé. Sem. proposée : `min_elapsed`
+   projeté à sa cadence sur la fenêtre ; `min_tracks` en entrée indicative.
+   (preview exclut les Every aujourd'hui, cf. `grid_engine::preview`.) Attend go.
+3. **`expiry="30m"`** : valide UNIQUEMENT sur `at_clock` (péremption d'un top,
+   déjà supporté). La « fin fixe » voulue = point 5.
+4. **`weight` en grid** : non supporté par design (grille = priorité). Pondération
+   = playlist `group strategy="weighted"`.
+5. **Rotation à budget de temps** (`strategy="shuffle"` + `expiry` par membre) :
+   FEATURE neuve = nouvelle stratégie + champ temps/membre + bascule sur timer
+   mural dans une activation de groupe. Gros chantier, attend go + décision de
+   sémantique (concept playlist type `take`-en-temps, vs `day_part` grille).
+
+### — Fallthrough grille + on_member_unavailable + contrat broadcast + choisi+flip + clock (2026-09-15/16) —
+
+- **Fallthrough grille** (`grid_engine::next_media`) : source au pool vide →
+  retombe sur la priorité inférieure jusqu'au plancher ; effets AtClock/Every
+  persistés seulement quand une source produit. `resolver::resolve_ranked`
+  (sources classées) + `resolve_next` = son premier (pur, 13+1 tests).
+- **`on_member_unavailable = "abort"(défaut)|"skip"`** sur groupe `sequence`
+  (`playlist.rs` + `selection.rs`).
+- **Contrat `broadcast` playlist refondu** : politique de consommation seule
+  (`limit`/`repeat`/`on_exhausted`/`constraints`), **optionnel** ;
+  `type`/`weight`/`schedule`/`every_*` → **erreur de parse** (deny_unknown_fields).
+  L'ordonnancement vit UNIQUEMENT dans `grid.toml`. Fixtures de tous les fichiers
+  de test nettoyées (playlist/selection/grid_engine/store/tests-sync).
+- **choisi+flip** : `next_media` vérifie l'existence disque du média choisi
+  (`with_media_root`, câblé dans main) ; absent → `media_index::mark_unavailable`
+  + re-pick borné (32) sur la même source, sinon fallthrough. Off en tests
+  (media_root None).
+- **Horloge manuelle** : `GridEngine` override + `effective_now` + `set_clock_civil`
+  ("HH:MM" = aujourd'hui / "YYYY-MM-DD HH:MM") ; `clock::civil_to_epoch` ;
+  RPC `SetClock` ; `stationctl clock set|show|reset`.
+
+### — Fallthrough grille + on_member_unavailable + config→guest wasm (2026-09-15) —
+
+Règle le dead-air : une source qui ne produit pas retombe sur la priorité
+inférieure jusqu'au plancher, au lieu de remonter une erreur.
+
+- `resolver.rs` : `resolve_ranked(now, grid, state) -> Vec<GridDecision>`
+  (sources classées par priorité) ; `resolve_next` = premier de la liste
+  (sémantique inchangée, 13 tests + 1 d'ordre). Reste **pur**.
+- `grid_engine.rs` : `next_media` essaie les sources classées, saute un
+  `PoolEmpty` et retombe jusqu'au plancher ; effets (mark AtClock / reset Every)
+  persistés **seulement quand une source produit** (corrige l'ancien caveat
+  « persiste avant sélection »). Erreur seulement si tout — plancher compris —
+  est vide ; `Fallback` (média None) si aucune règle ne couvre `now`.
+  `persist_effects`/`emit_resolved` factorisés. + test fallthrough.
+- `playlist.rs` : `on_member_unavailable = "abort"` (défaut) | `"skip"`.
+- `selection.rs` : groupe `sequence` — `skip` saute le membre vide et continue,
+  `abort` fait échouer le groupe (→ fallthrough grille). + 2 tests.
+- **Config→guest wasm** : `WasmPlugin::new` injecte `[plugin.config]` (JSON) dans
+  le `Manifest` extism (`with_config(...).into_iter()`) ; guest lit
+  `config::get("config")`. Crate guest `plugins/blacklist-wasm/` (blacklist wasm
+  configurable). Validé en réel (le filtrage suit la config).
+
+**Conséquence pour la grille** : une vraie grille doit avoir un **plancher
+musical distinct** (`base_rotation` sur une rotation musique), l'émission en
+`day_part`/`scheduled` au-dessus — sinon « le plancher EST le groupe » et il n'y
+a rien sous quoi retomber.
 
 ### — filter_pool + runtime WASM (WASM-1) (2026-09-15) —
 
@@ -441,7 +520,7 @@ dans le découpage des modules (`grid_index` = A, `grid_store` = B).
 | `src/library_grpc.rs` | Transport gRPC biblio (traducteur mince acteur↔proto) |
 | `src/plugin.rs` | Système de plugins : trait, acteur à état, quarantaine, `filter_pool`, `WasmPlugin` (extism), natifs logger/blacklist |
 | `src/plugin_grpc.rs` | Transport gRPC plugins (list + control) |
-| `plugins/require-title-wasm/` | Crate guest WASM de démo (séparé, cible wasm32) : exporte `filter_pool` |
+| `plugins/{require-title,blacklist}-wasm/` | Crates guest WASM de démo (séparés, cible wasm32) : `filter_pool` |
 | `src/grpc.rs` | Service `Station` (status/quit/playlist*) |
 | `src/db.rs` | Init pool SQLite + migrations |
 | `src/main.rs` | Daemon : démarrage, 5 services gRPC, shutdown |

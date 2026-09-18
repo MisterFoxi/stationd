@@ -10,7 +10,7 @@ use stationd::proto::{library, plugin, schedule, station};
 use station::station_client::StationClient;
 use station::{PlaylistAddRequest, PlaylistListRequest, PlaylistSyncRequest, QuitRequest, StatusRequest};
 use schedule::schedule_service_client::ScheduleServiceClient;
-use schedule::{ApplyGridRequest, ExportGridRequest, GridFile, PreviewRequest, ResolveNextRequest};
+use schedule::{ApplyGridRequest, ExportGridRequest, GridFile, PreviewRequest, ResolveNextRequest, SetClockRequest};
 use library::library_service_client::LibraryServiceClient;
 use library::{ListMediaRequest, ScanRequest};
 use plugin::plugin_service_client::PluginServiceClient;
@@ -47,6 +47,20 @@ enum Command {
     /// Plugin operations
     #[command(subcommand)]
     Plugin(PluginCommand),
+    /// Manual clock (testing)
+    #[command(subcommand)]
+    Clock(ClockCommand),
+}
+
+#[derive(Subcommand, Debug)]
+enum ClockCommand {
+    /// Show the effective clock
+    Show,
+    /// Freeze the clock at a civil local time: "HH:MM" (today) or
+    /// "YYYY-MM-DD HH:MM"
+    Set { when: String },
+    /// Return to real time
+    Reset,
 }
 
 #[derive(Subcommand, Debug)]
@@ -430,6 +444,17 @@ async fn main() -> anyhow::Result<()> {
                 };
                 println!("{}: {}{reason}", p.name, p.state);
             }
+        }
+        Command::Clock(cmd) => {
+            let req = match &cmd {
+                ClockCommand::Show => SetClockRequest { real: false, at: String::new() },
+                ClockCommand::Reset => SetClockRequest { real: true, at: String::new() },
+                ClockCommand::Set { when } => SetClockRequest { real: false, at: when.clone() },
+            };
+            let mut sched = ScheduleServiceClient::connect(args.addr.clone()).await?;
+            let status = sched.set_clock(req).await?.into_inner();
+            let state = if status.frozen { "FROZEN" } else { "real time" };
+            println!("clock: {state} \u{2014} {}", status.effective_local);
         }
     }
 
