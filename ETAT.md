@@ -5,7 +5,7 @@ sans reconstruire le contexte. À distinguer des docs de `Doc/` (décisions
 d'architecture durables) : ce fichier-ci est volatil, à mettre à jour à
 chaque session.
 
-Dernière mise à jour : 2026-09-15.
+Dernière mise à jour : 2026-09-18.
 
 
 ## Ajout : TUI d'administration (correctif préparé, compilation à confirmer)
@@ -72,6 +72,34 @@ Autres, indépendants :
 
 ## Fait
 
+### — Preview des `every` : projection elapsed + indicatif tracks (2026-09-18) —
+
+Point 2 du triage bug. Le `preview` ne jette plus les `every`.
+
+- **`elapsed` projeté** dans la timeline : réinjecté dans la marche
+  minute-par-minute de `grid_engine::preview` (semé `last_played = from` → 1er
+  repère à `from + cadence`, `last_played` avancé à chaque tir). Ponctue comme
+  un `AtClock` (instant, pas segment) ; priorité `AtClock > Every > base`
+  conservée (passe par `resolve_next`). Granularité minute assumée.
+- **`tracks` indicatif** : non projetable sur l'horloge → renvoyé à part.
+  `grid_engine::preview` renvoie `GridPreview { occurrences, indicative }` ;
+  `occurrences` reste une timeline pure et monotone (le TUI agenda en dépend),
+  `indicative` = une entrée par règle `every` au compteur (`IndicativeRule`).
+- **Contrat** `proto/schedule_v1.proto` : `Occurrence` inchangé, nouveau message
+  `IndicativeRule`, `PreviewResponse { occurrences, indicative }`.
+- **CLI** `stationctl schedule preview` : plancher/`day_part` affichés une seule
+  fois par segment réel — les reprises après une marque ne sont plus
+  réimprimées (lisibilité) ; `indicative` listé une fois en fin de sortie.
+- **TUI agenda** : pied de page liste les `every` au compteur par nom de
+  playlist (avant : comptait *tous* les `every` en disant « not projected »,
+  faux depuis que les `elapsed` sont projetés). `entries()`/`occurrences`
+  inchangés (le pied de page dérive de `ListRules`).
+- Tests verts : `grid_engine` (`preview_projects_an_elapsed_every_at_its_cadence`
+  neuf ; `preview_projects_base_daypart_and_marks` et
+  `preview_of_a_bare_floor_is_a_single_segment` adaptés à `GridPreview`) ;
+  `tests/agenda_preview.rs` (`occurrences` monotone sans `Every`, `indicative`
+  vérifié). `--features tui` : littéraux `PreviewResponse` complétés.
+
 ### — REPRISE (bug LIFO en cours-> non reproductible) + contrat broadcast + clock (2026-09-16) —
 
 **À FAIRE EN PREMIER À LA REPRISE :**
@@ -84,15 +112,10 @@ Autres, indépendants :
 
 **Bug.txt — triage (5 points) :**
 1. **LIFO groupe** (membres joués dernier→premier, visible en `schedule next`).
-   *En cours.* Code `resolve_group_sequence` + test = ordre AVANT (idx 0→1→2) ;
-   je ne reproduis pas par lecture. Trace TEMP posée → il faut les 3 lignes
-   `group sequence pick` de 3 `schedule next` pour trancher : idx part de 2
-   (→ `group_state` obsolete, base propre `rm -rf data/`) ? membres inversés en
-   base (→ stockage/parse) ? Groupe testé : `homestone-chronicles` (sequence,
-   intro/podcast/outro, take=1).
-2. **preview des `every`** : accepté, PAS codé. Sem. proposée : `min_elapsed`
-   projeté à sa cadence sur la fenêtre ; `min_tracks` en entrée indicative.
-   (preview exclut les Every aujourd'hui, cf. `grid_engine::preview`.) Attend go.
+   **Résolu / non reproductible (2026-09-18).** Clos.
+2. **preview des `every`** : **FAIT (2026-09-18, cf. section Fait).** `elapsed`
+   projeté dans `occurrences` à sa cadence ; `tracks` renvoyé à part dans
+   `PreviewResponse.indicative` (jamais dans la timeline), listé une fois.
 3. **`expiry="30m"`** : valide UNIQUEMENT sur `at_clock` (péremption d'un top,
    déjà supporté). La « fin fixe » voulue = point 5.
 4. **`weight` en grid** : non supporté par design (grille = priorité). Pondération

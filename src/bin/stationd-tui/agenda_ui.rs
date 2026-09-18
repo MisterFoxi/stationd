@@ -31,11 +31,8 @@ fn color(entry: &Entry) -> Color {
     }
 }
 
-fn source_name(entry: &Entry, playlists: &Resource<Vec<station::PlaylistSummary>>) -> String {
-    if entry.origin == Origin::Fallback {
-        return "Fallback".into();
-    }
-    let key = normalize_ref(&entry.playlist).ok();
+fn ref_name(playlist_ref: &str, playlists: &Resource<Vec<station::PlaylistSummary>>) -> String {
+    let key = normalize_ref(playlist_ref).ok();
     playlists
         .value
         .as_ref()
@@ -45,7 +42,14 @@ fn source_name(entry: &Entry, playlists: &Resource<Vec<station::PlaylistSummary>
                 .find(|p| key.is_some() && normalize_ref(&p.rel_path).ok() == key)
         })
         .map(|p| p.name.clone())
-        .unwrap_or_else(|| entry.playlist.clone())
+        .unwrap_or_else(|| playlist_ref.to_string())
+}
+
+fn source_name(entry: &Entry, playlists: &Resource<Vec<station::PlaylistSummary>>) -> String {
+    if entry.origin == Origin::Fallback {
+        return "Fallback".into();
+    }
+    ref_name(&entry.playlist, playlists)
 }
 
 pub fn draw(
@@ -277,18 +281,39 @@ pub fn draw(
         "Missing/repeated civil-time row: no instant for the selected day.".into()
     };
     frame.render_widget(Paragraph::new(detail).wrap(Wrap { trim: false }), layout[3]);
-    let every = rules.value.as_ref().map(|rules| {
-        rules
-            .iter()
-            .filter(|r| r.enabled && matches!(r.kind, Some(schedule::rule::Kind::Every(_))))
-            .count()
-    });
-    let cadence = match every {
-        Some(n) => format!(
-            "Every: {n} enabled playback cadences (not projected). {}",
-            if rules.error.is_some() { "STALE" } else { "" }
-        ),
-        None => "Every cadences: unavailable (see Grid).".into(),
+    // Track-cadence `every` rules can't be placed on a clock, so they never
+    // appear in the projection above — list them here so they stay visibly in
+    // play. Elapsed-cadence `every` rules *are* projected, up in the grid.
+    let tracks_every: Vec<String> = rules
+        .value
+        .as_ref()
+        .map(|rs| {
+            rs.iter()
+                .filter(|r| r.enabled)
+                .filter_map(|r| match &r.kind {
+                    Some(schedule::rule::Kind::Every(e)) => match e.cadence {
+                        Some(schedule::every::Cadence::Tracks(_)) => {
+                            Some(ref_name(&e.playlist_ref, playlists))
+                        }
+                        _ => None,
+                    },
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let cadence = if rules.value.is_none() {
+        "Every, track-cadence: unavailable (see Grid).".to_string()
+    } else {
+        let stale = if rules.error.is_some() { " STALE" } else { "" };
+        if tracks_every.is_empty() {
+            format!("Every, track-cadence: none (elapsed cadences are projected above).{stale}")
+        } else {
+            format!(
+                "Every, track-cadence (not projected): {}{stale}",
+                tracks_every.join(", ")
+            )
+        }
     };
     frame.render_widget(
         Paragraph::new(cadence).style(Style::default().fg(Color::Gray)),

@@ -191,11 +191,13 @@ impl ScheduleService for ScheduleGrpc {
         };
         // Absent window → 24h; a non-positive window yields no occurrences.
         let window_secs = req.window.map(|d| d.seconds).unwrap_or(24 * 3600);
-        let occurrences = self
+        let preview = self
             .engine
             .preview(from, window_secs)
             .await
-            .map_err(|e| Status::internal(e.to_string()))?
+            .map_err(|e| Status::internal(e.to_string()))?;
+        let occurrences = preview
+            .occurrences
             .into_iter()
             .map(|o| schedule::Occurrence {
                 at_utc: Some(prost_types::Timestamp { seconds: o.epoch.0, nanos: 0 }),
@@ -205,7 +207,15 @@ impl ScheduleService for ScheduleGrpc {
                 origin: map_origin(o.origin) as i32,
             })
             .collect();
-        Ok(Response::new(PreviewResponse { occurrences }))
+        let indicative = preview
+            .indicative
+            .into_iter()
+            .map(|i| schedule::IndicativeRule {
+                rule_id: i.rule_id,
+                playlist_ref: i.playlist_ref,
+            })
+            .collect();
+        Ok(Response::new(PreviewResponse { occurrences, indicative }))
     }
 
     /// Manual clock (testing): freeze/release the instant `resolve_next` uses

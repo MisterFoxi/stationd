@@ -651,7 +651,8 @@ mod tests {
         assert!(entries(
             &window,
             schedule::PreviewResponse {
-                occurrences: vec![schedule::Occurrence::default()]
+                occurrences: vec![schedule::Occurrence::default()],
+                ..Default::default()
             }
         )
         .is_err());
@@ -665,7 +666,8 @@ mod tests {
         assert!(entries(
             &window,
             schedule::PreviewResponse {
-                occurrences: vec![outside]
+                occurrences: vec![outside],
+                ..Default::default()
             }
         )
         .is_err());

@@ -67,21 +67,27 @@ async fn agenda_preview_preserves_live_state_across_day_and_week_reads() {
             .await
             .unwrap()
             .into_inner();
+        // `occurrences` is real clock instants only — a track-counted `every`
+        // is never placed on it...
         assert!(result
             .occurrences
             .iter()
             .all(|o| o.origin != p::decision::Origin::Every as i32));
+        // ...it is surfaced apart, once, as an indicative rule in play.
+        assert!(result
+            .indicative
+            .iter()
+            .any(|r| r.playlist_ref == "jingles"));
         assert!(result
             .occurrences
             .iter()
             .any(|o| o.origin == p::decision::Origin::AtClockSoft as i32));
-        assert!(
-            result
-                .occurrences
-                .windows(2)
-                .all(|w| w[0].at_utc.as_ref().unwrap().seconds
-                    < w[1].at_utc.as_ref().unwrap().seconds)
-        );
+        // The timeline is strictly ordered by instant.
+        assert!(result
+            .occurrences
+            .windows(2)
+            .all(|w| w[0].at_utc.as_ref().unwrap().seconds
+                < w[1].at_utc.as_ref().unwrap().seconds));
         if seconds == 25 * 3600 {
             if let Some(first) = &first {
                 assert_eq!(first, &result);

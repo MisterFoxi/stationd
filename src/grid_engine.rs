@@ -25,8 +25,8 @@ use crate::grid_index::{self, GridLoadError};
 use crate::grid_store;
 use crate::grid_toml;
 use crate::resolver::{
-    resolve_next, resolve_ranked, Epoch, Grid, GridDecision, LocalNow, Origin, PlaybackState,
-    Rule, RuleKind,
+    resolve_next, resolve_ranked, Cadence, Epoch, EveryState, Grid, GridDecision, LocalNow,
+    Origin, PlaybackState, Rule, RuleKind,
 };
 use crate::store;
 
@@ -78,6 +78,24 @@ pub struct PreviewOccurrence {
     pub origin: Origin,
     pub rule_id: String,
     pub playlist_ref: String,
+}
+
+/// A grid rule taken into account but not placeable on the clock (a
+/// track-counted `Every`, whose cadence rides real playback). Returned
+/// alongside the timeline, never injected into the ordered occurrences.
+#[derive(Debug, Clone)]
+pub struct IndicativeRule {
+    pub rule_id: String,
+    pub playlist_ref: String,
+}
+
+/// A grid projection ([`GridEngine::preview`]): the ordered, clock-driven
+/// `occurrences` (real instants only), plus the `indicative` rules that are in
+/// play but can't be timed on a clock.
+#[derive(Debug, Clone, Default)]
+pub struct GridPreview {
+    pub occurrences: Vec<PreviewOccurrence>,
+    pub indicative: Vec<IndicativeRule>,
 }
 
 /// A grid decision plus the concrete media it resolves to (see
@@ -272,21 +290,65 @@ impl GridEngine {
     /// minute-aligned) and emit an occurrence whenever the resolved decision
     /// changes. Consumed AtClock marks are carried forward exactly as the live
     /// loop persists them, so a mark punctuates a single instant instead of
-    /// swallowing its whole slot. `Every` rules are omitted: their cadence is
-    /// driven by real playback (tracks/elapsed), not by the calendar, so they
-    /// have no meaning in a clock projection.
+    /// swallowing its whole slot.
+    ///
+    /// `Every` rules split by cadence:
+    /// - **elapsed** (a time cooldown) *is* clock-projectable, so it is folded
+    ///   into the walk and appears in `occurrences`. We seed it as if it had
+    ///   just played at `from`, so its first projected mark lands one cadence
+    ///   in (`from + cadence`), and advance its last-played on each fire — it
+    ///   then punctuates like an AtClock (instant, not segment), and keeps the
+    ///   `AtClock > Every > base` priority for free (it goes through
+    ///   `resolve_next`).
+    /// - **track-counted** can't be placed on a clock (its cadence rides real
+    ///   playback, which we don't simulate here), so it is returned once in
+    ///   `indicative` — never injected into the ordered `occurrences` timeline.
     pub async fn preview(
         &self,
         from: Epoch,
         window_secs: i64,
-    ) -> Result<Vec<PreviewOccurrence>, EngineError> {
+    ) -> Result<GridPreview, EngineError> {
         let loaded = grid_index::load_grid(&self.pool).await?;
-        // Drop Every (playback-driven, not projectable on the clock).
+
+        // Track-counted Every rules: not projectable on the clock → returned
+        // once as indicative (enabled only — a disabled rule isn't in play).
+        let indicative: Vec<IndicativeRule> = loaded
+            .rules
+            .iter()
+            .filter(|r| r.enabled)
+            .filter_map(|r| match &r.kind {
+                RuleKind::Every { playlist_ref, cadence: Cadence::Tracks(_) } => {
+                    Some(IndicativeRule {
+                        rule_id: r.id.clone(),
+                        playlist_ref: playlist_ref.clone(),
+                    })
+                }
+                _ => None,
+            })
+            .collect();
+        // Elapsed Every rules: seed each so its first mark is one cadence in.
+        let elapsed_every_ids: Vec<String> = loaded
+            .rules
+            .iter()
+            .filter_map(|r| match &r.kind {
+                RuleKind::Every { cadence: Cadence::Elapsed(_), .. } => Some(r.id.clone()),
+                _ => None,
+            })
+            .collect();
+
+        // The walk grid keeps everything except track-counted Every rules —
+        // they can never fire on a clock (and a `Tracks(0)` left in would
+        // spuriously fire every minute). Elapsed Every rules stay in.
         let grid = Grid {
             rules: loaded
                 .rules
                 .into_iter()
-                .filter(|r| !matches!(r.kind, RuleKind::Every { .. }))
+                .filter(|r| {
+                    !matches!(
+                        r.kind,
+                        RuleKind::Every { cadence: Cadence::Tracks(_), .. }
+                    )
+                })
                 .collect(),
         };
 
@@ -296,7 +358,13 @@ impl GridEngine {
         let end = from.0.saturating_add(window);
 
         let mut sim = PlaybackState::default();
-        let mut out: Vec<PreviewOccurrence> = Vec::new();
+        for id in &elapsed_every_ids {
+            sim.every.insert(
+                id.clone(),
+                EveryState { last_played: Some(from), tracks_since: 0 },
+            );
+        }
+        let mut occurrences: Vec<PreviewOccurrence> = Vec::new();
         let mut prev_key: Option<(Origin, String, String)> = None;
 
         let mut secs = from.0;
@@ -305,17 +373,23 @@ impl GridEngine {
             let local = clock::to_local_now(epoch, &self.tz)?;
             let decision = resolve_next(local, &grid, &sim);
 
-            // Consume the mark so the next minute in this slot yields the base,
-            // mirroring the live loop (a mark is an instant, not a segment).
+            // Consume the occurrence so the next minute in this slot yields the
+            // base, mirroring the live loop (an instant, not a segment): an
+            // AtClock via its token, an elapsed Every by advancing last-played.
             if let Some(token) = &decision.mark_taken {
                 sim.at_clock_taken.insert(token.clone());
+            }
+            if decision.origin == Origin::Every {
+                if let Some(id) = &decision.rule_id {
+                    sim.every.entry(id.clone()).or_default().last_played = Some(epoch);
+                }
             }
 
             let rule_id = decision.rule_id.clone().unwrap_or_default();
             let playlist_ref = decision.playlist_ref.clone().unwrap_or_default();
             let key = (decision.origin.clone(), rule_id.clone(), playlist_ref.clone());
             if prev_key.as_ref() != Some(&key) {
-                out.push(PreviewOccurrence {
+                occurrences.push(PreviewOccurrence {
                     epoch,
                     at_local: fmt_local(&local, &self.tz),
                     origin: decision.origin.clone(),
@@ -326,7 +400,8 @@ impl GridEngine {
             }
             secs += 60;
         }
-        Ok(out)
+
+        Ok(GridPreview { occurrences, indicative })
     }
 
     /// Resolve the source to pull at a track boundary for instant `now`, and
@@ -636,7 +711,7 @@ mod tests {
         )
         .await
         .unwrap();
-        // An Every rule must NOT appear in a projection.
+        // A track-counted Every is NOT placed on the timeline, only noted.
         insert_rule(
             &eng.pool,
             &rule("cool", RuleKind::Every { playlist_ref: "never".into(), cadence: Cadence::Tracks(1) }),
@@ -645,7 +720,8 @@ mod tests {
         .unwrap();
 
         // Window 08:00 → 11:00 (UTC, so wall == epoch hour).
-        let occ = eng.preview(at(8, 0), 3 * 3600).await.unwrap();
+        let pv = eng.preview(at(8, 0), 3 * 3600).await.unwrap();
+        let occ = &pv.occurrences;
 
         // First occurrence starts exactly at `from`.
         assert_eq!(occ.first().unwrap().epoch, at(8, 0));
@@ -657,10 +733,14 @@ mod tests {
                 "consecutive occurrences must differ"
             );
         }
-        // The DayPart shows up as jazz, the marks as jingle, and Every never.
+        // The DayPart shows up as jazz, the marks as jingle.
         assert!(occ.iter().any(|o| o.origin == Origin::DayPart && o.playlist_ref == "jazz"));
         assert!(occ.iter().any(|o| o.origin == Origin::AtClockSoft && o.playlist_ref == "jingle"));
+        // A track-counted Every never lands on the timeline...
         assert!(occ.iter().all(|o| o.origin != Origin::Every));
+        // ...but is surfaced once, apart, as an indicative rule.
+        assert_eq!(pv.indicative.len(), 1);
+        assert_eq!(pv.indicative[0].playlist_ref, "never");
         // A mark is an instant, not a segment: the 08:30 jingle is followed by
         // a return to the floor at 08:31.
         let mark = occ.iter().position(|o| o.epoch == at(8, 30)).expect("08:30 mark");
@@ -670,15 +750,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn preview_projects_an_elapsed_every_at_its_cadence() {
+        let (_dir, eng) = engine().await; // tz = UTC
+        insert_rule(&eng.pool, &rule("floor", RuleKind::BaseRotation { playlist_ref: "general".into() }))
+            .await
+            .unwrap();
+        // A 30-minute elapsed cooldown.
+        insert_rule(
+            &eng.pool,
+            &rule(
+                "news",
+                RuleKind::Every { playlist_ref: "flash".into(), cadence: Cadence::Elapsed(1800) },
+            ),
+        )
+        .await
+        .unwrap();
+
+        // Window 08:00 → 10:00.
+        let pv = eng.preview(at(8, 0), 2 * 3600).await.unwrap();
+        let occ = &pv.occurrences;
+
+        // Seeded at the window start → no mark on the very edge.
+        assert!(!occ.iter().any(|o| o.epoch == at(8, 0) && o.origin == Origin::Every));
+        // First mark one cadence in (08:30), then back to the floor at 08:31 —
+        // an instant, not a segment.
+        let m = occ.iter().position(|o| o.epoch == at(8, 30)).expect("08:30 mark");
+        assert_eq!(occ[m].origin, Origin::Every);
+        assert_eq!(occ[m].playlist_ref, "flash");
+        assert_eq!(occ[m + 1].epoch, at(8, 31));
+        assert_eq!(occ[m + 1].origin, Origin::BaseRotation);
+        // And it recurs at the cadence: 09:00, 09:30.
+        assert!(occ.iter().any(|o| o.epoch == at(9, 0) && o.origin == Origin::Every));
+        assert!(occ.iter().any(|o| o.epoch == at(9, 30) && o.origin == Origin::Every));
+        // An elapsed Every is projected onto the timeline, not indicative.
+        assert!(pv.indicative.is_empty());
+    }
+
+    #[tokio::test]
     async fn preview_of_a_bare_floor_is_a_single_segment() {
         let (_dir, eng) = engine().await;
         insert_rule(&eng.pool, &rule("floor", RuleKind::BaseRotation { playlist_ref: "general".into() }))
             .await
             .unwrap();
-        let occ = eng.preview(at(0, 0), 6 * 3600).await.unwrap();
-        assert_eq!(occ.len(), 1, "nothing changes → one segment");
-        assert_eq!(occ[0].origin, Origin::BaseRotation);
-        assert_eq!(occ[0].playlist_ref, "general");
+        let pv = eng.preview(at(0, 0), 6 * 3600).await.unwrap();
+        assert_eq!(pv.occurrences.len(), 1, "nothing changes → one segment");
+        assert_eq!(pv.occurrences[0].origin, Origin::BaseRotation);
+        assert_eq!(pv.occurrences[0].playlist_ref, "general");
+        assert!(pv.indicative.is_empty());
     }
 
     #[tokio::test]

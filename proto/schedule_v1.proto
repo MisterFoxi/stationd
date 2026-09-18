@@ -143,6 +143,14 @@ message Occurrence {
   Decision.Origin origin = 5;
 }
 
+// Une règle prise en compte mais non plaçable sur l'horloge (un `every` au
+// compteur de pistes, dont la cadence suit la lecture réelle). Listée à part
+// du preview, jamais injectée dans la timeline ordonnée d'occurrences.
+message IndicativeRule {
+  string rule_id = 1;
+  string playlist_ref = 2;
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 // Service grille (CLI-first — stationctl schedule …)
 // ─────────────────────────────────────────────────────────────────────────
@@ -180,7 +188,10 @@ message PreviewRequest {
   google.protobuf.Timestamp from = 1;      // absent → maintenant
   google.protobuf.Duration  window = 2;    // ex. 24h
 }
-message PreviewResponse { repeated Occurrence occurrences = 1; }
+message PreviewResponse {
+  repeated Occurrence occurrences = 1;      // timeline ordonnée, instants réels
+  repeated IndicativeRule indicative = 2;   // règles en jeu mais non projetables
+}
 
 // Horloge manuelle. `real = true` → repasse en temps réel. Sinon `at` (s'il
 // est fourni) fige l'instant. Ni `real` ni `at` → aucun changement, reporte

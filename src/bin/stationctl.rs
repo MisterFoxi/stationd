@@ -128,7 +128,9 @@ enum ScheduleCommand {
     },
     /// Project the grid over a window without waiting for the wall clock.
     /// Each occurrence is shown in epoch UTC and station-local time (the
-    /// anti-DST view). Playback-driven `every` rules are not projected.
+    /// anti-DST view). An elapsed `every` is projected at its cadence; a
+    /// track-counted `every` can't be timed on a clock, so it is listed
+    /// separately as indicative.
     Preview {
         /// Start instant (epoch seconds, UTC). Default: now (server-side).
         #[arg(long)]
@@ -339,10 +341,26 @@ async fn main() -> anyhow::Result<()> {
             if reply.occurrences.is_empty() {
                 println!("(no occurrences in the window)");
             }
+            // Marks (AtClock/Every) are instants → always shown. Base/DayPart
+            // are segments: a base that merely *resumes* after a mark (same
+            // playlist as the current segment) is not reprinted, otherwise the
+            // floor reappears after every jingle and drowns the timeline. A
+            // real change of segment (DayPart start/end, floor→floor swap) is
+            // still shown.
+            use schedule::decision::Origin as O;
+            let mut last_segment: Option<(i32, String)> = None;
             for o in reply.occurrences {
-                let origin = schedule::decision::Origin::try_from(o.origin)
-                    .map(|x| x.as_str_name())
-                    .unwrap_or("UNKNOWN");
+                let parsed = O::try_from(o.origin).ok();
+                let is_instant =
+                    matches!(parsed, Some(O::AtClockHard | O::AtClockSoft | O::Every));
+                if !is_instant {
+                    let key = (o.origin, o.playlist_ref.clone());
+                    if last_segment.as_ref() == Some(&key) {
+                        continue;
+                    }
+                    last_segment = Some(key);
+                }
+                let origin = parsed.map(|x| x.as_str_name()).unwrap_or("UNKNOWN");
                 let utc = o.at_utc.map(|t| t.seconds).unwrap_or(0);
                 let pl = if o.playlist_ref.is_empty() {
                     "(fallback)".to_string()
@@ -355,6 +373,26 @@ async fn main() -> anyhow::Result<()> {
                     format!("  [{}]", o.rule_id)
                 };
                 println!("{utc:>11}  {}  {origin:<13}  {pl}{rule}", o.at_local);
+            }
+            // Rules taken into account but not placeable on a clock (a
+            // track-counted `every`, cadence driven by playback): listed once
+            // at the end, apart from the ordered timeline.
+            if !reply.indicative.is_empty() {
+                println!();
+                println!("indicative (playback-driven, not projected):");
+                for r in reply.indicative {
+                    let pl = if r.playlist_ref.is_empty() {
+                        "(fallback)".to_string()
+                    } else {
+                        r.playlist_ref
+                    };
+                    let rule = if r.rule_id.is_empty() {
+                        String::new()
+                    } else {
+                        format!("  [{}]", r.rule_id)
+                    };
+                    println!("  - EVERY  {pl}{rule}");
+                }
             }
         }
         Command::Library(LibraryCommand::Scan) => {
