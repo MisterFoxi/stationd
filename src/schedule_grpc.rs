@@ -101,17 +101,29 @@ fn secs_to_duration(secs: u64) -> prost_types::Duration {
     prost_types::Duration { seconds: secs as i64, nanos: 0 }
 }
 
-fn map_group_member(m: crate::playlist::ProjectedMember) -> schedule::GroupMember {
+fn ms_to_duration(ms: u64) -> Result<prost_types::Duration, Status> {
+    if ms > 315_576_000_000_000 {
+        return Err(Status::internal("pool duration exceeds protobuf range"));
+    }
+    Ok(prost_types::Duration {
+        seconds: (ms / 1000) as i64,
+        nanos: ((ms % 1000) * 1_000_000) as i32,
+    })
+}
+
+fn map_group_member(m: crate::pool_inspection::InspectedMember) -> Result<schedule::GroupMember, Status> {
     use crate::playlist::MemberQuota;
-    let quota = Some(match m.quota {
+    let quota = m.quota.map(|q| match q {
         MemberQuota::Take(n) => schedule::group_member::Quota::Take(n),
         MemberQuota::Runtime(secs) => schedule::group_member::Quota::Runtime(secs_to_duration(secs)),
     });
-    schedule::GroupMember {
+    Ok(schedule::GroupMember {
         r#ref: m.r#ref,
         quota,
         offset: m.offset_secs.map(secs_to_duration),
-    }
+        selected_count: m.stats.selected_count,
+        total_duration: m.stats.total_duration_ms.map(ms_to_duration).transpose()?,
+    })
 }
 
 #[tonic::async_trait]
@@ -222,7 +234,7 @@ impl ScheduleService for ScheduleGrpc {
             .engine
             .preview(from, window_secs)
             .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(map_next_error)?;
         let occurrences = preview
             .occurrences
             .into_iter()
@@ -232,11 +244,11 @@ impl ScheduleService for ScheduleGrpc {
                 let (strategy, members) = match o.group {
                     Some(g) => (
                         strategy_name(g.strategy).to_string(),
-                        g.members.into_iter().map(map_group_member).collect(),
+                        g.members.into_iter().map(map_group_member).collect::<Result<Vec<_>, _>>()?,
                     ),
                     None => (String::new(), Vec::new()),
                 };
-                schedule::Occurrence {
+                Ok(schedule::Occurrence {
                     at_utc: Some(prost_types::Timestamp { seconds: o.epoch.0, nanos: 0 }),
                     at_local: o.at_local,
                     rule_id: o.rule_id,
@@ -244,9 +256,11 @@ impl ScheduleService for ScheduleGrpc {
                     origin: map_origin(o.origin) as i32,
                     strategy,
                     members,
-                }
+                    selected_count: o.pool.selected_count,
+                    total_duration: o.pool.total_duration_ms.map(ms_to_duration).transpose()?,
+                })
             })
-            .collect();
+            .collect::<Result<Vec<_>, Status>>()?;
         let indicative = preview
             .indicative
             .into_iter()

@@ -464,7 +464,7 @@ type CandRow = (
     i64,            // mtime_ns
 );
 
-async fn materialize_dynamic(
+pub(crate) async fn materialize_dynamic(
     pool: &SqlitePool,
     sel: &Selection,
 ) -> Result<Vec<Candidate>, SelectionError> {
@@ -486,7 +486,7 @@ async fn materialize_dynamic(
     with_genres(pool, rows).await
 }
 
-async fn materialize_static(
+pub(crate) async fn materialize_static(
     pool: &SqlitePool,
     files: &[String],
 ) -> Result<Vec<Candidate>, SelectionError> {
@@ -617,8 +617,17 @@ fn combine_where(filters: &[Filter], m: Match) -> Result<Where, SelectionError> 
     };
     let mut parts = Vec::with_capacity(filters.len());
     let mut binds = Vec::new();
-    for f in filters {
-        let w = filter_sql(f)?;
+    for (index, f) in filters.iter().enumerate() {
+        let w = filter_sql(f).map_err(|error| match error {
+            SelectionError::BadFilterValue { field, reason } => SelectionError::BadFilterValue {
+                field,
+                reason: format!(
+                    "selection.filter[{}]: op = {:?}, value = {:?}: {reason}",
+                    index + 1, f.op, f.value,
+                ),
+            },
+            other => other,
+        })?;
         parts.push(format!("({})", w.sql));
         binds.extend(w.binds);
     }

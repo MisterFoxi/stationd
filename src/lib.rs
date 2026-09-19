@@ -24,6 +24,7 @@ pub mod media;
 pub mod media_index;
 pub mod playlist;
 pub mod playlist_cursor;
+pub mod pool_inspection;
 pub mod plugin;
 pub mod plugin_grpc;
 pub mod proto;

@@ -9,6 +9,13 @@ use tonic::Request;
 async fn agenda_preview_preserves_live_state_across_day_and_week_reads() {
     let dir = tempfile::tempdir().unwrap();
     let pool = db::init(&dir.path().join("preview.db")).await.unwrap();
+    for reference in ["general", "news"] {
+        let toml = r#"name = "Preview fixture"
+[selection]
+mode = "dynamic""#;
+        let pl = stationd::playlist::Playlist::parse(toml).unwrap();
+        stationd::store::upsert(&pool, reference, &pl, toml, Some(reference)).await.unwrap();
+    }
     let make = |id: &str, kind| r::Rule {
         id: id.into(),
         enabled: true,

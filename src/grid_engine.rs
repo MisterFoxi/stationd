@@ -78,10 +78,10 @@ pub struct PreviewOccurrence {
     pub origin: Origin,
     pub rule_id: String,
     pub playlist_ref: String,
-    /// Member decomposition when `playlist_ref` is a `sequence`/`shuffle`
-    /// group (`None` otherwise). Purely projected — see
-    /// `Playlist::project_group_members`.
-    pub group: Option<crate::playlist::GroupProjection>,
+    /// Read-only statistics of the active source, before any plugin filtering.
+    pub pool: crate::pool_inspection::PoolStats,
+    /// Member pools plus the existing take/runtime offset projection.
+    pub group: Option<crate::pool_inspection::InspectedGroup>,
 }
 
 /// A grid rule taken into account but not placeable on the clock (a
@@ -288,9 +288,9 @@ impl GridEngine {
     /// path, and the DST test (a window over a transition night reveals a
     /// hole or a doubled hour in the local column).
     ///
-    /// It is a *projection*, not a track-by-track simulation: track durations
-    /// are dynamic and unknown here, so we report the clock-driven structure
-    /// only. We walk minute by minute (every DayPart/AtClock boundary is
+    /// It is a *projection*, not a track-by-track simulation: pool statistics
+    /// describe the current media index, without choosing tracks or predicting
+    /// future playback. We walk minute by minute (every DayPart/AtClock boundary is
     /// minute-aligned) and emit an occurrence whenever the resolved decision
     /// changes. Consumed AtClock marks are carried forward exactly as the live
     /// loop persists them, so a mark punctuates a single instant instead of
@@ -370,8 +370,9 @@ impl GridEngine {
         }
         let mut occurrences: Vec<PreviewOccurrence> = Vec::new();
         let mut prev_key: Option<(Origin, String, String)> = None;
-        // A group ref recurs across the window; parse+project it at most once.
-        let mut group_memo: std::collections::HashMap<String, Option<crate::playlist::GroupProjection>> =
+        // Current pool predicates are time-independent: reuse an inspection
+        // within this request, never across previews (a rescan must be visible).
+        let mut pool_memo: std::collections::HashMap<String, crate::pool_inspection::PoolInspection> =
             std::collections::HashMap::new();
 
         let mut secs = from.0;
@@ -396,16 +397,18 @@ impl GridEngine {
             let playlist_ref = decision.playlist_ref.clone().unwrap_or_default();
             let key = (decision.origin.clone(), rule_id.clone(), playlist_ref.clone());
             if prev_key.as_ref() != Some(&key) {
-                // Decompose a group ref into its members (memoized) so the
-                // preview can show what the group would play under this segment.
-                let group = if playlist_ref.is_empty() {
-                    None
-                } else if let Some(g) = group_memo.get(&playlist_ref) {
-                    g.clone()
+                let inspection = if playlist_ref.is_empty() {
+                    crate::pool_inspection::PoolInspection::default()
                 } else {
-                    let g = group_projection(&self.pool, &playlist_ref).await;
-                    group_memo.insert(playlist_ref.clone(), g.clone());
-                    g
+                    let canonical = crate::playlist::normalize_ref(&playlist_ref)
+                        .map_err(|_| crate::selection::SelectionError::PlaylistNotFound(playlist_ref.clone()))?;
+                    if let Some(stats) = pool_memo.get(&canonical) {
+                        stats.clone()
+                    } else {
+                        let stats = crate::pool_inspection::inspect_ref(&self.pool, &canonical).await?;
+                        pool_memo.insert(canonical, stats.clone());
+                        stats
+                    }
                 };
                 occurrences.push(PreviewOccurrence {
                     epoch,
@@ -413,7 +416,8 @@ impl GridEngine {
                     origin: decision.origin.clone(),
                     rule_id,
                     playlist_ref,
-                    group,
+                    pool: inspection.stats,
+                    group: inspection.group,
                 });
                 prev_key = Some(key);
             }
@@ -569,21 +573,6 @@ fn real_now() -> Epoch {
     )
 }
 
-/// Load a group's member decomposition for the preview: read the stored
-/// playlist and, if it is a `sequence`/`shuffle` group, project its members.
-/// Any miss (unknown ref, unreadable/unparsable TOML, non-projectable
-/// playlist) yields `None` — the preview stays best-effort, the occurrence just
-/// shows no decomposition.
-async fn group_projection(
-    pool: &SqlitePool,
-    playlist_ref: &str,
-) -> Option<crate::playlist::GroupProjection> {
-    let toml = store::playlist_toml_by_ref(pool, playlist_ref).await.ok()??;
-    crate::playlist::Playlist::parse(&toml)
-        .ok()?
-        .project_group_members()
-}
-
 fn parse_hh_mm(s: &str) -> Result<(i8, i8), ClockError> {
     let (h, m) = s
         .split_once(':')
@@ -713,9 +702,20 @@ mod tests {
         assert_eq!(second.origin, Origin::BaseRotation);
     }
 
+    async fn preview_leaves(pool: &SqlitePool, refs: &[&str]) {
+        let toml = r#"name = "Preview fixture"
+[selection]
+mode = "dynamic""#;
+        let pl = crate::playlist::Playlist::parse(toml).unwrap();
+        for reference in refs {
+            crate::store::upsert(pool, reference, &pl, toml, Some(reference)).await.unwrap();
+        }
+    }
+
     #[tokio::test]
     async fn preview_projects_base_daypart_and_marks() {
         let (_dir, eng) = engine().await; // tz = UTC
+        preview_leaves(&eng.pool, &["general", "jazz", "jingle"]).await;
         insert_rule(&eng.pool, &rule("floor", RuleKind::BaseRotation { playlist_ref: "general".into() }))
             .await
             .unwrap();
@@ -787,6 +787,7 @@ mod tests {
     #[tokio::test]
     async fn preview_projects_an_elapsed_every_at_its_cadence() {
         let (_dir, eng) = engine().await; // tz = UTC
+        preview_leaves(&eng.pool, &["general", "flash"]).await;
         insert_rule(&eng.pool, &rule("floor", RuleKind::BaseRotation { playlist_ref: "general".into() }))
             .await
             .unwrap();
@@ -824,6 +825,7 @@ mod tests {
     #[tokio::test]
     async fn preview_of_a_bare_floor_is_a_single_segment() {
         let (_dir, eng) = engine().await;
+        preview_leaves(&eng.pool, &["general"]).await;
         insert_rule(&eng.pool, &rule("floor", RuleKind::BaseRotation { playlist_ref: "general".into() }))
             .await
             .unwrap();
@@ -894,6 +896,7 @@ mod tests {
     #[tokio::test]
     async fn preview_decomposes_a_sequence_group_occurrence() {
         let (_dir, eng) = engine().await; // tz = UTC
+        preview_leaves(&eng.pool, &["rock", "jingle"]).await;
         let toml = r#"
             name = "Matinee"
             [selection]
@@ -918,9 +921,9 @@ mod tests {
         assert_eq!(g.strategy, crate::playlist::Strategy::Sequence);
         assert_eq!(g.members.len(), 2);
         assert_eq!(g.members[0].r#ref, "rock");
-        assert_eq!(g.members[0].quota, crate::playlist::MemberQuota::Runtime(1200));
+        assert_eq!(g.members[0].quota, Some(crate::playlist::MemberQuota::Runtime(1200)));
         assert_eq!(g.members[0].offset_secs, Some(0));
-        assert_eq!(g.members[1].quota, crate::playlist::MemberQuota::Take(1));
+        assert_eq!(g.members[1].quota, Some(crate::playlist::MemberQuota::Take(1)));
         assert_eq!(g.members[1].offset_secs, None);
     }
 }

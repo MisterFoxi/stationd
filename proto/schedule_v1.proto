@@ -142,14 +142,23 @@ message Occurrence {
   string playlist_ref = 4;
   Decision.Origin origin = 5;
 
-  // Décomposition d'un groupe sequence/shuffle référencé par cette occurrence
-  // (vide sinon). Le preview étant une projection horloge PURE, il ignore la
-  // durée des pistes : un membre `take` (per-track) n'a donc jamais de
+  // Décomposition d'un groupe référencé par cette occurrence (vide sinon).
+  // Les statistiques de pool ne choisissent aucune piste : un membre `take`
+  // (per-track) n'a donc jamais de
   // position ; un membre `runtime` d'un `sequence` porte un offset relatif au
   // début du groupe, tant que ses prédécesseurs sont tous `runtime` (un `take`
   // rompt la chaîne). Un `shuffle` a un ordre tiré au runtime → aucun offset.
-  string strategy = 6;                     // "sequence" | "shuffle" ; vide si non décomposé
+  string strategy = 6;                     // sequence/shuffle/weighted/rotate ; vide hors groupe
   repeated GroupMember members = 7;
+
+  // Pool courant avant plugins, sans consommer de média. Absent = inconnu,
+  // zéro présent = pool vide. Total groupe = somme des pools des membres,
+  // sans dédoublonnage ENTRE membres, ni troncature aux quotas take/runtime.
+  optional uint64 selected_count = 8;
+  // Durée indépendante du count ; précision milliseconde. Un membre
+  // remote/queue reprend son runtime déclaré, sinon durée inconnue.
+  // Un seul membre de durée inconnue rend le total du groupe inconnu.
+  google.protobuf.Duration total_duration = 9;
 }
 
 // Un membre d'un groupe, tel que PROJETÉ dans le preview (pas résolu : aucun
@@ -165,6 +174,8 @@ message GroupMember {
   // prédécesseurs sont `runtime`). Absent pour un `take`, pour tout membre
   // situé après un `take`, et pour tout membre d'un `shuffle`.
   google.protobuf.Duration offset = 4;
+  optional uint64 selected_count = 5;       // absent = inconnu, zéro = pool vide
+  google.protobuf.Duration total_duration = 6; // pool local ou runtime remote/queue
 }
 
 // Une règle prise en compte mais non plaçable sur l'horloge (un `every` au

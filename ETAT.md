@@ -56,24 +56,8 @@ inférieure jusqu'au plancher (fini le dead-air par sélection vide) ; groupe
 
 ## ⭐ TÂCHE D'ENTRÉE PROCHAINE SESSION
 
-**Preview — nb de médias sélectionnables + durée, par occurrence (PRIORITÉ, demandé 2026-09-19).**
-Afficher, pour chaque occurrence du `preview`, le **nombre de médias
-sélectionnables** à cet instant et l'**évaluation de leur durée** (total du pool).
-- Le `preview` est aujourd'hui une projection horloge PURE : il n'entre pas dans
-  la sélection. Il faudra qu'il résolve le POOL de la playlist active par
-  occurrence, en **lecture seule / sans effet de bord** (pas de curseur, pas de
-  group_state, pas de plugins `filter_pool`) — c'est une *stat de pool*, pas une
-  résolution. Réutiliser `materialize_dynamic`/`materialize_static` + un
-  `SUM(duration_ms)`, jamais `resolve_*`.
-- `dynamic`/`static` → count + durée totale du pool ; `group` → par membre
-  (s'aligne sur la décomposition déjà en place) + total ; `remote`/`queue` →
-  inconnu (à marquer tel quel) SAUF SI UNE DUREE EXISTE.
-- Usage : comparer la durée du pool à la fenêtre `day_part` (sous/sur-remplissage
-  → répétitions) et au budget `runtime` d'un membre (assez de matière pour tenir
-  sans rejouer ?).
-- Contrat : `Occurrence` += `selected_count` + `total_duration` (+ par membre) ;
-  moteur calcule, CLI/preview affiche. Mutualisable avec une future commande
-  d'inspection de pool (`playlist resolve --pool`, cf. échanges du 2026-09-19).
+**Preview — statistiques de pool : patch préparé et testé (2026-09-19).**
+Voir la section Fait ci-dessous et `Doc/preview-pools.md`.
 
 **Plugins A2 — surface hôte** (`Doc/plugin-host.md`, *host functions* extism) :
 `control` (Stop/Pause/Resume/StopWhenIdle, first-class station + invocable
@@ -94,6 +78,31 @@ Autres, indépendants :
 ---
 
 ## Fait
+
+### — Preview : nombre de médias et durée du pool par occurrence (2026-09-19) —
+
+Patch basé sur `dev` / `42a5231` :
+- `pool_inspection::inspect_ref` réutilise `materialize_dynamic`/`materialize_static`
+  et somme les durées en millisecondes ; aucun choix de piste, curseur,
+  `group_state` ou plugin `filter_pool`.
+- `dynamic`/`static` : totalité du pool disponible, zéro explicite si vide.
+  Groupes : par membre et somme, y compris weighted/rotate sans quota inventé.
+  Un média partagé compte une fois par membre ; aucun plafonnement take/runtime.
+- `remote`/`queue` : count inconnu ; **runtime du membre repris comme durée si
+  défini**, sinon durée inconnue. Count et durée ont des présences indépendantes.
+- Contrat additif `Occurrence`/`GroupMember` : `selected_count` optionnel et
+  `total_duration`. CLI : `pool: N media, duration HH:MM:SS[.mmm]`, `unknown`
+  explicite. Timeline, offsets et every indicatifs conservés.
+- Cache limité à la requête, index actuel (pas de prédiction de scans futurs).
+  Références absentes, filtres invalides et groupes imbriqués : erreurs explicites.
+- **Validation** : `cargo test --locked` : **169 tests passent** ;
+  `cargo build --locked --features tui` : **OK**. Les tests nouveaux vérifient
+  notamment une connexion SQLite en lecture seule et un plugin actif qui
+  viderait le pool, ainsi que les durées remote/queue définies.
+- `cargo test --locked --features tui` reste bloqué par **5 erreurs préexistantes**
+  dans les tests de `src/bin/stationd-tui/playlist_form.rs` : accès à l'ancien
+  `Broadcast` (`limit`, `every_tracks`, `weight`, `schedule`). Hors de ce patch.
+
 
 ### — Fix : ref de grille sensible à la casse à la résolution (2026-09-19) —
 

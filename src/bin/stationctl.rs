@@ -377,7 +377,8 @@ async fn main() -> anyhow::Result<()> {
                 } else {
                     format!("  ({})", o.strategy)
                 };
-                println!("{utc:>11}  {}  {origin:<13}  {pl}{rule}{strat}", o.at_local);
+                let pool = fmt_pool(o.selected_count, o.total_duration.as_ref());
+                println!("{utc:>11}  {}  {origin:<13}  {pl}{rule}{strat}  {pool}", o.at_local);
 
                 // Group decomposition under the segment. A `take` member has no
                 // TS (track durations are unknown); a `runtime` member of a
@@ -391,13 +392,14 @@ async fn main() -> anyhow::Result<()> {
                         Some(schedule::group_member::Quota::Runtime(d)) => {
                             format!("runtime {}", fmt_dur(d.seconds))
                         }
-                        None => "?".to_string(),
+                        None => String::new(),
                     };
                     let at = match &m.offset {
                         Some(d) => format!("   {}", fmt_offset(d.seconds)),
                         None => String::new(),
                     };
-                    println!("               {branch} {:<16} {quota}{at}", m.r#ref);
+                    let pool = fmt_pool(m.selected_count, m.total_duration.as_ref());
+                    println!("               {branch} {:<16} {quota}{at}  {pool}", m.r#ref);
                 }
             }
             // Rules taken into account but not placeable on a clock (a
@@ -537,6 +539,21 @@ fn read_grid_toml(path: &std::path::Path) -> anyhow::Result<String> {
     Ok(content)
 }
 
+/// Count and duration have independent presence (e.g. a remote member with
+/// runtime). Keep milliseconds: a short sting must not be printed as zero.
+fn fmt_pool(count: Option<u64>, duration: Option<&prost_types::Duration>) -> String {
+    let count = count.map(|n| n.to_string()).unwrap_or_else(|| "unknown".into());
+    let duration = duration.map(|d| {
+        let (h, m, s) = (d.seconds / 3600, (d.seconds % 3600) / 60, d.seconds % 60);
+        if d.nanos == 0 {
+            format!("{h:02}:{m:02}:{s:02}")
+        } else {
+            format!("{h:02}:{m:02}:{s:02}.{:03}", d.nanos / 1_000_000)
+        }
+    }).unwrap_or_else(|| "unknown".into());
+    format!("pool: {count} media, duration {duration}")
+}
+
 /// Compact duration render for the preview's group members: largest unit first,
 /// seconds dropped once minutes/hours are present. 1200 → "20m", 3900 → "1h05m".
 fn fmt_dur(secs: i64) -> String {
@@ -571,5 +588,22 @@ fn fmt_offset(secs: i64) -> String {
         "+0".to_string()
     } else {
         format!("+{}", fmt_dur(secs))
+    }
+}
+
+#[cfg(test)]
+mod preview_pool_tests {
+    use super::fmt_pool;
+    use prost_types::Duration;
+
+    #[test]
+    fn pool_display_keeps_unknown_fields_independent_and_preserves_milliseconds() {
+        assert_eq!(fmt_pool(None, None), "pool: unknown media, duration unknown");
+        assert_eq!(fmt_pool(None, Some(&Duration { seconds: 1200, nanos: 0 })),
+            "pool: unknown media, duration 00:20:00");
+        assert_eq!(fmt_pool(Some(0), Some(&Duration::default())),
+            "pool: 0 media, duration 00:00:00");
+        assert_eq!(fmt_pool(Some(1), Some(&Duration { seconds: 0, nanos: 250_000_000 })),
+            "pool: 1 media, duration 00:00:00.250");
     }
 }
