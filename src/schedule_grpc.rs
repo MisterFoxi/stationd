@@ -87,6 +87,33 @@ fn map_origin(o: Origin) -> schedule::decision::Origin {
     }
 }
 
+fn strategy_name(s: crate::playlist::Strategy) -> &'static str {
+    use crate::playlist::Strategy;
+    match s {
+        Strategy::Sequence => "sequence",
+        Strategy::Shuffle => "shuffle",
+        Strategy::Weighted => "weighted",
+        Strategy::Rotate => "rotate",
+    }
+}
+
+fn secs_to_duration(secs: u64) -> prost_types::Duration {
+    prost_types::Duration { seconds: secs as i64, nanos: 0 }
+}
+
+fn map_group_member(m: crate::playlist::ProjectedMember) -> schedule::GroupMember {
+    use crate::playlist::MemberQuota;
+    let quota = Some(match m.quota {
+        MemberQuota::Take(n) => schedule::group_member::Quota::Take(n),
+        MemberQuota::Runtime(secs) => schedule::group_member::Quota::Runtime(secs_to_duration(secs)),
+    });
+    schedule::GroupMember {
+        r#ref: m.r#ref,
+        quota,
+        offset: m.offset_secs.map(secs_to_duration),
+    }
+}
+
 #[tonic::async_trait]
 impl ScheduleService for ScheduleGrpc {
     /// The live resolver: what to pull at a track boundary. `now` absent means
@@ -199,12 +226,25 @@ impl ScheduleService for ScheduleGrpc {
         let occurrences = preview
             .occurrences
             .into_iter()
-            .map(|o| schedule::Occurrence {
-                at_utc: Some(prost_types::Timestamp { seconds: o.epoch.0, nanos: 0 }),
-                at_local: o.at_local,
-                rule_id: o.rule_id,
-                playlist_ref: o.playlist_ref,
-                origin: map_origin(o.origin) as i32,
+            .map(|o| {
+                // A group occurrence carries its member decomposition; a
+                // non-group one leaves strategy empty / members absent.
+                let (strategy, members) = match o.group {
+                    Some(g) => (
+                        strategy_name(g.strategy).to_string(),
+                        g.members.into_iter().map(map_group_member).collect(),
+                    ),
+                    None => (String::new(), Vec::new()),
+                };
+                schedule::Occurrence {
+                    at_utc: Some(prost_types::Timestamp { seconds: o.epoch.0, nanos: 0 }),
+                    at_local: o.at_local,
+                    rule_id: o.rule_id,
+                    playlist_ref: o.playlist_ref,
+                    origin: map_origin(o.origin) as i32,
+                    strategy,
+                    members,
+                }
             })
             .collect();
         let indicative = preview

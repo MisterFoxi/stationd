@@ -13,7 +13,7 @@
 //! cursor), `newest` (head, stateless).
 //!
 //! SCOPE:
-//!   * modes: `static`, `dynamic`, `group`(sequence). `queue`/`remote` → error.
+//!   * modes: `static`, `dynamic`, `group`(sequence/shuffle). `queue`/`remote` → error.
 //!   * NOT YET honoured: `limit`, `constraints`, `unplayed_only`,
 //!     `order_by = published` (loud errors or tolerated-not-applied).
 //!
@@ -26,7 +26,10 @@ use std::collections::{HashMap, HashSet};
 use rand::seq::SliceRandom;
 use sqlx::SqlitePool;
 
-use crate::playlist::{Filter, Match, MemberUnavailable, Mode, Order, OrderBy, Playlist, PlaylistError, Selection, Strategy};
+use crate::playlist::{
+    Filter, Match, Member, MemberUnavailable, Mode, Order, OrderBy, Playlist, PlaylistError,
+    Selection, Strategy,
+};
 use crate::playlist_cursor;
 use crate::plugin::{Candidate, PluginHandle};
 use crate::store;
@@ -54,36 +57,69 @@ pub enum SelectionError {
 }
 
 /// Resolve a grid `playlist_ref` to one concrete media `rel_path`, without any
-/// plugin filtering (used by tests and simple callers).
+/// plugin filtering, at the current wall clock (used by tests and simple
+/// callers). For a time-budget group member, prefer [`resolve_ref_at`].
 pub async fn resolve_ref(pool: &SqlitePool, playlist_ref: &str) -> Result<String, SelectionError> {
-    resolve_inner(pool, None, playlist_ref).await
+    resolve_inner(pool, None, wall_now(), playlist_ref).await
 }
 
-/// Same, but let the plugin system filter the candidate pool. Used by the live
-/// engine, which holds the `PluginHandle`.
+/// Same as [`resolve_ref`] but at an explicit instant `now` (epoch seconds), so
+/// a caller can drive time-budget (`runtime`) group members deterministically
+/// on the controllable clock instead of the wall clock.
+pub async fn resolve_ref_at(
+    pool: &SqlitePool,
+    now: i64,
+    playlist_ref: &str,
+) -> Result<String, SelectionError> {
+    resolve_inner(pool, None, now, playlist_ref).await
+}
+
+/// Same, but let the plugin system filter the candidate pool, at instant `now`.
+/// Used by the live engine, which holds both the `PluginHandle` and the
+/// station clock — `now` is the same instant the grid resolved at, so a
+/// `runtime` budget rides the exact clock as everything else.
 pub async fn resolve_ref_with_plugins(
     pool: &SqlitePool,
     plugins: Option<&PluginHandle>,
+    now: i64,
     playlist_ref: &str,
 ) -> Result<String, SelectionError> {
-    resolve_inner(pool, plugins, playlist_ref).await
+    resolve_inner(pool, plugins, now, playlist_ref).await
 }
 
 async fn resolve_inner(
     pool: &SqlitePool,
     plugins: Option<&PluginHandle>,
+    now: i64,
     playlist_ref: &str,
 ) -> Result<String, SelectionError> {
-    let toml = store::playlist_toml_by_ref(pool, playlist_ref)
+    // Resolve against the canonical key. The store lookup is itself
+    // case-insensitive on the ref (it normalizes), but we normalize here too so
+    // the canonical key flows DOWNSTREAM as the cursor / group-state key —
+    // family-B state must not fork on how the ref happened to be spelled
+    // ("Filler" vs "filler"). Mirrors the member-ref normalization below.
+    let key = crate::playlist::normalize_ref(playlist_ref)
+        .map_err(|_| SelectionError::PlaylistNotFound(playlist_ref.to_string()))?;
+    let toml = store::playlist_toml_by_ref(pool, &key)
         .await?
         .ok_or_else(|| SelectionError::PlaylistNotFound(playlist_ref.to_string()))?;
     let playlist = Playlist::parse(&toml)?;
-    resolve_media(pool, plugins, playlist_ref, &playlist).await
+    resolve_media(pool, plugins, now, &key, &playlist).await
+}
+
+/// Wall-clock now in epoch seconds, for callers that don't supply an instant.
+fn wall_now() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 async fn resolve_media(
     pool: &SqlitePool,
     plugins: Option<&PluginHandle>,
+    now: i64,
     reference: &str,
     playlist: &Playlist,
 ) -> Result<String, SelectionError> {
@@ -91,7 +127,12 @@ async fn resolve_media(
     match sel.mode {
         Mode::Static | Mode::Dynamic => resolve_leaf(pool, plugins, reference, sel).await,
         Mode::Group => match sel.strategy {
-            Some(Strategy::Sequence) => resolve_group_sequence(pool, plugins, reference, sel).await,
+            Some(Strategy::Sequence) => {
+                resolve_group_rotation(pool, plugins, now, reference, sel, false).await
+            }
+            Some(Strategy::Shuffle) => {
+                resolve_group_rotation(pool, plugins, now, reference, sel, true).await
+            }
             Some(other) => Err(SelectionError::Unsupported(format!("group strategy {other:?}"))),
             None => Err(SelectionError::Unsupported("group without strategy".into())),
         },
@@ -163,59 +204,127 @@ async fn resolve_leaf(
     }
 }
 
-/// A `sequence` group: hand out one track per turn, walking members in order,
-/// `take` tracks each, wrapping (a new activation). State persisted in
-/// `group_state` (family B). Members must be leaves; nested groups are a loud
-/// error for now.
-async fn resolve_group_sequence(
+/// A rotation group — `sequence` or `shuffle` — hands out one track per turn,
+/// walking its members and honouring each member's per-member quota, then
+/// wrapping (a new activation). `sequence` walks the declared order; `shuffle`
+/// walks a random permutation, re-drawn each cycle and persisted so a restart
+/// mid-cycle does not repeat a member. State in `group_state` (family B).
+/// Members must be leaves; nested groups are a loud error for now.
+///
+/// Per-member quota (mutually exclusive, validated upstream):
+/// - **`take`** (tracks): emit, count, advance once the count reaches `take`.
+/// - **`runtime`** (time budget): stamp the member's start on its first track,
+///   keep emitting while `now - started < budget`, and advance at the next
+///   track boundary once the budget has elapsed. Soft — the member's last track
+///   may overrun. `now` is epoch seconds on the controllable station clock, so
+///   the budget is testable and `--at`-drivable, and a downtime longer than the
+///   budget simply expires the member at restart (catch-up).
+async fn resolve_group_rotation(
     pool: &SqlitePool,
     plugins: Option<&PluginHandle>,
+    now: i64,
     group_ref: &str,
     sel: &Selection,
+    shuffle: bool,
 ) -> Result<String, SelectionError> {
-    if sel.members.is_empty() {
+    let n = sel.members.len();
+    if n == 0 {
         return Err(SelectionError::PoolEmpty);
     }
     let policy = sel
         .on_member_unavailable
         .unwrap_or(MemberUnavailable::Abort);
-    let n = sel.members.len();
-    let (mut idx, mut count) = crate::group_state::get(pool, group_ref).await?;
+
+    let mut st = crate::group_state::get(pool, group_ref).await?;
+
+    // Traversal order for this cycle. `sequence` = declared order; `shuffle` =
+    // the persisted permutation, re-drawn when absent or stale (e.g. the member
+    // count changed after a TOML edit) — a fresh cycle from the top.
+    let mut order: Vec<usize> = if shuffle {
+        match &st.permutation {
+            Some(p) if p.len() == n => p.clone(),
+            _ => {
+                st.member_idx = 0;
+                st.take_count = 0;
+                st.member_started_at = None;
+                new_permutation(n)
+            }
+        }
+    } else {
+        (0..n).collect()
+    };
 
     // Try members from the current position. With `skip`, an unavailable member
     // (empty pool) is dropped and we advance to the next this turn; with
     // `abort` (default) it fails the whole group → the grid falls through to a
     // lower-priority source. Bounded to one full pass so we never loop forever.
     for _ in 0..n {
-        if idx >= n {
-            idx = 0;
-            count = 0;
+        // Wrap: past the last member → a fresh cycle (shuffle re-draws).
+        if st.member_idx >= n {
+            st.member_idx = 0;
+            st.take_count = 0;
+            st.member_started_at = None;
+            if shuffle {
+                order = new_permutation(n);
+            }
         }
-        let member = &sel.members[idx];
-        let take = member.take.unwrap_or(1).max(1);
+
+        let member = &sel.members[order[st.member_idx]];
         let member_key = crate::playlist::normalize_ref(&member.r#ref)
             .map_err(|_| SelectionError::PlaylistNotFound(member.r#ref.clone()))?;
-        // TEMP debug: montre l'ordre réel de parcours des membres.
-        //tracing::info!(group = %group_ref, idx, count, n, member = %member_key, "group sequence pick");
+
+        // Time-budget expiry is checked BEFORE emitting: if the current
+        // member's budget has already elapsed, advance now and let the next
+        // member produce this turn (soft switch at a track boundary). Only the
+        // current member can be expired — the next has no start stamp yet — so
+        // this fires at most once per call: no runaway skipping.
+        if let Some(budget) = member_runtime_secs(member)? {
+            if let Some(started) = st.member_started_at {
+                if now.saturating_sub(started) >= budget {
+                    st.member_idx += 1;
+                    st.take_count = 0;
+                    st.member_started_at = None;
+                    continue;
+                }
+            }
+        }
 
         match resolve_member(pool, plugins, &member_key).await {
             Ok(track) => {
-                count += 1;
-                if count >= take {
-                    idx += 1;
-                    count = 0;
+                if member.runtime.is_some() {
+                    // Time budget: stamp the slot start on the first track and
+                    // stay — the expiry check above is what advances later.
+                    if st.member_started_at.is_none() {
+                        st.member_started_at = Some(now);
+                    }
+                } else {
+                    // Track budget: count this track, advance once `take` met.
+                    let take = member.take.unwrap_or(1).max(1);
+                    st.take_count += 1;
+                    if st.take_count >= take {
+                        st.member_idx += 1;
+                        st.take_count = 0;
+                        st.member_started_at = None;
+                    }
                 }
-                if idx >= n {
-                    idx = 0;
-                    count = 0;
+                // Fold a wrap so the NEXT call starts a fresh cycle cleanly.
+                if st.member_idx >= n {
+                    st.member_idx = 0;
+                    st.take_count = 0;
+                    st.member_started_at = None;
+                    if shuffle {
+                        order = new_permutation(n);
+                    }
                 }
-                crate::group_state::set(pool, group_ref, idx, count).await?;
+                st.permutation = shuffle.then(|| order.clone());
+                crate::group_state::set(pool, group_ref, &st).await?;
                 return Ok(track);
             }
             // `skip`: drop this member and try the next one this turn.
             Err(SelectionError::PoolEmpty) if policy == MemberUnavailable::Skip => {
-                idx += 1;
-                count = 0;
+                st.member_idx += 1;
+                st.take_count = 0;
+                st.member_started_at = None;
                 continue;
             }
             // `abort` (PoolEmpty) or a config error: propagate. An aborted group
@@ -226,6 +335,28 @@ async fn resolve_group_sequence(
 
     // `skip` exhausted every member → the group produces nothing.
     Err(SelectionError::PoolEmpty)
+}
+
+/// A fresh random permutation of member indices `0..n` (for `shuffle`).
+fn new_permutation(n: usize) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..n).collect();
+    order.shuffle(&mut rand::thread_rng());
+    order
+}
+
+/// A member's time budget in seconds, if it carries a `runtime` quota. The
+/// stored duration is re-parsed here; a malformed value is a loud error
+/// (validation should have caught it on the way in, but selection never trusts
+/// silently).
+fn member_runtime_secs(member: &Member) -> Result<Option<i64>, SelectionError> {
+    match &member.runtime {
+        None => Ok(None),
+        Some(r) => crate::playlist::parse_duration_secs(r)
+            .map(|s| Some(s as i64))
+            .map_err(|e| {
+                SelectionError::Unsupported(format!("member `{}` runtime `{r}`: {e}", member.r#ref))
+            }),
+    }
 }
 
 async fn resolve_member(
@@ -871,6 +1002,34 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn resolves_a_top_level_ref_case_insensitively() {
+        // Regression: a grid ref written "Filler" must resolve to the view key
+        // "filler" (the view is keyed by the lowercased `normalize_ref`). Before
+        // the fix the lookup was case-sensitive and missed — while the apply
+        // check, which normalizes, had passed.
+        let (_d, pool) = fresh_db().await;
+        media_index::replace_library(&pool, &[media("pop/a.mp3", "A", 2020, &["pop"])], 1000)
+            .await
+            .unwrap();
+        add_playlist(
+            &pool,
+            "filler", // stored lowercased, as `sync` keys it
+            r#"
+                name = "Filler"
+                [selection]
+                mode = "dynamic"
+                order = "shuffle"
+                [[selection.filter]]
+                field = "path"
+                op = "prefix"
+                value = "pop/"
+            "#,
+        )
+        .await;
+        assert_eq!(resolve_ref(&pool, "Filler").await.unwrap(), "pop/a.mp3");
+    }
+
     // ----- cursor: sequential / newest / oldest ------------------------
 
     #[tokio::test]
@@ -1296,5 +1455,168 @@ mod tests {
             resolve_ref(&pool, "showabort").await,
             Err(SelectionError::PoolEmpty)
         ));
+    }
+
+    // ----- group shuffle ----------------------------------------------
+
+    /// Register N single-file leaf playlists `a`, `b`, … each keyed to a
+    /// distinct top-level directory, and a group over them.
+    async fn add_letter_leaves(pool: &SqlitePool, letters: &[&str]) {
+        for r in letters {
+            add_playlist(
+                pool,
+                r,
+                &format!(
+                    "name = \"{r}\"\n[selection]\nmode = \"dynamic\"\norder = \"shuffle\"\n\
+                     [[selection.filter]]\nfield = \"path\"\nop = \"prefix\"\nvalue = \"{r}/\"\n"
+                ),
+            )
+            .await;
+        }
+    }
+
+    #[tokio::test]
+    async fn group_shuffle_visits_each_member_once_per_cycle() {
+        let (_d, pool) = fresh_db().await;
+        media_index::replace_library(
+            &pool,
+            &[
+                media("a/x.mp3", "", 0, &[]),
+                media("b/x.mp3", "", 0, &[]),
+                media("c/x.mp3", "", 0, &[]),
+            ],
+            1000,
+        )
+        .await
+        .unwrap();
+        add_letter_leaves(&pool, &["a", "b", "c"]).await;
+        add_playlist(
+            &pool,
+            "shuf",
+            r#"
+                name = "Shuf"
+                [selection]
+                mode = "group"
+                strategy = "shuffle"
+                members = [{ ref = "a" }, { ref = "b" }, { ref = "c" }]
+            "#,
+        )
+        .await;
+
+        // Two full cycles: each is a permutation → every member exactly once,
+        // no repeat within a cycle (whatever the random order).
+        for _ in 0..2 {
+            let mut seen = HashSet::new();
+            for _ in 0..3 {
+                let got = resolve_ref(&pool, "shuf").await.unwrap();
+                seen.insert(got.chars().next().unwrap()); // 'a' | 'b' | 'c'
+            }
+            assert_eq!(seen.len(), 3, "a cycle visits all three members once");
+        }
+    }
+
+    // ----- per-member time budget (runtime) ---------------------------
+
+    #[tokio::test]
+    async fn group_sequence_runtime_budget_switches_after_elapsed() {
+        let (_d, pool) = fresh_db().await;
+        media_index::replace_library(
+            &pool,
+            &[
+                media("rock/r1.mp3", "", 0, &[]),
+                media("rock/r2.mp3", "", 0, &[]),
+                media("jingles/j.wav", "", 0, &[]),
+            ],
+            1000,
+        )
+        .await
+        .unwrap();
+        add_playlist(
+            &pool,
+            "rock",
+            r#"
+                name = "Rock"
+                [selection]
+                mode = "dynamic"
+                order = "shuffle"
+                [[selection.filter]]
+                field = "path"
+                op = "prefix"
+                value = "rock/"
+            "#,
+        )
+        .await;
+        add_playlist(
+            &pool,
+            "jingle",
+            r#"
+                name = "J"
+                [selection]
+                mode = "static"
+                order = "shuffle"
+                files = ["jingles/j.wav"]
+            "#,
+        )
+        .await;
+        add_playlist(
+            &pool,
+            "budget",
+            r#"
+                name = "Budget"
+                [selection]
+                mode = "group"
+                strategy = "sequence"
+                members = [{ ref = "rock", runtime = "1m" }, { ref = "jingle", take = 1 }]
+            "#,
+        )
+        .await;
+
+        // t=1000: first rock track, the member's start is stamped.
+        assert!(resolve_ref_at(&pool, 1000, "budget").await.unwrap().starts_with("rock/"));
+        // t=1030 (30s < 60s budget): still rock.
+        assert!(resolve_ref_at(&pool, 1030, "budget").await.unwrap().starts_with("rock/"));
+        // t=1061 (61s ≥ 60s): budget elapsed → switch to the jingle this turn.
+        assert_eq!(resolve_ref_at(&pool, 1061, "budget").await.unwrap(), "jingles/j.wav");
+        // Jingle (take = 1) hands back → wrap → rock again on a fresh budget.
+        assert!(resolve_ref_at(&pool, 1062, "budget").await.unwrap().starts_with("rock/"));
+    }
+
+    #[tokio::test]
+    async fn group_shuffle_runtime_holds_a_member_then_moves_on() {
+        let (_d, pool) = fresh_db().await;
+        media_index::replace_library(
+            &pool,
+            &[
+                media("a/1.mp3", "", 0, &[]),
+                media("a/2.mp3", "", 0, &[]),
+                media("b/1.mp3", "", 0, &[]),
+                media("b/2.mp3", "", 0, &[]),
+            ],
+            1000,
+        )
+        .await
+        .unwrap();
+        add_letter_leaves(&pool, &["a", "b"]).await;
+        add_playlist(
+            &pool,
+            "shufbud",
+            r#"
+                name = "ShufBud"
+                [selection]
+                mode = "group"
+                strategy = "shuffle"
+                members = [{ ref = "a", runtime = "1m" }, { ref = "b", runtime = "1m" }]
+            "#,
+        )
+        .await;
+
+        // First member of the drawn permutation, held within its 60s budget.
+        let first = resolve_ref_at(&pool, 1000, "shufbud").await.unwrap();
+        let first_letter = first.chars().next().unwrap();
+        let again = resolve_ref_at(&pool, 1030, "shufbud").await.unwrap();
+        assert_eq!(again.chars().next().unwrap(), first_letter, "same member within budget");
+        // Budget elapsed → the other member takes over (only two in the cycle).
+        let next = resolve_ref_at(&pool, 1061, "shufbud").await.unwrap();
+        assert_ne!(next.chars().next().unwrap(), first_letter, "switches member after budget");
     }
 }

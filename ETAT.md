@@ -5,7 +5,7 @@ sans reconstruire le contexte. À distinguer des docs de `Doc/` (décisions
 d'architecture durables) : ce fichier-ci est volatil, à mettre à jour à
 chaque session.
 
-Dernière mise à jour : 2026-09-18.
+Dernière mise à jour : 2026-09-19.
 
 
 ## Ajout : TUI d'administration (correctif préparé, compilation à confirmer)
@@ -32,10 +32,14 @@ La **grille est pilotable de bout en bout en CLI**, projection comprise :
 `AT_CLOCK_SOFT`, export round-trip stable, `preview` projette 24h avec rendu
 UTC + local nommé (test anti-DST 2026-10-25 : 02:30 deux fois, epochs
 distincts). Cœur pur (`resolve_next`, `clock`/DST `jiff`, familles A/B) vert,
-grammaire + les 6 RPC réels. `cargo build` + `cargo test -p stationd` OK.
+grammaire + les 6 RPC réels. `cargo build` + `cargo test -p stationd` étaient verts
+au dernier build compilé ; les ajouts récents (shuffle/runtime de groupe,
+décomposition preview, fix casse de ref) **attendent un `cargo build`** (Rust
+indispo dans l'env de préparation).
 Biblio média scannée et pilotable au CLI (`library scan|list`). **Étage
 sélection livré** : `playlist_ref` → `media_path` concret (shuffle, sequential,
-newest/oldest via curseur, groupe `sequence`). Validé en réel de bout en bout :
+newest/oldest via curseur, groupe `sequence`/`shuffle` + quota `take`/`runtime`,
+membres décomposés au `preview`). Validé en réel de bout en bout :
 grille → groupe intro / épisode le plus récent / outro → fichiers réels.
 **Système de plugins** : A1 (registre, cycle de vie, `on_event`) + **hook
 `filter_pool`** (le pool est matérialisé puis filtré par les plugins avant le
@@ -72,6 +76,105 @@ Autres, indépendants :
 
 ## Fait
 
+### — Fix : ref de grille sensible à la casse à la résolution (2026-09-19) —
+
+Bug : une règle de grille `playlist_ref = "Filler"` (majuscule) n'était pas
+prise en compte (source jamais résolue → erreur `PlaylistNotFound` sur son
+créneau ; membres non décomposés au preview), alors que
+`homestone-chronicles/…` (déjà minuscule) marchait.
+
+Cause : la vue est clé­e en minuscules (`sync` stocke `normalize_ref(...)`),
+mais `store::playlist_toml_by_ref` matchait la ref **brute**
+(`WHERE rel_path = ?`, sensible à la casse). Deux chemins de lookup touchés :
+la résolution à l'antenne (`resolve_inner`) ET la décomposition preview
+(`grid_engine::group_projection`, qui lit le store en direct). L'`apply` de la grille, lui,
+normalise pour vérifier l'existence → il acceptait `"Filler"`, d'où le décalage
+apply-OK / résolution-KO. Les refs de **membres**, déjà normalisées, n'étaient
+pas touchées (seule la ref top-level l'était).
+
+Fix (2 passes — la 1ʳᵉ, sur `resolve_inner` seul, ratait le preview) : la
+normalisation vit désormais dans le **point de choke unique**
+`store::playlist_toml_by_ref` → tous les lookups (antenne, membres,
+décomposition preview) sont insensibles à la casse. `resolve_inner` normalise
+aussi pour propager la clé canonique en aval (curseur / group_state ne se
+dédoublent plus selon la casse). Tests régression :
+`store::lookup_by_ref_is_case_insensitive` +
+`selection::resolves_a_top_level_ref_case_insensitively`. Contournement sans
+patch : écrire la ref en minuscule dans le `grid.toml`.
+
+### — Preview : décomposition des groupes (membres + offsets runtime) (2026-09-19) —
+
+`stationctl schedule preview` affiche désormais, sous une occurrence dont le
+`playlist_ref` est un groupe `sequence`/`shuffle`, la liste de ses membres. Le
+preview reste une **projection horloge pure** (durée des pistes inconnue) :
+
+- membre `take` (per-track) → listé **sans TS** (impossible : N pistes de durée
+  inconnue) ;
+- membre `runtime` d'un `sequence` → **offset relatif** au début du groupe
+  (`+0`, `+20m`, …), tant que ses prédécesseurs sont tous `runtime` ; un `take`
+  intercalé rompt la chaîne (offsets suivants absents) ;
+- `shuffle` → **budgets seulement**, aucun offset (ordre tiré au runtime) ; le
+  groupe est marqué `(shuffle)`.
+
+Chemin CLI-first : décomposition calculée côté moteur, exposée au contrat.
+- `playlist.rs` : `Playlist::project_group_members() -> Option<GroupProjection>`
+  (pur : `Strategy` + `Vec<ProjectedMember { ref, MemberQuota::Take|Runtime,
+  offset_secs }>`), `None` hors groupe sequence/shuffle. 5 tests.
+- `schedule_v1.proto` : `Occurrence` += `strategy` + `repeated GroupMember`
+  (`ref`, oneof `take`|`runtime`, `offset`). Ajout **additif** — la timeline
+  `occurrences` est inchangée (TUI agenda non impacté).
+- `grid_engine.rs` : `PreviewOccurrence.group`, décomposition mémoïsée par ref
+  dans la marche du preview (helper `group_projection`). 1 test.
+- `schedule_grpc.rs` : mapping projection → proto.
+- `stationctl.rs` : affichage arborescent (`├`/`└`) sous la ligne d'occurrence.
+
+Rust indispo ici → **compilation/tests + regen proto (`build.rs`) à confirmer au
+prochain build.** Groupes `weighted`/`rotate` non décomposés (pas de timeline
+take/runtime) — à ajouter si besoin.
+
+### — Rotation de groupe : `shuffle` + budget `runtime` par membre (2026-09-18) —
+
+Point 5 du triage bug. **FAIT** (édité ; **compilation/tests à confirmer au
+prochain build** — Rust indispo dans l'env de préparation).
+
+Décision de sémantique (tranchée avant code) : concept **playlist** (quota par
+membre de groupe), pas grille. Budget = **temps mural écoulé** depuis le début
+du membre courant (catch-up : périme tout seul après un downtime > budget),
+**soft** (la dernière piste déborde, bascule au bord suivant — comme
+`DayPart.end`). Aucun timer mural, aucun `sleep`.
+
+- **Nouvelle stratégie `shuffle`** (`playlist.rs` `Strategy::Shuffle`) : mêmes
+  membres qu'une `sequence`, parcourus en **permutation** (chaque membre une
+  fois par cycle), re-tirée à chaque cycle. Permutation **persistée** → un
+  redémarrage en milieu de cycle ne rebat pas les cartes.
+- **Quota par membre** : `take` (N pistes, existant) **XOR** `runtime` (durée
+  `"20m"`, neuf) — les deux sur le même membre = erreur de parse. Autorisés sur
+  `sequence` ET `shuffle`. `runtime` parsé via `parse_duration_secs` (même
+  grammaire `[1-9][0-9]*(s|m|h|d)` que la grille ; **doublon assumé** dans
+  `playlist.rs`, comme `parse_date`).
+- **`selection.rs`** : `resolve_group_sequence` → **`resolve_group_rotation(…,
+  shuffle: bool)`** (sequence et shuffle partagent tout sauf l'ordre). Budget
+  vérifié **avant** l'emit (bascule soft) ; `runtime` stampe le départ du membre
+  sur sa 1ʳᵉ piste, avance quand `now - started ≥ budget`. La trace TEMP de
+  l'ancienne fonction disparaît avec le renommage.
+- **Threading de `now`** : le budget a besoin de l'**horloge contrôlable** (pas
+  d'un `SystemTime::now()` local), sinon il échappe à `schedule next --at` /
+  preview / tests. `resolve_ref_with_plugins` prend un `now: i64` (epoch s),
+  passé par `grid_engine::next_media` (`now.0`) — unique call-site vivant.
+  `resolve_ref_at(pool, now, ref)` neuf pour les tests ; `resolve_ref` garde
+  l'horloge murale.
+- **`migrations/0010_group_runtime_shuffle.sql`** : `group_state` +=
+  `member_started_at INTEGER` (budget) + `permutation TEXT` (indices CSV,
+  shuffle). Nullables → lignes existantes valides. **Famille (B)**.
+  `src/group_state.rs` réécrit : `get`/`set` sur une struct `GroupState`
+  (member_idx, take_count, member_started_at, permutation).
+- Tests ajoutés : `playlist.rs` (shuffle+runtime valides, XOR, runtime hors
+  quota-group, mauvaise durée, grammaire) ; `selection.rs`
+  (`group_shuffle_visits_each_member_once_per_cycle`,
+  `group_sequence_runtime_budget_switches_after_elapsed`,
+  `group_shuffle_runtime_holds_a_member_then_moves_on`) ; `group_state.rs`
+  (roundtrips take / runtime+permutation / CSV).
+
 ### — Preview des `every` : projection elapsed + indicatif tracks (2026-09-18) —
 
 Point 2 du triage bug. Le `preview` ne jette plus les `every`.
@@ -106,6 +209,7 @@ Point 2 du triage bug. Le `preview` ne jette plus les `every`.
 - `cargo test -p stationd` (reconfirmer le vert après les derniers edits store.rs/tests/sync.rs).
 - **Retirer la trace TEMP** dans `selection.rs` `resolve_group_sequence` :
   `tracing::info!(... "group sequence pick")` (posée pour diagnostiquer le bug 1).
+  **Fait (2026-09-18)** — fonction renommée `resolve_group_rotation`, trace supprimée.
 - Nettoyer les `.toml` de playlists sur disque (voir Bug ci-dessous) : retirer
   `type`/`weight`/`[[broadcast.schedule]]`/`every_*` ; typo `ClassicFM.toml`
   `mode = "remore"` → `"remote"`.
@@ -120,10 +224,10 @@ Point 2 du triage bug. Le `preview` ne jette plus les `every`.
    déjà supporté). La « fin fixe » voulue = point 5.
 4. **`weight` en grid** : non supporté par design (grille = priorité). Pondération
    = playlist `group strategy="weighted"`.
-5. **Rotation à budget de temps** (`strategy="shuffle"` + `expiry` par membre) :
-   FEATURE neuve = nouvelle stratégie + champ temps/membre + bascule sur timer
-   mural dans une activation de groupe. Gros chantier, attend go + décision de
-   sémantique (concept playlist type `take`-en-temps, vs `day_part` grille).
+5. **Rotation à budget de temps** : **FAIT (2026-09-18, cf. section Fait).**
+   Nouvelle stratégie `shuffle` (permutation persistée) + quota par membre
+   `take` XOR `runtime` (temps mural écoulé, soft, catch-up), sur `sequence` et
+   `shuffle`. Migration 0010 (`member_started_at`/`permutation`).
 
 ### — Fallthrough grille + on_member_unavailable + contrat broadcast + choisi+flip + clock (2026-09-15/16) —
 
@@ -491,7 +595,7 @@ dans le découpage des modules (`grid_index` = A, `grid_store` = B).
 
 ## Pièges & points de vigilance
 
-- **Base de dev à recréer** : migrations `0005`→`0009` sont neuves. En cas de
+- **Base de dev à recréer** : migrations `0005`→`0010` sont neuves. En cas de
   souci de schéma/checksum sqlx, `rm -rf data/` + relancer (file-first, la vue
   est jetable). Ne JAMAIS éditer une migration déjà appliquée en prod.
 - **`0004` manquant** : le fichier de migration de la vue riche playlists est
@@ -536,9 +640,9 @@ dans le découpage des modules (`grid_index` = A, `grid_store` = B).
 | `src/store.rs` / `src/sync.rs` | Vue playlists / réconciliation |
 | `src/media.rs` | Scan biblio **pur** (walkdir + lofty → `ScanReport`, 5 tests) |
 | `src/media_index.rs` | Vue média famille (A) : `replace_library` (réconciliation) / `list` (4 tests) |
-| `src/selection.rs` | Étage sélection `playlist_ref`→média : filtres, ordres, curseur, groupe sequence (~20 tests) |
+| `src/selection.rs` | Étage sélection `playlist_ref`→média : filtres, ordres, curseur, groupe sequence/shuffle + budget runtime (~24 tests) |
 | `src/playlist_cursor.rs` | Curseur de parcours famille (B) : dernier média rendu |
-| `src/group_state.rs` | État de passage d'un groupe sequence famille (B) |
+| `src/group_state.rs` | État de passage d'un groupe (sequence/shuffle) famille (B) : idx, take_count, member_started_at, permutation |
 | `src/library_actor.rs` | Acteur biblio possédant (mpsc, spawn_blocking) — gabarit refacto |
 | `src/library_grpc.rs` | Transport gRPC biblio (traducteur mince acteur↔proto) |
 | `src/plugin.rs` | Système de plugins : trait, acteur à état, quarantaine, `filter_pool`, `WasmPlugin` (extism), natifs logger/blacklist |
@@ -555,6 +659,6 @@ dans le découpage des modules (`grid_index` = A, `grid_store` = B).
 | `Doc/plugin-{events,hooks,host}.md` | Contrats du système de plugins (référence durable) |
 | `Doc/proposition-grammaire-grille-v1.md` | Contrat grammaire `grid.toml` (référence durable) |
 | `proto/playlist_v1.proto` | Contrat playlist v1 (⚠ pas encore compilé/servi) |
-| `migrations/0001→0009` | Schéma (0005 état grille, 0006 règles, 0007 biblio, 0008 curseur, 0009 groupe ; ⚠ 0004 absent) |
+| `migrations/0001→0010` | Schéma (0005 état grille, 0006 règles, 0007 biblio, 0008 curseur, 0009 groupe, 0010 runtime/shuffle groupe ; ⚠ 0004 absent) |
 | `tests/sync.rs` | Intégration `sync` |
 | `Doc/*.md` | Décisions d'architecture (référence durable) |

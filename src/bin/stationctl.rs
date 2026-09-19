@@ -372,7 +372,33 @@ async fn main() -> anyhow::Result<()> {
                 } else {
                     format!("  [{}]", o.rule_id)
                 };
-                println!("{utc:>11}  {}  {origin:<13}  {pl}{rule}", o.at_local);
+                let strat = if o.strategy.is_empty() {
+                    String::new()
+                } else {
+                    format!("  ({})", o.strategy)
+                };
+                println!("{utc:>11}  {}  {origin:<13}  {pl}{rule}{strat}", o.at_local);
+
+                // Group decomposition under the segment. A `take` member has no
+                // TS (track durations are unknown); a `runtime` member of a
+                // `sequence` shows its relative offset from the group start; a
+                // `shuffle` shows budgets only (order is drawn at runtime).
+                let n = o.members.len();
+                for (i, m) in o.members.iter().enumerate() {
+                    let branch = if i + 1 == n { '\u{2514}' } else { '\u{251c}' };
+                    let quota = match &m.quota {
+                        Some(schedule::group_member::Quota::Take(t)) => format!("take {t}"),
+                        Some(schedule::group_member::Quota::Runtime(d)) => {
+                            format!("runtime {}", fmt_dur(d.seconds))
+                        }
+                        None => "?".to_string(),
+                    };
+                    let at = match &m.offset {
+                        Some(d) => format!("   {}", fmt_offset(d.seconds)),
+                        None => String::new(),
+                    };
+                    println!("               {branch} {:<16} {quota}{at}", m.r#ref);
+                }
             }
             // Rules taken into account but not placeable on a clock (a
             // track-counted `every`, cadence driven by playback): listed once
@@ -509,4 +535,41 @@ fn read_grid_toml(path: &std::path::Path) -> anyhow::Result<String> {
         .parse::<toml::Table>()
         .map_err(|e| anyhow::anyhow!("{} is not well-formed TOML: {e}", path.display()))?;
     Ok(content)
+}
+
+/// Compact duration render for the preview's group members: largest unit first,
+/// seconds dropped once minutes/hours are present. 1200 → "20m", 3900 → "1h05m".
+fn fmt_dur(secs: i64) -> String {
+    if secs <= 0 {
+        return "0s".to_string();
+    }
+    let (h, m, s) = (secs / 3600, (secs % 3600) / 60, secs % 60);
+    let mut out = String::new();
+    if h > 0 {
+        out.push_str(&format!("{h}h"));
+    }
+    if m > 0 {
+        // Zero-pad the minutes only when an hour precedes them ("1h05m").
+        if h > 0 {
+            out.push_str(&format!("{m:02}m"));
+        } else {
+            out.push_str(&format!("{m}m"));
+        }
+    }
+    if s > 0 && h == 0 && m == 0 {
+        out.push_str(&format!("{s}s"));
+    }
+    if out.is_empty() {
+        out.push_str("0s");
+    }
+    out
+}
+
+/// A relative start offset for a sequence's runtime member: "+0", "+20m", …
+fn fmt_offset(secs: i64) -> String {
+    if secs == 0 {
+        "+0".to_string()
+    } else {
+        format!("+{}", fmt_dur(secs))
+    }
 }

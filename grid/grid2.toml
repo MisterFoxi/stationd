@@ -32,11 +32,11 @@ expiry ="30m"
 playlist_ref="rockfm"
 
 
-[[rule]]
-id="Classic"
-kind="every"
-min_elapsed="15m"
-playlist_ref="classicfm"
+#[[rule]]
+#id="Classic"
+#kind="every"
+#min_elapsed="15m"
+#playlist_ref="classicfm"
 #weight="20"
 
 
@@ -53,14 +53,9 @@ end = "15:50"
 id="Filler"
 kind = "day_part"
 playlist_ref="Filler"
-start = "10:45"
-end = "15:00"
+start = "06:00"
+end = "08:00"
 
-[[rule]]
-id="Filler2"
-playlist_ref="Filler"
-kind = "every"
-min_elapsed = "60m"
 
 
 

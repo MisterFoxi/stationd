@@ -135,6 +135,7 @@ pub enum Strategy {
     Weighted,
     Rotate,
     Sequence,
+    Shuffle,
 }
 
 /// What a `sequence` group does when a member produces no media:
@@ -160,8 +161,11 @@ pub struct Filter {
     pub value: toml::Value,
 }
 
-/// A group member: a reference to another playlist, plus an optional
-/// `weight` (weighted strategy) or `take` (sequence strategy).
+/// A group member: a reference to another playlist, plus an optional quota.
+/// In a `weighted` group a member may carry a `weight`. In a `sequence` or
+/// `shuffle` group a member may carry a per-member quota, either in tracks
+/// (`take`) or in wall-clock time (`runtime`, e.g. "20m") — the two are
+/// mutually exclusive.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Member {
@@ -170,6 +174,11 @@ pub struct Member {
     pub weight: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub take: Option<u32>,
+    /// Per-member time budget (e.g. "20m"), alternative to `take`. Soft: the
+    /// member's last track may overrun the budget; the switch happens at the
+    /// next track boundary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<String>,
 }
 
 /// The playlist's own **consumption policy** — NOT scheduling. When (and
@@ -277,11 +286,34 @@ impl Playlist {
             }
         }
 
-        // `take` only makes sense in a `sequence` group; `weight` only in a
-        // `weighted` group.
+        // Per-member quotas. `weight` is for a `weighted` group; `take`
+        // (tracks) and `runtime` (time budget) are per-member quotas for a
+        // `sequence` or `shuffle` group, and are mutually exclusive.
+        let quota_group = matches!(
+            self.selection.strategy,
+            Some(Strategy::Sequence) | Some(Strategy::Shuffle)
+        );
         for m in &self.selection.members {
-            if m.take.is_some() && self.selection.strategy != Some(Strategy::Sequence) {
-                return Err(err("`take` on a member requires a `sequence` group"));
+            if m.take.is_some() && m.runtime.is_some() {
+                return Err(err(
+                    "a member cannot have both `take` and `runtime` (tracks XOR time budget)",
+                ));
+            }
+            if m.take.is_some() && !quota_group {
+                return Err(err("`take` on a member requires a `sequence` or `shuffle` group"));
+            }
+            if m.runtime.is_some() && !quota_group {
+                return Err(err(
+                    "`runtime` on a member requires a `sequence` or `shuffle` group",
+                ));
+            }
+            if let Some(r) = &m.runtime {
+                parse_duration_secs(r).map_err(|e| {
+                    PlaylistError::Validation(format!(
+                        "member `{}` has an invalid `runtime`: {e}",
+                        m.r#ref
+                    ))
+                })?;
             }
             if m.weight.is_some() && self.selection.strategy != Some(Strategy::Weighted) {
                 return Err(err("`weight` on a member requires a `weighted` group"));
@@ -326,6 +358,119 @@ impl Playlist {
             }
         }
         Ok(())
+    }
+}
+
+/// Parse a duration in the playlist/grid grammar `[1-9][0-9]*(s|m|h|d)` into
+/// seconds: a single unit, no leading zero, no zero duration. Loud error on
+/// anything else. (Deliberately duplicated from `grid_toml` — same grammar,
+/// separate scope — so this module stays free-standing, like the assumed
+/// `parse_date`/`parse_weekday` duplication.)
+pub fn parse_duration_secs(s: &str) -> Result<u64, String> {
+    let bad = || format!("invalid duration {s:?} (want e.g. 30s, 15m, 2h, 1d)");
+    if s.len() < 2 {
+        return Err(bad());
+    }
+    let (num, unit) = s.split_at(s.len() - 1);
+    let mult: u64 = match unit {
+        "s" => 1,
+        "m" => 60,
+        "h" => 3600,
+        "d" => 86400,
+        _ => return Err(bad()),
+    };
+    let bytes = num.as_bytes();
+    if bytes.is_empty() || bytes[0] == b'0' || !num.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(bad());
+    }
+    let n: u64 = num.parse().map_err(|_| bad())?;
+    if n == 0 {
+        return Err(bad());
+    }
+    n.checked_mul(mult)
+        .ok_or_else(|| format!("duration {s:?} is too large"))
+}
+
+// ---------------------------------------------------------------------------
+// Group projection (for the preview): decompose a sequence/shuffle group into
+// its members with their quota and, when computable, a start offset. Pure and
+// DB-free — track durations are unknown, so a `take` member never gets an
+// offset and breaks the offset chain for everything after it; a `shuffle` gets
+// no offsets at all (its order is drawn at runtime).
+// ---------------------------------------------------------------------------
+
+/// A member's quota as projected: tracks (`take`) or a time budget (`runtime`,
+/// in seconds).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MemberQuota {
+    Take(u32),
+    Runtime(u64),
+}
+
+/// One group member, projected for the preview.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectedMember {
+    pub r#ref: String,
+    pub quota: MemberQuota,
+    /// Seconds from the group's activation start, when the preview can place
+    /// it (a `runtime` member whose predecessors in a `sequence` are all
+    /// `runtime`); `None` otherwise.
+    pub offset_secs: Option<u64>,
+}
+
+/// A group's members as projected for the preview, plus its strategy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupProjection {
+    pub strategy: Strategy,
+    pub members: Vec<ProjectedMember>,
+}
+
+impl Playlist {
+    /// Decompose a `sequence`/`shuffle` group for the preview. `None` for any
+    /// other playlist — a leaf, a `remote`/`queue`, or a `weighted`/`rotate`
+    /// group (those have no per-member `take`/`runtime` timeline). Pure: a
+    /// `take` member never gets an offset and breaks the offset chain for
+    /// everything after it (its track duration is unknown); a `shuffle` gets no
+    /// offsets at all. A `runtime` that somehow fails to parse (validation
+    /// should have caught it) is treated as a 0s budget rather than panicking.
+    pub fn project_group_members(&self) -> Option<GroupProjection> {
+        let sel = &self.selection;
+        if sel.mode != Mode::Group {
+            return None;
+        }
+        let strategy = match sel.strategy {
+            Some(s @ (Strategy::Sequence | Strategy::Shuffle)) => s,
+            _ => return None,
+        };
+        // `sequence` accumulates offsets from the top; `shuffle` never has a
+        // known order, so the chain starts "broken" (`None`).
+        let mut cumulative: Option<u64> = (strategy == Strategy::Sequence).then_some(0);
+        let members = sel
+            .members
+            .iter()
+            .map(|m| {
+                if let Some(r) = &m.runtime {
+                    let secs = parse_duration_secs(r).unwrap_or(0);
+                    let offset = cumulative;
+                    cumulative = cumulative.map(|c| c.saturating_add(secs));
+                    ProjectedMember {
+                        r#ref: m.r#ref.clone(),
+                        quota: MemberQuota::Runtime(secs),
+                        offset_secs: offset,
+                    }
+                } else {
+                    // Unknown duration → no offset, and the chain is broken for
+                    // every later member.
+                    cumulative = None;
+                    ProjectedMember {
+                        r#ref: m.r#ref.clone(),
+                        quota: MemberQuota::Take(m.take.unwrap_or(1).max(1)),
+                        offset_secs: None,
+                    }
+                }
+            })
+            .collect();
+        Some(GroupProjection { strategy, members })
     }
 }
 
@@ -681,6 +826,191 @@ mod tests {
             members = [{ ref = "a", take = 3 }, { ref = "b", take = 1 }]
         "#;
         validate_str(toml_str).expect("sequence group with take is valid");
+    }
+
+    #[test]
+    fn valid_group_shuffle_with_runtime() {
+        let toml_str = r#"
+            name = "Shuffle budgets"
+            [selection]
+            mode = "group"
+            strategy = "shuffle"
+            members = [{ ref = "rock", runtime = "20m" }, { ref = "pop", runtime = "20m" }]
+        "#;
+        validate_str(toml_str).expect("shuffle group with per-member runtime is valid");
+    }
+
+    #[test]
+    fn valid_group_sequence_mixing_take_and_runtime() {
+        let toml_str = r#"
+            name = "Sequence budgets"
+            [selection]
+            mode = "group"
+            strategy = "sequence"
+            members = [{ ref = "rock", runtime = "20m" }, { ref = "jingle", take = 1 }]
+        "#;
+        validate_str(toml_str).expect("a sequence group may mix runtime and take across members");
+    }
+
+    #[test]
+    fn rejects_take_and_runtime_on_same_member() {
+        let toml_str = r#"
+            name = "Both quotas"
+            [selection]
+            mode = "group"
+            strategy = "sequence"
+            members = [{ ref = "a", take = 2, runtime = "20m" }]
+        "#;
+        assert!(validate_str(toml_str).is_err(), "take and runtime are mutually exclusive");
+    }
+
+    #[test]
+    fn rejects_runtime_outside_quota_group() {
+        let toml_str = r#"
+            name = "Runtime on weighted"
+            [selection]
+            mode = "group"
+            strategy = "weighted"
+            members = [{ ref = "a", runtime = "20m" }]
+        "#;
+        assert!(validate_str(toml_str).is_err(), "runtime needs a sequence or shuffle group");
+    }
+
+    #[test]
+    fn rejects_bad_runtime_duration() {
+        let toml_str = r#"
+            name = "Bad runtime"
+            [selection]
+            mode = "group"
+            strategy = "shuffle"
+            members = [{ ref = "a", runtime = "20" }]
+        "#;
+        assert!(validate_str(toml_str).is_err(), "runtime must be a valid duration");
+    }
+
+    #[test]
+    fn parse_duration_secs_grammar() {
+        assert_eq!(parse_duration_secs("30s").unwrap(), 30);
+        assert_eq!(parse_duration_secs("15m").unwrap(), 900);
+        assert_eq!(parse_duration_secs("2h").unwrap(), 7200);
+        assert_eq!(parse_duration_secs("1d").unwrap(), 86_400);
+        for bad in ["0m", "m", "15", "1x", "01m", "20 m", ""] {
+            assert!(parse_duration_secs(bad).is_err(), "{bad:?} must be rejected");
+        }
+    }
+
+    // ----- group projection (preview) ----------------------------------
+
+    fn project(toml_str: &str) -> Option<GroupProjection> {
+        Playlist::parse(toml_str)
+            .expect("test input parses")
+            .project_group_members()
+    }
+
+    #[test]
+    fn projects_sequence_runtime_offsets_and_breaks_on_take() {
+        // runtime 20m → take 1 → runtime 20m : offsets [Some(0), None, None]
+        // (the `take` in the middle breaks the chain — unknown duration).
+        let g = project(
+            r#"
+                name = "Seq"
+                [selection]
+                mode = "group"
+                strategy = "sequence"
+                members = [
+                  { ref = "rock",    runtime = "20m" },
+                  { ref = "jingle",  take = 1 },
+                  { ref = "pop",     runtime = "20m" },
+                ]
+            "#,
+        )
+        .expect("a sequence group projects");
+        assert_eq!(g.strategy, Strategy::Sequence);
+        assert_eq!(g.members.len(), 3);
+        assert_eq!(g.members[0].quota, MemberQuota::Runtime(1200));
+        assert_eq!(g.members[0].offset_secs, Some(0));
+        assert_eq!(g.members[1].quota, MemberQuota::Take(1));
+        assert_eq!(g.members[1].offset_secs, None);
+        assert_eq!(g.members[2].quota, MemberQuota::Runtime(1200));
+        assert_eq!(g.members[2].offset_secs, None, "a take breaks the offset chain");
+    }
+
+    #[test]
+    fn projects_sequence_runtime_accumulates() {
+        let g = project(
+            r#"
+                name = "Seq"
+                [selection]
+                mode = "group"
+                strategy = "sequence"
+                members = [
+                  { ref = "a", runtime = "20m" },
+                  { ref = "b", runtime = "10m" },
+                  { ref = "c", runtime = "5m" },
+                ]
+            "#,
+        )
+        .unwrap();
+        assert_eq!(g.members[0].offset_secs, Some(0));
+        assert_eq!(g.members[1].offset_secs, Some(1200));
+        assert_eq!(g.members[2].offset_secs, Some(1800));
+    }
+
+    #[test]
+    fn projects_shuffle_without_any_offset() {
+        let g = project(
+            r#"
+                name = "Shuf"
+                [selection]
+                mode = "group"
+                strategy = "shuffle"
+                members = [{ ref = "a", runtime = "20m" }, { ref = "b", runtime = "20m" }]
+            "#,
+        )
+        .unwrap();
+        assert_eq!(g.strategy, Strategy::Shuffle);
+        assert!(g.members.iter().all(|m| m.offset_secs.is_none()), "shuffle order is unknown");
+        assert_eq!(g.members[0].quota, MemberQuota::Runtime(1200));
+    }
+
+    #[test]
+    fn projects_bare_member_as_take_one() {
+        let g = project(
+            r#"
+                name = "Seq"
+                [selection]
+                mode = "group"
+                strategy = "sequence"
+                members = [{ ref = "a" }, { ref = "b" }]
+            "#,
+        )
+        .unwrap();
+        assert_eq!(g.members[0].quota, MemberQuota::Take(1));
+        assert_eq!(g.members[0].offset_secs, None);
+    }
+
+    #[test]
+    fn non_sequence_shuffle_groups_do_not_project() {
+        // weighted group → no per-member take/runtime timeline.
+        assert!(project(
+            r#"
+                name = "W"
+                [selection]
+                mode = "group"
+                strategy = "weighted"
+                members = [{ ref = "a", weight = 5 }]
+            "#,
+        )
+        .is_none());
+        // a leaf never projects.
+        assert!(project(
+            r#"
+                name = "Leaf"
+                [selection]
+                mode = "dynamic"
+            "#,
+        )
+        .is_none());
     }
 
     // ----- defaults ----------------------------------------------------

@@ -141,6 +141,30 @@ message Occurrence {
   string rule_id = 3;
   string playlist_ref = 4;
   Decision.Origin origin = 5;
+
+  // Décomposition d'un groupe sequence/shuffle référencé par cette occurrence
+  // (vide sinon). Le preview étant une projection horloge PURE, il ignore la
+  // durée des pistes : un membre `take` (per-track) n'a donc jamais de
+  // position ; un membre `runtime` d'un `sequence` porte un offset relatif au
+  // début du groupe, tant que ses prédécesseurs sont tous `runtime` (un `take`
+  // rompt la chaîne). Un `shuffle` a un ordre tiré au runtime → aucun offset.
+  string strategy = 6;                     // "sequence" | "shuffle" ; vide si non décomposé
+  repeated GroupMember members = 7;
+}
+
+// Un membre d'un groupe, tel que PROJETÉ dans le preview (pas résolu : aucun
+// média concret ici).
+message GroupMember {
+  string ref = 1;                          // ref du membre
+  oneof quota {
+    uint32 take = 2;                       // quota en pistes — jamais de position (durée inconnue)
+    google.protobuf.Duration runtime = 3;  // budget temps
+  }
+  // Décalage du début de ce membre depuis le début de l'activation du groupe,
+  // quand il est calculable (membre `runtime` d'un `sequence` dont tous les
+  // prédécesseurs sont `runtime`). Absent pour un `take`, pour tout membre
+  // situé après un `take`, et pour tout membre d'un `shuffle`.
+  google.protobuf.Duration offset = 4;
 }
 
 // Une règle prise en compte mais non plaçable sur l'horloge (un `every` au

@@ -92,8 +92,19 @@ pub async fn playlist_toml_by_ref(
     pool: &SqlitePool,
     reference: &str,
 ) -> Result<Option<String>, sqlx::Error> {
+    // The view is keyed by the canonical ref (lowercased, `.toml` stripped,
+    // separators unified), so normalize before matching — a grid/CLI ref
+    // spelled "Filler" must find the stored "filler". This is the single lookup
+    // choke point: the live selection (`resolve_inner`), the member resolution,
+    // AND the preview's group decomposition (`grid_engine::group_projection`)
+    // all go through here, so the whole view is case-insensitive on the ref. A
+    // malformed ref simply doesn't match (`Ok(None)`).
+    let key = match crate::playlist::normalize_ref(reference) {
+        Ok(k) => k,
+        Err(_) => return Ok(None),
+    };
     let row: Option<(String,)> = sqlx::query_as("SELECT toml FROM playlists WHERE rel_path = ?1")
-        .bind(reference)
+        .bind(&key)
         .fetch_optional(pool)
         .await?;
     Ok(row.map(|(t,)| t))
@@ -202,5 +213,22 @@ mod tests {
         upsert(&pool, "id-r", &rem_pl, REMOTE, Some("n/gn")).await.unwrap();
         let rows = list(&pool).await.unwrap();
         assert_eq!(rows[0].mode, "remote", "mode is recovered from the TOML");
+    }
+
+    #[tokio::test]
+    async fn lookup_by_ref_is_case_insensitive() {
+        // Regression: the view is keyed by the lowercased `normalize_ref`, so a
+        // ref spelled with different case (a grid `playlist_ref = "Filler"`)
+        // must still resolve. Both the live selection and the preview's group
+        // decomposition rely on this single lookup.
+        let (_dir, pool) = fresh_db().await;
+        let pl = Playlist::parse(DYNAMIC).unwrap();
+        upsert(&pool, "id-1", &pl, DYNAMIC, Some("filler")).await.unwrap();
+
+        assert!(playlist_toml_by_ref(&pool, "Filler").await.unwrap().is_some());
+        assert!(playlist_toml_by_ref(&pool, "FILLER").await.unwrap().is_some());
+        assert!(playlist_toml_by_ref(&pool, "filler").await.unwrap().is_some());
+        // A genuinely unknown ref still misses.
+        assert!(playlist_toml_by_ref(&pool, "ghost").await.unwrap().is_none());
     }
 }
