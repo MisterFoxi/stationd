@@ -56,6 +56,25 @@ inférieure jusqu'au plancher (fini le dead-air par sélection vide) ; groupe
 
 ## ⭐ TÂCHE D'ENTRÉE PROCHAINE SESSION
 
+**Preview — nb de médias sélectionnables + durée, par occurrence (PRIORITÉ, demandé 2026-09-19).**
+Afficher, pour chaque occurrence du `preview`, le **nombre de médias
+sélectionnables** à cet instant et l'**évaluation de leur durée** (total du pool).
+- Le `preview` est aujourd'hui une projection horloge PURE : il n'entre pas dans
+  la sélection. Il faudra qu'il résolve le POOL de la playlist active par
+  occurrence, en **lecture seule / sans effet de bord** (pas de curseur, pas de
+  group_state, pas de plugins `filter_pool`) — c'est une *stat de pool*, pas une
+  résolution. Réutiliser `materialize_dynamic`/`materialize_static` + un
+  `SUM(duration_ms)`, jamais `resolve_*`.
+- `dynamic`/`static` → count + durée totale du pool ; `group` → par membre
+  (s'aligne sur la décomposition déjà en place) + total ; `remote`/`queue` →
+  inconnu (à marquer tel quel) SAUF SI UNE DUREE EXISTE.
+- Usage : comparer la durée du pool à la fenêtre `day_part` (sous/sur-remplissage
+  → répétitions) et au budget `runtime` d'un membre (assez de matière pour tenir
+  sans rejouer ?).
+- Contrat : `Occurrence` += `selected_count` + `total_duration` (+ par membre) ;
+  moteur calcule, CLI/preview affiche. Mutualisable avec une future commande
+  d'inspection de pool (`playlist resolve --pool`, cf. échanges du 2026-09-19).
+
 **Plugins A2 — surface hôte** (`Doc/plugin-host.md`, *host functions* extism) :
 `control` (Stop/Pause/Resume/StopWhenIdle, first-class station + invocable
 plugin), `push_override` (file lue par `next_media`, `soft` honoré / `hard`→LS),
