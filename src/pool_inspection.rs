@@ -113,9 +113,11 @@ async fn load_playlist(pool: &SqlitePool, reference: &str) -> Result<Playlist, S
     let toml = crate::store::playlist_toml_by_ref(pool, reference)
         .await?
         .ok_or_else(|| SelectionError::PlaylistNotFound(reference.into()))?;
-    let playlist = Playlist::parse(&toml)?;
-    playlist.validate()?;
-    Ok(playlist)
+    // Parse only — like the live resolve path (`selection::resolve_inner`). We do
+    // NOT re-validate here: the stored playlist was validated at apply/sync, and
+    // validating again would pre-empt the resolution-level filter errors (their
+    // variant + `playlist` tag) that this inspection is meant to surface.
+    Ok(Playlist::parse(&toml)?)
 }
 
 async fn inspect_leaf(pool: &SqlitePool, sel: &Selection) -> Result<PoolStats, SelectionError> {

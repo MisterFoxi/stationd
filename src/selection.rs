@@ -670,7 +670,9 @@ fn filter_sql(f: &Filter) -> Result<Where, SelectionError> {
             }
         }
         field @ ("title" | "artist" | "album") => {
-            let v = as_text(f)?;
+            // Validate the op before the value type, so an op that doesn't apply
+            // to a scalar field (e.g. `has_any`) is a clear UnsupportedFilter
+            // rather than a misleading "expected a string".
             let sql = match f.op.as_str() {
                 "eq" => format!("{field} = ?"),
                 "ne" => format!("{field} <> ?"),
@@ -680,7 +682,7 @@ fn filter_sql(f: &Filter) -> Result<Where, SelectionError> {
             };
             Ok(Where {
                 sql,
-                binds: vec![Bind::Text(v)],
+                binds: vec![Bind::Text(as_text(f)?)],
             })
         }
         "year" => {
@@ -697,17 +699,105 @@ fn filter_sql(f: &Filter) -> Result<Where, SelectionError> {
                 binds: vec![Bind::Int(as_int(f)? * 1000)],
             })
         }
-        "genre" => match f.op.as_str() {
-            "has" => Ok(Where {
-                sql: "EXISTS (SELECT 1 FROM media_genre mg \
-                      WHERE mg.rel_path = media.rel_path AND mg.genre = ?)"
-                    .into(),
-                binds: vec![Bind::Text(as_text(f)?)],
-            }),
-            _ => Err(unsupported()),
+        // Set-valued fields (genre today, others slot into `set_field`): the
+        // `has` / `has_any` operators live in `set_field_sql`, field-agnostic —
+        // never hardcoded to genre.
+        other => match set_field(other) {
+            Some(sf) => set_field_sql(&sf, f),
+            None => Err(unsupported()),
         },
+    }
+}
+
+/// A set-valued (multi-valued) media attribute, stored in a detail table keyed
+/// on `rel_path`. The `has`/`has_any`/`has_all`/`has_none` operators run against this mapping, so
+/// they are field-agnostic: `genre` is the first entry, another set field is
+/// one line here and inherits the operators unchanged. `table`/`column` are a
+/// closed whitelist — constant SQL identifiers, never user input.
+struct SetField {
+    table: &'static str,
+    column: &'static str,
+}
+
+fn set_field(field: &str) -> Option<SetField> {
+    match field {
+        "genre" => Some(SetField {
+            table: "media_genre",
+            column: "genre",
+        }),
+        _ => None,
+    }
+}
+
+/// The `has` family for a set-valued field, compiled against its detail table:
+/// - `has <s>`          — the set contains `s` (one string) → `EXISTS (… = ?)`
+/// - `has_any [a, b…]`  — the set intersects the list → `EXISTS (… IN (…))`
+/// - `has_all [a, b…]`  — the set contains every listed value → `AND` of one
+///                        `EXISTS (… = ?)` per value
+/// - `has_none [a, b…]` — the set has none of them → `NOT EXISTS (… IN (…))`
+///
+/// Fully parameterised: table/column are whitelist constants, the values are
+/// binds. `has_none` is true for a media with no rows at all (it has none of
+/// the listed values). Any other op on a set field is a loud `UnsupportedFilter`.
+fn set_field_sql(sf: &SetField, f: &Filter) -> Result<Where, SelectionError> {
+    let unsupported = || SelectionError::UnsupportedFilter {
+        field: f.field.clone(),
+        op: f.op.clone(),
+    };
+    let (table, column) = (sf.table, sf.column);
+    // One `EXISTS (… d.<col> = ?)` fragment (one bind).
+    let exists_eq = || {
+        format!("EXISTS (SELECT 1 FROM {table} d WHERE d.rel_path = media.rel_path AND d.{column} = ?)")
+    };
+    // `[NOT] EXISTS (… d.<col> IN (?, …))` over a list (N binds).
+    let exists_in = |neg: bool, n: usize| {
+        format!(
+            "{}EXISTS (SELECT 1 FROM {table} d WHERE d.rel_path = media.rel_path AND d.{column} IN ({}))",
+            if neg { "NOT " } else { "" },
+            placeholders(n)
+        )
+    };
+    match f.op.as_str() {
+        "has" => Ok(Where {
+            sql: exists_eq(),
+            binds: vec![Bind::Text(as_text(f)?)],
+        }),
+        "has_any" => {
+            let values = as_text_list(f)?;
+            let sql = exists_in(false, values.len());
+            Ok(Where {
+                sql,
+                binds: values.into_iter().map(Bind::Text).collect(),
+            })
+        }
+        "has_all" => {
+            let values = as_text_list(f)?;
+            // AND of one EXISTS per listed value: the set contains every one.
+            let sql = vec![exists_eq(); values.len()].join(" AND ");
+            Ok(Where {
+                sql,
+                binds: values.into_iter().map(Bind::Text).collect(),
+            })
+        }
+        "has_none" => {
+            let values = as_text_list(f)?;
+            let sql = exists_in(true, values.len());
+            Ok(Where {
+                sql,
+                binds: values.into_iter().map(Bind::Text).collect(),
+            })
+        }
         _ => Err(unsupported()),
     }
+}
+
+/// Validate one dynamic filter's field/op/value *shape* against the closed
+/// catalogue, without a database — the very check `filter_sql` performs, with
+/// the SQL discarded. Exposed so `Playlist::validate` can reject a malformed
+/// filter at apply/validate time instead of it only surfacing on air. Single
+/// source of truth: defers to `filter_sql`, never a second catalogue.
+pub(crate) fn validate_filter(f: &Filter) -> Result<(), SelectionError> {
+    filter_sql(f).map(|_| ())
 }
 
 fn num_op(op: &str) -> Option<&'static str> {
@@ -739,6 +829,36 @@ fn as_int(f: &Filter) -> Result<i64, SelectionError> {
             field: f.field.clone(),
             reason: "expected an integer".into(),
         })
+}
+
+/// Read a filter value as a non-empty list of non-empty strings (for `has_any`
+/// and other list ops). Loud errors, per no-silent-failure: not an array, an
+/// empty array, a non-string element, or an empty string — a mistyped list must
+/// never quietly match nothing. Duplicates are left as-is (harmless in an
+/// `IN (...)`), not rejected.
+fn as_text_list(f: &Filter) -> Result<Vec<String>, SelectionError> {
+    let bad = |reason: &str| SelectionError::BadFilterValue {
+        field: f.field.clone(),
+        reason: reason.to_string(),
+    };
+    let arr = f
+        .value
+        .as_array()
+        .ok_or_else(|| bad("expected an array of strings"))?;
+    if arr.is_empty() {
+        return Err(bad("expected a non-empty array"));
+    }
+    let mut out = Vec::with_capacity(arr.len());
+    for v in arr {
+        let s = v
+            .as_str()
+            .ok_or_else(|| bad("every array element must be a string"))?;
+        if s.is_empty() {
+            return Err(bad("array elements must be non-empty strings"));
+        }
+        out.push(s.to_string());
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -815,6 +935,132 @@ mod tests {
             filter_sql(&filt("year", ">=", toml::Value::String("nope".into()))),
             Err(SelectionError::BadFilterValue { .. })
         ));
+    }
+
+    #[test]
+    fn genre_has_builds_an_exists() {
+        let w = filter_sql(&filt("genre", "has", toml::Value::String("jazz".into()))).unwrap();
+        assert_eq!(
+            w.sql,
+            "EXISTS (SELECT 1 FROM media_genre d WHERE d.rel_path = media.rel_path AND d.genre = ?)"
+        );
+        assert_eq!(w.binds, vec![Bind::Text("jazz".into())]);
+    }
+
+    #[test]
+    fn genre_has_any_builds_an_in_exists() {
+        let w = filter_sql(&filt(
+            "genre",
+            "has_any",
+            toml::Value::Array(vec![
+                toml::Value::String("jazz".into()),
+                toml::Value::String("blues".into()),
+            ]),
+        ))
+        .unwrap();
+        assert_eq!(
+            w.sql,
+            "EXISTS (SELECT 1 FROM media_genre d WHERE d.rel_path = media.rel_path AND d.genre IN (?, ?))"
+        );
+        assert_eq!(
+            w.binds,
+            vec![Bind::Text("jazz".into()), Bind::Text("blues".into())]
+        );
+    }
+
+    #[test]
+    fn has_any_on_a_scalar_field_is_unsupported() {
+        // `has`/`has_any` are for set-valued fields; on a scalar field they are
+        // a loud error, never a silent no-match.
+        assert!(matches!(
+            filter_sql(&filt(
+                "artist",
+                "has_any",
+                toml::Value::Array(vec![toml::Value::String("A".into())])
+            )),
+            Err(SelectionError::UnsupportedFilter { .. })
+        ));
+    }
+
+    #[test]
+    fn has_any_rejects_non_list_empty_or_non_string() {
+        // not an array
+        assert!(matches!(
+            filter_sql(&filt("genre", "has_any", toml::Value::String("jazz".into()))),
+            Err(SelectionError::BadFilterValue { .. })
+        ));
+        // empty array
+        assert!(matches!(
+            filter_sql(&filt("genre", "has_any", toml::Value::Array(vec![]))),
+            Err(SelectionError::BadFilterValue { .. })
+        ));
+        // non-string element
+        assert!(matches!(
+            filter_sql(&filt(
+                "genre",
+                "has_any",
+                toml::Value::Array(vec![toml::Value::Integer(3)])
+            )),
+            Err(SelectionError::BadFilterValue { .. })
+        ));
+    }
+
+    #[test]
+    fn genre_has_all_builds_an_and_of_exists() {
+        let w = filter_sql(&filt(
+            "genre",
+            "has_all",
+            toml::Value::Array(vec![
+                toml::Value::String("jazz".into()),
+                toml::Value::String("funk".into()),
+            ]),
+        ))
+        .unwrap();
+        assert_eq!(
+            w.sql,
+            "EXISTS (SELECT 1 FROM media_genre d WHERE d.rel_path = media.rel_path AND d.genre = ?) \
+             AND EXISTS (SELECT 1 FROM media_genre d WHERE d.rel_path = media.rel_path AND d.genre = ?)"
+        );
+        assert_eq!(
+            w.binds,
+            vec![Bind::Text("jazz".into()), Bind::Text("funk".into())]
+        );
+    }
+
+    #[test]
+    fn genre_has_none_builds_a_not_exists_in() {
+        let w = filter_sql(&filt(
+            "genre",
+            "has_none",
+            toml::Value::Array(vec![
+                toml::Value::String("rock".into()),
+                toml::Value::String("metal".into()),
+            ]),
+        ))
+        .unwrap();
+        assert_eq!(
+            w.sql,
+            "NOT EXISTS (SELECT 1 FROM media_genre d WHERE d.rel_path = media.rel_path AND d.genre IN (?, ?))"
+        );
+        assert_eq!(
+            w.binds,
+            vec![Bind::Text("rock".into()), Bind::Text("metal".into())]
+        );
+    }
+
+    #[test]
+    fn has_all_and_has_none_reject_bad_values() {
+        // Same list-value contract as has_any: non-array / empty → loud error.
+        for op in ["has_all", "has_none"] {
+            assert!(matches!(
+                filter_sql(&filt("genre", op, toml::Value::String("jazz".into()))),
+                Err(SelectionError::BadFilterValue { .. })
+            ));
+            assert!(matches!(
+                filter_sql(&filt("genre", op, toml::Value::Array(vec![]))),
+                Err(SelectionError::BadFilterValue { .. })
+            ));
+        }
     }
 
     #[test]
@@ -966,6 +1212,96 @@ mod tests {
         "#;
         add_playlist(&pool, "rot/jazz", toml).await;
         assert_eq!(resolve_ref(&pool, "rot/jazz").await.unwrap(), "a.mp3");
+    }
+
+    #[tokio::test]
+    async fn genre_has_any_matches_any_of_the_listed_genres() {
+        let (_d, pool) = fresh_db().await;
+        media_index::replace_library(
+            &pool,
+            &[
+                media("a.mp3", "A", 2000, &["jazz", "funk"]),
+                media("b.mp3", "B", 2000, &["rock"]),
+                media("c.mp3", "C", 2000, &["blues"]),
+            ],
+            1000,
+        )
+        .await
+        .unwrap();
+        // has_any [rock, blues] → b or c, never a (jazz/funk).
+        let toml = r#"
+            name = "RockOrBlues"
+            [selection]
+            mode = "dynamic"
+            order = "shuffle"
+            [[selection.filter]]
+            field = "genre"
+            op = "has_any"
+            value = ["rock", "blues"]
+        "#;
+        add_playlist(&pool, "rot/rb", toml).await;
+        let got = resolve_ref(&pool, "rot/rb").await.unwrap();
+        assert!(got == "b.mp3" || got == "c.mp3", "must match rock or blues, got {got}");
+    }
+
+    #[tokio::test]
+    async fn genre_has_all_requires_every_listed_genre() {
+        let (_d, pool) = fresh_db().await;
+        media_index::replace_library(
+            &pool,
+            &[
+                media("a.mp3", "A", 2000, &["jazz", "funk"]),
+                media("b.mp3", "B", 2000, &["jazz"]),
+                media("c.mp3", "C", 2000, &["jazz", "funk", "soul"]),
+            ],
+            1000,
+        )
+        .await
+        .unwrap();
+        // has_all [jazz, funk] → a or c, never b (missing funk).
+        let toml = r#"
+            name = "JazzAndFunk"
+            [selection]
+            mode = "dynamic"
+            order = "shuffle"
+            [[selection.filter]]
+            field = "genre"
+            op = "has_all"
+            value = ["jazz", "funk"]
+        "#;
+        add_playlist(&pool, "rot/jf", toml).await;
+        let got = resolve_ref(&pool, "rot/jf").await.unwrap();
+        assert!(got == "a.mp3" || got == "c.mp3", "must have both jazz and funk, got {got}");
+    }
+
+    #[tokio::test]
+    async fn genre_has_none_excludes_any_listed_genre() {
+        let (_d, pool) = fresh_db().await;
+        media_index::replace_library(
+            &pool,
+            &[
+                media("a.mp3", "A", 2000, &["jazz"]),
+                media("b.mp3", "B", 2000, &["rock"]),
+                media("c.mp3", "C", 2000, &["jazz", "rock"]),
+            ],
+            1000,
+        )
+        .await
+        .unwrap();
+        // has_none [rock] → only a (b and c carry rock; the empty-set case would
+        // also pass, none here).
+        let toml = r#"
+            name = "NoRock"
+            [selection]
+            mode = "dynamic"
+            order = "shuffle"
+            [[selection.filter]]
+            field = "genre"
+            op = "has_none"
+            value = ["rock"]
+        "#;
+        add_playlist(&pool, "rot/norock", toml).await;
+        assert_eq!(resolve_ref(&pool, "rot/norock").await.unwrap(), "a.mp3");
     }
 
     #[tokio::test]

@@ -26,6 +26,19 @@ async fn add(pool: &SqlitePool, reference: &str, selection: &str) {
         .unwrap();
 }
 
+/// Install a playlist WITHOUT the front-door `validate()` gate. Used to inject
+/// a fixture that upstream validation would now reject, so the DEFENSIVE
+/// downstream path (pool inspection / preview re-resolving filters) can still
+/// be exercised — a bad filter that somehow reaches the view (hand-edited TOML,
+/// a path that skipped validate) must be a loud error, never a silent zero.
+async fn add_unvalidated(pool: &SqlitePool, reference: &str, selection: &str) {
+    let toml = format!("name = {reference:?}\n[selection]\n{selection}");
+    let pl = Playlist::parse(&toml).unwrap();
+    store::upsert(pool, reference, &pl, &toml, Some(reference))
+        .await
+        .unwrap();
+}
+
 fn media(path: &str, duration_ms: u64, genre: &str) -> ScannedMedia {
     ScannedMedia {
         rel_path: path.into(),
@@ -260,7 +273,7 @@ async fn invalid_pools_are_errors_not_silent_zeroes() {
         inspect_ref(&pool, "missing").await,
         Err(SelectionError::PlaylistNotFound(_))
     ));
-    add(
+    add_unvalidated(
         &pool,
         "bad",
         r#"mode = "dynamic"
@@ -472,7 +485,7 @@ members = [{ ref = "jazz", runtime = "20m" }, { ref = "remote", runtime = "5m" }
 #[tokio::test]
 async fn preview_filter_error_identifies_the_leaf_playlist_and_filter() {
     let (_dir, pool) = fixture().await;
-    add(
+    add_unvalidated(
         &pool,
         "shows/broken",
         r#"mode = "dynamic"

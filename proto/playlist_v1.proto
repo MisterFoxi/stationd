@@ -129,7 +129,7 @@ message Filter {
   oneof value {
     string     string_value = 3;   // path/prefix, title/contains…
     int64      int_value    = 4;   // year/>=…
-    StringList string_list  = 5;   // genre/has_any, in/not_in textuel…
+    StringList string_list  = 5;   // genre/has_any|has_all|has_none, in/not_in textuel…
     Int64List  int_list     = 6;   // year/in…
   }
 }
@@ -236,6 +236,7 @@ enum FilterOp {
   FILTER_OP_HAS = 7;
   FILTER_OP_HAS_ANY = 8;
   FILTER_OP_HAS_ALL = 9;
+  FILTER_OP_HAS_NONE = 14;       // additif : n° postérieur aux comparateurs (LT..GE = 10..13)
   FILTER_OP_LT = 10;
   FILTER_OP_LE = 11;
   FILTER_OP_GT = 12;

@@ -151,8 +151,9 @@ pub enum MemberUnavailable {
 
 /// A dynamic-selection filter: structured `field`/`op`/`value`, no string
 /// DSL (keeps the parsing surface small, per the doc). `value` is a free
-/// TOML value (string, number, or array) — validated against `field`/`op`
-/// later, not here.
+/// TOML value (string, number, or array); its field/op/value shape is checked
+/// in `Playlist::validate` — via the same pure catalogue check the resolver
+/// uses — so a malformed filter is a loud error at apply/validate, not on air.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Filter {
@@ -339,6 +340,16 @@ impl Playlist {
         // `url` only belongs to a remote.
         if self.selection.url.is_some() && self.selection.mode != Mode::Remote {
             return Err(err("`url` is only valid for mode `remote`"));
+        }
+
+        // Dynamic-selection filters: each `field`/`op`/`value` must be a valid
+        // catalogue entry. Checked here with the same pure check the resolver
+        // uses, so a malformed filter — e.g. `has_any` with a bare string
+        // instead of a list — is a loud error at apply/validate, never on air.
+        for (i, f) in self.selection.filter.iter().enumerate() {
+            crate::selection::validate_filter(f).map_err(|e| {
+                PlaylistError::Validation(format!("selection.filter[{}]: {e}", i + 1))
+            })?;
         }
 
         // Cross-playlist checks (group cycle detection, referential
@@ -766,6 +777,67 @@ mod tests {
         "#;
         let pl = Playlist::parse(toml_str).expect("parses");
         assert!(pl.validate().is_err(), "url only valid for remote");
+    }
+
+    // ----- dynamic filter shape validated upstream (at validate) -------
+
+    #[test]
+    fn validates_a_wellformed_genre_has_any() {
+        let toml_str = r#"
+            name = "Ok"
+            [selection]
+            mode = "dynamic"
+            [[selection.filter]]
+            field = "genre"
+            op = "has_any"
+            value = ["80s", "disco"]
+        "#;
+        validate_str(toml_str).expect("has_any with a string list is valid");
+    }
+
+    #[test]
+    fn rejects_has_any_with_a_bare_string() {
+        // The bug this guards: `has_any` wants a list; a bare string must fail
+        // at validate time, not surface on air.
+        let toml_str = r#"
+            name = "Bad"
+            [selection]
+            mode = "dynamic"
+            [[selection.filter]]
+            field = "genre"
+            op = "has_any"
+            value = "80s,disco"
+        "#;
+        assert!(validate_str(toml_str).is_err(), "has_any needs an array, not a string");
+    }
+
+    #[test]
+    fn rejects_unknown_filter_field_at_validate() {
+        let toml_str = r#"
+            name = "Bad"
+            [selection]
+            mode = "dynamic"
+            [[selection.filter]]
+            field = "rating"
+            op = ">="
+            value = 3
+        "#;
+        assert!(validate_str(toml_str).is_err(), "unknown filter field is rejected upstream");
+    }
+
+    #[test]
+    fn rejects_unsupported_op_for_field_at_validate() {
+        // genre only takes has/has_any/has_all/has_none — `eq` is a loud error.
+        let toml_str = r#"
+            name = "Bad"
+            [selection]
+            mode = "dynamic"
+            [[selection.filter]]
+            field = "genre"
+            op = "eq"
+            value = "jazz"
+        "#;
+        assert!(validate_str(toml_str).is_err(), "genre/eq is not a valid catalogue entry");
     }
 
     // ----- helpers -----------------------------------------------------
