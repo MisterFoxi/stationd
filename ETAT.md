@@ -5,7 +5,7 @@ sans reconstruire le contexte. À distinguer des docs de `Doc/` (décisions
 d'architecture durables) : ce fichier-ci est volatil, à mettre à jour à
 chaque session.
 
-Dernière mise à jour : 2026-09-19.
+Dernière mise à jour : 2026-09-21.
 
 
 ## Ajout : TUI d'administration (correctif préparé, compilation à confirmer)
@@ -159,6 +159,38 @@ Trois profondeurs d'un même bake, via flags CLI (modèle `git log --oneline /
   grille, lesquels ne sont qu'un avertissement.
 
 ## Fait
+
+### — Groupes `weighted` + `rotate` : résolution (2026-09-21) —
+
+Point 3 du todo « B » (débloquer weighted/rotate ; imbriqués = sous-pas suivant).
+Le modèle (`Strategy::Weighted`/`Rotate`) et la validation (`weight` en weighted
+seul, `take`/`runtime` en sequence/shuffle seul) existaient déjà ; seul
+`selection.rs::resolve_media` renvoyait `Unsupported` sur ces deux stratégies.
+
+- **`rotate`** → routé vers `resolve_group_rotation(shuffle = false)`. Ses
+  membres sont forcément nus (validation), donc la marche sequence avec `take`
+  défaut = 1 EST un round-robin ; position persistée via `group_state`. Aucune
+  mécanique neuve.
+- **`weighted`** → `resolve_group_weighted` (neuve, sans état persisté, tirages
+  indépendants) : éligibles = `weight > 0`, tirage `SliceRandom::choose_weighted`,
+  puis un média du membre tiré. Poids par défaut **15** (`DEFAULT_WEIGHT`, milieu
+  de la plage 0-50 de la proposition), `0` = exclu du tirage (pas un disable
+  global). Membre tiré vide → `on_member_unavailable` : `skip` re-tire sans lui
+  (borné à N membres), `abort` (défaut) remonte `PoolEmpty` → fallthrough grille.
+  Membres feuilles uniquement (nested → `Unsupported` via `resolve_member`).
+- `match sel.strategy` désormais **exhaustif** (les 4 stratégies + `None`), plus
+  de bras fourre-tout.
+- Tests : 5 ajoutés (`group_weighted_draws_from_its_members`,
+  `_excludes_zero_weight`, `_skip_redraws_past_an_empty_member`,
+  `_abort_bubbles_when_drawn_member_is_empty`,
+  `group_rotate_round_robins_one_per_member`) ; écrits déterministes malgré le
+  hasard (exclusion poids 0, skip vers l'unique membre non vide). Ancien
+  `group_mode_weighted_is_rejected_for_now` supprimé.
+- Décisions de sémantique assumées : défaut de poids = 15 ; borne [0,50] **non**
+  validée ici (scope validation, séparé) ; `0` exclut.
+
+Non fait (sous-pas restant) : **groupes imbriqués** (membre = groupe) — encore
+`Unsupported` ; la détection de cycle existe déjà côté `validate_set`.
 
 ### — Preview : nombre de médias et durée du pool par occurrence (2026-09-19) —
 
@@ -684,7 +716,7 @@ dans le découpage des modules (`grid_index` = A, `grid_store` = B).
 - **`DayPart` cross-minuit** : `window_covers` renvoie `None` (TODO signalé).
 - **Sélection — suite** : anti-répétition (`constraints`) + `unplayed_only`
   (réclament l'historique famille B), `limit`/quota par activation, groupes
-  `weighted`/`rotate`/imbriqués, `queue`/`remote`.
+  **imbriqués** (weighted/rotate faits — cf. Fait 2026-09-21), `queue`/`remote`.
 - **Refs de membres relatives au dossier du groupe** : `normalize_ref` ne
   résout pas un `ref` de membre relativement à l'emplacement du groupe — il
   faut aujourd'hui le chemin complet

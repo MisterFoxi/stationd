@@ -13,7 +13,8 @@
 //! cursor), `newest` (head, stateless).
 //!
 //! SCOPE:
-//!   * modes: `static`, `dynamic`, `group`(sequence/shuffle). `queue`/`remote` → error.
+//!   * modes: `static`, `dynamic`, `group`(sequence/shuffle/rotate/weighted).
+//!     `queue`/`remote` → error.
 //!   * NOT YET honoured: `limit`, `constraints`, `unplayed_only`,
 //!     `order_by = published` (loud errors or tolerated-not-applied).
 //!
@@ -133,7 +134,14 @@ async fn resolve_media(
             Some(Strategy::Shuffle) => {
                 resolve_group_rotation(pool, plugins, now, reference, sel, true).await
             }
-            Some(other) => Err(SelectionError::Unsupported(format!("group strategy {other:?}"))),
+            // Rotate = plain round-robin, one track per member per turn. Its
+            // members are bare (validation forbids take/runtime/weight), so the
+            // sequence walk with the default take = 1 already IS a rotation;
+            // position persists across turns via group_state.
+            Some(Strategy::Rotate) => {
+                resolve_group_rotation(pool, plugins, now, reference, sel, false).await
+            }
+            Some(Strategy::Weighted) => resolve_group_weighted(pool, plugins, sel).await,
             None => Err(SelectionError::Unsupported("group without strategy".into())),
         },
         m @ (Mode::Queue | Mode::Remote) => Err(SelectionError::UnsupportedMode(m)),
@@ -334,6 +342,63 @@ async fn resolve_group_rotation(
     }
 
     // `skip` exhausted every member → the group produces nothing.
+    Err(SelectionError::PoolEmpty)
+}
+
+/// A group weight given to a member that declares none. Neutral middle of the
+/// documented 0–50 range (see the playlist grammar proposal): with weights all
+/// omitted every member is equally likely; it only matters when some members
+/// set a weight and others don't. `0` is an explicit exclusion from the draw.
+const DEFAULT_WEIGHT: u32 = 15;
+
+/// A `weighted` group: draw one available member at random, weighted by its
+/// `weight`, and emit one track from it. Independent draws — nothing is
+/// persisted (no position, unlike `rotate`/`sequence`). A member with no
+/// explicit `weight` gets [`DEFAULT_WEIGHT`]; `weight = 0` excludes it from the
+/// draw (not a global disable). If the drawn member yields nothing, the group's
+/// `on_member_unavailable` decides: `skip` re-draws among the rest, `abort`
+/// (default) bubbles `PoolEmpty` so the grid falls through to a lower-priority
+/// source. Members must be leaves; a nested group is a loud error (via
+/// `resolve_member`).
+async fn resolve_group_weighted(
+    pool: &SqlitePool,
+    plugins: Option<&PluginHandle>,
+    sel: &Selection,
+) -> Result<String, SelectionError> {
+    let policy = sel
+        .on_member_unavailable
+        .unwrap_or(MemberUnavailable::Abort);
+
+    // Eligible members = weight > 0, paired with their member index so a
+    // skipped (empty) member can be removed and the draw retried.
+    let mut eligible: Vec<(usize, u32)> = sel
+        .members
+        .iter()
+        .enumerate()
+        .map(|(i, m)| (i, m.weight.unwrap_or(DEFAULT_WEIGHT)))
+        .filter(|(_, w)| *w > 0)
+        .collect();
+
+    // Bounded: each failed draw under `skip` removes one member, so at most
+    // `members.len()` iterations before the pool is empty.
+    while !eligible.is_empty() {
+        let &(member_i, _) = eligible
+            .choose_weighted(&mut rand::thread_rng(), |&(_, w)| w)
+            .map_err(|_| SelectionError::PoolEmpty)?;
+        let member = &sel.members[member_i];
+        let member_key = crate::playlist::normalize_ref(&member.r#ref)
+            .map_err(|_| SelectionError::PlaylistNotFound(member.r#ref.clone()))?;
+        match resolve_member(pool, plugins, &member_key).await {
+            Ok(track) => return Ok(track),
+            // `skip`: drop this empty member and re-draw among the rest.
+            Err(SelectionError::PoolEmpty) if policy == MemberUnavailable::Skip => {
+                eligible.retain(|&(i, _)| i != member_i);
+                continue;
+            }
+            // `abort` (default) or a config error: propagate.
+            Err(e) => return Err(e),
+        }
+    }
     Err(SelectionError::PoolEmpty)
 }
 
@@ -1322,20 +1387,148 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn group_mode_weighted_is_rejected_for_now() {
+    async fn group_weighted_draws_from_its_members() {
         let (_d, pool) = fresh_db().await;
-        let toml = r#"
-            name = "Grp"
-            [selection]
-            mode = "group"
-            strategy = "weighted"
-            members = [{ ref = "a", weight = 1 }]
-        "#;
-        add_playlist(&pool, "grp", toml).await;
+        media_index::replace_library(
+            &pool,
+            &[media("a/x.mp3", "", 0, &[]), media("b/x.mp3", "", 0, &[])],
+            1000,
+        )
+        .await
+        .unwrap();
+        add_letter_leaves(&pool, &["a", "b"]).await;
+        add_playlist(
+            &pool,
+            "w",
+            r#"
+                name = "W"
+                [selection]
+                mode = "group"
+                strategy = "weighted"
+                members = [{ ref = "a", weight = 1 }, { ref = "b", weight = 1 }]
+            "#,
+        )
+        .await;
+        let got = resolve_ref(&pool, "w").await.unwrap();
+        assert!(got == "a/x.mp3" || got == "b/x.mp3", "weighted picks a member, got {got}");
+    }
+
+    #[tokio::test]
+    async fn group_weighted_excludes_zero_weight() {
+        let (_d, pool) = fresh_db().await;
+        media_index::replace_library(
+            &pool,
+            &[media("a/x.mp3", "", 0, &[]), media("b/x.mp3", "", 0, &[])],
+            1000,
+        )
+        .await
+        .unwrap();
+        add_letter_leaves(&pool, &["a", "b"]).await;
+        // a has weight 0 → excluded from the draw; every pick must be b.
+        add_playlist(
+            &pool,
+            "w0",
+            r#"
+                name = "W0"
+                [selection]
+                mode = "group"
+                strategy = "weighted"
+                members = [{ ref = "a", weight = 0 }, { ref = "b", weight = 3 }]
+            "#,
+        )
+        .await;
+        for _ in 0..8 {
+            assert_eq!(resolve_ref(&pool, "w0").await.unwrap(), "b/x.mp3");
+        }
+    }
+
+    #[tokio::test]
+    async fn group_weighted_skip_redraws_past_an_empty_member() {
+        let (_d, pool) = fresh_db().await;
+        // Only b has media; a's pool is empty.
+        media_index::replace_library(&pool, &[media("b/x.mp3", "", 0, &[])], 1000)
+            .await
+            .unwrap();
+        add_letter_leaves(&pool, &["a", "b"]).await;
+        // a is heavier but empty; with skip the draw must fall back to b.
+        add_playlist(
+            &pool,
+            "wskip",
+            r#"
+                name = "WSkip"
+                [selection]
+                mode = "group"
+                strategy = "weighted"
+                on_member_unavailable = "skip"
+                members = [{ ref = "a", weight = 5 }, { ref = "b", weight = 1 }]
+            "#,
+        )
+        .await;
+        for _ in 0..8 {
+            assert_eq!(resolve_ref(&pool, "wskip").await.unwrap(), "b/x.mp3");
+        }
+    }
+
+    #[tokio::test]
+    async fn group_weighted_abort_bubbles_when_drawn_member_is_empty() {
+        let (_d, pool) = fresh_db().await;
+        media_index::replace_library(&pool, &[media("b/x.mp3", "", 0, &[])], 1000)
+            .await
+            .unwrap();
+        add_letter_leaves(&pool, &["a", "b"]).await;
+        // b excluded (weight 0); the sole eligible draw is the empty a → abort
+        // (default) → PoolEmpty bubbles up (the grid would fall through).
+        add_playlist(
+            &pool,
+            "wabort",
+            r#"
+                name = "WAbort"
+                [selection]
+                mode = "group"
+                strategy = "weighted"
+                members = [{ ref = "a", weight = 5 }, { ref = "b", weight = 0 }]
+            "#,
+        )
+        .await;
         assert!(matches!(
-            resolve_ref(&pool, "grp").await,
-            Err(SelectionError::Unsupported(_))
+            resolve_ref(&pool, "wabort").await,
+            Err(SelectionError::PoolEmpty)
         ));
+    }
+
+    #[tokio::test]
+    async fn group_rotate_round_robins_one_per_member() {
+        let (_d, pool) = fresh_db().await;
+        media_index::replace_library(
+            &pool,
+            &[
+                media("a/x.mp3", "", 0, &[]),
+                media("b/x.mp3", "", 0, &[]),
+                media("c/x.mp3", "", 0, &[]),
+            ],
+            1000,
+        )
+        .await
+        .unwrap();
+        add_letter_leaves(&pool, &["a", "b", "c"]).await;
+        add_playlist(
+            &pool,
+            "rot",
+            r#"
+                name = "Rot"
+                [selection]
+                mode = "group"
+                strategy = "rotate"
+                members = [{ ref = "a" }, { ref = "b" }, { ref = "c" }]
+            "#,
+        )
+        .await;
+        // One track per member, in declared order, wrapping. Each leaf has a
+        // single file, so the pick within a member is deterministic.
+        assert_eq!(resolve_ref(&pool, "rot").await.unwrap(), "a/x.mp3");
+        assert_eq!(resolve_ref(&pool, "rot").await.unwrap(), "b/x.mp3");
+        assert_eq!(resolve_ref(&pool, "rot").await.unwrap(), "c/x.mp3");
+        assert_eq!(resolve_ref(&pool, "rot").await.unwrap(), "a/x.mp3");
     }
 
     #[tokio::test]
