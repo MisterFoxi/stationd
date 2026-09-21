@@ -77,6 +77,87 @@ Autres, indépendants :
 
 ---
 
+## A modifier/Changer
+## Preview / validation de la grille avant diffusion
+
+La grille est appliquée en avance (cron chargeant un TOML à la demande) et les
+PL dynamiques sont résolues à la lecture. Pour valider une grille *avant*
+qu'elle passe à l'antenne, on produit un preview autoritatif.
+
+### Gel = preview autoritatif, même résolveur
+
+- Le `preview` n'est pas une photo indicative : c'est le résolveur
+  (`resolve_next`, quasi-pur) exécuté sur **horloge virtuelle**, qui produit le
+  playout complet du segment. **Un seul chemin de code** — jamais une simulation
+  parallèle, sinon la garantie devient fausse dès la première divergence.
+- La sim balaie **tout le jeu de règles de la station** (base, DayPart,
+  AtClock, Every, one-shots, interrupts), pas seulement le segment regardé —
+  sinon l'anti-répétition simulée ≠ celle diffusée.
+- Le résultat est un **artefact de validation** (un log), pas un état persisté
+  qui rejoue. On regarde → ça plaît, on commit la grille ; sinon on retravaille.
+- **Le dynamisme est préservé** : la requête reste la source, ré-évaluée à
+  chaque activation. Le gel ne fige pas la *nature* de la PL, il cristallise
+  *une* résolution pour l'inspecter. En streaming pur, les causes externes sont
+  marginales → le dry-run est fidèle à ce qui sortira.
+- Exception `queue` (on-demand) : tampon vide au moment du bake, rempli au
+  runtime → non simulable, exclu par nature.
+
+### Ce qui est dur vs estimé
+
+- **Dur** : l'ensemble des médias, l'ordre résolu (permutation du shuffle,
+  résultat des tirages pondérés), les départs ancrés-règle (`scheduled`,
+  `AtClock`).
+- **Estimé** : le wall-clock **par piste** (cumul des durées) — durée réelle,
+  cooldowns contre l'historique, interrupts intercalés sont des faits de
+  runtime. Cohérent avec les bornes molles.
+- Le preview promet donc « exactement ces médias, dans cet ordre, dans ce bloc
+  qui démarre à cette heure » — pas « ce titre à 20:03:47 ». Ne pas survendre le
+  calage seconde dans l'UI.
+
+### Preview log multi-granularité
+
+Trois profondeurs d'un même bake, via flags CLI (modèle `git log --oneline /
+--stat / full`) :
+
+1. **Tranche horaire** (`--summary`) : index scannable, une colonne DIAG qui
+   indique *où* déplier avant de lire le détail.
+2. **Bloc** (défaut) : un bloc = une activation. Porte la règle et ses params,
+   **pourquoi il gagne** (résolution de collision), et le diagnostic au bon
+   grain (un trou apparaît comme bloc fantôme, pas noyé dans les pistes).
+3. **Médias** (`--tracks` / `-v`) : piste concrète + **colonne raison**
+   (`[newest]`, `[shuffle #7]`, `SKIP … contrainte`, `fallback`) — transforme
+   « ce qui sort » en « pourquoi ça sort, et où le quota a cédé ».
+
+- Les secondes ne s'affichent qu'au niveau 3, marquées estimées (`~`).
+- Même structure en `--format json` (arbre tranche→bloc→piste, diagnostics par
+  nœud) pour un futur rendu web. CLI-first : le log est produit par le contrat
+  gRPC, l'affichage n'est qu'un rendu.
+
+### Diagnostic de couverture inter-blocs
+
+- Départs implicites (B1@20:00, B2@21:30). La **fin de B1 est une borne
+  dérivée** (= le `start` de B2), calculée au preview, **jamais un champ TOML**.
+- `end` reste **interdit en entrée**, raison inchangée : composer une liste de
+  médias dont la somme des durées tombe pile sur une cible est impossible
+  (packing exact + durées = runtime). Un `end` normatif est une promesse
+  mensongère.
+- Ce qu'on rapporte est l'**inverse** — observationnel, en sortie. Trois états,
+  tous dérivables sur horloge virtuelle :
+  - **débord** (contenu > fenêtre implicite) — `⚠`, souvent voulu (borne molle) ;
+  - **sous-couverture / trou** (contenu < fenêtre, rien pour combler) — `✗` si
+    trou sec sans fallback ;
+  - **OK** (tient, avec la marge affichée).
+- **Signalé, pas jugé** : le preview rend le fait visible, l'humain tranche.
+
+### Encore ouvert (à fusionner dans « Encore ouvert »)
+
+- Liste **fermée** des codes de diagnostic (doit exister au contrat gRPC pour
+  être atteignable CLI + web) : trou d'antenne, pool vide, média/ref cassée,
+  cycle de groupe, cooldown non satisfait, épuisement (`on_exhausted`),
+  collision surprenante, débord inter-blocs, sous-couverture, anomalie DST.
+- Politique **bloquant vs non-bloquant** : quels codes empêchent le commit de la
+  grille, lesquels ne sont qu'un avertissement.
+
 ## Fait
 
 ### — Preview : nombre de médias et durée du pool par occurrence (2026-09-19) —
@@ -438,12 +519,16 @@ par identité (rel_path + garde-fou), jamais par FK.
   DROP). `list(only_available)`. Remplacement explicite du set de genres.
 - `src/lib.rs` : `media` + `media_index` exposés.
 
-⚠ **Anomalie relevée** : `migrations/0004_playlist_materialized_view.sql` est
-ABSENT du dossier (0001-0003, 0005-0006 seulement) alors qu'ETAT le décrit
-(vue riche playlists + famille B `episode_play`/`broadcast_log`/
-`playlist_suspension`). Ces tables **n'existent donc pas** en base : bloquant
-pour `unplayed_only`/historique le jour venu. À retrancher (recréer 0004 ou
-renuméroter). N'impacte pas le scan média (tables neuves en 0007).
+ℹ **Incident 0004 — clos (2026-09-21).** Le fichier
+`migrations/0004_playlist_materialized_view.sql` a été effacé par erreur.
+Décision : baseline = schéma courant (0001-0003 + 0005-0010), **0004 est
+volontairement nul et non avenu** — un trou de numérotation ne gêne pas sqlx
+(tri par version, aucune contiguïté requise ; `rm -rf data/` rejoue proprement).
+Rien à reconstruire. Le socle famille B (`episode_play`/`broadcast_log`/
+`playlist_suspension`) et la vue éclatée n'ont jamais existé en base ; ils
+seront (re)créés dans une **future migration** (p.ex. 0011) le jour où
+`unplayed_only`/historique arriveront — pas en ressuscitant 0004. N'impacte ni
+le scan média ni l'étage sélection (qui lit le TOML brut).
 
 ### — Grammaire TOML de la grille + apply/validate/export (2026-09-14) —
 
@@ -610,9 +695,11 @@ dans le découpage des modules (`grid_index` = A, `grid_store` = B).
 - Compiler+servir `playlist_v1.proto` (nouveau contrat) et migrer le code
   (`store`/`playlist`/`sync`) vers l'identité `name`/`handle` → alors seulement
   reposer l'index UNIQUE `ref_effective`.
-- Vraie vue matérialisée **peuplée** (l'apply qui éclate le TOML dans les tables
-  de `0004`). CRUD `remove`/`export`, reload/watch. Rapport de cycle exact
-  (Tarjan). Points ouverts `Doc/playlists.md`.
+- Vraie vue matérialisée **peuplée** (l'apply qui éclate le TOML dans des tables
+  de détail) + socle famille B (`episode_play`/`broadcast_log`/
+  `playlist_suspension`) → **future migration** (0004 étant nul). CRUD
+  `remove`/`export`, reload/watch. Rapport de cycle exact (Tarjan). Points
+  ouverts `Doc/playlists.md`.
 
 ### Hors périmètre (chantiers suivants)
 - Câblage Liquidsoap/Icecast (`request.dynamic` + fallback). Scan biblio
@@ -626,9 +713,11 @@ dans le découpage des modules (`grid_index` = A, `grid_store` = B).
 - **Base de dev à recréer** : migrations `0005`→`0010` sont neuves. En cas de
   souci de schéma/checksum sqlx, `rm -rf data/` + relancer (file-first, la vue
   est jetable). Ne JAMAIS éditer une migration déjà appliquée en prod.
-- **`0004` manquant** : le fichier de migration de la vue riche playlists est
-  absent du dossier (cf. Fait). `unplayed_only`/historique n'ont donc pas leur
-  socle SQL tant que ce n'est pas retranché.
+- **`0004` volontairement nul (incident clos, 2026-09-21)** : fichier effacé
+  par erreur, non reconstruit — baseline = schéma courant. Le socle SQL de
+  `unplayed_only`/historique (tables famille B) viendra dans une future
+  migration, pas dans un 0004 ressuscité. Un trou de numérotation ne gêne pas
+  sqlx.
 - **`lofty` ajouté** : premier `cargo build` doit actualiser `Cargo.lock`
   (Rust indispo dans l'env de préparation).
 - **Refs de membres = chemin complet** : un `ref` de membre de groupe doit être
