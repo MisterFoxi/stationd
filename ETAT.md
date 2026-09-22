@@ -70,7 +70,6 @@ Autres, indépendants :
 - **`on_scan`** : dernier hook non câblé (enrichissement au scan biblio).
 - **Crate de types partagé** `Candidate`/`PluginEvent` (host + guests wasm ne
   les dupliquent plus — aujourd'hui recopiés dans les 2 crates guest).
-- **`DayPart` cross-minuit** : `window_covers` renvoie `None` (TODO).
 - **Refacto acteur `GridEngine`** (gabarit `library_actor`).
 - **Câblage Liquidsoap** (le vrai « ça diffuse » ; débloque aussi `hard`).
 - **Refs de membres relatives** au dossier du groupe (chemin complet requis).
@@ -78,6 +77,33 @@ Autres, indépendants :
 ---
 
 ## Fait
+
+### — DayPart cross-minuit (2026-09-22) —
+
+Débloque une base de nuit qui enjambe minuit (22:00→06:00). C'était un manque
+fonctionnel : `window_covers` renvoyait `None` dès `end ≤ start`, et `grid_toml`
+rejetait la règle à l'`apply`.
+
+- `resolver.rs` (`window_covers`, pur) : `end < start` = fenêtre cross-minuit
+  `[start, 24:00) ∪ [00:00, end)`, largeur qui enjambe minuit (le
+  « narrowest wins » compare donc des durées justes) ; `start == end` = fenêtre
+  nulle, ne couvre jamais.
+- `grid_toml.rs` : la validation `day_part` n'interdit plus que `start == end`
+  (message adapté) ; `end < start` passe. La table `grid_day_part` (0006) n'a
+  aucun `CHECK end > start` → aucune migration.
+- Tests : résolveur `daypart_cross_midnight_covers_both_sides_of_midnight` +
+  `narrowest_daypart_wins_across_midnight` ; grammaire
+  `rejects_cross_midnight_day_part` → `accepts_cross_midnight_day_part`, +
+  `rejects_zero_length_day_part`.
+
+**Caveat documenté** (pas un bug silencieux) : la couverture est sur l'horloge
+murale ; `days` reste évalué sur le **jour calendaire de `now`**. Une base de
+nuit **tous les jours** est exacte ; une émission restreinte à un jour (« nuit
+du vendredi ») matcherait par le jour de `now`, pas par le jour de *début* de la
+fenêtre — l'ancrage sur le jour de départ n'est pas fait. À trancher en suivi si
+le besoin apparaît.
+
+**Validation** : édité ; `cargo build` + `cargo test -p stationd` à confirmer.
 
 ### — CheckCoverage : preview de dimensionnement « assez de média ? » (2026-09-22) —
 
@@ -695,7 +721,6 @@ dans le découpage des modules (`grid_index` = A, `grid_store` = B).
 ### Grille / scheduler (suite directe)
 - **Refacto acteur** : `GridEngine` en tâche tokio possédante, grille en
   mémoire invalidée à l'apply, mutations par mpsc (gabarit `library_actor`).
-- **`DayPart` cross-minuit** : `window_covers` renvoie `None` (TODO signalé).
 - **Sélection — suite** : anti-répétition (`constraints`) + `unplayed_only`
   (réclament l'historique famille B), `limit`/quota par activation, groupes
   **imbriqués** (weighted/rotate faits — cf. Fait 2026-09-21), `queue`/`remote`.

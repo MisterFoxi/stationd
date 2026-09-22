@@ -244,12 +244,16 @@ fn to_rule(rd: RuleDoc) -> Result<Rule, String> {
             )?;
             let end =
                 parse_wallclock(rd.end.as_deref().ok_or("`day_part` requires `end`")?)?;
-            if minutes(end) <= minutes(start) {
+            if minutes(end) == minutes(start) {
                 return Err(
-                    "`end` must be strictly after `start` (cross-midnight is not supported in v1)"
+                    "`start` and `end` must differ (a zero-length window covers nothing; \
+                     use a base_rotation for 24h)"
                         .into(),
                 );
             }
+            // `end < start` is a cross-midnight window (e.g. 22:00→06:00): it
+            // covers [start, 24:00) ∪ [00:00, end). The resolver models the
+            // wrap; validation only forbids the zero-length case.
             RuleKind::DayPart {
                 playlist_ref,
                 start,
@@ -717,7 +721,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_cross_midnight_day_part() {
+    fn accepts_cross_midnight_day_part() {
         let toml = r#"
             schema_version = 1
             [[rule]]
@@ -726,6 +730,27 @@ mod tests {
             playlist_ref = "g"
             start = "22:00"
             end = "06:00"
+        "#;
+        let rules = parse_grid(toml).expect("cross-midnight day_part parses");
+        match &rules[0].kind {
+            RuleKind::DayPart { start, end, .. } => {
+                assert_eq!((start.hour, start.minute), (22, 0));
+                assert_eq!((end.hour, end.minute), (6, 0));
+            }
+            _ => panic!("expected DayPart"),
+        }
+    }
+
+    #[test]
+    fn rejects_zero_length_day_part() {
+        let toml = r#"
+            schema_version = 1
+            [[rule]]
+            id = "noop"
+            kind = "day_part"
+            playlist_ref = "g"
+            start = "08:00"
+            end = "08:00"
         "#;
         assert!(matches!(parse_grid(toml), Err(GridTomlError::Rule { .. })));
     }

@@ -376,20 +376,30 @@ impl Validity {
     }
 }
 
-/// If `now` falls in `[start, end)` (local minutes), return the window width
-/// in minutes (used to prefer the narrowest overlapping DayPart). `None` if
-/// not covered. Cross-midnight windows (end <= start) are left as a TODO for
-/// when the grid needs them — flagged rather than silently mishandled.
+/// If `now` falls in the window (local minutes), return the window width in
+/// minutes (used to prefer the narrowest overlapping DayPart). `None` if not
+/// covered.
+///
+/// A window with `end < start` is **cross-midnight**: it covers
+/// `[start, 24:00) ∪ [00:00, end)`, and its width wraps past midnight. A
+/// zero-length window (`start == end`) never covers (rejected at validation).
+///
+/// Coverage is purely on the wall clock; the `days` validity gate is evaluated
+/// separately against `now`'s OWN calendar day. So a day-restricted
+/// cross-midnight window matches by the weekday of `now`, not the weekday the
+/// window started on — exact for an every-day night base, but a
+/// per-night-of-week show would need start-day anchoring (not done here).
 fn window_covers(start: WallClock, end: WallClock, now: WallClock) -> Option<u32> {
     let (s, e, n) = (start.minutes(), end.minutes(), now.minutes());
-    if e <= s {
-        // TODO: cross-midnight window not modelled yet (would need day carry).
-        return None;
+    if s == e {
+        return None; // zero-length window: never covers
     }
-    if s <= n && n < e {
-        Some(e - s)
+    if s < e {
+        // Same-day window [s, e).
+        if s <= n && n < e { Some(e - s) } else { None }
     } else {
-        None
+        // Cross-midnight window [s, 1440) ∪ [0, e).
+        if n >= s || n < e { Some(1440 - s + e) } else { None }
     }
 }
 
@@ -552,6 +562,38 @@ mod tests {
         };
         let d = resolve_next(now_at(9, 30), &grid, &PlaybackState::default());
         assert_eq!(d.playlist_ref.as_deref(), Some("b"), "narrower window is more specific");
+    }
+
+    #[test]
+    fn daypart_cross_midnight_covers_both_sides_of_midnight() {
+        // A night base 22:00→06:00 covers [22:00,24:00) ∪ [00:00,06:00).
+        let grid = Grid {
+            rules: vec![base("floor", "general"), daypart("night", "chill", (22, 0), (6, 0))],
+        };
+        let pl = |h, m| {
+            resolve_next(now_at(h, m), &grid, &PlaybackState::default())
+                .playlist_ref
+                .unwrap()
+        };
+        assert_eq!(pl(23, 0), "chill", "before midnight, inside");
+        assert_eq!(pl(2, 0), "chill", "after midnight, still inside");
+        // 06:00 exactly is excluded ([22,06)) → back to the floor.
+        assert_eq!(pl(6, 0), "general", "at the end bound, excluded");
+        assert_eq!(pl(12, 0), "general", "midday, outside");
+    }
+
+    #[test]
+    fn narrowest_daypart_wins_across_midnight() {
+        // A narrow cross-midnight window (23:30→00:30 = 60 min) beats a wide
+        // one (22:00→02:00 = 240 min) at 23:45.
+        let grid = Grid {
+            rules: vec![
+                daypart("wide", "a", (22, 0), (2, 0)),
+                daypart("narrow", "b", (23, 30), (0, 30)),
+            ],
+        };
+        let d = resolve_next(now_at(23, 45), &grid, &PlaybackState::default());
+        assert_eq!(d.playlist_ref.as_deref(), Some("b"), "narrower cross-midnight window wins");
     }
 
     #[test]
