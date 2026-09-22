@@ -212,6 +212,10 @@ service ScheduleService {
   // créneau. « Signalé, pas jugé » : le verdict qualifie, il ne bloque rien.
   rpc CheckCoverage(CheckCoverageRequest) returns (CheckCoverageResponse);
 
+  // Enqueue un média dans le tampon runtime d'une playlist `queue` (demande
+  // auditeur / injection DJ). Refusé si la queue est à son max_len.
+  rpc Enqueue(EnqueueRequest) returns (EnqueueResponse);
+
   // Horloge manuelle (test) : fige/relâche l'instant que ResolveNext utilise
   // quand la requête ne fournit pas `now`. Sans changement demandé → reporte.
   rpc SetClock(SetClockRequest) returns (ClockStatus);
@@ -293,4 +297,18 @@ message CoverageMember {
   google.protobuf.Duration total_duration = 3;
   Verdict verdict = 4;
   string detail = 5;
+}
+
+// ──────────────────────────────────────────────────────────────
+// Enqueue — pousser dans le tampon runtime d'une playlist `queue`
+// ──────────────────────────────────────────────────────────────
+
+message EnqueueRequest {
+  string playlist_ref = 1;   // la playlist queue visée
+  string media_path = 2;     // rel_path du média à pousser
+}
+
+message EnqueueResponse {
+  bool   accepted = 1;       // false = refusé (queue au max_len)
+  uint64 len      = 2;       // longueur du tampon après le push
 }

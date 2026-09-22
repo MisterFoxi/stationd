@@ -174,6 +174,33 @@ pub async fn mark_unavailable(pool: &SqlitePool, rel_path: &str) -> Result<(), s
     Ok(())
 }
 
+/// The stored artist tag of a media row (`None` = untagged, or the path is
+/// unknown). Used to stamp a track start into the broadcast history so the
+/// anti-repetition `no_same_artist_within` window has an artist to match.
+pub async fn artist_of(pool: &SqlitePool, rel_path: &str) -> Result<Option<String>, sqlx::Error> {
+    let row: Option<(Option<String>,)> =
+        sqlx::query_as("SELECT artist FROM media WHERE rel_path = ?1")
+            .bind(rel_path)
+            .fetch_optional(pool)
+            .await?;
+    Ok(row.and_then(|(a,)| a))
+}
+
+/// The `(size_bytes, mtime_ns)` of a media row, or `None` if the path is
+/// unknown. Captured at episode completion as the `unplayed_only` play-once
+/// guard (a later file change invalidates the mark).
+pub async fn size_mtime_of(
+    pool: &SqlitePool,
+    rel_path: &str,
+) -> Result<Option<(i64, i64)>, sqlx::Error> {
+    let row: Option<(i64, i64)> =
+        sqlx::query_as("SELECT size_bytes, mtime_ns FROM media WHERE rel_path = ?1")
+            .bind(rel_path)
+            .fetch_optional(pool)
+            .await?;
+    Ok(row)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -287,6 +287,15 @@ impl Playlist {
             }
         }
 
+        // `unplayed_only` (play-once) only makes sense on a dated order: it
+        // dequeues a growing series oldest/newest-first. On any other order it
+        // is a loud error, never silently ignored.
+        if self.selection.unplayed_only == Some(true)
+            && !matches!(self.selection.order, Some(Order::Newest) | Some(Order::Oldest))
+        {
+            return Err(err("`unplayed_only` requires `order = newest` or `order = oldest`"));
+        }
+
         // Per-member quotas. `weight` is for a `weighted` group; `take`
         // (tracks) and `runtime` (time budget) are per-member quotas for a
         // `sequence` or `shuffle` group, and are mutually exclusive.
@@ -958,6 +967,34 @@ mod tests {
             members = [{ ref = "a", runtime = "20" }]
         "#;
         assert!(validate_str(toml_str).is_err(), "runtime must be a valid duration");
+    }
+
+    #[test]
+    fn rejects_unplayed_only_without_dated_order() {
+        let toml_str = r#"
+            name = "Bad unplayed"
+            [selection]
+            mode = "dynamic"
+            order = "shuffle"
+            unplayed_only = true
+        "#;
+        assert!(
+            validate_str(toml_str).is_err(),
+            "unplayed_only needs order newest or oldest"
+        );
+    }
+
+    #[test]
+    fn valid_unplayed_only_with_oldest() {
+        let toml_str = r#"
+            name = "Feuilleton"
+            [selection]
+            mode = "dynamic"
+            order = "oldest"
+            order_by = "filename"
+            unplayed_only = true
+        "#;
+        validate_str(toml_str).expect("oldest + unplayed_only is valid");
     }
 
     #[test]

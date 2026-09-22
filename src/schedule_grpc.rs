@@ -19,8 +19,9 @@ pub use crate::proto::schedule;
 use schedule::schedule_service_server::ScheduleService;
 use schedule::{
     ApplyGridRequest, ApplyGridResponse, CheckCoverageRequest, CheckCoverageResponse, ClockStatus,
-    Decision, ExportGridRequest, ExportGridResponse, GridFile, ListRulesRequest, ListRulesResponse,
-    PreviewRequest, PreviewResponse, ResolveNextRequest, SetClockRequest, ValidateGridResponse,
+    Decision, EnqueueRequest, EnqueueResponse, ExportGridRequest, ExportGridResponse, GridFile,
+    ListRulesRequest, ListRulesResponse, PreviewRequest, PreviewResponse, ResolveNextRequest,
+    SetClockRequest, ValidateGridResponse,
 };
 
 pub struct ScheduleGrpc {
@@ -333,6 +334,24 @@ impl ScheduleService for ScheduleGrpc {
         Ok(Response::new(CheckCoverageResponse {
             entries,
             worst: map_verdict(report.worst) as i32,
+        }))
+    }
+
+    /// Enqueue a media into a `queue` playlist's runtime buffer. Delegates to
+    /// `GridEngine::enqueue`; `accepted = false` means the queue was at max_len.
+    async fn enqueue(
+        &self,
+        request: Request<EnqueueRequest>,
+    ) -> Result<Response<EnqueueResponse>, Status> {
+        let req = request.into_inner();
+        let out = self
+            .engine
+            .enqueue(&req.playlist_ref, &req.media_path)
+            .await
+            .map_err(map_next_error)?;
+        Ok(Response::new(EnqueueResponse {
+            accepted: out.accepted,
+            len: out.len,
         }))
     }
 

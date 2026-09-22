@@ -109,6 +109,10 @@ pub struct GridPreview {
 pub struct ResolvedDecision {
     pub decision: GridDecision,
     pub media_path: Option<String>,
+    /// True when `media_path` is a remote stream URL (a `remote` playlist), not
+    /// a local file: the LS wiring relays it via `input.http` rather than
+    /// playing a file. `false` for a file or a fallback.
+    pub stream: bool,
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -617,6 +621,71 @@ impl GridEngine {
         Ok(())
     }
 
+    /// Mark an episode as fully played for its `unplayed_only` playlist (family
+    /// B, infinite-expiry). Called by the track-COMPLETION path — never on
+    /// start: an interrupted or failed episode must stay eligible. No-op unless
+    /// the playlist actually declares `unplayed_only` (keeps the history scoped)
+    /// and the media is known (its size/mtime are the play-once guard). The
+    /// live wiring (Liquidsoap end-of-track) is not in place yet, so today this
+    /// is driven by the CLI / tests.
+    pub async fn on_episode_finished(
+        &self,
+        playlist_ref: &str,
+        media: &str,
+        now: Epoch,
+    ) -> Result<(), EngineError> {
+        let Ok(key) = crate::playlist::normalize_ref(playlist_ref) else {
+            tracing::warn!(playlist = %playlist_ref, "on_episode_finished: unnormalizable ref, skipping");
+            return Ok(());
+        };
+        let Some(toml) = store::playlist_toml_by_ref(&self.pool, &key).await? else {
+            return Ok(()); // unknown playlist — nothing to mark
+        };
+        let playlist = crate::playlist::Playlist::parse(&toml)
+            .map_err(|e| EngineError::Selection(crate::selection::SelectionError::Parse(e)))?;
+        if playlist.selection.unplayed_only != Some(true) {
+            return Ok(()); // only unplayed_only playlists keep a play history
+        }
+        let Some((size, mtime)) = crate::media_index::size_mtime_of(&self.pool, media).await? else {
+            return Ok(()); // media unknown — can't capture the guard
+        };
+        crate::episode_play::mark(&self.pool, &key, media, size, mtime, now).await?;
+        Ok(())
+    }
+
+    /// Enqueue a media into a `queue` playlist's runtime buffer (audience
+    /// request / DJ injection). Errors if the ref is unknown or the playlist is
+    /// not a queue; refused (`accepted = false`) when the queue is at its
+    /// `max_len`. The pushed `media_path` is taken as-is (a media rel_path).
+    pub async fn enqueue(
+        &self,
+        playlist_ref: &str,
+        media_path: &str,
+    ) -> Result<crate::queue_state::PushOutcome, EngineError> {
+        let key = crate::playlist::normalize_ref(playlist_ref).map_err(|_| {
+            EngineError::Selection(crate::selection::SelectionError::PlaylistNotFound(
+                playlist_ref.to_string(),
+            ))
+        })?;
+        let Some(toml) = store::playlist_toml_by_ref(&self.pool, &key).await? else {
+            return Err(EngineError::Selection(
+                crate::selection::SelectionError::PlaylistNotFound(playlist_ref.to_string()),
+            ));
+        };
+        let pl = crate::playlist::Playlist::parse(&toml)
+            .map_err(|e| EngineError::Selection(crate::selection::SelectionError::Parse(e)))?;
+        if pl.selection.mode != crate::playlist::Mode::Queue {
+            return Err(EngineError::Selection(
+                crate::selection::SelectionError::Unsupported(format!(
+                    "`{playlist_ref}` is not a queue playlist"
+                )),
+            ));
+        }
+        crate::queue_state::push(&self.pool, &key, media_path, pl.selection.max_len, real_now())
+            .await
+            .map_err(EngineError::from)
+    }
+
     fn parse_all(files: &[(String, String)]) -> Result<Vec<Rule>, Vec<String>> {
         let mut rules = Vec::new();
         let mut errors = Vec::new();
@@ -858,7 +927,7 @@ impl GridEngine {
             // scans) is flipped unavailable in the index and we re-pick from
             // the same source. Capped so a pool of dead entries can't spin.
             const MAX_DEAD_PICKS: u32 = 32;
-            let mut produced: Option<String> = None;
+            let mut produced: Option<crate::selection::Resolved> = None;
             for _ in 0..MAX_DEAD_PICKS {
                 match crate::selection::resolve_ref_with_plugins(
                     &self.pool,
@@ -868,11 +937,16 @@ impl GridEngine {
                 )
                 .await
                 {
-                    Ok(media) if self.media_exists(&media) => {
-                        produced = Some(media);
+                    // A remote stream: no file on disk to check, no re-pick.
+                    Ok(stream @ crate::selection::Resolved::Stream(_)) => {
+                        produced = Some(stream);
                         break;
                     }
-                    Ok(missing) => {
+                    Ok(crate::selection::Resolved::File(media)) if self.media_exists(&media) => {
+                        produced = Some(crate::selection::Resolved::File(media));
+                        break;
+                    }
+                    Ok(crate::selection::Resolved::File(missing)) => {
                         tracing::warn!(
                             media = %missing,
                             "resolved media missing on disk; marking unavailable and re-picking"
@@ -887,11 +961,28 @@ impl GridEngine {
                 }
             }
 
-            if let Some(media) = produced {
+            if let Some(resolved) = produced {
                 // Persist effects only now that this source actually produced.
                 self.persist_effects(&decision, now).await?;
-                self.emit_resolved(&decision, Some(&media));
-                return Ok(ResolvedDecision { decision, media_path: Some(media) });
+                let (media_path, stream) = match resolved {
+                    crate::selection::Resolved::File(media) => {
+                        // Log the track START into the station history (family B)
+                        // so the anti-repetition constraints see it on the next
+                        // pull. Artist from the media index (None = untagged).
+                        let artist = crate::media_index::artist_of(&self.pool, &media).await?;
+                        crate::broadcast_log::record(&self.pool, &media, artist.as_deref(), now)
+                            .await?;
+                        (media, false)
+                    }
+                    // A stream has no file identity / artist → no play history.
+                    crate::selection::Resolved::Stream(url) => (url, true),
+                };
+                self.emit_resolved(&decision, Some(&media_path));
+                return Ok(ResolvedDecision {
+                    decision,
+                    media_path: Some(media_path),
+                    stream,
+                });
             }
 
             tracing::info!(
@@ -918,7 +1009,7 @@ impl GridEngine {
             mark_taken: None,
         };
         self.emit_resolved(&decision, None);
-        Ok(ResolvedDecision { decision, media_path: None })
+        Ok(ResolvedDecision { decision, media_path: None, stream: false })
     }
 
     /// Persist a decision's side effects — a consumed AtClock occurrence and an
@@ -1315,5 +1406,173 @@ mode = "dynamic""#;
         assert_eq!(g.members[0].offset_secs, Some(0));
         assert_eq!(g.members[1].quota, Some(crate::playlist::MemberQuota::Take(1)));
         assert_eq!(g.members[1].offset_secs, None);
+    }
+
+    #[tokio::test]
+    async fn next_media_logs_starts_and_then_excludes_within_the_window() {
+        let (_dir, eng) = engine().await; // tz = UTC
+        crate::media_index::replace_library(
+            &eng.pool,
+            &[
+                crate::media::ScannedMedia {
+                    rel_path: "a.mp3".into(),
+                    title: None,
+                    artist: Some("X".into()),
+                    album: None,
+                    year: None,
+                    genres: vec![],
+                    duration_ms: 1000,
+                    size_bytes: 1,
+                    mtime_ns: 0,
+                },
+                crate::media::ScannedMedia {
+                    rel_path: "b.mp3".into(),
+                    title: None,
+                    artist: Some("Y".into()),
+                    album: None,
+                    year: None,
+                    genres: vec![],
+                    duration_ms: 1000,
+                    size_bytes: 1,
+                    mtime_ns: 0,
+                },
+            ],
+            1000,
+        )
+        .await
+        .unwrap();
+        let toml = "name = \"Rot\"\n[selection]\nmode = \"dynamic\"\norder = \"sequential\"\n\
+                    [[selection.filter]]\nfield = \"path\"\nop = \"prefix\"\nvalue = \"\"\n\
+                    [broadcast.constraints]\nno_same_track_within = \"1h\"\n";
+        let pl = crate::playlist::Playlist::parse(toml).unwrap();
+        crate::store::upsert(&eng.pool, "rot", &pl, toml, Some("rot"))
+            .await
+            .unwrap();
+        insert_rule(
+            &eng.pool,
+            &rule("floor", RuleKind::BaseRotation { playlist_ref: "rot".into() }),
+        )
+        .await
+        .unwrap();
+
+        // First pull logs a track; 30 min later the 1h window bars it → the
+        // next pull must pick the other track.
+        let first = eng.next_media(Epoch(10_000)).await.unwrap().media_path.unwrap();
+        let second = eng
+            .next_media(Epoch(10_000 + 1800))
+            .await
+            .unwrap()
+            .media_path
+            .unwrap();
+        assert_ne!(first, second, "anti-repetition excludes the just-played track");
+        // Both starts are recorded in the station history.
+        let logged = crate::broadcast_log::tracks_since(&eng.pool, 0).await.unwrap();
+        assert!(logged.contains(&first) && logged.contains(&second));
+    }
+
+    #[tokio::test]
+    async fn on_episode_finished_marks_only_unplayed_only_playlists() {
+        let (_dir, eng) = engine().await;
+        crate::media_index::replace_library(
+            &eng.pool,
+            &[crate::media::ScannedMedia {
+                rel_path: "pod/ep1.mp3".into(),
+                title: None,
+                artist: None,
+                album: None,
+                year: None,
+                genres: vec![],
+                duration_ms: 1000,
+                size_bytes: 42,
+                mtime_ns: 7,
+            }],
+            1000,
+        )
+        .await
+        .unwrap();
+        let feu = "name = \"F\"\n[selection]\nmode = \"dynamic\"\norder = \"oldest\"\n\
+                   order_by = \"filename\"\nunplayed_only = true\n[[selection.filter]]\n\
+                   field = \"path\"\nop = \"prefix\"\nvalue = \"pod/\"\n";
+        let pl = crate::playlist::Playlist::parse(feu).unwrap();
+        crate::store::upsert(&eng.pool, "feu", &pl, feu, Some("feu")).await.unwrap();
+        let rot = "name = \"R\"\n[selection]\nmode = \"dynamic\"\norder = \"shuffle\"\n\
+                   [[selection.filter]]\nfield = \"path\"\nop = \"prefix\"\nvalue = \"pod/\"\n";
+        let pl2 = crate::playlist::Playlist::parse(rot).unwrap();
+        crate::store::upsert(&eng.pool, "rot", &pl2, rot, Some("rot")).await.unwrap();
+
+        // Finishing under the unplayed_only playlist records it (guard from index).
+        eng.on_episode_finished("feu", "pod/ep1.mp3", Epoch(5000)).await.unwrap();
+        assert!(crate::episode_play::played_matching(&eng.pool, "feu")
+            .await
+            .unwrap()
+            .contains("pod/ep1.mp3"));
+        // The same media under a plain rotation keeps no play history.
+        eng.on_episode_finished("rot", "pod/ep1.mp3", Epoch(5000)).await.unwrap();
+        assert!(crate::episode_play::played_matching(&eng.pool, "rot")
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn next_media_relays_a_remote_without_touching_disk() {
+        let (_dir, eng) = engine().await; // tz = UTC
+        // No media on disk; the base is a remote relay.
+        let toml = "name = \"night\"\n[selection]\nmode = \"remote\"\nurl = \"http://nightmusic.live\"\n";
+        let pl = crate::playlist::Playlist::parse(toml).unwrap();
+        crate::store::upsert(&eng.pool, "night", &pl, toml, Some("night")).await.unwrap();
+        insert_rule(
+            &eng.pool,
+            &rule("floor", RuleKind::BaseRotation { playlist_ref: "night".into() }),
+        )
+        .await
+        .unwrap();
+
+        let r = eng.next_media(Epoch(1000)).await.unwrap();
+        assert!(r.stream, "a remote resolves to a stream");
+        assert_eq!(r.media_path.as_deref(), Some("http://nightmusic.live"));
+        assert_eq!(r.decision.origin, Origin::BaseRotation);
+        // A stream is never logged into the file-oriented broadcast history.
+        assert!(crate::broadcast_log::tracks_since(&eng.pool, 0)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn enqueue_then_next_media_pops_the_queue() {
+        let (_dir, eng) = engine().await; // tz = UTC
+        let toml = "name = \"Req\"\n[selection]\nmode = \"queue\"\norder = \"fifo\"\nmax_len = 2\n";
+        let pl = crate::playlist::Playlist::parse(toml).unwrap();
+        crate::store::upsert(&eng.pool, "req", &pl, toml, Some("req")).await.unwrap();
+        insert_rule(
+            &eng.pool,
+            &rule("floor", RuleKind::BaseRotation { playlist_ref: "req".into() }),
+        )
+        .await
+        .unwrap();
+
+        // Empty queue → the base produces nothing → PoolEmpty surfaces.
+        assert!(matches!(
+            eng.next_media(Epoch(1)).await,
+            Err(EngineError::Selection(crate::selection::SelectionError::PoolEmpty))
+        ));
+        // Enqueue, then it plays and is consumed.
+        let out = eng.enqueue("req", "req/a.mp3").await.unwrap();
+        assert!(out.accepted);
+        assert_eq!(out.len, 1);
+        let r = eng.next_media(Epoch(2)).await.unwrap();
+        assert_eq!(r.media_path.as_deref(), Some("req/a.mp3"));
+        // Consumed → empty again.
+        assert!(matches!(
+            eng.next_media(Epoch(3)).await,
+            Err(EngineError::Selection(crate::selection::SelectionError::PoolEmpty))
+        ));
+        // Enqueue to an unknown ref, and to a non-queue playlist → errors.
+        assert!(eng.enqueue("nope", "x.mp3").await.is_err());
+        let rtoml = "name = \"R\"\n[selection]\nmode = \"dynamic\"\norder = \"shuffle\"\n";
+        let rpl = crate::playlist::Playlist::parse(rtoml).unwrap();
+        crate::store::upsert(&eng.pool, "rot", &rpl, rtoml, Some("rot")).await.unwrap();
+        assert!(eng.enqueue("rot", "x.mp3").await.is_err());
     }
 }

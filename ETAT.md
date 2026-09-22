@@ -78,6 +78,121 @@ Autres, indépendants :
 
 ## Fait
 
+### — queue : tampon runtime + enqueue (CLI-complete) (2026-09-22) —
+
+Dernier mode de sélection câblé. Une `queue` est un tampon volatil rempli au
+runtime (demandes auditeurs / injection DJ), consommé FIFO/LIFO.
+
+- **Migration 0013** `queue_entry(id, playlist_ref, rel_path, enqueued_at)` +
+  index (playlist_ref, id). Famille B, aucune FK, survit au restart.
+- **`src/queue_state.rs`** : `push` (refuse au-delà de `max_len` — 0/absent =
+  illimité, pas de drop silencieux), `pop(fifo/lifo)` (renvoie + supprime),
+  `count`.
+- **Résolution** : arms `Mode::Queue` de `resolve_media` et `resolve_member` →
+  pop selon `order`, consommation à la résolution ; vide → `PoolEmpty` →
+  fallthrough. Fichier mort → `mark_unavailable` + re-pop suivant.
+- **Enqueue (full CLI-complete)** : `grid_engine::enqueue(ref, media)` (erreur
+  si ref inconnue / pas une queue ; refusé au max_len) → RPC `Enqueue` →
+  `stationctl queue push <ref> <media>` (exit non-zéro si refusé).
+- **LIFO** : implémenté tel que déclaré, avec la note doc « LIFO public = piège »
+  (mieux modélisé comme push prioritaire) ; pertinent pour l'injection DJ.
+- Tests : `queue_state` (fifo/lifo/max_len), `selection` (pop fifo/lifo,
+  drain → PoolEmpty), `grid_engine` (enqueue → next_media pop → consommé ;
+  erreurs ref inconnue / non-queue).
+
+**Validation** : édité ; `cargo test -p stationd` à confirmer. Migration 0013
+neuve.
+
+### — remote : résolution en flux (2026-09-22) —
+
+Un `remote` (relais d'un flux externe) est désormais RÉSOLU au playout — avant,
+`Unsupported`. Le relais réel (`input.http` côté Liquidsoap) reste **LS-gated**.
+
+- **Contrat** : enum `selection::Resolved { File(rel_path) | Stream(url) }`.
+  `resolve_ref`/`resolve_ref_at` aplatissent en `String` (tests fichier
+  intacts) ; `resolve_ref_with_plugins` rend le `Resolved` typé.
+- **Résolution** : l'arm `Mode::Remote` de `resolve_media` ET de `resolve_member`
+  (un remote peut être membre de groupe — relais de nuit) renvoie l'`url` en
+  `Stream`. `Mode::Queue` reste `UnsupportedMode`.
+- **`grid_engine::next_media`** : un `Stream` court-circuite la boucle de re-pick
+  disque (`media_exists`/`mark_unavailable`) et n'écrit NI dans `broadcast_log`
+  NI dans `episode_play` (une URL n'a ni identité fichier ni artiste).
+  `ResolvedDecision` gagne `stream: bool` pour le futur câblage LS.
+- Tests : `selection` (remote seul → Stream, remote membre de groupe → Stream) ;
+  `grid_engine` (next_media relaie un remote sans toucher au disque ni logger).
+
+**LS-gated** : le moteur produit désormais l'URL + le flag `stream` ; le relais
+`input.http` et le point de bascule de source seront branchés avec Liquidsoap.
+
+**Validation** : édité ; `cargo test -p stationd` à confirmer.
+
+### — unplayed_only (slice 2) (2026-09-22) —
+
+Play-once par épisode : un épisode déjà diffusé EN ENTIER pour une playlist n'est
+plus resélectionné (cooldown à expiration infinie, distinct de `broadcast_log`).
+
+- **Migration 0012** `episode_play(playlist_ref, rel_path, size_bytes,
+  mtime_ns, played_at, PK(playlist_ref, rel_path))`. Famille B, aucune FK.
+- **`src/episode_play.rs`** : `mark` (upsert), `played_matching` = JOIN
+  `episode_play ⋈ media` sur `size_bytes` ET `mtime_ns` → le **garde-fou**
+  d'identité (chemin + taille/mtime) vit dans le SQL ; un fichier changé rend
+  l'épisode ré-éligible. Pas besoin de toucher `Candidate`.
+- **Filtrage** : `selection::resolve_leaf`, après materialize/plugin/constraints,
+  avant le choix. Pool vidé → `PoolEmpty` → fallthrough (no-silent-failure).
+- **Validation** : `unplayed_only` exige `order = newest|oldest` — erreur
+  bruyante à `validate()` ET en résolution (avant, un `unplayed_only` avec
+  shuffle était silencieusement ignoré → trou fermé). `reject_unplayed_only`
+  supprimé.
+- **Marquage** : `grid_engine::on_episode_finished(playlist_ref, media, now)`, à
+  la FIN d'une diffusion (garde-fou taille/mtime capté depuis l'index). No-op
+  hors playlist `unplayed_only`. `media_index::size_mtime_of` ajouté.
+- Tests : `selection` (oldest rattrapage + garde-fou ré-éligibilise, newest
+  backlog, shuffle rejeté), `playlist` (validate), `grid_engine`
+  (on_episode_finished scopé), `episode_play` (mark/JOIN/garde-fou).
+
+**Limite (décision confirmée)** : le marquage n'est **pas auto-câblé** dans la
+boucle live — il attend le signal de fin de piste de Liquidsoap. Le filtre
+fonctionne dès maintenant ; le marquage auto arrive avec le câblage Liquidsoap.
+En attendant, `on_episode_finished` est pilotable au CLI/tests.
+
+**Validation** : édité ; `cargo test -p stationd` à confirmer. Migration 0012
+neuve → aucun conflit checksum.
+
+### — Anti-répétition temporelle (slice 1) (2026-09-22) —
+
+Première tranche de « famille B → anti-répétition ». `no_same_track_within` et
+`no_same_artist_within` sont désormais **appliqués au playout** (avant, ils
+n'étaient qu'un signal de dimensionnement dans `CheckCoverage`).
+
+- **Migration 0011** `broadcast_log(id, rel_path, artist NULL, played_at)` +
+  index `played_at`. Famille B : append-only, aucune FK, jamais remis à zéro
+  par un scan/apply. Historique **station-wide**.
+- **`src/broadcast_log.rs`** : `record` (au démarrage d'une piste),
+  `tracks_since` / `artists_since` (fenêtres). `media_index::artist_of` fournit
+  l'artiste au moment du log.
+- **Écriture** : `grid_engine::next_media`, une fois la source produite (même
+  point que `persist_effects`) — « titre X démarré à T ».
+- **Filtrage** : `selection::apply_constraints`, après `materialize` + filtre
+  plugin, avant le choix. Contrainte **dure** : jamais relâchée ; pool vidé →
+  `PoolEmpty` → fallthrough grille (no-silent-failure : pas de trou muet, pas de
+  rejeu forcé). Un candidat non taggé (artist None) n'est jamais exclu par la
+  fenêtre artiste. `now`/`constraints` threadés dans `resolve_leaf` via
+  `resolve_media`/`resolve_member` — contraintes **propres à chaque feuille**.
+- Tests : `selection` (piste dans/hors fenêtre, artiste exclu, non-taggé jamais
+  exclu) + `grid_engine` (next_media logue puis exclut) + `broadcast_log`
+  (record + fenêtres).
+
+**Limite documentée** : les contraintes déclarées sur un GROUPE lui-même (et non
+sur ses membres) ne sont PAS encore threadées jusqu'à la résolution des membres
+— les contraintes propres d'un membre feuille, elles, s'appliquent. À faire si
+le besoin apparaît.
+
+**Slice 2 (à suivre)** : `unplayed_only` — mécanisme distinct (cooldown à
+expiration infinie, keyé par (playlist, identité d'épisode) avec garde-fou
+chemin+taille/mtime). Table/logique à part.
+
+**Validation** : édité ; `cargo test -p stationd` à confirmer.
+
 ### — Groupes imbriqués : déjà faits, verrouillés par des tests (2026-09-22) —
 
 Constat : les groupes imbriqués (un groupe membre d'un groupe) étaient **déjà
@@ -765,9 +880,11 @@ dans le découpage des modules (`grid_index` = A, `grid_store` = B).
 ### Grille / scheduler (suite directe)
 - **Refacto acteur** : `GridEngine` en tâche tokio possédante, grille en
   mémoire invalidée à l'apply, mutations par mpsc (gabarit `library_actor`).
-- **Sélection — suite** : anti-répétition (`constraints`) + `unplayed_only`
-  (réclament l'historique famille B), `queue`/`remote`. (`limit` standalone :
-  écarté par design ; groupes imbriqués : faits — cf. Fait/décisions 2026-09-22.)
+- **Sélection** : complète (static / dynamic / remote / queue / group +
+  anti-répétition + unplayed_only). Reste : contraintes portées par un GROUPE
+  lui-même (non threadées jusqu'aux membres — cf. Fait anti-répétition).
+  `limit` standalone : écarté ; marquage `unplayed_only` et relais remote :
+  auto-câblés avec Liquidsoap.
 - **Refs de membres relatives au dossier du groupe** : `normalize_ref` ne
   résout pas un `ref` de membre relativement à l'emplacement du groupe — il
   faut aujourd'hui le chemin complet

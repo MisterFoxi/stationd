@@ -10,7 +10,7 @@ use stationd::proto::{library, plugin, schedule, station};
 use station::station_client::StationClient;
 use station::{PlaylistAddRequest, PlaylistListRequest, PlaylistSyncRequest, QuitRequest, StatusRequest};
 use schedule::schedule_service_client::ScheduleServiceClient;
-use schedule::{ApplyGridRequest, CheckCoverageRequest, ExportGridRequest, GridFile, PreviewRequest, ResolveNextRequest, SetClockRequest};
+use schedule::{ApplyGridRequest, CheckCoverageRequest, EnqueueRequest, ExportGridRequest, GridFile, PreviewRequest, ResolveNextRequest, SetClockRequest};
 use library::library_service_client::LibraryServiceClient;
 use library::{ListMediaRequest, ScanRequest};
 use plugin::plugin_service_client::PluginServiceClient;
@@ -41,6 +41,9 @@ enum Command {
     /// Grid / scheduler operations
     #[command(subcommand)]
     Schedule(ScheduleCommand),
+    /// Runtime queue operations (audience requests / DJ injection)
+    #[command(subcommand)]
+    Queue(QueueCommand),
     /// Media library operations
     #[command(subcommand)]
     Library(LibraryCommand),
@@ -146,6 +149,19 @@ enum ScheduleCommand {
         /// Only check these rule ids (repeatable). Omitted → the whole grid.
         #[arg(long = "rule")]
         rules: Vec<String>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum QueueCommand {
+    /// Push a media into a queue playlist's runtime buffer (audience request /
+    /// DJ injection). Refused — and exits non-zero — if the queue is at its
+    /// max_len.
+    Push {
+        /// The queue playlist ref.
+        reference: String,
+        /// The media rel_path to enqueue.
+        media: String,
     },
 }
 
@@ -493,6 +509,22 @@ async fn main() -> anyhow::Result<()> {
             // Non-zero only on ✗ (INSUFFICIENT); ⚠ THIN still airs, so it does
             // not fail a CI gate on its own.
             if worst == schedule::Verdict::Insufficient {
+                std::process::exit(1);
+            }
+        }
+        Command::Queue(QueueCommand::Push { reference, media }) => {
+            let mut sched = ScheduleServiceClient::connect(args.addr.clone()).await?;
+            let reply = sched
+                .enqueue(EnqueueRequest {
+                    playlist_ref: reference,
+                    media_path: media,
+                })
+                .await?
+                .into_inner();
+            if reply.accepted {
+                println!("queued (buffer len {})", reply.len);
+            } else {
+                println!("refused: queue at max_len (buffer len {})", reply.len);
                 std::process::exit(1);
             }
         }

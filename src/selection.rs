@@ -27,9 +27,10 @@ use std::collections::{HashMap, HashSet};
 use rand::seq::SliceRandom;
 use sqlx::SqlitePool;
 
+use crate::broadcast_log;
 use crate::playlist::{
-    Filter, Match, Member, MemberUnavailable, Mode, Order, OrderBy, Playlist, PlaylistError,
-    Selection, Strategy,
+    Constraints, Filter, Match, Member, MemberUnavailable, Mode, Order, OrderBy, Playlist,
+    PlaylistError, Selection, Strategy,
 };
 use crate::playlist_cursor;
 use crate::plugin::{Candidate, PluginHandle};
@@ -57,11 +58,33 @@ pub enum SelectionError {
     Sqlx(#[from] sqlx::Error),
 }
 
+/// The outcome of resolving a grid `playlist_ref`: either a concrete local
+/// media (`rel_path` under the media root) or a remote stream URL (a `remote`
+/// playlist, relayed by Liquidsoap via `input.http`). Kept distinct so the
+/// engine never runs the on-disk existence check on a stream URL.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Resolved {
+    File(String),
+    Stream(String),
+}
+
+impl Resolved {
+    /// The resolved token — a media `rel_path` or a stream URL — discarding the
+    /// file/stream distinction. Used by the plain `resolve_ref` helpers.
+    pub fn into_token(self) -> String {
+        match self {
+            Resolved::File(s) | Resolved::Stream(s) => s,
+        }
+    }
+}
+
 /// Resolve a grid `playlist_ref` to one concrete media `rel_path`, without any
 /// plugin filtering, at the current wall clock (used by tests and simple
 /// callers). For a time-budget group member, prefer [`resolve_ref_at`].
 pub async fn resolve_ref(pool: &SqlitePool, playlist_ref: &str) -> Result<String, SelectionError> {
-    resolve_inner(pool, None, wall_now(), playlist_ref).await
+    resolve_inner(pool, None, wall_now(), playlist_ref)
+        .await
+        .map(Resolved::into_token)
 }
 
 /// Same as [`resolve_ref`] but at an explicit instant `now` (epoch seconds), so
@@ -72,7 +95,9 @@ pub async fn resolve_ref_at(
     now: i64,
     playlist_ref: &str,
 ) -> Result<String, SelectionError> {
-    resolve_inner(pool, None, now, playlist_ref).await
+    resolve_inner(pool, None, now, playlist_ref)
+        .await
+        .map(Resolved::into_token)
 }
 
 /// Same, but let the plugin system filter the candidate pool, at instant `now`.
@@ -84,7 +109,7 @@ pub async fn resolve_ref_with_plugins(
     plugins: Option<&PluginHandle>,
     now: i64,
     playlist_ref: &str,
-) -> Result<String, SelectionError> {
+) -> Result<Resolved, SelectionError> {
     resolve_inner(pool, plugins, now, playlist_ref).await
 }
 
@@ -93,7 +118,7 @@ async fn resolve_inner(
     plugins: Option<&PluginHandle>,
     now: i64,
     playlist_ref: &str,
-) -> Result<String, SelectionError> {
+) -> Result<Resolved, SelectionError> {
     // Resolve against the canonical key. The store lookup is itself
     // case-insensitive on the ref (it normalizes), but we normalize here too so
     // the canonical key flows DOWNSTREAM as the cursor / group-state key —
@@ -124,10 +149,15 @@ async fn resolve_media(
     reference: &str,
     playlist: &Playlist,
     depth: u32,
-) -> Result<String, SelectionError> {
+) -> Result<Resolved, SelectionError> {
     let sel = &playlist.selection;
     match sel.mode {
-        Mode::Static | Mode::Dynamic => resolve_leaf(pool, plugins, reference, sel).await,
+        Mode::Static | Mode::Dynamic => {
+            let constraints = playlist.broadcast.as_ref().and_then(|b| b.constraints.as_ref());
+            resolve_leaf(pool, plugins, now, reference, sel, constraints)
+                .await
+                .map(Resolved::File)
+        }
         Mode::Group => match sel.strategy {
             Some(Strategy::Sequence) => {
                 resolve_group_rotation(pool, plugins, now, reference, sel, false, depth).await
@@ -145,7 +175,24 @@ async fn resolve_media(
             Some(Strategy::Weighted) => resolve_group_weighted(pool, plugins, now, sel, depth).await,
             None => Err(SelectionError::Unsupported("group without strategy".into())),
         },
-        m @ (Mode::Queue | Mode::Remote) => Err(SelectionError::UnsupportedMode(m)),
+        // A remote relays an external stream: resolve to its URL, tagged as a
+        // stream so the engine never disk-checks it. Liquidsoap does the relay.
+        Mode::Remote => {
+            let url = sel
+                .url
+                .clone()
+                .ok_or_else(|| SelectionError::Unsupported("remote without url".into()))?;
+            Ok(Resolved::Stream(url))
+        }
+        Mode::Queue => {
+            // Volatile runtime buffer (requests / DJ injection): pop one entry
+            // per turn (FIFO/LIFO), consuming it. Empty → PoolEmpty → fallthrough.
+            let lifo = matches!(sel.order, Some(Order::Lifo));
+            match crate::queue_state::pop(pool, reference, lifo).await? {
+                Some(path) => Ok(Resolved::File(path)),
+                None => Err(SelectionError::PoolEmpty),
+            }
+        }
     }
 }
 
@@ -155,8 +202,10 @@ async fn resolve_media(
 async fn resolve_leaf(
     pool: &SqlitePool,
     plugins: Option<&PluginHandle>,
+    now: i64,
     reference: &str,
     sel: &Selection,
+    constraints: Option<&Constraints>,
 ) -> Result<String, SelectionError> {
     let order = effective_order(sel);
 
@@ -184,6 +233,25 @@ async fn resolve_leaf(
             );
         }
     }
+    // 2b. Anti-repetition constraints against the station-wide history. A HARD
+    //     filter: never relaxed implicitly. If it empties the pool, that
+    //     surfaces as PoolEmpty and the grid falls through — no forced repeat,
+    //     no silent gap.
+    apply_constraints(pool, now, constraints, &mut candidates).await?;
+
+    // 2c. play-once (`unplayed_only`): exclude episodes already fully played
+    //     for THIS playlist (infinite-expiry cooldown, family B). Valid only
+    //     with newest/oldest — anything else is a loud error, never ignored.
+    if sel.unplayed_only == Some(true) {
+        if !matches!(order, Order::Newest | Order::Oldest) {
+            return Err(SelectionError::Unsupported(
+                "unplayed_only requires order = newest or oldest".into(),
+            ));
+        }
+        let played = crate::episode_play::played_matching(pool, reference).await?;
+        candidates.retain(|c| !played.contains(&c.rel_path));
+    }
+
     if candidates.is_empty() {
         return Err(SelectionError::PoolEmpty);
     }
@@ -197,20 +265,58 @@ async fn resolve_leaf(
             .clone()),
         Order::Sequential => cursor_pick(pool, reference, &candidates).await,
         Order::Newest => {
-            reject_unplayed_only(sel)?;
             let key = order_key(sel)?;
             candidates.sort_by(|a, b| cmp_by(a, b, key));
             // Ascending sort → the newest is the last element.
             Ok(candidates.last().expect("non-empty pool").rel_path.clone())
         }
         Order::Oldest => {
-            reject_unplayed_only(sel)?;
             let key = order_key(sel)?;
             candidates.sort_by(|a, b| cmp_by(a, b, key));
             cursor_pick(pool, reference, &candidates).await
         }
         other => Err(SelectionError::UnsupportedOrder(other)),
     }
+}
+
+/// Drop candidates barred by the playlist's own anti-repetition constraints,
+/// evaluated against the station-wide broadcast history (`broadcast_log`):
+/// a candidate whose `rel_path` played within `no_same_track_within`, or whose
+/// `artist` played within `no_same_artist_within`, is removed. A HARD filter,
+/// never relaxed implicitly (doc): if it empties the pool the caller surfaces
+/// `PoolEmpty` and the grid falls through. An untagged candidate (no artist) is
+/// never excluded by the artist window. `now` is epoch seconds; each window's
+/// cutoff is `now - window`. Constraints declared on a GROUP itself (not its
+/// members) are not threaded here yet — a member's own constraints do apply.
+async fn apply_constraints(
+    pool: &SqlitePool,
+    now: i64,
+    constraints: Option<&Constraints>,
+    candidates: &mut Vec<Candidate>,
+) -> Result<(), SelectionError> {
+    let Some(c) = constraints else {
+        return Ok(());
+    };
+    if let Some(window) = &c.no_same_track_within {
+        let secs = crate::playlist::parse_duration_secs(window).map_err(|e| {
+            SelectionError::Unsupported(format!("no_same_track_within `{window}`: {e}"))
+        })?;
+        let cutoff = now.saturating_sub(secs as i64);
+        let recent = broadcast_log::tracks_since(pool, cutoff).await?;
+        candidates.retain(|cand| !recent.contains(&cand.rel_path));
+    }
+    if let Some(window) = &c.no_same_artist_within {
+        let secs = crate::playlist::parse_duration_secs(window).map_err(|e| {
+            SelectionError::Unsupported(format!("no_same_artist_within `{window}`: {e}"))
+        })?;
+        let cutoff = now.saturating_sub(secs as i64);
+        let recent = broadcast_log::artists_since(pool, cutoff).await?;
+        candidates.retain(|cand| match &cand.artist {
+            Some(a) => !recent.contains(a),
+            None => true, // untagged: nothing to match, always eligible
+        });
+    }
+    Ok(())
 }
 
 /// A rotation group — `sequence` or `shuffle` — hands out one track per turn,
@@ -238,7 +344,7 @@ async fn resolve_group_rotation(
     sel: &Selection,
     shuffle: bool,
     depth: u32,
-) -> Result<String, SelectionError> {
+) -> Result<Resolved, SelectionError> {
     let n = sel.members.len();
     if n == 0 {
         return Err(SelectionError::PoolEmpty);
@@ -376,7 +482,7 @@ async fn resolve_group_weighted(
     now: i64,
     sel: &Selection,
     depth: u32,
-) -> Result<String, SelectionError> {
+) -> Result<Resolved, SelectionError> {
     let policy = sel
         .on_member_unavailable
         .unwrap_or(MemberUnavailable::Abort);
@@ -441,21 +547,25 @@ fn member_runtime_secs(member: &Member) -> Result<Option<i64>, SelectionError> {
 /// `resolve_media` (one track per turn — the child advances its own
 /// `group_state` under its own ref). The recursion is boxed (mutually recursive
 /// async) and capped at `MAX_GROUP_DEPTH`, a runtime backstop for a cycle that
-/// slipped the apply-time DAG check. `queue`/`remote` members are unsupported.
+/// slipped the apply-time DAG check. A `remote` member resolves to its stream
+/// URL; `queue` members are unsupported.
 async fn resolve_member(
     pool: &SqlitePool,
     plugins: Option<&PluginHandle>,
     now: i64,
     member_key: &str,
     depth: u32,
-) -> Result<String, SelectionError> {
+) -> Result<Resolved, SelectionError> {
     let toml = store::playlist_toml_by_ref(pool, member_key)
         .await?
         .ok_or_else(|| SelectionError::PlaylistNotFound(member_key.to_string()))?;
     let playlist = Playlist::parse(&toml)?;
     match playlist.selection.mode {
         Mode::Static | Mode::Dynamic => {
-            resolve_leaf(pool, plugins, member_key, &playlist.selection).await
+            let constraints = playlist.broadcast.as_ref().and_then(|b| b.constraints.as_ref());
+            resolve_leaf(pool, plugins, now, member_key, &playlist.selection, constraints)
+                .await
+                .map(Resolved::File)
         }
         Mode::Group => {
             if depth >= MAX_GROUP_DEPTH {
@@ -465,9 +575,21 @@ async fn resolve_member(
             }
             Box::pin(resolve_media(pool, plugins, now, member_key, &playlist, depth + 1)).await
         }
-        m @ (Mode::Queue | Mode::Remote) => Err(SelectionError::Unsupported(format!(
-            "group member with mode {m:?} (queue / remote not supported yet)"
-        ))),
+        // A remote member relays its stream (e.g. a night relay inside a group).
+        Mode::Remote => {
+            let url = playlist.selection.url.clone().ok_or_else(|| {
+                SelectionError::Unsupported(format!("remote member `{member_key}` without url"))
+            })?;
+            Ok(Resolved::Stream(url))
+        }
+        // A queue member pops its own runtime buffer, consuming one entry.
+        Mode::Queue => {
+            let lifo = matches!(playlist.selection.order, Some(Order::Lifo));
+            match crate::queue_state::pop(pool, member_key, lifo).await? {
+                Some(path) => Ok(Resolved::File(path)),
+                None => Err(SelectionError::PoolEmpty),
+            }
+        }
     }
 }
 
@@ -512,15 +634,6 @@ fn cmp_by(a: &Candidate, b: &Candidate, key: SortKey) -> std::cmp::Ordering {
             .cmp(&b.mtime_ns)
             .then_with(|| a.rel_path.cmp(&b.rel_path)),
     }
-}
-
-fn reject_unplayed_only(sel: &Selection) -> Result<(), SelectionError> {
-    if sel.unplayed_only == Some(true) {
-        return Err(SelectionError::Unsupported(
-            "unplayed_only (needs the play history)".into(),
-        ));
-    }
-    Ok(())
 }
 
 /// Advance the playlist cursor over an ordered pool: the file after the last
@@ -1723,30 +1836,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unplayed_only_and_published_are_rejected_for_now() {
+    async fn published_order_by_is_rejected_for_now() {
         let (_d, pool) = fresh_db().await;
         media_index::replace_library(&pool, &[media("pod/ep001.mp3", "", 0, &[])], 1000)
             .await
             .unwrap();
-
-        let unplayed = r#"
-            name = "U"
-            [selection]
-            mode = "dynamic"
-            order = "oldest"
-            order_by = "filename"
-            unplayed_only = true
-            [[selection.filter]]
-            field = "path"
-            op = "prefix"
-            value = "pod/"
-        "#;
-        add_playlist(&pool, "u", unplayed).await;
-        assert!(matches!(
-            resolve_ref(&pool, "u").await,
-            Err(SelectionError::Unsupported(_))
-        ));
-
         let published = r#"
             name = "P"
             [selection]
@@ -2227,5 +2321,350 @@ mod tests {
         // Budget elapsed → the other member takes over (only two in the cycle).
         let next = resolve_ref_at(&pool, 1061, "shufbud").await.unwrap();
         assert_ne!(next.chars().next().unwrap(), first_letter, "switches member after budget");
+    }
+
+    // ----- anti-repetition (constraints vs station history) ------------
+
+    #[tokio::test]
+    async fn no_same_track_within_is_a_hard_filter() {
+        let (_d, pool) = fresh_db().await;
+        media_index::replace_library(&pool, &[media("a.mp3", "X", 0, &[])], 1000)
+            .await
+            .unwrap();
+        let toml = r#"
+            name = "Rot"
+            [selection]
+            mode = "dynamic"
+            order = "shuffle"
+            [[selection.filter]]
+            field = "path"
+            op = "prefix"
+            value = ""
+            [broadcast.constraints]
+            no_same_track_within = "1h"
+        "#;
+        add_playlist(&pool, "rot", toml).await;
+        let now = 1_000_000;
+        // Played 30 min ago (inside the 1h window) → the only track is excluded
+        // → PoolEmpty (never relaxed); the grid would fall through.
+        crate::broadcast_log::record(&pool, "a.mp3", Some("X"), crate::resolver::Epoch(now - 1800))
+            .await
+            .unwrap();
+        assert!(matches!(
+            resolve_ref_at(&pool, now, "rot").await,
+            Err(SelectionError::PoolEmpty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn track_outside_the_window_is_allowed_again() {
+        let (_d, pool) = fresh_db().await;
+        media_index::replace_library(&pool, &[media("a.mp3", "X", 0, &[])], 1000)
+            .await
+            .unwrap();
+        let toml = r#"
+            name = "Rot"
+            [selection]
+            mode = "dynamic"
+            order = "shuffle"
+            [[selection.filter]]
+            field = "path"
+            op = "prefix"
+            value = ""
+            [broadcast.constraints]
+            no_same_track_within = "1h"
+        "#;
+        add_playlist(&pool, "rot", toml).await;
+        let now = 1_000_000;
+        // Played 2h ago (outside the 1h window) → eligible again.
+        crate::broadcast_log::record(&pool, "a.mp3", Some("X"), crate::resolver::Epoch(now - 7200))
+            .await
+            .unwrap();
+        assert_eq!(resolve_ref_at(&pool, now, "rot").await.unwrap(), "a.mp3");
+    }
+
+    #[tokio::test]
+    async fn no_same_artist_within_excludes_by_artist() {
+        let (_d, pool) = fresh_db().await;
+        media_index::replace_library(
+            &pool,
+            &[media("a.mp3", "X", 0, &[]), media("b.mp3", "Y", 0, &[])],
+            1000,
+        )
+        .await
+        .unwrap();
+        let toml = r#"
+            name = "Rot"
+            [selection]
+            mode = "dynamic"
+            order = "shuffle"
+            [[selection.filter]]
+            field = "path"
+            op = "prefix"
+            value = ""
+            [broadcast.constraints]
+            no_same_artist_within = "1h"
+        "#;
+        add_playlist(&pool, "rot", toml).await;
+        let now = 1_000_000;
+        // Artist X aired 30 min ago → a.mp3 (artist X) barred, only b (Y) plays.
+        crate::broadcast_log::record(&pool, "a.mp3", Some("X"), crate::resolver::Epoch(now - 1800))
+            .await
+            .unwrap();
+        assert_eq!(resolve_ref_at(&pool, now, "rot").await.unwrap(), "b.mp3");
+    }
+
+    #[tokio::test]
+    async fn untagged_track_is_never_excluded_by_artist_window() {
+        let (_d, pool) = fresh_db().await;
+        // media_mtime leaves artist = None (untagged).
+        media_index::replace_library(&pool, &[media_mtime("a.mp3", 0)], 1000)
+            .await
+            .unwrap();
+        let toml = r#"
+            name = "Rot"
+            [selection]
+            mode = "dynamic"
+            order = "shuffle"
+            [[selection.filter]]
+            field = "path"
+            op = "prefix"
+            value = ""
+            [broadcast.constraints]
+            no_same_artist_within = "1h"
+        "#;
+        add_playlist(&pool, "rot", toml).await;
+        let now = 1_000_000;
+        // Some artist aired recently, but a.mp3 is untagged → nothing to match
+        // → it stays eligible.
+        crate::broadcast_log::record(&pool, "other.mp3", Some("X"), crate::resolver::Epoch(now - 1800))
+            .await
+            .unwrap();
+        assert_eq!(resolve_ref_at(&pool, now, "rot").await.unwrap(), "a.mp3");
+    }
+
+    // ----- play-once (unplayed_only vs episode_play) -------------------
+
+    #[tokio::test]
+    async fn oldest_unplayed_only_excludes_played_and_guard_reeligibilizes() {
+        let (_d, pool) = fresh_db().await;
+        media_index::replace_library(
+            &pool,
+            &[
+                media("pod/ep001.mp3", "", 0, &[]),
+                media("pod/ep002.mp3", "", 0, &[]),
+                media("pod/ep003.mp3", "", 0, &[]),
+            ],
+            1000,
+        )
+        .await
+        .unwrap();
+        let toml = r#"
+            name = "Feuilleton"
+            [selection]
+            mode = "dynamic"
+            order = "oldest"
+            order_by = "filename"
+            unplayed_only = true
+            [[selection.filter]]
+            field = "path"
+            op = "prefix"
+            value = "pod/"
+        "#;
+        add_playlist(&pool, "rot", toml).await;
+        // fixture media() → size 1, mtime 0; mark with the matching guard.
+        assert_eq!(resolve_ref(&pool, "rot").await.unwrap(), "pod/ep001.mp3");
+        crate::episode_play::mark(&pool, "rot", "pod/ep001.mp3", 1, 0, crate::resolver::Epoch(1000))
+            .await
+            .unwrap();
+        assert_eq!(resolve_ref(&pool, "rot").await.unwrap(), "pod/ep002.mp3");
+        crate::episode_play::mark(&pool, "rot", "pod/ep002.mp3", 1, 0, crate::resolver::Epoch(1000))
+            .await
+            .unwrap();
+        crate::episode_play::mark(&pool, "rot", "pod/ep003.mp3", 1, 0, crate::resolver::Epoch(1000))
+            .await
+            .unwrap();
+        // All played → pool empty (never a forced repeat).
+        assert!(matches!(
+            resolve_ref(&pool, "rot").await,
+            Err(SelectionError::PoolEmpty)
+        ));
+        // A diverged guard (mtime ≠ current media) re-eligibilizes ep001.
+        crate::episode_play::mark(&pool, "rot", "pod/ep001.mp3", 1, 999, crate::resolver::Epoch(1000))
+            .await
+            .unwrap();
+        assert_eq!(resolve_ref(&pool, "rot").await.unwrap(), "pod/ep001.mp3");
+    }
+
+    #[tokio::test]
+    async fn newest_unplayed_only_takes_the_newest_unplayed() {
+        let (_d, pool) = fresh_db().await;
+        media_index::replace_library(
+            &pool,
+            &[
+                media("pod/ep001.mp3", "", 0, &[]),
+                media("pod/ep002.mp3", "", 0, &[]),
+                media("pod/ep003.mp3", "", 0, &[]),
+            ],
+            1000,
+        )
+        .await
+        .unwrap();
+        let toml = r#"
+            name = "Backlog"
+            [selection]
+            mode = "dynamic"
+            order = "newest"
+            order_by = "filename"
+            unplayed_only = true
+            [[selection.filter]]
+            field = "path"
+            op = "prefix"
+            value = "pod/"
+        "#;
+        add_playlist(&pool, "rot", toml).await;
+        assert_eq!(resolve_ref(&pool, "rot").await.unwrap(), "pod/ep003.mp3");
+        crate::episode_play::mark(&pool, "rot", "pod/ep003.mp3", 1, 0, crate::resolver::Epoch(1000))
+            .await
+            .unwrap();
+        assert_eq!(resolve_ref(&pool, "rot").await.unwrap(), "pod/ep002.mp3");
+    }
+
+    #[tokio::test]
+    async fn unplayed_only_requires_a_dated_order_at_resolution() {
+        let (_d, pool) = fresh_db().await;
+        media_index::replace_library(&pool, &[media("pod/ep001.mp3", "", 0, &[])], 1000)
+            .await
+            .unwrap();
+        // shuffle + unplayed_only → loud error at resolution (no silent ignore).
+        let toml = r#"
+            name = "Bad"
+            [selection]
+            mode = "dynamic"
+            order = "shuffle"
+            unplayed_only = true
+            [[selection.filter]]
+            field = "path"
+            op = "prefix"
+            value = "pod/"
+        "#;
+        add_playlist(&pool, "rot", toml).await;
+        assert!(matches!(
+            resolve_ref(&pool, "rot").await,
+            Err(SelectionError::Unsupported(_))
+        ));
+    }
+
+    // ----- remote (stream relay) --------------------------------------
+
+    #[tokio::test]
+    async fn remote_resolves_to_its_url_as_a_stream() {
+        let (_d, pool) = fresh_db().await;
+        let toml = r#"
+            name = "goodnight"
+            [selection]
+            mode = "remote"
+            url = "http://nightmusic.live/stream"
+        "#;
+        add_playlist(&pool, "night", toml).await;
+        // resolve_ref flattens to the resolved token (the url).
+        assert_eq!(
+            resolve_ref(&pool, "night").await.unwrap(),
+            "http://nightmusic.live/stream"
+        );
+        // The engine path exposes the typed Stream, distinct from a File.
+        match resolve_ref_with_plugins(&pool, None, 0, "night").await.unwrap() {
+            Resolved::Stream(u) => assert_eq!(u, "http://nightmusic.live/stream"),
+            Resolved::File(f) => panic!("expected a stream, got file {f}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn remote_as_group_member_yields_a_stream() {
+        let (_d, pool) = fresh_db().await;
+        media_index::replace_library(&pool, &[media("a/x.mp3", "", 0, &[])], 1000)
+            .await
+            .unwrap();
+        add_playlist(
+            &pool,
+            "goodnight",
+            r#"
+                name = "goodnight"
+                [selection]
+                mode = "remote"
+                url = "http://nightmusic.live"
+            "#,
+        )
+        .await;
+        add_letter_leaves(&pool, &["a"]).await;
+        add_playlist(
+            &pool,
+            "grp",
+            r#"
+                name = "Grp"
+                [selection]
+                mode = "group"
+                strategy = "sequence"
+                members = [{ ref = "goodnight", take = 1 }, { ref = "a", take = 1 }]
+            "#,
+        )
+        .await;
+        // Turn 1 is the remote member → a stream.
+        match resolve_ref_with_plugins(&pool, None, 0, "grp").await.unwrap() {
+            Resolved::Stream(u) => assert_eq!(u, "http://nightmusic.live"),
+            other => panic!("expected a stream, got {other:?}"),
+        }
+    }
+
+    // ----- queue (runtime buffer) -------------------------------------
+
+    #[tokio::test]
+    async fn queue_pops_fifo_then_empties() {
+        let (_d, pool) = fresh_db().await;
+        // A queue holds explicit rel_paths pushed at runtime — no media index
+        // needed for the pop itself.
+        let toml = r#"
+            name = "Requests"
+            [selection]
+            mode = "queue"
+            order = "fifo"
+            max_len = 20
+        "#;
+        add_playlist(&pool, "req", toml).await;
+        crate::queue_state::push(&pool, "req", "a.mp3", Some(20), crate::resolver::Epoch(1))
+            .await
+            .unwrap();
+        crate::queue_state::push(&pool, "req", "b.mp3", Some(20), crate::resolver::Epoch(2))
+            .await
+            .unwrap();
+        // FIFO: oldest first, each consumed.
+        assert_eq!(resolve_ref(&pool, "req").await.unwrap(), "a.mp3");
+        assert_eq!(resolve_ref(&pool, "req").await.unwrap(), "b.mp3");
+        // Drained → PoolEmpty (the grid would fall through).
+        assert!(matches!(
+            resolve_ref(&pool, "req").await,
+            Err(SelectionError::PoolEmpty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn queue_lifo_pops_newest_first() {
+        let (_d, pool) = fresh_db().await;
+        let toml = r#"
+            name = "DJ"
+            [selection]
+            mode = "queue"
+            order = "lifo"
+        "#;
+        add_playlist(&pool, "dj", toml).await;
+        crate::queue_state::push(&pool, "dj", "a.mp3", None, crate::resolver::Epoch(1))
+            .await
+            .unwrap();
+        crate::queue_state::push(&pool, "dj", "b.mp3", None, crate::resolver::Epoch(2))
+            .await
+            .unwrap();
+        // LIFO: newest first.
+        assert_eq!(resolve_ref(&pool, "dj").await.unwrap(), "b.mp3");
+        assert_eq!(resolve_ref(&pool, "dj").await.unwrap(), "a.mp3");
     }
 }
