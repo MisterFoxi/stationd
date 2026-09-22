@@ -7,7 +7,7 @@ use std::collections::HashSet;
 use sqlx::SqlitePool;
 
 use crate::playlist::{MemberQuota, Mode, Playlist, PlaylistError, Selection, Strategy};
-use crate::selection::{materialize_dynamic, materialize_static, SelectionError};
+use crate::selection::{materialize_dynamic, materialize_static, SelectionError, MAX_GROUP_DEPTH};
 
 /// Count and duration are independently optional: a remote/queue member can
 /// have a declared runtime even though its media count is unknown.
@@ -49,11 +49,23 @@ pub struct PoolInspection {
 /// Group totals sum the member pools (not a distinct union across members).
 /// Shared media therefore count once per member. Quotas never truncate local
 /// pools; remote/queue members use their declared runtime when one exists.
-/// Missing refs, invalid filters and nested groups are explicit errors, not
+/// A member that is itself a group recurses (its aggregate folds into the
+/// parent total). Missing refs and invalid filters are explicit errors, not
 /// empty pools or guessed zero durations.
 pub async fn inspect_ref(
     pool: &SqlitePool,
     playlist_ref: &str,
+) -> Result<PoolInspection, SelectionError> {
+    inspect_ref_at_depth(pool, playlist_ref, 0).await
+}
+
+/// Depth-tracked worker for [`inspect_ref`]. A nested group member recurses,
+/// bounded by [`MAX_GROUP_DEPTH`] — the runtime backstop against a cycle that
+/// slipped the apply-time DAG check (matches the resolution path).
+async fn inspect_ref_at_depth(
+    pool: &SqlitePool,
+    playlist_ref: &str,
+    depth: u32,
 ) -> Result<PoolInspection, SelectionError> {
     let playlist = load_playlist(pool, playlist_ref).await?;
     let sel = &playlist.selection;
@@ -64,6 +76,11 @@ pub async fn inspect_ref(
                 .map_err(|e| identify_playlist(e, playlist_ref))?,
             group: None,
         });
+    }
+    if depth >= MAX_GROUP_DEPTH {
+        return Err(SelectionError::Unsupported(format!(
+            "group nesting exceeds depth {MAX_GROUP_DEPTH} at `{playlist_ref}` (cycle?)"
+        )));
     }
 
     let strategy = sel
@@ -82,9 +99,16 @@ pub async fn inspect_ref(
     };
     for (i, member) in sel.members.iter().enumerate() {
         let child = load_playlist(pool, &member.r#ref).await?;
-        let mut stats = inspect_leaf(pool, &child.selection)
-            .await
-            .map_err(|e| identify_playlist(e, &member.r#ref))?;
+        let mut stats = if child.selection.mode == Mode::Group {
+            // Nested group: recurse and fold in its aggregate stats.
+            Box::pin(inspect_ref_at_depth(pool, &member.r#ref, depth + 1))
+                .await?
+                .stats
+        } else {
+            inspect_leaf(pool, &child.selection)
+                .await
+                .map_err(|e| identify_playlist(e, &member.r#ref))?
+        };
         if matches!(child.selection.mode, Mode::Remote | Mode::Queue) {
             if let Some(runtime) = &member.runtime {
                 let seconds = crate::playlist::parse_duration_secs(runtime)

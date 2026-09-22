@@ -78,6 +78,50 @@ Autres, indépendants :
 
 ## Fait
 
+### — Groupes imbriqués : déjà faits, verrouillés par des tests (2026-09-22) —
+
+Constat : les groupes imbriqués (un groupe membre d'un groupe) étaient **déjà
+implémentés des deux côtés** — résolution (`selection.rs` : `resolve_member`
+recurse via `Box::pin(resolve_media)`, `now`/`depth` threadés, cap
+`MAX_GROUP_DEPTH`) ET inspection (`pool_inspection.rs` : `inspect_ref_at_depth`
+recurse, même cap). `ETAT` était en retard sur le code.
+
+La résolution avait ses tests ; l'inspection nested n'en avait **aucun** (chemin
+récursif non exercé, bras `inspect_leaf` « nested group pools » devenu mort
+défensif). Et `CheckCoverage` n'avait aucun test. Ajouté dans
+`tests/pool_preview.rs` :
+- `inspect_ref_sums_a_nested_group_recursively` — outer=sequence[inner,jazz],
+  inner=weighted[jazz,static] → total 6 / 1_022_000 ms, le membre nested portant
+  son agrégat 4 / 601_250 ms.
+- `coverage_flags_empty_pool_and_missing_ref` — ✗ pool vide, ✗ ref cassée, worst=✗.
+- `coverage_flags_undersized_group_members` — `runtime = 1h` et `take = 5` sur un
+  pool de 2 pistes → ⚠, membre nommé.
+- `coverage_ok_for_a_sufficient_rotation` — dynamic sans contrainte → OK.
+
+Rien à construire côté nested. `cargo test -p stationd` à relancer.
+
+### — Décision : pas de `limit` standalone au playout (2026-09-22) —
+
+`broadcast.limit` sur une playlist **autonome** (base/day_part référencée
+directement par la grille) n'est **pas appliqué au playout, par design**.
+
+Vérification faite sur la famille B : `every_state` (rule_id/last_played/
+tracks_since), `at_clock_taken`, `group_state` (member_idx/take_count),
+`playlist_cursor`. Aucune « source de grille active + run count », et rien pour
+la dériver. L'appliquer imposerait une nouvelle table `grid_activation` + une
+sémantique de « cède la main » sans destinataire clair dans une grille *pull*
+(le résolveur re-choisit par les règles à chaque bord ; rien vers quoi tourner
+pour une base unique).
+
+Or « N pistes puis on passe » **existe déjà** : `take` par membre de groupe
+(`group_state.take_count`) et `Every` au compteur (`every_state.tracks_since`).
+Aucun cas d'usage pour un `limit` standalone en plus → on ne construit rien.
+
+`limit` **reste dans le contrat** : `CheckCoverage` s'en sert comme signal de
+dimensionnement (pool ≥ N pistes distinctes). Sur une base non-groupe il est
+**advisory** (parse, non appliqué au playout — pas une erreur de validation) ; le
+tour-de-rôle « N puis suivant » passe par un groupe `rotate`/`sequence` + `take`.
+
 ### — DayPart cross-minuit (2026-09-22) —
 
 Débloque une base de nuit qui enjambe minuit (22:00→06:00). C'était un manque
@@ -722,8 +766,8 @@ dans le découpage des modules (`grid_index` = A, `grid_store` = B).
 - **Refacto acteur** : `GridEngine` en tâche tokio possédante, grille en
   mémoire invalidée à l'apply, mutations par mpsc (gabarit `library_actor`).
 - **Sélection — suite** : anti-répétition (`constraints`) + `unplayed_only`
-  (réclament l'historique famille B), `limit`/quota par activation, groupes
-  **imbriqués** (weighted/rotate faits — cf. Fait 2026-09-21), `queue`/`remote`.
+  (réclament l'historique famille B), `queue`/`remote`. (`limit` standalone :
+  écarté par design ; groupes imbriqués : faits — cf. Fait/décisions 2026-09-22.)
 - **Refs de membres relatives au dossier du groupe** : `normalize_ref` ne
   résout pas un `ref` de membre relativement à l'emplacement du groupe — il
   faut aujourd'hui le chemin complet

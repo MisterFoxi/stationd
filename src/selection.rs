@@ -105,7 +105,7 @@ async fn resolve_inner(
         .await?
         .ok_or_else(|| SelectionError::PlaylistNotFound(playlist_ref.to_string()))?;
     let playlist = Playlist::parse(&toml)?;
-    resolve_media(pool, plugins, now, &key, &playlist).await
+    resolve_media(pool, plugins, now, &key, &playlist, 0).await
 }
 
 /// Wall-clock now in epoch seconds, for callers that don't supply an instant.
@@ -123,25 +123,26 @@ async fn resolve_media(
     now: i64,
     reference: &str,
     playlist: &Playlist,
+    depth: u32,
 ) -> Result<String, SelectionError> {
     let sel = &playlist.selection;
     match sel.mode {
         Mode::Static | Mode::Dynamic => resolve_leaf(pool, plugins, reference, sel).await,
         Mode::Group => match sel.strategy {
             Some(Strategy::Sequence) => {
-                resolve_group_rotation(pool, plugins, now, reference, sel, false).await
+                resolve_group_rotation(pool, plugins, now, reference, sel, false, depth).await
             }
             Some(Strategy::Shuffle) => {
-                resolve_group_rotation(pool, plugins, now, reference, sel, true).await
+                resolve_group_rotation(pool, plugins, now, reference, sel, true, depth).await
             }
             // Rotate = plain round-robin, one track per member per turn. Its
             // members are bare (validation forbids take/runtime/weight), so the
             // sequence walk with the default take = 1 already IS a rotation;
             // position persists across turns via group_state.
             Some(Strategy::Rotate) => {
-                resolve_group_rotation(pool, plugins, now, reference, sel, false).await
+                resolve_group_rotation(pool, plugins, now, reference, sel, false, depth).await
             }
-            Some(Strategy::Weighted) => resolve_group_weighted(pool, plugins, sel).await,
+            Some(Strategy::Weighted) => resolve_group_weighted(pool, plugins, now, sel, depth).await,
             None => Err(SelectionError::Unsupported("group without strategy".into())),
         },
         m @ (Mode::Queue | Mode::Remote) => Err(SelectionError::UnsupportedMode(m)),
@@ -217,7 +218,9 @@ async fn resolve_leaf(
 /// wrapping (a new activation). `sequence` walks the declared order; `shuffle`
 /// walks a random permutation, re-drawn each cycle and persisted so a restart
 /// mid-cycle does not repeat a member. State in `group_state` (family B).
-/// Members must be leaves; nested groups are a loud error for now.
+/// A member may itself be a group: it is resolved recursively (one track per
+/// turn), bounded by [`MAX_GROUP_DEPTH`]. Cycles are caught at apply
+/// (`validate_set`); the depth cap is the runtime backstop.
 ///
 /// Per-member quota (mutually exclusive, validated upstream):
 /// - **`take`** (tracks): emit, count, advance once the count reaches `take`.
@@ -234,6 +237,7 @@ async fn resolve_group_rotation(
     group_ref: &str,
     sel: &Selection,
     shuffle: bool,
+    depth: u32,
 ) -> Result<String, SelectionError> {
     let n = sel.members.len();
     if n == 0 {
@@ -297,7 +301,7 @@ async fn resolve_group_rotation(
             }
         }
 
-        match resolve_member(pool, plugins, &member_key).await {
+        match resolve_member(pool, plugins, now, &member_key, depth).await {
             Ok(track) => {
                 if member.runtime.is_some() {
                     // Time budget: stamp the slot start on the first track and
@@ -351,6 +355,12 @@ async fn resolve_group_rotation(
 /// set a weight and others don't. `0` is an explicit exclusion from the draw.
 const DEFAULT_WEIGHT: u32 = 15;
 
+/// Max group nesting depth honoured at resolution/inspection. Cycles are
+/// rejected at apply (`validate_set` DAG check); this is the runtime backstop
+/// for hand-edited state that bypassed it — exceeding it is a loud error, never
+/// an infinite recursion.
+pub(crate) const MAX_GROUP_DEPTH: u32 = 8;
+
 /// A `weighted` group: draw one available member at random, weighted by its
 /// `weight`, and emit one track from it. Independent draws — nothing is
 /// persisted (no position, unlike `rotate`/`sequence`). A member with no
@@ -358,12 +368,14 @@ const DEFAULT_WEIGHT: u32 = 15;
 /// draw (not a global disable). If the drawn member yields nothing, the group's
 /// `on_member_unavailable` decides: `skip` re-draws among the rest, `abort`
 /// (default) bubbles `PoolEmpty` so the grid falls through to a lower-priority
-/// source. Members must be leaves; a nested group is a loud error (via
-/// `resolve_member`).
+/// source. A member may itself be a group (resolved recursively via
+/// `resolve_member`, bounded by `MAX_GROUP_DEPTH`).
 async fn resolve_group_weighted(
     pool: &SqlitePool,
     plugins: Option<&PluginHandle>,
+    now: i64,
     sel: &Selection,
+    depth: u32,
 ) -> Result<String, SelectionError> {
     let policy = sel
         .on_member_unavailable
@@ -388,7 +400,7 @@ async fn resolve_group_weighted(
         let member = &sel.members[member_i];
         let member_key = crate::playlist::normalize_ref(&member.r#ref)
             .map_err(|_| SelectionError::PlaylistNotFound(member.r#ref.clone()))?;
-        match resolve_member(pool, plugins, &member_key).await {
+        match resolve_member(pool, plugins, now, &member_key, depth).await {
             Ok(track) => return Ok(track),
             // `skip`: drop this empty member and re-draw among the rest.
             Err(SelectionError::PoolEmpty) if policy == MemberUnavailable::Skip => {
@@ -424,10 +436,18 @@ fn member_runtime_secs(member: &Member) -> Result<Option<i64>, SelectionError> {
     }
 }
 
+/// Resolve one track for a group member. A leaf (static/dynamic) goes through
+/// `resolve_leaf`; a member that is itself a group recurses through
+/// `resolve_media` (one track per turn — the child advances its own
+/// `group_state` under its own ref). The recursion is boxed (mutually recursive
+/// async) and capped at `MAX_GROUP_DEPTH`, a runtime backstop for a cycle that
+/// slipped the apply-time DAG check. `queue`/`remote` members are unsupported.
 async fn resolve_member(
     pool: &SqlitePool,
     plugins: Option<&PluginHandle>,
+    now: i64,
     member_key: &str,
+    depth: u32,
 ) -> Result<String, SelectionError> {
     let toml = store::playlist_toml_by_ref(pool, member_key)
         .await?
@@ -437,8 +457,16 @@ async fn resolve_member(
         Mode::Static | Mode::Dynamic => {
             resolve_leaf(pool, plugins, member_key, &playlist.selection).await
         }
-        m => Err(SelectionError::Unsupported(format!(
-            "group member with mode {m:?} (nested groups / queue / remote not supported yet)"
+        Mode::Group => {
+            if depth >= MAX_GROUP_DEPTH {
+                return Err(SelectionError::Unsupported(format!(
+                    "group nesting exceeds depth {MAX_GROUP_DEPTH} at `{member_key}` (cycle?)"
+                )));
+            }
+            Box::pin(resolve_media(pool, plugins, now, member_key, &playlist, depth + 1)).await
+        }
+        m @ (Mode::Queue | Mode::Remote) => Err(SelectionError::Unsupported(format!(
+            "group member with mode {m:?} (queue / remote not supported yet)"
         ))),
     }
 }
@@ -1881,34 +1909,77 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn nested_group_is_rejected_for_now() {
+    async fn nested_group_resolves_recursively() {
         let (_d, pool) = fresh_db().await;
+        media_index::replace_library(
+            &pool,
+            &[
+                media("rock/r.mp3", "A", 0, &[]),
+                media("pop/p.mp3", "B", 0, &[]),
+                media("jingles/j.wav", "C", 0, &[]),
+            ],
+            1000,
+        )
+        .await
+        .unwrap();
+        for (r, prefix) in [("rock", "rock/"), ("pop", "pop/")] {
+            add_playlist(
+                &pool,
+                r,
+                &format!(
+                    "name = \"{r}\"\n[selection]\nmode = \"dynamic\"\norder = \"shuffle\"\n\
+                     [[selection.filter]]\nfield = \"path\"\nop = \"prefix\"\nvalue = \"{prefix}\"\n"
+                ),
+            )
+            .await;
+        }
+        add_playlist(
+            &pool,
+            "jingle",
+            "name = \"J\"\n[selection]\nmode = \"static\"\norder = \"shuffle\"\nfiles = [\"jingles/j.wav\"]\n",
+        )
+        .await;
+        // inner = weighted group of rock/pop ; outer = sequence [inner, jingle].
         add_playlist(
             &pool,
             "inner",
-            r#"
-                name = "Inner"
-                [selection]
-                mode = "group"
-                strategy = "sequence"
-                members = [{ ref = "leaf" }]
-            "#,
+            "name = \"Inner\"\n[selection]\nmode = \"group\"\nstrategy = \"weighted\"\n\
+             members = [{ ref = \"rock\", weight = 1 }, { ref = \"pop\", weight = 1 }]\n",
         )
         .await;
         add_playlist(
             &pool,
             "outer",
-            r#"
-                name = "Outer"
-                [selection]
-                mode = "group"
-                strategy = "sequence"
-                members = [{ ref = "inner" }]
-            "#,
+            "name = \"Outer\"\n[selection]\nmode = \"group\"\nstrategy = \"sequence\"\n\
+             members = [{ ref = \"inner\" }, { ref = \"jingle\", take = 1 }]\n",
+        )
+        .await;
+
+        // Turn 1: the nested weighted group yields one track (rock or pop).
+        let t1 = resolve_ref(&pool, "outer").await.unwrap();
+        assert!(t1.starts_with("rock/") || t1.starts_with("pop/"), "nested weighted child, got {t1}");
+        // Turn 2: the jingle member.
+        assert_eq!(resolve_ref(&pool, "outer").await.unwrap(), "jingles/j.wav");
+        // Turn 3: wrap → back into the nested group.
+        let t3 = resolve_ref(&pool, "outer").await.unwrap();
+        assert!(t3.starts_with("rock/") || t3.starts_with("pop/"), "wraps to the nested group, got {t3}");
+    }
+
+    #[tokio::test]
+    async fn group_cycle_hits_the_depth_guard() {
+        let (_d, pool) = fresh_db().await;
+        // Self-referential group inserted WITHOUT the set-level cycle check
+        // (add_playlist skips validate_set). Resolution must fail loudly at the
+        // depth cap, never recurse forever.
+        add_playlist(
+            &pool,
+            "loop",
+            "name = \"Loop\"\n[selection]\nmode = \"group\"\nstrategy = \"sequence\"\n\
+             members = [{ ref = \"loop\" }]\n",
         )
         .await;
         assert!(matches!(
-            resolve_ref(&pool, "outer").await,
+            resolve_ref(&pool, "loop").await,
             Err(SelectionError::Unsupported(_))
         ));
     }

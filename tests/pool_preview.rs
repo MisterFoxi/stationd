@@ -2,7 +2,7 @@ use p::schedule_service_server::ScheduleService;
 use sqlx::{sqlite::SqliteConnectOptions, SqlitePool};
 use stationd::{
     db,
-    grid_engine::GridEngine,
+    grid_engine::{GridEngine, Verdict},
     grid_index, group_state,
     media::ScannedMedia,
     media_index,
@@ -554,4 +554,142 @@ members = [{ ref = "shows/broken", take = 1 }]"#,
     // Direct inspection identifies the same TOML, not just group traversal.
     let direct = inspect_ref(&pool, "shows/broken").await.unwrap_err();
     assert!(direct.to_string().contains("playlist `shows/broken`"));
+}
+
+#[tokio::test]
+async fn inspect_ref_sums_a_nested_group_recursively() {
+    // outer = sequence[ inner , jazz ] ; inner = weighted[ jazz , static ].
+    // The nested group folds its aggregate into the parent total (one level
+    // deeper than the existing group tests) — exercises the recursive
+    // `inspect_ref_at_depth` path, not just the flat one.
+    let (_dir, pool) = fixture().await;
+    add(
+        &pool,
+        "inner",
+        r#"mode = "group"
+strategy = "weighted"
+members = [{ ref = "jazz", weight = 1 }, { ref = "static", weight = 1 }]"#,
+    )
+    .await;
+    add(
+        &pool,
+        "outer",
+        r#"mode = "group"
+strategy = "sequence"
+members = [{ ref = "inner", take = 1 }, { ref = "jazz", take = 1 }]"#,
+    )
+    .await;
+    let result = inspect_ref(&pool, "outer").await.unwrap();
+    // Total = inner (2 jazz + 2 static = 4 / 601_250) + jazz (2 / 420_750).
+    assert_eq!(
+        result.stats,
+        PoolStats {
+            selected_count: Some(6),
+            total_duration_ms: Some(1_022_000),
+            distinct_artists: None, // group total
+        }
+    );
+    let members = result.group.unwrap().members;
+    assert_eq!(members[0].r#ref, "inner");
+    // The nested group appears as one member carrying its own aggregate.
+    assert_eq!(members[0].stats.selected_count, Some(4));
+    assert_eq!(members[0].stats.total_duration_ms, Some(601_250));
+    assert_eq!(members[1].r#ref, "jazz");
+    assert_eq!(members[1].stats.selected_count, Some(2));
+}
+
+// ----- CheckCoverage (sizing verdict) ------------------------------------
+
+/// A BaseRotation rule `id` pointing at playlist `pl`, inserted into the grid.
+async fn floor_rule(pool: &SqlitePool, id: &str, pl: &str) {
+    grid_index::insert_rule(
+        pool,
+        &r::Rule {
+            id: id.into(),
+            enabled: true,
+            validity: r::Validity::default(),
+            kind: r::RuleKind::BaseRotation {
+                playlist_ref: pl.into(),
+            },
+        },
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn coverage_flags_empty_pool_and_missing_ref() {
+    let (_dir, pool) = fixture().await;
+    floor_rule(&pool, "floor", "empty").await; // static [missing.mp3] → pool vide
+    floor_rule(&pool, "ghost", "does-not-exist").await; // ref cassée
+    let report = GridEngine::new(pool.clone(), "UTC")
+        .check_coverage(&[])
+        .await
+        .unwrap();
+    assert_eq!(report.worst, Verdict::Insufficient);
+    let by = |rid: &str| report.entries.iter().find(|e| e.rule_id == rid).unwrap();
+    assert_eq!(by("floor").verdict, Verdict::Insufficient);
+    assert!(by("floor").detail.contains("pool vide"), "{}", by("floor").detail);
+    assert_eq!(by("ghost").verdict, Verdict::Insufficient);
+    assert!(by("ghost").detail.contains("cassée"), "{}", by("ghost").detail);
+}
+
+#[tokio::test]
+async fn coverage_flags_undersized_group_members() {
+    let (_dir, pool) = fixture().await;
+    // jazz pool = 2 tracks / ~7 min. A 1h runtime budget and a take = 5 both
+    // exceed it → ⚠, each naming the culprit member.
+    add(
+        &pool,
+        "night",
+        r#"mode = "group"
+strategy = "shuffle"
+members = [{ ref = "jazz", runtime = "1h" }]"#,
+    )
+    .await;
+    add(
+        &pool,
+        "seq",
+        r#"mode = "group"
+strategy = "sequence"
+members = [{ ref = "jazz", take = 5 }]"#,
+    )
+    .await;
+    floor_rule(&pool, "night", "night").await;
+    floor_rule(&pool, "seq", "seq").await;
+    let report = GridEngine::new(pool.clone(), "UTC")
+        .check_coverage(&[])
+        .await
+        .unwrap();
+    let by = |rid: &str| report.entries.iter().find(|e| e.rule_id == rid).unwrap();
+
+    // shuffle group loops → axis B doesn't fire; the runtime shortfall does.
+    assert_eq!(by("night").verdict, Verdict::Thin);
+    assert!(by("night").detail.contains("jazz"), "{}", by("night").detail);
+    let night_m = by("night")
+        .members
+        .iter()
+        .find(|m| m.r#ref == "jazz")
+        .unwrap();
+    assert_eq!(night_m.verdict, Verdict::Thin);
+    assert!(night_m.detail.contains("runtime"), "{}", night_m.detail);
+
+    assert_eq!(by("seq").verdict, Verdict::Thin);
+    let seq_m = by("seq").members.iter().find(|m| m.r#ref == "jazz").unwrap();
+    assert_eq!(seq_m.verdict, Verdict::Thin);
+    assert!(seq_m.detail.contains("take"), "{}", seq_m.detail);
+}
+
+#[tokio::test]
+async fn coverage_ok_for_a_sufficient_rotation() {
+    let (_dir, pool) = fixture().await;
+    // jazz: dynamic (loops), no broadcast constraints/limit → non-empty = OK.
+    floor_rule(&pool, "floor", "jazz").await;
+    let report = GridEngine::new(pool.clone(), "UTC")
+        .check_coverage(&[])
+        .await
+        .unwrap();
+    assert_eq!(report.worst, Verdict::Ok);
+    assert_eq!(report.entries.len(), 1);
+    assert_eq!(report.entries[0].verdict, Verdict::Ok);
 }
