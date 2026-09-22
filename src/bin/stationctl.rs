@@ -10,7 +10,7 @@ use stationd::proto::{library, plugin, schedule, station};
 use station::station_client::StationClient;
 use station::{PlaylistAddRequest, PlaylistListRequest, PlaylistSyncRequest, QuitRequest, StatusRequest};
 use schedule::schedule_service_client::ScheduleServiceClient;
-use schedule::{ApplyGridRequest, ExportGridRequest, GridFile, PreviewRequest, ResolveNextRequest, SetClockRequest};
+use schedule::{ApplyGridRequest, CheckCoverageRequest, ExportGridRequest, GridFile, PreviewRequest, ResolveNextRequest, SetClockRequest};
 use library::library_service_client::LibraryServiceClient;
 use library::{ListMediaRequest, ScanRequest};
 use plugin::plugin_service_client::PluginServiceClient;
@@ -138,6 +138,14 @@ enum ScheduleCommand {
         /// Window length in seconds. Default: 24h.
         #[arg(long, default_value_t = 86_400)]
         window: i64,
+    },
+    /// Sizing check: does the grid have enough media? For each rule, size the
+    /// pool of the playlist it references and grade it (OK / ⚠ thin / ✗
+    /// insufficient). Read-only — no playout. Exits non-zero if any rule is ✗.
+    Check {
+        /// Only check these rule ids (repeatable). Omitted → the whole grid.
+        #[arg(long = "rule")]
+        rules: Vec<String>,
     },
 }
 
@@ -423,6 +431,71 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
+        Command::Schedule(ScheduleCommand::Check { rules }) => {
+            let mut sched = ScheduleServiceClient::connect(args.addr.clone()).await?;
+            let reply = sched
+                .check_coverage(CheckCoverageRequest { rule_ids: rules })
+                .await?
+                .into_inner();
+            if reply.entries.is_empty() {
+                println!("(no rules in the grid)");
+            }
+            for e in &reply.entries {
+                let v = schedule::Verdict::try_from(e.verdict).unwrap_or_default();
+                let glyph = verdict_glyph(v);
+                let kind = e.kind.as_str();
+                let pl = if e.playlist_ref.is_empty() {
+                    "(none)"
+                } else {
+                    e.playlist_ref.as_str()
+                };
+                let rule = if e.rule_id.is_empty() {
+                    String::new()
+                } else {
+                    format!("  [{}]", e.rule_id)
+                };
+                let count = e
+                    .selected_count
+                    .map(|n| n.to_string())
+                    .unwrap_or_else(|| "?".into());
+                let dur = e
+                    .total_duration
+                    .as_ref()
+                    .map(|d| fmt_hms_secs(d.seconds))
+                    .unwrap_or_else(|| "?".into());
+                let detail = e.detail.as_str();
+                println!("{glyph:<3} {kind:<13} {pl}{rule}  {count} média(s), {dur}  — {detail}");
+
+                // Group members, indented — locates the weak link in a group.
+                let n = e.members.len();
+                for (i, m) in e.members.iter().enumerate() {
+                    let branch = if i + 1 == n { '\u{2514}' } else { '\u{251c}' };
+                    let mv = schedule::Verdict::try_from(m.verdict).unwrap_or_default();
+                    let mg = verdict_glyph(mv);
+                    let mc = m
+                        .selected_count
+                        .map(|n| n.to_string())
+                        .unwrap_or_else(|| "?".into());
+                    let md = m
+                        .total_duration
+                        .as_ref()
+                        .map(|d| fmt_hms_secs(d.seconds))
+                        .unwrap_or_else(|| "?".into());
+                    println!(
+                        "     {branch} {mg:<3} {:<16} {mc} média(s), {md}  — {}",
+                        m.r#ref, m.detail
+                    );
+                }
+            }
+            let worst = schedule::Verdict::try_from(reply.worst).unwrap_or_default();
+            println!();
+            println!("verdict grille: {} {}", verdict_glyph(worst), worst.as_str_name());
+            // Non-zero only on ✗ (INSUFFICIENT); ⚠ THIN still airs, so it does
+            // not fail a CI gate on its own.
+            if worst == schedule::Verdict::Insufficient {
+                std::process::exit(1);
+            }
+        }
         Command::Library(LibraryCommand::Scan) => {
             let mut lib = LibraryServiceClient::connect(args.addr.clone()).await?;
             let reply = lib.scan(ScanRequest {}).await?.into_inner();
@@ -588,6 +661,22 @@ fn fmt_offset(secs: i64) -> String {
         "+0".to_string()
     } else {
         format!("+{}", fmt_dur(secs))
+    }
+}
+
+/// Seconds → "HH:MM:SS" for the coverage check's pool durations.
+fn fmt_hms_secs(secs: i64) -> String {
+    let s = secs.max(0);
+    format!("{:02}:{:02}:{:02}", s / 3600, (s % 3600) / 60, s % 60)
+}
+
+/// Verdict glyph for the coverage table: OK / ⚠ thin / ✗ insufficient.
+fn verdict_glyph(v: schedule::Verdict) -> &'static str {
+    match v {
+        schedule::Verdict::Ok => "OK",
+        schedule::Verdict::Thin => "\u{26a0}",         // ⚠
+        schedule::Verdict::Insufficient => "\u{2717}", // ✗
+        _ => "?",
     }
 }
 

@@ -127,6 +127,7 @@ async fn pools_count_all_candidates_deduplicate_static_and_exclude_unavailable()
         PoolStats {
             selected_count: Some(2),
             total_duration_ms: Some(420_750),
+            distinct_artists: Some(0), // fixtures carry no artist tags
         }
     );
     assert_eq!(
@@ -134,6 +135,7 @@ async fn pools_count_all_candidates_deduplicate_static_and_exclude_unavailable()
         PoolStats {
             selected_count: Some(2),
             total_duration_ms: Some(180_500),
+            distinct_artists: Some(0),
         }
     );
     assert_eq!(
@@ -141,6 +143,7 @@ async fn pools_count_all_candidates_deduplicate_static_and_exclude_unavailable()
         PoolStats {
             selected_count: Some(0),
             total_duration_ms: Some(0),
+            distinct_artists: Some(0),
         }
     );
     for reference in ["remote", "queue"] {
@@ -180,6 +183,7 @@ members = [
             PoolStats {
                 selected_count: None,
                 total_duration_ms: Some(2_101_250),
+                distinct_artists: None, // group total: not de-duplicated across members
             }
         );
         let members = result.group.unwrap().members;
@@ -189,6 +193,7 @@ members = [
             PoolStats {
                 selected_count: None,
                 total_duration_ms: Some(1_200_000),
+                distinct_artists: None, // remote leaf: not measurable
             }
         );
         assert_eq!(members[2].stats.total_duration_ms, Some(300_000));
@@ -255,6 +260,7 @@ members = [{{ ref = "jazz" }}, {{ ref = "static" }}]"#
             PoolStats {
                 selected_count: Some(4),
                 total_duration_ms: Some(601_250),
+                distinct_artists: None, // group total
             }
         );
         assert!(result

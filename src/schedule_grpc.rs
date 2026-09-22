@@ -18,9 +18,9 @@ pub use crate::proto::schedule;
 
 use schedule::schedule_service_server::ScheduleService;
 use schedule::{
-    ApplyGridRequest, ApplyGridResponse, ClockStatus, Decision, ExportGridRequest,
-    ExportGridResponse, GridFile, ListRulesRequest, ListRulesResponse, PreviewRequest,
-    PreviewResponse, ResolveNextRequest, SetClockRequest, ValidateGridResponse,
+    ApplyGridRequest, ApplyGridResponse, CheckCoverageRequest, CheckCoverageResponse, ClockStatus,
+    Decision, ExportGridRequest, ExportGridResponse, GridFile, ListRulesRequest, ListRulesResponse,
+    PreviewRequest, PreviewResponse, ResolveNextRequest, SetClockRequest, ValidateGridResponse,
 };
 
 pub struct ScheduleGrpc {
@@ -123,6 +123,46 @@ fn map_group_member(m: crate::pool_inspection::InspectedMember) -> Result<schedu
         offset: m.offset_secs.map(secs_to_duration),
         selected_count: m.stats.selected_count,
         total_duration: m.stats.total_duration_ms.map(ms_to_duration).transpose()?,
+    })
+}
+
+fn map_verdict(v: crate::grid_engine::Verdict) -> schedule::Verdict {
+    use crate::grid_engine::Verdict as V;
+    match v {
+        V::Ok => schedule::Verdict::Ok,
+        V::Thin => schedule::Verdict::Thin,
+        V::Insufficient => schedule::Verdict::Insufficient,
+    }
+}
+
+fn map_coverage_member(
+    m: crate::grid_engine::CoverageMember,
+) -> Result<schedule::CoverageMember, Status> {
+    Ok(schedule::CoverageMember {
+        r#ref: m.r#ref,
+        selected_count: m.stats.selected_count,
+        total_duration: m.stats.total_duration_ms.map(ms_to_duration).transpose()?,
+        verdict: map_verdict(m.verdict) as i32,
+        detail: m.detail,
+    })
+}
+
+fn map_coverage_entry(
+    e: crate::grid_engine::CoverageEntry,
+) -> Result<schedule::CoverageEntry, Status> {
+    Ok(schedule::CoverageEntry {
+        rule_id: e.rule_id,
+        playlist_ref: e.playlist_ref,
+        kind: e.kind.to_string(),
+        selected_count: e.stats.selected_count,
+        total_duration: e.stats.total_duration_ms.map(ms_to_duration).transpose()?,
+        verdict: map_verdict(e.verdict) as i32,
+        detail: e.detail,
+        members: e
+            .members
+            .into_iter()
+            .map(map_coverage_member)
+            .collect::<Result<Vec<_>, _>>()?,
     })
 }
 
@@ -270,6 +310,30 @@ impl ScheduleService for ScheduleGrpc {
             })
             .collect();
         Ok(Response::new(PreviewResponse { occurrences, indicative }))
+    }
+
+    /// Sizing check (read-only): « does the grid have enough media? ». Delegates
+    /// to `GridEngine::check_coverage`; a per-entry config problem is reported as
+    /// an INSUFFICIENT entry, so a normal response carries the whole picture and
+    /// only infrastructure surfaces as an error status.
+    async fn check_coverage(
+        &self,
+        request: Request<CheckCoverageRequest>,
+    ) -> Result<Response<CheckCoverageResponse>, Status> {
+        let report = self
+            .engine
+            .check_coverage(&request.into_inner().rule_ids)
+            .await
+            .map_err(map_next_error)?;
+        let entries = report
+            .entries
+            .into_iter()
+            .map(map_coverage_entry)
+            .collect::<Result<Vec<_>, Status>>()?;
+        Ok(Response::new(CheckCoverageResponse {
+            entries,
+            worst: map_verdict(report.worst) as i32,
+        }))
     }
 
     /// Manual clock (testing): freeze/release the instant `resolve_next` uses

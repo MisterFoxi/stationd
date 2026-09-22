@@ -111,6 +111,317 @@ pub struct ResolvedDecision {
     pub media_path: Option<String>,
 }
 
+// ───────────────────────────────────────────────────────────────────────────
+// Coverage check: « does the grid have enough media? » ([`GridEngine::check_coverage`])
+// A read-only sizing pass, NOT a playout: for each rule it inspects the pool of
+// the playlist it references and grades it. Two axes, worst wins:
+//   A. the playlist's own demands   — anti-repetition window, `limit`;
+//   B. the grid's temporal demand   — a FINITE source shorter than its slot.
+// « Signalé, pas jugé »: it qualifies, it never blocks a commit.
+// ───────────────────────────────────────────────────────────────────────────
+
+use crate::pool_inspection::{self, PoolInspection, PoolStats};
+
+/// Sizing verdict for one grid entry (or group member). Ordered by severity;
+/// the grid's overall verdict is the worst across its entries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Verdict {
+    #[default]
+    Ok,
+    Thin,
+    Insufficient,
+}
+
+impl Verdict {
+    fn rank(self) -> u8 {
+        match self {
+            Verdict::Ok => 0,
+            Verdict::Thin => 1,
+            Verdict::Insufficient => 2,
+        }
+    }
+    /// The more severe of the two.
+    pub fn worst(self, other: Verdict) -> Verdict {
+        if other.rank() > self.rank() { other } else { self }
+    }
+}
+
+/// One group member, sized on its own — locates the weak link inside a group.
+#[derive(Debug, Clone)]
+pub struct CoverageMember {
+    pub r#ref: String,
+    pub stats: PoolStats,
+    pub verdict: Verdict,
+    pub detail: String,
+}
+
+/// One grid rule and the sizing of the pool its playlist resolves to.
+#[derive(Debug, Clone)]
+pub struct CoverageEntry {
+    pub rule_id: String,
+    pub playlist_ref: String,
+    pub kind: &'static str,
+    pub stats: PoolStats,
+    pub verdict: Verdict,
+    pub detail: String,
+    pub members: Vec<CoverageMember>,
+}
+
+/// The whole grid's sizing report ([`GridEngine::check_coverage`]).
+#[derive(Debug, Clone, Default)]
+pub struct CoverageReport {
+    pub entries: Vec<CoverageEntry>,
+    pub worst: Verdict,
+}
+
+/// What the grid asks a rule's source to cover. `Punctual` = a single track
+/// (AtClock/Every marks) — any non-empty pool satisfies it.
+enum Demand {
+    Duration(i64), // seconds
+    Punctual,
+}
+
+/// Kind tag, referenced playlist, and temporal demand of a rule.
+fn classify_rule(kind: &RuleKind) -> (&'static str, String, Demand) {
+    match kind {
+        RuleKind::BaseRotation { playlist_ref } => {
+            // The floor must sustain a full day without forcing repeats.
+            ("base_rotation", playlist_ref.clone(), Demand::Duration(86_400))
+        }
+        RuleKind::DayPart { playlist_ref, start, end } => {
+            ("day_part", playlist_ref.clone(), Demand::Duration(wallclock_window_secs(start, end)))
+        }
+        RuleKind::AtClock { playlist_ref, .. } => ("at_clock", playlist_ref.clone(), Demand::Punctual),
+        RuleKind::Every { playlist_ref, .. } => ("every", playlist_ref.clone(), Demand::Punctual),
+    }
+}
+
+/// Window length of a DayPart in seconds, handling a cross-midnight rule
+/// (`end ≤ start` → the window wraps to the next day).
+fn wallclock_window_secs(start: &crate::resolver::WallClock, end: &crate::resolver::WallClock) -> i64 {
+    let s = start.hour as i64 * 3600 + start.minute as i64 * 60;
+    let e = end.hour as i64 * 3600 + end.minute as i64 * 60;
+    if e > s { e - s } else { e + 86_400 - s }
+}
+
+/// Does the source fill an arbitrary window by looping, or is its playtime
+/// bounded? Confirmed rule: `dynamic`/`remote`/rotation groups and any
+/// `repeat = true` loop; `static`/`queue` without repeat and a `sequence`
+/// group are finite. Only a finite source can under-fill its slot (axis B).
+fn source_loops(playlist: &crate::playlist::Playlist) -> bool {
+    use crate::playlist::{Mode, Strategy};
+    if playlist.broadcast.as_ref().and_then(|b| b.repeat) == Some(true) {
+        return true;
+    }
+    match playlist.selection.mode {
+        Mode::Dynamic | Mode::Remote => true,
+        Mode::Static | Mode::Queue => false,
+        Mode::Group => !matches!(playlist.selection.strategy, Some(Strategy::Sequence)),
+    }
+}
+
+fn make_entry(
+    rule_id: String,
+    playlist_ref: String,
+    kind: &'static str,
+    stats: PoolStats,
+    verdict: Verdict,
+    detail: String,
+    members: Vec<CoverageMember>,
+) -> CoverageEntry {
+    CoverageEntry { rule_id, playlist_ref, kind, stats, verdict, detail, members }
+}
+
+/// Grade a resolved pool against both axes. Returns the verdict, a detail line
+/// naming what fired, and the per-member breakdown (empty for a leaf).
+fn verdict_for(
+    playlist: &crate::playlist::Playlist,
+    inspection: &PoolInspection,
+    demand: Demand,
+) -> (Verdict, String, Vec<CoverageMember>) {
+    let stats = inspection.stats;
+    let members = member_breakdown(inspection);
+
+    // Empty pool → the rule can never produce: hard fail, nothing else matters.
+    if stats.selected_count == Some(0) {
+        return (Verdict::Insufficient, "pool vide".into(), members);
+    }
+
+    let mut verdict = Verdict::Ok;
+    let mut reasons: Vec<String> = Vec::new();
+    let bc = playlist.broadcast.as_ref();
+
+    // --- Axis A: the playlist's own demands (anti-repetition + limit) ---
+    if let Some(c) = bc.and_then(|b| b.constraints.as_ref()) {
+        if let Some(d) = &c.no_same_track_within {
+            if let (Ok(need_s), Some(have_ms)) =
+                (crate::playlist::parse_duration_secs(d), stats.total_duration_ms)
+            {
+                let need_ms = need_s.saturating_mul(1000);
+                if have_ms < need_ms {
+                    verdict = verdict.worst(Verdict::Thin);
+                    reasons.push(format!(
+                        "no_same_track_within {d} : pool {} < {d} (rejeu de piste forcé)",
+                        fmt_hms(have_ms)
+                    ));
+                }
+            }
+        }
+        if c.no_same_artist_within.is_some() {
+            match stats.distinct_artists {
+                // A pool with fewer than 2 distinct artists can never satisfy a
+                // no-same-artist window. (A tighter bound would need the number
+                // of tracks per window; this is the honest lower guard.)
+                Some(a) if a < 2 => {
+                    verdict = verdict.worst(Verdict::Thin);
+                    reasons.push(format!(
+                        "no_same_artist_within : {a} artiste(s) distinct(s) (rejeu d'artiste forcé)"
+                    ));
+                }
+                None => reasons.push("no_same_artist_within non évalué (agrégat de groupe)".into()),
+                _ => {}
+            }
+        }
+    }
+    if let Some(limit) = bc.and_then(|b| b.limit) {
+        if let Some(count) = stats.selected_count {
+            if count < limit as u64 {
+                verdict = verdict.worst(Verdict::Thin);
+                reasons.push(format!(
+                    "limit {limit} : {count} média(s) distinct(s) dans le pool"
+                ));
+            }
+        }
+    }
+
+    // --- Axis B: temporal demand of the grid, for FINITE sources only ---
+    if !source_loops(playlist) {
+        if let Demand::Duration(secs) = demand {
+            if let Some(have_ms) = stats.total_duration_ms {
+                let need_ms = (secs.max(0) as u64).saturating_mul(1000);
+                if have_ms < need_ms {
+                    verdict = verdict.worst(Verdict::Thin);
+                    reasons.push(format!(
+                        "source finie {} < créneau {} (ne remplit pas)",
+                        fmt_hms(have_ms),
+                        fmt_hms(need_ms)
+                    ));
+                }
+            }
+        }
+    }
+
+    // --- Group members: emptiness sinks the group; an under-sized quota loops ---
+    if inspection.group.is_some() {
+        let empty: Vec<&str> = members
+            .iter()
+            .filter(|m| m.stats.selected_count == Some(0))
+            .map(|m| m.r#ref.as_str())
+            .collect();
+        if !empty.is_empty() {
+            let policy = playlist
+                .selection
+                .on_member_unavailable
+                .unwrap_or(crate::playlist::MemberUnavailable::Abort);
+            match policy {
+                crate::playlist::MemberUnavailable::Abort => {
+                    verdict = verdict.worst(Verdict::Insufficient);
+                    reasons.push(format!("membre(s) vide(s) [{}] → abort", empty.join(", ")));
+                }
+                crate::playlist::MemberUnavailable::Skip => {
+                    verdict = verdict.worst(Verdict::Thin);
+                    reasons.push(format!(
+                        "membre(s) vide(s) [{}] → skip (dégradé)",
+                        empty.join(", ")
+                    ));
+                }
+            }
+        }
+        // A non-empty member whose quota exceeds its pool loops within its slot
+        // (the case this check exists for). Signalled, never blocking.
+        let looping: Vec<&str> = members
+            .iter()
+            .filter(|m| m.stats.selected_count != Some(0) && m.verdict == Verdict::Thin)
+            .map(|m| m.r#ref.as_str())
+            .collect();
+        if !looping.is_empty() {
+            verdict = verdict.worst(Verdict::Thin);
+            reasons.push(format!(
+                "membre(s) sous-dimensionné(s) [{}] → boucle dans le slot",
+                looping.join(", ")
+            ));
+        }
+    }
+
+    let detail = if reasons.is_empty() { "ok".to_string() } else { reasons.join(" ; ") };
+    (verdict, detail, members)
+}
+
+/// Per-member breakdown of a group inspection (empty for a leaf). Each member
+/// is graded against its OWN quota ([`member_verdict`]) — the group-level axes
+/// carry the rest.
+fn member_breakdown(inspection: &PoolInspection) -> Vec<CoverageMember> {
+    let Some(g) = &inspection.group else {
+        return Vec::new();
+    };
+    g.members
+        .iter()
+        .map(|m| {
+            let (verdict, detail) = member_verdict(m);
+            CoverageMember { r#ref: m.r#ref.clone(), stats: m.stats, verdict, detail }
+        })
+        .collect()
+}
+
+/// Grade one group member against its own per-member quota. Empty pool → ✗. A
+/// `runtime`/`take` quota larger than the member's pool means the member will
+/// LOOP inside its slot before handing over — flagged ⚠ (this is the point of
+/// the check: make the loops visible). Unknown pool size (remote/queue) → no
+/// false alarm. A member with no quota (weighted/rotate) is judged on emptiness
+/// only.
+fn member_verdict(m: &crate::pool_inspection::InspectedMember) -> (Verdict, String) {
+    use crate::playlist::MemberQuota;
+    if m.stats.selected_count == Some(0) {
+        return (Verdict::Insufficient, "pool vide".to_string());
+    }
+    match &m.quota {
+        Some(MemberQuota::Runtime(secs)) => {
+            if let Some(have_ms) = m.stats.total_duration_ms {
+                let need_ms = (*secs).saturating_mul(1000);
+                if have_ms < need_ms {
+                    return (
+                        Verdict::Thin,
+                        format!(
+                            "budget runtime {} > pool {} → boucle dans le slot",
+                            fmt_hms(need_ms),
+                            fmt_hms(have_ms)
+                        ),
+                    );
+                }
+            }
+            (Verdict::Ok, "ok".to_string())
+        }
+        Some(MemberQuota::Take(n)) => {
+            if let Some(count) = m.stats.selected_count {
+                if count < *n as u64 {
+                    return (
+                        Verdict::Thin,
+                        format!("take {n} > {count} piste(s) distincte(s) → répétition"),
+                    );
+                }
+            }
+            (Verdict::Ok, "ok".to_string())
+        }
+        None => (Verdict::Ok, "ok".to_string()),
+    }
+}
+
+/// Milliseconds → "HH:MM:SS" (durations are estimates; seconds are enough).
+fn fmt_hms(ms: u64) -> String {
+    let s = ms / 1000;
+    format!("{:02}:{:02}:{:02}", s / 3600, (s % 3600) / 60, s % 60)
+}
+
 impl GridEngine {
     pub fn new(pool: SqlitePool, tz: impl Into<String>) -> Self {
         Self {
@@ -203,6 +514,85 @@ impl GridEngine {
     /// Read the configured rules without resolving or touching playback state.
     pub async fn list_rules(&self) -> Result<Vec<crate::resolver::Rule>, EngineError> {
         Ok(grid_index::load_grid(&self.pool).await?.rules)
+    }
+
+    /// Sizing report: for each enabled grid rule, inspect the pool of the
+    /// playlist it references (read-only, no playout, no family-B mutation)
+    /// and grade whether it has enough media for what the grid asks. `rule_ids`
+    /// empty → the whole grid; otherwise only those rules. A per-entry config
+    /// problem (broken ref, unreadable playlist, unresolvable pool) becomes an
+    /// `INSUFFICIENT` entry rather than aborting the report — the point is to
+    /// surface every problem at once. Only infrastructure (SQLite) propagates.
+    pub async fn check_coverage(&self, rule_ids: &[String]) -> Result<CoverageReport, EngineError> {
+        let grid = grid_index::load_grid(&self.pool).await?;
+        let want: Option<HashSet<&str>> =
+            (!rule_ids.is_empty()).then(|| rule_ids.iter().map(String::as_str).collect());
+
+        let mut entries = Vec::new();
+        for rule in &grid.rules {
+            if let Some(w) = &want {
+                if !w.contains(rule.id.as_str()) {
+                    continue;
+                }
+            }
+            // A disabled rule is not in play — it can't cause a gap, skip it.
+            if !rule.enabled {
+                continue;
+            }
+            entries.push(self.coverage_for_rule(rule).await?);
+        }
+        let worst = entries.iter().fold(Verdict::Ok, |acc, e| acc.worst(e.verdict));
+        Ok(CoverageReport { entries, worst })
+    }
+
+    async fn coverage_for_rule(&self, rule: &Rule) -> Result<CoverageEntry, EngineError> {
+        let (kind, playlist_ref, demand) = classify_rule(&rule.kind);
+        let fail = |detail: String| {
+            make_entry(
+                rule.id.clone(),
+                playlist_ref.clone(),
+                kind,
+                PoolStats::default(),
+                Verdict::Insufficient,
+                detail,
+                Vec::new(),
+            )
+        };
+
+        // Broken / unsafe ref → nothing to size.
+        let key = match crate::playlist::normalize_ref(&playlist_ref) {
+            Ok(k) => k,
+            Err(msg) => return Ok(fail(format!("ref invalide : {msg}"))),
+        };
+        let Some(toml) = crate::store::playlist_toml_by_ref(&self.pool, &key).await? else {
+            return Ok(fail("ref cassée : playlist inconnue".into()));
+        };
+        let playlist = match crate::playlist::Playlist::parse(&toml) {
+            Ok(p) => p,
+            Err(e) => return Ok(fail(format!("playlist illisible : {e}"))),
+        };
+
+        // Size the pool (read-only). Only SQLite is infra and propagates; a
+        // config-level selection error (transitive unknown ref, unsupported
+        // mode, bad filter) marks THIS entry insufficient, report goes on.
+        let inspection = match pool_inspection::inspect_ref(&self.pool, &key).await {
+            Ok(i) => i,
+            Err(crate::selection::SelectionError::Sqlx(e)) => return Err(EngineError::Sqlx(e)),
+            Err(e) => return Ok(fail(format!("pool non résolvable : {e}"))),
+        };
+
+        let (verdict, detail, members) = verdict_for(&playlist, &inspection, demand);
+        // `playlist_ref` is still borrowed by the `fail` closure above; clone
+        // rather than move so there is no borrow/move conflict.
+        Ok(make_entry(
+            rule.id.clone(),
+            playlist_ref.clone(),
+            kind,
+            inspection.stats,
+            verdict,
+            detail,
+            members,
+        ))
     }
 
     /// Ensure every `Every` rule has a counter row, so its cadence advances

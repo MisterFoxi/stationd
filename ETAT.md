@@ -5,7 +5,7 @@ sans reconstruire le contexte. À distinguer des docs de `Doc/` (décisions
 d'architecture durables) : ce fichier-ci est volatil, à mettre à jour à
 chaque session.
 
-Dernière mise à jour : 2026-09-21.
+Dernière mise à jour : 2026-09-22.
 
 
 ## Ajout : TUI d'administration (correctif préparé, compilation à confirmer)
@@ -27,12 +27,12 @@ Voir `Doc/tui-dev.md` pour le périmètre, les commandes et les limites.
 ## Où on en est en une phrase
 
 La **grille est pilotable de bout en bout en CLI**, projection comprise :
-`grid.toml` (4 familles) → `stationctl schedule validate|apply|export|list|next|preview`
+`grid.toml` (4 familles) → `stationctl schedule validate|apply|export|list|next|preview|check`
 → gRPC → moteur → SQLite. Testé en vrai : apply de 4 règles, `next` rend
 `AT_CLOCK_SOFT`, export round-trip stable, `preview` projette 24h avec rendu
 UTC + local nommé (test anti-DST 2026-10-25 : 02:30 deux fois, epochs
 distincts). Cœur pur (`resolve_next`, `clock`/DST `jiff`, familles A/B) vert,
-grammaire + les 6 RPC réels. `cargo build` + `cargo test -p stationd` étaient verts
+grammaire + les 7 RPC réels. `cargo build` + `cargo test -p stationd` étaient verts
 au dernier build compilé ; les ajouts récents (shuffle/runtime de groupe,
 décomposition preview, fix casse de ref) **attendent un `cargo build`** (Rust
 indispo dans l'env de préparation).
@@ -77,88 +77,70 @@ Autres, indépendants :
 
 ---
 
-## A modifier/Changer
-## Preview / validation de la grille avant diffusion
-
-La grille est appliquée en avance (cron chargeant un TOML à la demande) et les
-PL dynamiques sont résolues à la lecture. Pour valider une grille *avant*
-qu'elle passe à l'antenne, on produit un preview autoritatif.
-
-### Gel = preview autoritatif, même résolveur
-
-- Le `preview` n'est pas une photo indicative : c'est le résolveur
-  (`resolve_next`, quasi-pur) exécuté sur **horloge virtuelle**, qui produit le
-  playout complet du segment. **Un seul chemin de code** — jamais une simulation
-  parallèle, sinon la garantie devient fausse dès la première divergence.
-- La sim balaie **tout le jeu de règles de la station** (base, DayPart,
-  AtClock, Every, one-shots, interrupts), pas seulement le segment regardé —
-  sinon l'anti-répétition simulée ≠ celle diffusée.
-- Le résultat est un **artefact de validation** (un log), pas un état persisté
-  qui rejoue. On regarde → ça plaît, on commit la grille ; sinon on retravaille.
-- **Le dynamisme est préservé** : la requête reste la source, ré-évaluée à
-  chaque activation. Le gel ne fige pas la *nature* de la PL, il cristallise
-  *une* résolution pour l'inspecter. En streaming pur, les causes externes sont
-  marginales → le dry-run est fidèle à ce qui sortira.
-- Exception `queue` (on-demand) : tampon vide au moment du bake, rempli au
-  runtime → non simulable, exclu par nature.
-
-### Ce qui est dur vs estimé
-
-- **Dur** : l'ensemble des médias, l'ordre résolu (permutation du shuffle,
-  résultat des tirages pondérés), les départs ancrés-règle (`scheduled`,
-  `AtClock`).
-- **Estimé** : le wall-clock **par piste** (cumul des durées) — durée réelle,
-  cooldowns contre l'historique, interrupts intercalés sont des faits de
-  runtime. Cohérent avec les bornes molles.
-- Le preview promet donc « exactement ces médias, dans cet ordre, dans ce bloc
-  qui démarre à cette heure » — pas « ce titre à 20:03:47 ». Ne pas survendre le
-  calage seconde dans l'UI.
-
-### Preview log multi-granularité
-
-Trois profondeurs d'un même bake, via flags CLI (modèle `git log --oneline /
---stat / full`) :
-
-1. **Tranche horaire** (`--summary`) : index scannable, une colonne DIAG qui
-   indique *où* déplier avant de lire le détail.
-2. **Bloc** (défaut) : un bloc = une activation. Porte la règle et ses params,
-   **pourquoi il gagne** (résolution de collision), et le diagnostic au bon
-   grain (un trou apparaît comme bloc fantôme, pas noyé dans les pistes).
-3. **Médias** (`--tracks` / `-v`) : piste concrète + **colonne raison**
-   (`[newest]`, `[shuffle #7]`, `SKIP … contrainte`, `fallback`) — transforme
-   « ce qui sort » en « pourquoi ça sort, et où le quota a cédé ».
-
-- Les secondes ne s'affichent qu'au niveau 3, marquées estimées (`~`).
-- Même structure en `--format json` (arbre tranche→bloc→piste, diagnostics par
-  nœud) pour un futur rendu web. CLI-first : le log est produit par le contrat
-  gRPC, l'affichage n'est qu'un rendu.
-
-### Diagnostic de couverture inter-blocs
-
-- Départs implicites (B1@20:00, B2@21:30). La **fin de B1 est une borne
-  dérivée** (= le `start` de B2), calculée au preview, **jamais un champ TOML**.
-- `end` reste **interdit en entrée**, raison inchangée : composer une liste de
-  médias dont la somme des durées tombe pile sur une cible est impossible
-  (packing exact + durées = runtime). Un `end` normatif est une promesse
-  mensongère.
-- Ce qu'on rapporte est l'**inverse** — observationnel, en sortie. Trois états,
-  tous dérivables sur horloge virtuelle :
-  - **débord** (contenu > fenêtre implicite) — `⚠`, souvent voulu (borne molle) ;
-  - **sous-couverture / trou** (contenu < fenêtre, rien pour combler) — `✗` si
-    trou sec sans fallback ;
-  - **OK** (tient, avec la marge affichée).
-- **Signalé, pas jugé** : le preview rend le fait visible, l'humain tranche.
-
-### Encore ouvert (à fusionner dans « Encore ouvert »)
-
-- Liste **fermée** des codes de diagnostic (doit exister au contrat gRPC pour
-  être atteignable CLI + web) : trou d'antenne, pool vide, média/ref cassée,
-  cycle de groupe, cooldown non satisfait, épuisement (`on_exhausted`),
-  collision surprenante, débord inter-blocs, sous-couverture, anomalie DST.
-- Politique **bloquant vs non-bloquant** : quels codes empêchent le commit de la
-  grille, lesquels ne sont qu'un avertissement.
-
 ## Fait
+
+### — CheckCoverage : preview de dimensionnement « assez de média ? » (2026-09-22) —
+
+Nouveau RPC pour valider une grille *avant* commit : pour chaque règle, le pool
+de la playlist référencée a-t-il assez de média pour ce qu'on lui demande ?
+**Read-only, dimensionnement pur — PAS un playout.** `stationctl schedule check
+[--rule <id>]`.
+
+**⚠ Abandon d'un concept.** Ceci **remplace** l'idée de « preview autoritatif =
+playout baké sur horloge virtuelle + commit des médias sélectionnés » (dérouler
+le playout puis le figer était le mauvais modèle ; ce qu'on veut, c'est compter
+et signaler les manques — en particulier les boucles). La grosse section
+« Preview / validation de la grille avant diffusion » qui décrivait ce concept a
+été **retirée** de ce fichier. Les messages proto de l'arbre BLOCK/TRACK
+(`PreviewLog`/`PreviewSlice`/`PreviewBlock`/`Coverage`/`Diagnostic*`,
+`PreviewRequest.depth`, `PreviewResponse.log`) ont été **retirés du proto et des
+sites d'appel** ; seule la timeline plate `occurrences`/`indicative` subsiste au
+contrat `Preview`.
+
+**Verdict = pire des deux axes** (`OK` / `THIN ⚠` / `INSUFFICIENT ✗`) :
+- **Axe A — exigences propres de la playlist** : pool vide → ✗ ;
+  `no_same_track_within=D` → durée pool ≥ D sinon ⚠ (rejeu de piste forcé) ;
+  `no_same_artist_within` → ≥ 2 artistes distincts sinon ⚠ (borne basse honnête,
+  affinable) ; `limit=N` → count ≥ N sinon ⚠.
+- **Axe B — demande temporelle de la grille** : source **finie** (static/queue
+  sans repeat, groupe `sequence`) dont la durée < créneau → ⚠. Créneau =
+  `DayPart` end−start (passage minuit géré), `BaseRotation` 24h, `AtClock`/`Every`
+  ponctuel (count ≥ 1). Source **bouclante** (dynamic/remote/rotation,
+  `repeat=true`) → axe B auto-satisfait (c'est l'axe A qui mord sur le rejeu).
+- **Membres de groupe** : chaque membre jugé sur **son quota** — vide → ✗ ;
+  `runtime=D` > durée du pool membre → ⚠ « boucle dans le slot » ; `take=N` > pistes
+  distinctes → ⚠ « répétition » ; pool inconnu (remote/queue) → pas de fausse
+  alerte. Le pire membre remonte au groupe ; un vide fait ✗ si `abort`, ⚠ si
+  `skip`. **C'est ce qui rend les boucles visibles — le but du check.**
+- Erreur de config **par entrée** (ref cassée, playlist illisible, pool non
+  résolvable) → entrée ✗ avec détail, **jamais un abandon du rapport** ; seule
+  l'infra (SQLite) remonte en erreur gRPC. Exit CLI non-zéro **uniquement sur ✗**
+  (⚠ passe encore à l'antenne → ne casse pas un gate CI).
+
+Câblage (tout additif, rien de l'existant modifié) :
+- `proto/schedule_v1.proto` : `rpc CheckCoverage`, enum fermé
+  `Verdict {OK, THIN, INSUFFICIENT}`, messages `CheckCoverage{Request,Response}`
+  / `CoverageEntry` / `CoverageMember`. → **7e RPC** de `ScheduleService`.
+- `src/pool_inspection.rs` : `PoolStats` += `distinct_artists` (calculé au grain
+  feuille sur le pool matérialisé ; `None` pour un agrégat de groupe / remote /
+  queue — non dédoublonnable).
+- `src/grid_engine.rs` : types `Verdict`/`CoverageEntry`/`CoverageMember`/
+  `CoverageReport` + `check_coverage(rule_ids)` : itère les règles **activées**,
+  `inspect_ref` (aucun playout, aucune mutation famille B), verdict via
+  `verdict_for` / `member_verdict`.
+- `src/schedule_grpc.rs` : handler `check_coverage` + mappings (traducteur pur).
+- `src/bin/stationctl.rs` : `schedule check [--rule …]`, tableau
+  `verdict | kind | ref | #médias | durée | détail`, membres indentés (`├`/`└`),
+  résumé `verdict grille:`.
+
+Réparé au passage : deux champs proto orphelins de l'extension arbre abandonnée
+(`PreviewResponse.log`, `PreviewRequest.depth`) qui bloquaient la compilation ;
+tests d'intégration recalés (`PoolStats.distinct_artists`, `PreviewRequest.depth`
+dans `tests/pool_preview.rs` + `tests/agenda_preview.rs`).
+
+**Validation** : édité ; **`cargo build` + `cargo test -p stationd` à reconfirmer**
+(Rust indispo dans l'env d'édition ; le dernier changement = quota membre
+`runtime`/`take`). Regen proto par `build.rs` au prochain build.
 
 ### — Groupes `weighted` + `rotate` : résolution (2026-09-21) —
 
@@ -783,7 +765,7 @@ dans le découpage des modules (`grid_index` = A, `grid_store` = B).
 | `src/grid_toml.rs` | Grammaire `grid.toml` : `parse_grid`/`validate_refs`/`to_toml` (15 tests) |
 | `src/grid_store.rs` | État durable famille (B) : compteurs Every / tokens AtClock |
 | `src/grid_engine.rs` | Boucle vivante (résolution + persistance) + `preview` (projection) |
-| `src/schedule_grpc.rs` | Service gRPC scheduling (6 RPC réels, `preview` compris) |
+| `src/schedule_grpc.rs` | Service gRPC scheduling (7 RPC réels, dont `CheckCoverage`) |
 | `src/config.rs` | Config TOML + fuseau station validé |
 | `src/playlist.rs` | Modèle/parser/validation playlists |
 | `src/store.rs` / `src/sync.rs` | Vue playlists / réconciliation |
@@ -802,7 +784,7 @@ dans le découpage des modules (`grid_index` = A, `grid_store` = B).
 | `src/main.rs` | Daemon : démarrage, 5 services gRPC, shutdown |
 | `src/bin/stationctl.rs` | CLI (station + `schedule …` + `library …` + `plugin …`) |
 | `proto/station.proto` | Contrat `Station` |
-| `proto/schedule_v1.proto` | Contrat `ScheduleService` (compilé/servi ; 6 RPC réels) |
+| `proto/schedule_v1.proto` | Contrat `ScheduleService` (compilé/servi ; 7 RPC réels) |
 | `proto/library_v1.proto` | Contrat `LibraryService` (compilé/servi ; Scan + ListMedia) |
 | `proto/plugin_v1.proto` | Contrat `PluginService` (compilé/servi ; List + Control) |
 | `Doc/plugin-{events,hooks,host}.md` | Contrats du système de plugins (référence durable) |

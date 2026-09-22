@@ -2,6 +2,8 @@
 //! Uses the same materialization as playback, but never chooses a track,
 //! reads/advances cursors or group_state, or calls filter_pool plugins.
 
+use std::collections::HashSet;
+
 use sqlx::SqlitePool;
 
 use crate::playlist::{MemberQuota, Mode, Playlist, PlaylistError, Selection, Strategy};
@@ -13,6 +15,11 @@ use crate::selection::{materialize_dynamic, materialize_static, SelectionError};
 pub struct PoolStats {
     pub selected_count: Option<u64>,
     pub total_duration_ms: Option<u64>,
+    /// Distinct non-empty artists in the pool. Feeds the coverage check's
+    /// `no_same_artist_within` guard (a pool with < 2 distinct artists can
+    /// never satisfy it). `None` = not measurable: a remote/queue pool, or a
+    /// group total (artists can't be de-duplicated across members here).
+    pub distinct_artists: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,6 +75,10 @@ pub async fn inspect_ref(
     let mut total = PoolStats {
         selected_count: Some(0),
         total_duration_ms: Some(0),
+        // A group total does not carry a distinct-artist count: the same
+        // artist may appear in several members, and the per-member pools are
+        // not de-duplicated here. Left unknown on purpose.
+        distinct_artists: None,
     };
     for (i, member) in sel.members.iter().enumerate() {
         let child = load_playlist(pool, &member.r#ref).await?;
@@ -135,9 +146,19 @@ async fn inspect_leaf(pool: &SqlitePool, sel: &Selection) -> Result<PoolStats, S
     let duration = candidates.iter().try_fold(0_u64, |sum, c| {
         sum.checked_add(c.duration_ms).ok_or_else(overflow)
     })?;
+    // Distinct non-empty artists over the same materialized pool (one pass, no
+    // extra query). An untagged file contributes no artist rather than a fake
+    // empty one.
+    let distinct_artists = candidates
+        .iter()
+        .filter_map(|c| c.artist.as_deref())
+        .filter(|a| !a.is_empty())
+        .collect::<HashSet<_>>()
+        .len() as u64;
     Ok(PoolStats {
         selected_count: Some(candidates.len() as u64),
         total_duration_ms: Some(duration),
+        distinct_artists: Some(distinct_artists),
     })
 }
 

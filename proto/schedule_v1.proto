@@ -187,113 +187,6 @@ message IndicativeRule {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// Preview autoritatif — log multi-granularité (arbre tranche → bloc → piste)
-// ─────────────────────────────────────────────────────────────────────────
-// Même bake que `occurrences`, vu comme un ARBRE avec diagnostics par nœud.
-// Produit par le contrat (CLI-first) ; --summary/--tracks ne sont qu'un rendu.
-// `occurrences`/`indicative` restent la timeline plate inchangée (TUI agenda).
-//
-// Dur vs estimé : DUR = l'ensemble des médias, l'ordre résolu (permutation du
-// shuffle, tirages pondérés), les départs ancrés-règle (`at_utc` d'un bloc).
-// ESTIMÉ = le wall-clock PAR PISTE (cumul de durées) et les marges de
-// couverture. Le preview promet « ces médias, dans cet ordre, dans ce bloc qui
-// démarre à cette heure » — pas « ce titre à 20:03:47 ».
-
-// Liste FERMÉE des codes de diagnostic (fermée = atteignable au contrat, donc
-// CLI + web). « Signalé, pas jugé » : le preview rend le fait visible ; la
-// politique bloquant/non-bloquant (quel code empêche le commit de la grille)
-// est décidée ailleurs, pas gelée ici.
-enum DiagnosticCode {
-  DIAGNOSTIC_CODE_UNSPECIFIED = 0;
-  DEAD_AIR             = 1;   // trou d'antenne (aucune source, pas de fallback)
-  POOL_EMPTY           = 2;   // la source active a un pool vide
-  BROKEN_REF           = 3;   // média ou ref de playlist cassée
-  GROUP_CYCLE          = 4;   // cycle dans un groupe (graphe non-DAG)
-  COOLDOWN_UNMET       = 5;   // anti-répétition non satisfaisable (quota cède)
-  SOURCE_EXHAUSTED     = 6;   // source finie épuisée (on_exhausted)
-  SURPRISING_COLLISION = 7;   // collision résolue de façon inattendue
-  BLOCK_OVERRUN        = 8;   // débord : contenu > fenêtre inter-blocs implicite
-  BLOCK_UNDERRUN       = 9;   // sous-couverture : contenu < fenêtre, rien à combler
-  DST_ANOMALY          = 10;  // heure locale inexistante/dupliquée sur la fenêtre
-}
-
-// « Signalé, pas jugé » : la sévérité qualifie, elle ne décide pas du commit.
-// ⚠ (débord, souvent voulu — borne molle) vs ✗ (trou sec sans fallback).
-enum DiagnosticSeverity {
-  DIAGNOSTIC_SEVERITY_UNSPECIFIED = 0;
-  INFO    = 1;
-  WARNING = 2;   // ⚠
-  ERROR   = 3;   // ✗
-}
-
-message Diagnostic {
-  DiagnosticCode     code     = 1;
-  DiagnosticSeverity severity = 2;
-  string             detail   = 3;   // message humain contextuel (ref, quota…)
-}
-
-// Couverture inter-blocs : OBSERVATIONNELLE, en sortie. La fenêtre est DÉRIVÉE
-// au preview (= start du bloc suivant − start de ce bloc), jamais un champ TOML
-// (`end` reste interdit en entrée). Contenu et marge sont ESTIMÉS (cumul de
-// durées).
-message Coverage {
-  State state = 1;
-  google.protobuf.Duration window  = 2;  // fenêtre implicite dérivée (borne molle)
-  google.protobuf.Duration content = 3;  // somme estimée des durées du bloc
-  google.protobuf.Duration margin  = 4;  // window − content (négatif = débord)
-  enum State {
-    STATE_UNSPECIFIED = 0;
-    OK       = 1;   // tient, avec la marge affichée
-    OVERRUN  = 2;   // débord (⚠, souvent voulu)
-    UNDERRUN = 3;   // sous-couverture / trou (✗ si trou sec)
-  }
-}
-
-// Niveau 3 (--tracks / -v) : une piste concrète du playout, avec la RAISON de
-// sa présence (« ce qui sort » → « pourquoi ça sort, et où le quota a cédé »).
-message PreviewTrack {
-  string media_path = 1;
-  // Raison de sélection : "[newest]", "[shuffle #7]", "SKIP … contrainte",
-  // "fallback", etc.
-  string reason = 2;
-  // Wall-clock ESTIMÉ (cumul de durées) — n'apparaît qu'au niveau 3, à marquer
-  // « ~ » à l'affichage. Ne jamais survendre le calage seconde.
-  google.protobuf.Duration est_offset   = 3;  // depuis le début du bloc
-  google.protobuf.Duration est_duration = 4;  // durée estimée de la piste
-  repeated Diagnostic diagnostics = 5;         // p.ex. SKIP cooldown sur la piste
-}
-
-// Niveau 2 (défaut) : un bloc = une ACTIVATION. Son `at_utc` est DUR (ancré
-// règle). Un trou est matérialisé comme bloc fantôme (`phantom`), pas noyé
-// dans les pistes.
-message PreviewBlock {
-  google.protobuf.Timestamp at_utc  = 1;   // départ du bloc (dur)
-  string at_local = 2;                      // même instant en local nommé
-  string rule_id = 3;
-  string playlist_ref = 4;
-  Decision.Origin origin = 5;
-  string win_reason = 6;                    // pourquoi CE bloc gagne (collision)
-  Coverage coverage = 7;                    // couverture vers le bloc suivant
-  repeated Diagnostic diagnostics = 8;      // diag au grain bloc
-  bool phantom = 9;                         // bloc fantôme = trou matérialisé
-  repeated PreviewTrack tracks = 10;        // rempli au niveau 3 seulement
-}
-
-// Niveau 1 (--summary) : index scannable par tranche horaire, avec une colonne
-// DIAG (diagnostics remontés des blocs) qui dit OÙ déplier avant de lire.
-message PreviewSlice {
-  string hour_local = 1;                    // la tranche (ex. "20:00")
-  google.protobuf.Timestamp start_utc = 2;
-  repeated Diagnostic diagnostics = 3;      // remontée pour la colonne DIAG
-  repeated PreviewBlock blocks = 4;         // rempli aux niveaux ≥ 2
-}
-
-// L'arbre complet d'un bake. Même structure servie en --format json.
-message PreviewLog {
-  repeated PreviewSlice slices = 1;
-}
-
-// ─────────────────────────────────────────────────────────────────────────
 // Service grille (CLI-first — stationctl schedule …)
 // ─────────────────────────────────────────────────────────────────────────
 
@@ -312,6 +205,13 @@ service ScheduleService {
   // Sert de test anti-DST (fenêtre sur nuit de bascule → révèle trou/doublon).
   rpc Preview(PreviewRequest) returns (PreviewResponse);
 
+  // Dimensionnement : « la grille a-t-elle assez de média ? ». Pour chaque
+  // règle active, inspecte le pool de sa playlist (read-only, aucun playout,
+  // aucune mutation famille B) et rend un verdict — pool vide / ref cassée,
+  // anti-répétition ou `limit` non tenable, source FINIE plus courte que son
+  // créneau. « Signalé, pas jugé » : le verdict qualifie, il ne bloque rien.
+  rpc CheckCoverage(CheckCoverageRequest) returns (CheckCoverageResponse);
+
   // Horloge manuelle (test) : fige/relâche l'instant que ResolveNext utilise
   // quand la requête ne fournit pas `now`. Sans changement demandé → reporte.
   rpc SetClock(SetClockRequest) returns (ClockStatus);
@@ -329,21 +229,10 @@ message ListRulesResponse   { repeated Rule rules = 1; }
 message PreviewRequest {
   google.protobuf.Timestamp from = 1;      // absent → maintenant
   google.protobuf.Duration  window = 2;    // ex. 24h
-  // Profondeur du log produit. Un seul bake, trois grains (modèle `git log
-  // --oneline / --stat / full`). TRACK résout le playout complet (plus lourd,
-  // à exécuter sur état VIRTUEL — jamais muter les curseurs famille B).
-  Depth depth = 3;
-  enum Depth {
-    DEPTH_UNSPECIFIED = 0;   // → BLOCK
-    SLICE = 1;               // --summary : tranches + colonne DIAG
-    BLOCK = 2;               // défaut : blocs (règle, collision, couverture)
-    TRACK = 3;               // --tracks/-v : pistes concrètes + raisons
-  }
 }
 message PreviewResponse {
   repeated Occurrence occurrences = 1;      // timeline ordonnée, instants réels
   repeated IndicativeRule indicative = 2;   // règles en jeu mais non projetables
-  PreviewLog log = 3;                       // arbre tranche→bloc→piste (diag par nœud)
 }
 
 // Horloge manuelle. `real = true` → repasse en temps réel. Sinon `at` (s'il
@@ -360,4 +249,48 @@ message ClockStatus {
   bool frozen = 1;                         // true si une horloge manuelle est active
   google.protobuf.Timestamp effective = 2; // l'instant que ResolveNext utilisera
   string effective_local = 3;              // le même instant rendu en local nommé
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// CheckCoverage — preview de DIMENSIONNEMENT (pas de playout)
+// ─────────────────────────────────────────────────────────────────────────
+
+// Verdict d'une entrée (enum fermé — atteignable au contrat). Croissant en
+// gravité : le pire l'emporte au niveau grille.
+enum Verdict {
+  VERDICT_UNSPECIFIED = 0;
+  OK           = 1;   // le pool couvre ce que la règle demande
+  THIN         = 2;   // ⚠ tient, mais juste (rejeu forcé, quota non plein, créneau à peine couvert)
+  INSUFFICIENT = 3;   // ✗ pool vide, ref cassée, membre indispensable manquant
+}
+
+message CheckCoverageRequest {
+  // Vide → toute la grille (règles activées). Sinon restreint à ces rule_ids.
+  repeated string rule_ids = 1;
+}
+
+message CheckCoverageResponse {
+  repeated CoverageEntry entries = 1;
+  Verdict worst = 2;                       // pire verdict de la grille (résumé / exit code)
+}
+
+// Une règle de la grille et le dimensionnement du pool qu'elle référence.
+message CoverageEntry {
+  string rule_id = 1;
+  string playlist_ref = 2;
+  string kind = 3;                         // base_rotation | day_part | at_clock | every
+  optional uint64 selected_count = 4;      // médias du pool ; absent = non mesurable (remote/queue)
+  google.protobuf.Duration total_duration = 5; // durée cumulée du pool ; absente = inconnue
+  Verdict verdict = 6;
+  string detail = 7;                       // ce qui a fait le verdict (axe + seuil)
+  repeated CoverageMember members = 8;     // décomposition d'un groupe (vide sinon)
+}
+
+// Un membre d'un groupe, dimensionné à part (localise le maillon faible).
+message CoverageMember {
+  string ref = 1;
+  optional uint64 selected_count = 2;
+  google.protobuf.Duration total_duration = 3;
+  Verdict verdict = 4;
+  string detail = 5;
 }
