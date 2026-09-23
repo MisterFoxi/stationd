@@ -115,24 +115,42 @@ jamais la source de vérité de quoi que ce soit d'essentiel à l'antenne.
   réécrivant des fichiers.
 - Pas un accès **réseau/FS** général : seulement les capacités listées.
 
+## Décisions (tranche A2, 2026-09-23)
+
+- **`hard` sans Liquidsoap** : **dégradé en `soft` + avertissement**. Le push
+  est accepté, la réponse porte `degraded = true`, le mode demandé (`hard`)
+  reste visible dans la file. « L'annonce passe », en retard (prochaine
+  frontière).
+- **Capacités déclarées** : `capabilities = ["control", "push_override"]` dans
+  le `[[plugin]]` (ensemble fermé ; nom inconnu = config refusée au démarrage).
+  Un appel hors capacités est **refusé et loggué**, jamais exécuté ; en WASM
+  le refus revient au guest comme donnée (`{"ok":false,…}`), pas comme trap.
+  `plugin list` affiche les capacités.
+- **`media_path` arbitraire autorisé** : chemin relatif à `media/` (`\` → `/`,
+  absolu / lecteur / `..` / NUL refusés au push), pas forcément indexé ;
+  **vérifié sur disque au passage** — absent → override abandonné (loggué),
+  la grille reprend.
+- **Portée d'un override PL** : `tracks` pistes (défaut 1), résolues comme une
+  source de grille (plugins et contraintes compris). Pool vide / ref inconnue
+  au passage → abandonné, loggué, la grille reprend.
+- **Rate-limit** : file bornée (64 overrides en attente), refus explicite
+  au-delà. Pas de quarantaine sur refus (ce n'est pas un crash).
+- **File volatile** : en mémoire. Un arrêt du daemon perd les overrides en
+  attente — **annoncé** dans les logs d'arrêt (nombre perdu), pas silencieux.
+  L'état de diffusion, lui, est persisté (un `stop` reste un `stop` après
+  redémarrage).
+- **`StopWhenIdle`** : `draining` devient `stopped` au prochain bord de piste
+  si le **dernier** échantillon d'auditeurs vaut 0. Jamais échantillonné →
+  aucun arrêt (pas de signal d'audience). `resume` annule un drain.
+- **Contrat** : `broadcast_v1.proto` (`GetState` / `Control` /
+  `SampleListeners` / `PushOverride` / `ListOverrides` / `ClearOverrides`),
+  CLI `stationctl station|override|debug listeners`. `ResolveNext` rend
+  `OVERRIDE` (+ `override_source`) ou `HALTED` (+ `halted_state`, aucun média,
+  Liquidsoap ne doit pas combler).
+
 ## Encore ouvert
 
-- **`hard` sans Liquidsoap** : dégradé-en-`soft` + avertissement (proposé) vs
-  erreur explicite. Le dégradé privilégie « l'annonce passe » ; l'erreur
-  privilégie « pas de faux-semblant ». À trancher.
-- **Qui a le droit d'appeler `control` / `push_override` ?** Tout plugin, ou
-  seulement ceux qui déclarent la capacité (`capabilities = [...]` dans la
-  déclaration TOML) ? Une capacité `Stop` donnée à n'importe quel plugin stats
-  est un risque. Défaut pressenti : **capacités déclarées** par plugin, refus
-  sinon.
-- **Portée d'un override PL** : prend-elle la main jusqu'à épuisement, ou
-  jusqu'à un `limit` de pistes, ou jusqu'à un `expiry` temporel ? (recoupe le
-  `limit`/quota encore non honoré côté sélection).
-- **Rate-limit / quotas des appels hôte** : un plugin qui pousse un override à
-  chaque piste, ou martèle `db_put`, doit être borné. Compteur → quarantaine
-  (cf. `plugin-hooks.md`) ou refus doux ?
-- **Transactions `db_*`** : `db_query` lecture seule + `db_put` atomique
+- **`db_*`** (tranche suivante) : `db_query` lecture seule + `db_put` atomique
   suffisent-ils, ou faut-il des transactions multi-clés exposées ?
-- **`push_override` accepte-t-il un `media_path` arbitraire** (hors
-  bibliothèque indexée) ou seulement des références connues du core ? Un chemin
-  arbitraire rouvre la porte au « média fantôme » que la sélection évite.
+- **Persistance de la file d'override** si un cas réel l'exige (aujourd'hui la
+  péremption rend la perte au redémarrage acceptable).

@@ -1,0 +1,17 @@
+# Plugin WASM de démo A2 : stop-when-idle (host function station_control).
+# Crate SÉPARÉ ([workspace] vide).
+#   cargo build --release --target wasm32-unknown-unknown
+# → target/wasm32-unknown-unknown/release/stop_when_idle_wasm.wasm
+[package]
+name = "stop-when-idle-wasm"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+extism-pdk = "1"
+serde_json = "1"

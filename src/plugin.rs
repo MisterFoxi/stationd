@@ -12,11 +12,12 @@
 //! event must NEVER block or fail the caller (a track resolution), so a slow or
 //! crashed plugin never holds the air.
 //!
-//! Scope of A1: lifecycle + `on_event`. The synchronous hooks `on_scan` /
-//! `filter_pool` (which return a value into the scan / decision path) are NOT
-//! wired here — they need a synchronous sharing design distinct from this
-//! fire-and-forget actor, and land with their call sites. The host surface
-//! (`push_override`, `control`, per-plugin db) is A2.
+//! Scope: lifecycle + `on_event` (A1), `filter_pool` (sync hook), and the
+//! **host surface** (A2): a [`Host`] handed to the plugin in `on_load`, scoped
+//! to that plugin and gated by the capabilities it DECLARES
+//! (`capabilities = ["control", "push_override"]`). Native plugins call it
+//! directly; WASM plugins through extism host functions (`station_control`,
+//! `push_override`, JSON in/out). The per-plugin db (`db_*`) is a later slice.
 //!
 //! Failure handling (no-silent-failure, visible): a plugin that fails `on_load`
 //! is recorded `Failed` and inactive — the daemon and other plugins still
@@ -27,9 +28,13 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-use extism::{Manifest, Plugin as ExtismPlugin, Wasm};
+use extism::{host_fn, Function, Manifest, Plugin as ExtismPlugin, UserData, Wasm, PTR};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
+
+use crate::station_control::{
+    ControlAction, ControlError, OverrideRequest, PushOutcome, StationControl, Transition,
+};
 
 /// Sliding-window failure policy: N failures within WINDOW → quarantine.
 const MAX_FAILURES: u32 = 3;
@@ -66,7 +71,9 @@ pub trait Plugin: Send {
 
     /// Activate: open resources, read config. Synchronous, bounded, may fail —
     /// a failure refuses the plugin (state `Failed{load}`), others start anyway.
-    fn on_load(&mut self) -> Result<(), String> {
+    /// `host` is this plugin's host surface (scoped to it, gated by its
+    /// declared capabilities); keep a clone to act later.
+    fn on_load(&mut self, _host: Host) -> Result<(), String> {
         Ok(())
     }
 
@@ -92,9 +99,10 @@ pub trait Plugin: Send {
 /// Facts the core notifies plugins about. `#[non_exhaustive]`: a plugin must
 /// `_ => {}` on unknown variants, so adding events never breaks a plugin.
 ///
-/// A1 emits only `TrackResolved` (the one source that already exists). Others
+/// Emitted today: `TrackResolved` (grid engine), `ListenersSampled` (test
+/// injection until Icecast), `BroadcastStateChanged` (station control). Others
 /// from `Doc/plugin-events.md` (`TrackSkipped`, `LibraryScanned`, `GridApplied`,
-/// `ListenersSampled`, …) are added as their sources come online.
+/// …) are added as their sources come online.
 #[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum PluginEvent {
@@ -106,6 +114,101 @@ pub enum PluginEvent {
         rule_id: Option<String>,
         origin: String,
     },
+    /// An audience sample (Icecast later; `stationctl debug listeners` today).
+    /// `at` = epoch seconds.
+    ListenersSampled { count: u32, at: i64 },
+    /// The broadcast state changed (`running|paused|stopped|draining`). `by`
+    /// names the emitter: a plugin, `cli`, or `stop-when-idle` for a drain
+    /// completed by the core at a track boundary.
+    BroadcastStateChanged { from: String, to: String, by: String },
+}
+
+// ---------------------------------------------------------------------------
+// Host surface (A2): what a plugin may call on the core
+// ---------------------------------------------------------------------------
+
+/// A capability a plugin must declare to use the matching host call. Closed
+/// set: an unknown name is a config error (loud, at start-up).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Capability {
+    /// `host.control(...)` — stop / pause / resume / stop-when-idle.
+    Control,
+    /// `host.push_override(...)` — content ahead of the grid.
+    PushOverride,
+}
+
+impl Capability {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Capability::Control => "control",
+            Capability::PushOverride => "push_override",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum HostError {
+    #[error("plugin `{plugin}` did not declare capability `{capability}`")]
+    Denied { plugin: String, capability: &'static str },
+    #[error("no station control is wired")]
+    Unavailable,
+    #[error(transparent)]
+    Control(#[from] ControlError),
+}
+
+/// A plugin's host surface, handed over in `on_load`. Scoped: it carries the
+/// plugin's name (recorded as the emitter of every action) and its declared
+/// capabilities; a call outside them is refused and logged, never performed.
+/// Capabilities, never paths or handles (sandboxing).
+#[derive(Clone)]
+pub struct Host {
+    plugin: String,
+    capabilities: Vec<Capability>,
+    control: Option<StationControl>,
+}
+
+impl Host {
+    pub fn new(plugin: &str, capabilities: &[Capability], control: Option<StationControl>) -> Self {
+        Self {
+            plugin: plugin.to_string(),
+            capabilities: capabilities.to_vec(),
+            control,
+        }
+    }
+
+    pub fn plugin_name(&self) -> &str {
+        &self.plugin
+    }
+
+    pub fn has(&self, capability: Capability) -> bool {
+        self.capabilities.contains(&capability)
+    }
+
+    fn require(&self, capability: Capability) -> Result<&StationControl, HostError> {
+        if !self.has(capability) {
+            let err = HostError::Denied {
+                plugin: self.plugin.clone(),
+                capability: capability.as_str(),
+            };
+            tracing::warn!(%err, "host call refused");
+            return Err(err);
+        }
+        self.control.as_ref().ok_or(HostError::Unavailable)
+    }
+
+    /// Pilot the broadcast (first-class station control; the plugin is just
+    /// one more emitter). Needs capability `control`.
+    pub fn control(&self, action: ControlAction) -> Result<Option<Transition>, HostError> {
+        Ok(self.require(Capability::Control)?.apply(action, &self.plugin)?)
+    }
+
+    /// Push content ahead of the grid. Needs capability `push_override`.
+    pub fn push_override(&self, req: OverrideRequest) -> Result<PushOutcome, HostError> {
+        Ok(self
+            .require(Capability::PushOverride)?
+            .push_override(req, &self.plugin)?)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -130,6 +233,10 @@ pub struct PluginDecl {
     /// that file (via extism); when absent, `name` selects a built-in.
     #[serde(default)]
     pub wasm: Option<String>,
+    /// Host calls this plugin may make (`control`, `push_override`). Empty by
+    /// default: a plugin acts on nothing unless it says so.
+    #[serde(default)]
+    pub capabilities: Vec<Capability>,
     #[serde(default)]
     pub config: toml::Table,
 }
@@ -186,6 +293,8 @@ pub struct PluginInfo {
     pub state: String,
     pub reason: String,
     pub failures: u32,
+    /// Declared capabilities (what the plugin may call on the core).
+    pub capabilities: Vec<String>,
 }
 
 /// Lifecycle action requested via `plugin start|stop|restart|reload`.
@@ -221,17 +330,25 @@ impl Slot {
             state: self.state.label().to_string(),
             reason: self.state.reason(),
             failures,
+            capabilities: self
+                .decl
+                .capabilities
+                .iter()
+                .map(|c| c.as_str().to_string())
+                .collect(),
         }
     }
 
-    /// (Re)build the instance and run `on_load`. Sets `Loaded` or `Failed`.
-    fn start(&mut self) {
-        match build_plugin(&self.decl) {
+    /// (Re)build the instance and run `on_load` with its scoped host surface.
+    /// Sets `Loaded` or `Failed`.
+    fn start(&mut self, control: Option<&StationControl>) {
+        let host = Host::new(&self.decl.name, &self.decl.capabilities, control.cloned());
+        match build_plugin(&self.decl, &host) {
             Err(reason) => {
                 self.plugin = None;
                 self.state = PluginState::Failed { phase: Phase::Load, reason };
             }
-            Ok(mut plugin) => match catch(|| plugin.on_load()) {
+            Ok(mut plugin) => match catch(|| plugin.on_load(host)) {
                 Ok(Ok(())) => {
                     self.plugin = Some(plugin);
                     self.state = PluginState::Loaded;
@@ -289,16 +406,18 @@ fn catch<R>(f: impl FnOnce() -> R) -> Result<R, String> {
     })
 }
 
-/// Map a declaration to a native plugin instance. A1 knows only `logger`; an
+/// Map a declaration to a plugin instance: a `.wasm` module when `wasm` is
+/// set (its host functions bound to `host`), else a built-in by name. An
 /// unknown name is a loud (visible) failure, never silently ignored.
-fn build_plugin(decl: &PluginDecl) -> Result<Box<dyn Plugin>, String> {
+fn build_plugin(decl: &PluginDecl, host: &Host) -> Result<Box<dyn Plugin>, String> {
     if let Some(path) = &decl.wasm {
-        return WasmPlugin::new(decl.name.clone(), path, &decl.config)
+        return WasmPlugin::new(decl.name.clone(), path, &decl.config, host)
             .map(|p| Box::new(p) as Box<dyn Plugin>);
     }
     match decl.name.as_str() {
         "logger" => Ok(Box::new(LoggerPlugin::from_config(&decl.config))),
         "blacklist" => Ok(Box::new(BlacklistPlugin::from_config(&decl.config))),
+        "stop-when-idle" => Ok(Box::new(StopWhenIdlePlugin::from_config(&decl.config)?)),
         other => Err(format!("unknown plugin kind `{other}`")),
     }
 }
@@ -376,10 +495,17 @@ impl PluginHandle {
     }
 }
 
+/// Spawn the plugin actor without a station control: host calls answer
+/// `Unavailable` (tests, tools).
+pub fn spawn(decls: Vec<PluginDecl>) -> PluginHandle {
+    spawn_with(decls, None)
+}
+
 /// Spawn the owning task from the declared plugins and return a handle. Enabled
 /// plugins are loaded immediately (a failure is recorded, not fatal); disabled
-/// ones stay `Disabled`. Slots are ordered by (`order`, `name`).
-pub fn spawn(mut decls: Vec<PluginDecl>) -> PluginHandle {
+/// ones stay `Disabled`. Slots are ordered by (`order`, `name`). `control` is
+/// the station control behind every plugin's host surface.
+pub fn spawn_with(mut decls: Vec<PluginDecl>, control: Option<StationControl>) -> PluginHandle {
     decls.sort_by(|a, b| a.order.cmp(&b.order).then_with(|| a.name.cmp(&b.name)));
     let mut slots: Vec<Slot> = decls
         .into_iter()
@@ -391,7 +517,7 @@ pub fn spawn(mut decls: Vec<PluginDecl>) -> PluginHandle {
                 failures: VecDeque::new(),
             };
             if slot.decl.enabled {
-                slot.start();
+                slot.start(control.as_ref());
             }
             slot
         })
@@ -412,7 +538,7 @@ pub fn spawn(mut decls: Vec<PluginDecl>) -> PluginHandle {
                     let res = match slots.iter_mut().find(|s| s.decl.name == name) {
                         None => Err(format!("unknown plugin `{name}`")),
                         Some(slot) => {
-                            apply_action(slot, action);
+                            apply_action(slot, action, control.as_ref());
                             Ok(slot.info())
                         }
                     };
@@ -425,20 +551,20 @@ pub fn spawn(mut decls: Vec<PluginDecl>) -> PluginHandle {
     PluginHandle { tx }
 }
 
-fn apply_action(slot: &mut Slot, action: Action) {
+fn apply_action(slot: &mut Slot, action: Action, control: Option<&StationControl>) {
     match action {
         Action::Start => {
             // Idempotent: starting an already-loaded plugin is a no-op.
             if !matches!(slot.state, PluginState::Loaded) {
-                slot.start();
+                slot.start(control);
             }
         }
         Action::Stop => slot.stop(),
-        // reload == restart in native (no artefact to re-read); they diverge
-        // only with WASM.
+        // reload == restart in native (no artefact to re-read); a WASM plugin
+        // is rebuilt from its file on start, so both re-read it.
         Action::Restart | Action::Reload => {
             slot.stop();
-            slot.start();
+            slot.start(control);
         }
     }
 }
@@ -514,7 +640,7 @@ impl Plugin for LoggerPlugin {
         "logger"
     }
 
-    fn on_load(&mut self) -> Result<(), String> {
+    fn on_load(&mut self, _host: Host) -> Result<(), String> {
         if self.fail_on_load {
             return Err("fail_on_load = true (test)".to_string());
         }
@@ -541,6 +667,12 @@ impl Plugin for LoggerPlugin {
                     media = media_path.as_deref().unwrap_or("-"),
                     "[logger] track resolved"
                 );
+            }
+            PluginEvent::ListenersSampled { count, at } => {
+                tracing::info!(count, at, "[logger] listeners sampled");
+            }
+            PluginEvent::BroadcastStateChanged { from, to, by } => {
+                tracing::info!(%from, %to, %by, "[logger] broadcast state changed");
             }
             // Required for real (downstream/WASM) plugins: PluginEvent is
             // #[non_exhaustive], so new variants must be ignored gracefully.
@@ -588,7 +720,7 @@ impl Plugin for BlacklistPlugin {
         "blacklist"
     }
 
-    fn on_load(&mut self) -> Result<(), String> {
+    fn on_load(&mut self, _host: Host) -> Result<(), String> {
         tracing::info!(
             paths = self.exclude_path_prefixes.len(),
             artists = self.exclude_artists.len(),
@@ -615,15 +747,143 @@ impl Plugin for BlacklistPlugin {
     }
 }
 
+/// Demo of the A2 composition « observe + act »: on `ListenersSampled` with a
+/// count of 0 (for `min_zero_samples` consecutive samples, default 1) it arms
+/// `host.control(StopWhenIdle)`. The core owns the mechanism (the drain
+/// completes at the next track boundary if the audience is still 0); this
+/// plugin only carries the policy. A non-zero sample resets the streak. It
+/// arms once per idle period: an operator's `resume` is not overridden until
+/// the audience comes back and leaves again.
+///
+/// Requires capability `control` — refused at `on_load` otherwise (visible
+/// `Failed`), never a policy that silently can't act.
+struct StopWhenIdlePlugin {
+    host: Option<Host>,
+    min_zero_samples: u32,
+    zero_streak: u32,
+}
+
+impl StopWhenIdlePlugin {
+    fn from_config(config: &toml::Table) -> Result<Self, String> {
+        let min = match config.get("min_zero_samples") {
+            None => 1,
+            Some(v) => match v.as_integer() {
+                Some(n) if n >= 1 && n <= u32::MAX as i64 => n as u32,
+                _ => return Err("`min_zero_samples` must be an integer ≥ 1".into()),
+            },
+        };
+        Ok(Self { host: None, min_zero_samples: min, zero_streak: 0 })
+    }
+}
+
+impl Plugin for StopWhenIdlePlugin {
+    fn name(&self) -> &str {
+        "stop-when-idle"
+    }
+
+    fn on_load(&mut self, host: Host) -> Result<(), String> {
+        if !host.has(Capability::Control) {
+            return Err("stop-when-idle requires `capabilities = [\"control\"]`".into());
+        }
+        self.host = Some(host);
+        self.zero_streak = 0;
+        Ok(())
+    }
+
+    fn on_event(&mut self, event: &PluginEvent) {
+        let PluginEvent::ListenersSampled { count, .. } = event else {
+            return;
+        };
+        if *count > 0 {
+            self.zero_streak = 0;
+            return;
+        }
+        self.zero_streak = self.zero_streak.saturating_add(1);
+        if self.zero_streak != self.min_zero_samples {
+            return; // not yet, or already armed for this idle period
+        }
+        let Some(host) = &self.host else { return };
+        match host.control(ControlAction::StopWhenIdle) {
+            Ok(Some(t)) => tracing::info!(
+                from = t.from.as_str(),
+                to = t.to.as_str(),
+                "[stop-when-idle] no listeners: graceful stop armed"
+            ),
+            Ok(None) => {}
+            Err(e) => tracing::warn!(%e, "[stop-when-idle] could not arm the graceful stop"),
+        }
+    }
+}
+
+// ----- WASM host functions (the host surface, JSON in / JSON out) ----------
+//
+// Both always return a JSON string — `{"ok":true,…}` or `{"ok":false,"error":…}`
+// — so a refused call is data for the guest, never a trap. The `Host` carried
+// as user data is the plugin's own (scoped name + declared capabilities).
+
+fn host_reply<T: Serialize>(res: Result<T, String>) -> String {
+    let v = match res.map(serde_json::to_value) {
+        Ok(Ok(serde_json::Value::Object(mut m))) => {
+            m.insert("ok".into(), serde_json::Value::Bool(true));
+            serde_json::Value::Object(m)
+        }
+        Ok(Ok(other)) => serde_json::json!({ "ok": true, "result": other }),
+        Ok(Err(e)) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+        Err(e) => serde_json::json!({ "ok": false, "error": e }),
+    };
+    v.to_string()
+}
+
+/// `station_control` input: `{"action": "stop|pause|resume|stop_when_idle"}`.
+fn wasm_station_control(host: &Host, input: &str) -> String {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Req {
+        action: ControlAction,
+    }
+    host_reply(
+        serde_json::from_str::<Req>(input)
+            .map_err(|e| format!("bad station_control input: {e}"))
+            .and_then(|r| host.control(r.action).map_err(|e| e.to_string()))
+            .map(|t| match t {
+                Some(t) => serde_json::json!({ "changed": true, "from": t.from, "to": t.to }),
+                None => serde_json::json!({ "changed": false }),
+            }),
+    )
+}
+
+/// `push_override` input: an `OverrideRequest`, e.g.
+/// `{"content": {"media": "news/flash.mp3"}, "mode": "soft", "expiry": "5m"}`.
+fn wasm_push_override(host: &Host, input: &str) -> String {
+    host_reply(
+        serde_json::from_str::<OverrideRequest>(input)
+            .map_err(|e| format!("bad push_override input: {e}"))
+            .and_then(|r| host.push_override(r).map_err(|e| e.to_string())),
+    )
+}
+
+host_fn!(station_control(user_data: Host; input: String) -> String {
+    let host = user_data.get()?;
+    let host = host.lock().map_err(|_| anyhow::anyhow!("host surface poisoned"))?;
+    Ok(wasm_station_control(&host, &input))
+});
+
+host_fn!(push_override(user_data: Host; input: String) -> String {
+    let host = user_data.get()?;
+    let host = host.lock().map_err(|_| anyhow::anyhow!("host surface poisoned"))?;
+    Ok(wasm_push_override(&host, &input))
+});
+
 /// A WASM plugin loaded from a `.wasm` file via extism. Implements the same
 /// `Plugin` trait as the built-ins by delegating to the module's exports,
 /// serialising data to JSON at the boundary. `extism::Plugin` is `Send`, so
 /// this lives on the actor task like any other plugin.
 ///
-/// WASM-1 scope: `filter_pool` and `on_event` exports (both optional — a
-/// missing export means "pass-through" / "ignore"). Host functions
-/// (`push_override`, `control`, db) are A2. Config-to-guest plumbing is the
-/// next increment.
+/// Exports (all optional): `filter_pool` (missing → pass-through), `on_event`
+/// (missing → ignored). Host functions offered to the guest (A2), bound to
+/// this plugin's scoped `Host`: `station_control`, `push_override` (imported
+/// by the guest from `extern "ExtismHost"`). Config reaches the guest as JSON
+/// under the key "config".
 struct WasmPlugin {
     name: String,
     plugin: ExtismPlugin,
@@ -632,13 +892,30 @@ struct WasmPlugin {
 }
 
 impl WasmPlugin {
-    fn new(name: String, path: &str, config: &toml::Table) -> Result<Self, String> {
+    fn new(name: String, path: &str, config: &toml::Table, host: &Host) -> Result<Self, String> {
         // Pass the plugin's TOML config to the guest as a single JSON string
         // under the key "config"; the guest reads it via `config::get("config")`.
         let config_json = serde_json::to_string(config).unwrap_or_else(|_| "{}".to_string());
         let manifest = Manifest::new([Wasm::file(path)])
             .with_config([("config".to_string(), config_json)].into_iter());
-        let plugin = ExtismPlugin::new(&manifest, [], false).map_err(|e| e.to_string())?;
+        let functions = [
+            Function::new(
+                "station_control",
+                [PTR],
+                [PTR],
+                UserData::new(host.clone()),
+                station_control,
+            ),
+            Function::new(
+                "push_override",
+                [PTR],
+                [PTR],
+                UserData::new(host.clone()),
+                push_override,
+            ),
+        ];
+        let plugin =
+            ExtismPlugin::new(&manifest, functions, false).map_err(|e| e.to_string())?;
         let has_filter = plugin.function_exists("filter_pool");
         let has_event = plugin.function_exists("on_event");
         Ok(Self {
@@ -699,8 +976,152 @@ mod tests {
             enabled,
             order: 50,
             wasm: None,
+            capabilities: vec![],
             config,
         }
+    }
+
+    // ----- host surface (A2) ---------------------------------------------
+
+    #[test]
+    fn host_refuses_an_undeclared_capability() {
+        let control = StationControl::new_in_memory();
+        let host = Host::new("stats", &[], Some(control.clone()));
+        assert!(matches!(
+            host.control(ControlAction::Stop),
+            Err(HostError::Denied { .. })
+        ));
+        assert_eq!(control.state(), crate::station_control::BroadcastState::Running);
+        let req = OverrideRequest {
+            content: crate::station_control::OverrideContent::Media("a.mp3".into()),
+            mode: Default::default(),
+            expiry: None,
+            tracks: None,
+        };
+        assert!(matches!(host.push_override(req), Err(HostError::Denied { .. })));
+        assert!(control.list_overrides().is_empty());
+    }
+
+    #[test]
+    fn host_acts_within_its_capabilities_and_signs_as_the_plugin() {
+        let control = StationControl::new_in_memory();
+        let host = Host::new(
+            "urgence",
+            &[Capability::Control, Capability::PushOverride],
+            Some(control.clone()),
+        );
+        host.control(ControlAction::Pause).unwrap();
+        assert_eq!(control.state(), crate::station_control::BroadcastState::Paused);
+        let req = OverrideRequest {
+            content: crate::station_control::OverrideContent::Media("alert.mp3".into()),
+            mode: Default::default(),
+            expiry: None,
+            tracks: None,
+        };
+        host.push_override(req).unwrap();
+        assert_eq!(control.list_overrides()[0].source, "urgence");
+    }
+
+    #[test]
+    fn host_without_control_is_unavailable() {
+        let host = Host::new("x", &[Capability::Control], None);
+        assert!(matches!(host.control(ControlAction::Stop), Err(HostError::Unavailable)));
+    }
+
+    #[test]
+    fn wasm_host_calls_answer_json_in_band() {
+        let control = StationControl::new_in_memory();
+        let host = Host::new("w", &[Capability::Control], Some(control.clone()));
+        let ok: serde_json::Value =
+            serde_json::from_str(&wasm_station_control(&host, r#"{"action":"stop_when_idle"}"#))
+                .unwrap();
+        assert_eq!(ok["ok"], true);
+        assert_eq!(ok["to"], "draining");
+        assert_eq!(control.state(), crate::station_control::BroadcastState::Draining);
+        // Bad input and missing capability are data, not traps.
+        let bad: serde_json::Value =
+            serde_json::from_str(&wasm_station_control(&host, r#"{"action":"explode"}"#)).unwrap();
+        assert_eq!(bad["ok"], false);
+        let denied: serde_json::Value = serde_json::from_str(&wasm_push_override(
+            &host,
+            r#"{"content":{"media":"a.mp3"}}"#,
+        ))
+        .unwrap();
+        assert_eq!(denied["ok"], false);
+        assert!(denied["error"].as_str().unwrap().contains("push_override"));
+    }
+
+    #[test]
+    fn wasm_push_override_queues_with_the_plugin_as_source() {
+        let control = StationControl::new_in_memory();
+        let host = Host::new("w", &[Capability::PushOverride], Some(control.clone()));
+        let out: serde_json::Value = serde_json::from_str(&wasm_push_override(
+            &host,
+            r#"{"content":{"playlist":"Shows/Flash"},"mode":"hard","expiry":"5m"}"#,
+        ))
+        .unwrap();
+        assert_eq!(out["ok"], true);
+        assert_eq!(out["degraded"], true, "hard without LS is degraded");
+        let e = &control.list_overrides()[0];
+        assert_eq!(e.source, "w");
+        assert_eq!(
+            e.content,
+            crate::station_control::OverrideContent::Playlist("shows/flash".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn stop_when_idle_requires_the_control_capability() {
+        let h = spawn_with(
+            vec![decl("stop-when-idle", true, toml::Table::new())],
+            Some(StationControl::new_in_memory()),
+        );
+        let info = &h.list().await[0];
+        assert_eq!(info.state, "failed");
+        assert!(info.reason.contains("control"));
+    }
+
+    #[tokio::test]
+    async fn stop_when_idle_arms_the_drain_on_zero_listeners() {
+        let control = StationControl::new_in_memory();
+        let mut d = decl("stop-when-idle", true, toml::Table::new());
+        d.capabilities = vec![Capability::Control];
+        let h = spawn_with(vec![d], Some(control.clone()));
+        control.attach_plugins(h.clone());
+        assert_eq!(h.list().await[0].state, "loaded");
+        assert_eq!(h.list().await[0].capabilities, vec!["control".to_string()]);
+
+        control.sample_listeners(4);
+        h.list().await; // the actor handles messages in order: events processed
+        assert_eq!(control.state(), crate::station_control::BroadcastState::Running);
+
+        control.sample_listeners(0);
+        h.list().await;
+        assert_eq!(control.state(), crate::station_control::BroadcastState::Draining);
+        // The core completes it at the next track boundary (audience still 0).
+        assert_eq!(
+            control.gate(),
+            crate::station_control::Gate::Halt(crate::station_control::BroadcastState::Stopped)
+        );
+    }
+
+    #[test]
+    fn stop_when_idle_honours_min_zero_samples() {
+        let control = StationControl::new_in_memory();
+        let mut cfg = toml::Table::new();
+        cfg.insert("min_zero_samples".into(), toml::Value::Integer(2));
+        let mut p = StopWhenIdlePlugin::from_config(&cfg).unwrap();
+        p.on_load(Host::new("stop-when-idle", &[Capability::Control], Some(control.clone())))
+            .unwrap();
+        let zero = PluginEvent::ListenersSampled { count: 0, at: 0 };
+        p.on_event(&zero);
+        assert_eq!(control.state(), crate::station_control::BroadcastState::Running);
+        p.on_event(&zero);
+        assert_eq!(control.state(), crate::station_control::BroadcastState::Draining);
+        // Bad config is a load-time refusal.
+        let mut bad = toml::Table::new();
+        bad.insert("min_zero_samples".into(), toml::Value::Integer(0));
+        assert!(StopWhenIdlePlugin::from_config(&bad).is_err());
     }
 
     #[tokio::test]

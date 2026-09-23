@@ -371,6 +371,7 @@ members = [{ ref = "jazz", runtime = "20m" }, { ref = "remote", runtime = "5m" }
         enabled: true,
         order: 1,
         wasm: None,
+        capabilities: vec![],
         config: "exclude_path_prefixes = [\"\"]".parse().unwrap(),
     }]);
     assert!(

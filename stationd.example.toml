@@ -19,3 +19,23 @@ path = "./playlist"
 # Optional — defaults to "info" if absent
 [logging]
 level = "info"
+
+# Plugins (optional). `capabilities` = host calls the plugin may make on the
+# core ("control", "push_override"); a call outside them is refused and logged.
+#
+# [[plugin]]
+# name = "logger"
+#
+# Graceful stop when nobody listens: arms `stop-when-idle` on a zero listener
+# sample; the station stops at the next track boundary if still at zero.
+# [[plugin]]
+# name = "stop-when-idle"
+# capabilities = ["control"]
+# [plugin.config]
+# min_zero_samples = 2
+#
+# Same policy as a WASM guest (plugins/stop-when-idle-wasm):
+# [[plugin]]
+# name = "stop-when-idle-wasm"
+# wasm = "plugins/stop-when-idle-wasm/target/wasm32-unknown-unknown/release/stop_when_idle_wasm.wasm"
+# capabilities = ["control"]

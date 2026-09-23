@@ -12,6 +12,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     tonic_build::compile_protos("proto/library_v1.proto")?;
     // The plugin service (list + lifecycle control).
     tonic_build::compile_protos("proto/plugin_v1.proto")?;
+    // The broadcast control service (state, overrides, listener injection).
+    // Uses proto3 `optional` (listeners) → same flag as schedule_v1.
+    tonic_build::configure()
+        .protoc_arg("--experimental_allow_proto3_optional")
+        .compile_protos(&["proto/broadcast_v1.proto"], &["proto"])?;
 
     // Force a rebuild whenever a migration file is added, changed, or
     // removed. `sqlx::migrate!` embeds the migrations into the binary at
@@ -27,6 +32,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-changed=proto/schedule_v1.proto");
     println!("cargo:rerun-if-changed=proto/library_v1.proto");
     println!("cargo:rerun-if-changed=proto/plugin_v1.proto");
+    println!("cargo:rerun-if-changed=proto/broadcast_v1.proto");
 
     Ok(())
 }

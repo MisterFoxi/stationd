@@ -10,7 +10,10 @@ use stationd::grpc::station::station_server::StationServer;
 use stationd::schedule_grpc::schedule::schedule_service_server::ScheduleServiceServer;
 use stationd::library_grpc::library::library_service_server::LibraryServiceServer;
 use stationd::plugin_grpc::plugin::plugin_service_server::PluginServiceServer;
+use stationd::broadcast_grpc::broadcast::broadcast_service_server::BroadcastServiceServer;
+use stationd::broadcast_grpc::BroadcastGrpc;
 use stationd::grid_engine::GridEngine;
+use stationd::station_control::StationControl;
 use stationd::library_grpc::LibraryGrpc;
 use stationd::plugin_grpc::PluginGrpc;
 use stationd::schedule_grpc::ScheduleGrpc;
@@ -71,17 +74,28 @@ async fn main() -> anyhow::Result<()> {
 
     // TODO: Liquidsoap/Icecast control — deliberately absent at this stage
 
+    // Station runtime control: broadcast state (restored from the last run —
+    // an operator's stop stays a stop), override queue, manual clock. Shared
+    // by the grid engine, the plugin host surface and `stationctl station|
+    // override|debug`.
+    let control = StationControl::load(db_pool.clone()).await?;
+    info!(state = control.state().as_str(), "broadcast control ready");
+
     // Plugin system: single owning actor over the declared plugins. Loads the
-    // enabled ones now (a failure is recorded, not fatal). The grid engine
-    // emits decisions to it (best-effort); it is also driven via
+    // enabled ones now (a failure is recorded, not fatal), each with its host
+    // surface scoped to its declared capabilities. The grid engine and the
+    // station control emit events to it (best-effort); it is also driven via
     // `stationctl plugin list|start|stop|restart|reload`.
-    let plugins = stationd::plugin::spawn(cfg.plugins.clone());
+    let plugins = stationd::plugin::spawn_with(cfg.plugins.clone(), Some(control.clone()));
+    control.attach_plugins(plugins.clone());
     let plugin_service = PluginGrpc::new(plugins.clone());
+    let broadcast_service = BroadcastGrpc::new(control.clone());
 
     // Grid engine: the live resolver over the SQLite-backed grid, in the
     // station timezone. `sync_grid` reconciles the Every counter rows for the
     // current grid (catch-up on start-up); it never resets an existing counter.
     let engine = GridEngine::new(db_pool.clone(), cfg.station.timezone.clone())
+        .with_control(control.clone())
         .with_plugins(plugins)
         .with_media_root(cfg.media.library_path.clone());
     engine.sync_grid().await?;
@@ -103,7 +117,7 @@ async fn main() -> anyhow::Result<()> {
         shutdown_tx,
     );
 
-    info!(%addr, "gRPC server listening (status, quit, schedule, library, plugin)");
+    info!(%addr, "gRPC server listening (status, quit, schedule, library, plugin, broadcast)");
 
     // Three ways to shut down cleanly: via `stationctl quit` (shutdown_rx,
     // triggered by the service's `quit` handler), or via a signal — Ctrl+C
@@ -132,8 +146,16 @@ async fn main() -> anyhow::Result<()> {
         .add_service(ScheduleServiceServer::new(schedule_service))
         .add_service(LibraryServiceServer::new(library_service))
         .add_service(PluginServiceServer::new(plugin_service))
+        .add_service(BroadcastServiceServer::new(broadcast_service))
         .serve_with_shutdown(addr, shutdown_signal)
         .await?;
+
+    // The override queue is volatile (in memory): say what is lost, never
+    // drop it silently.
+    let pending = control.list_overrides().len();
+    if pending > 0 {
+        warn!(pending, "pending overrides discarded at shutdown (the queue is volatile)");
+    }
 
     info!("stationd shut down cleanly");
 

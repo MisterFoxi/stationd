@@ -123,6 +123,11 @@ message Decision {
   string playlist_ref = 2;          // playlist résolue
   string rule_id      = 3;          // règle gagnante (introspection)
   Origin origin       = 4;
+  // OVERRIDE : qui a poussé le contenu (nom de plugin, ou "cli").
+  string override_source = 5;
+  // HALTED : état de diffusion (paused | stopped). Aucun média, et Liquidsoap
+  // ne doit PAS combler (≠ FALLBACK).
+  string halted_state = 6;
   enum Origin {
     ORIGIN_UNSPECIFIED = 0;
     AT_CLOCK_HARD = 1;
@@ -131,6 +136,8 @@ message Decision {
     DAY_PART = 4;
     BASE_ROTATION = 5;              // le plancher a rempli
     FALLBACK = 6;                   // aucune règle → filet de sécurité (jamais un blanc)
+    OVERRIDE = 7;                   // file d'override, devant la grille
+    HALTED = 8;                     // station en pause / arrêtée : rien à jouer
   }
 }
 

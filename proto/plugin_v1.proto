@@ -34,6 +34,8 @@ message PluginInfo {
   string state    = 4;   // loaded | disabled | failed | quarantined
   string reason   = 5;   // raison si failed/quarantined, sinon vide
   uint32 failures = 6;   // échecs récents (fenêtre glissante)
+  // Capacités DÉCLARÉES (surface hôte autorisée) : control, push_override.
+  repeated string capabilities = 7;
 }
 
 message PluginControlRequest {

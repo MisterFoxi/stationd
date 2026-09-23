@@ -5,7 +5,7 @@
 
 use clap::{Parser, Subcommand};
 
-use stationd::proto::{library, plugin, schedule, station};
+use stationd::proto::{broadcast, library, plugin, schedule, station};
 
 use station::station_client::StationClient;
 use station::{PlaylistAddRequest, PlaylistListRequest, PlaylistSyncRequest, QuitRequest, StatusRequest};
@@ -15,6 +15,12 @@ use library::library_service_client::LibraryServiceClient;
 use library::{ListMediaRequest, ScanRequest};
 use plugin::plugin_service_client::PluginServiceClient;
 use plugin::{plugin_control_request::Action as PluginAction, PluginControlRequest, PluginListRequest};
+use broadcast::broadcast_service_client::BroadcastServiceClient;
+use broadcast::{
+    control_request::Action as BroadcastAction, push_override_request, ClearOverridesRequest,
+    ControlRequest, GetStateRequest, ListOverridesRequest, PushOverrideRequest,
+    SampleListenersRequest,
+};
 
 use std::path::PathBuf;
 
@@ -53,6 +59,65 @@ enum Command {
     /// Manual clock (testing)
     #[command(subcommand)]
     Clock(ClockCommand),
+    /// Broadcast control: state, stop / pause / resume / stop-when-idle
+    #[command(subcommand)]
+    Station(StationCommand),
+    /// Override queue: content pushed ahead of the grid
+    #[command(subcommand)]
+    Override(OverrideCommand),
+    /// Test injection of sources not wired yet (Icecast, …)
+    #[command(subcommand)]
+    Debug(DebugCommand),
+}
+
+#[derive(Subcommand, Debug)]
+enum StationCommand {
+    /// Show the broadcast state and the last listener sample
+    State,
+    /// Stop the broadcast now
+    Stop,
+    /// Suspend the broadcast
+    Pause,
+    /// Resume (also cancels an armed stop-when-idle)
+    Resume,
+    /// Arm a graceful stop: at the next track boundary with zero listeners
+    StopWhenIdle,
+}
+
+#[derive(Subcommand, Debug)]
+enum OverrideCommand {
+    /// Push a media or a playlist ahead of the grid
+    Push {
+        /// Media path under the media root (need not be indexed; checked on disk
+        /// when it airs)
+        #[arg(long, conflicts_with = "playlist", required_unless_present = "playlist")]
+        media: Option<String>,
+        /// Playlist ref, resolved when it airs
+        #[arg(long)]
+        playlist: Option<String>,
+        /// Cut/duck the current track (degraded to soft until Liquidsoap is wired)
+        #[arg(long)]
+        hard: bool,
+        /// Staleness window from now, e.g. 30s, 5m, 2h (default: never stale)
+        #[arg(long)]
+        expiry: Option<String>,
+        /// Playlist only: number of tracks it holds the air (default 1)
+        #[arg(long)]
+        tracks: Option<u32>,
+    },
+    /// List pending overrides, in play order
+    List,
+    /// Remove one override (--id) or all
+    Clear {
+        #[arg(long)]
+        id: Option<u64>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum DebugCommand {
+    /// Inject a listener sample (emits ListenersSampled; Icecast later)
+    Listeners { count: u32 },
 }
 
 #[derive(Subcommand, Debug)]
@@ -295,6 +360,12 @@ async fn main() -> anyhow::Result<()> {
             }
             if !reply.media_path.is_empty() {
                 println!("media:         {}", reply.media_path);
+            }
+            if !reply.override_source.is_empty() {
+                println!("override by:   {}", reply.override_source);
+            }
+            if !reply.halted_state.is_empty() {
+                println!("halted:        {} (nothing airs)", reply.halted_state);
             }
         }
         Command::Schedule(ScheduleCommand::Validate { path }) => {
@@ -585,8 +656,13 @@ async fn main() -> anyhow::Result<()> {
                 } else {
                     format!("  \u{2014} {}", p.reason)
                 };
+                let caps = if p.capabilities.is_empty() {
+                    String::new()
+                } else {
+                    format!("  caps=[{}]", p.capabilities.join(","))
+                };
                 println!(
-                    "{:<16} {:<12} {:<9} order={:<3} failures={}{reason}",
+                    "{:<16} {:<12} {:<9} order={:<3} failures={}{caps}{reason}",
                     p.name, p.state, en, p.order, p.failures
                 );
             }
@@ -627,9 +703,110 @@ async fn main() -> anyhow::Result<()> {
             let state = if status.frozen { "FROZEN" } else { "real time" };
             println!("clock: {state} \u{2014} {}", status.effective_local);
         }
+        Command::Station(StationCommand::State) => {
+            let mut bc = BroadcastServiceClient::connect(args.addr.clone()).await?;
+            let s = bc.get_state(GetStateRequest {}).await?.into_inner();
+            print_broadcast_status(&s);
+        }
+        Command::Station(cmd) => {
+            let action = match cmd {
+                StationCommand::Stop => BroadcastAction::Stop,
+                StationCommand::Pause => BroadcastAction::Pause,
+                StationCommand::Resume => BroadcastAction::Resume,
+                StationCommand::StopWhenIdle => BroadcastAction::StopWhenIdle,
+                StationCommand::State => unreachable!("handled above"),
+            };
+            let mut bc = BroadcastServiceClient::connect(args.addr.clone()).await?;
+            // A meaningless transition comes back as failed_precondition → `?`
+            // exits non-zero with the reason.
+            let r = bc
+                .control(ControlRequest { action: action as i32 })
+                .await?
+                .into_inner();
+            if r.changed {
+                println!("{} \u{2192} {}", state_name(r.from), state_name(r.to));
+            } else {
+                println!("already {}", state_name(r.to));
+            }
+        }
+        Command::Override(OverrideCommand::Push { media, playlist, hard, expiry, tracks }) => {
+            use push_override_request::{Content, Mode};
+            let content = match (media, playlist) {
+                (Some(m), _) => Content::MediaPath(m),
+                (None, Some(p)) => Content::PlaylistRef(p),
+                (None, None) => unreachable!("clap requires --media or --playlist"),
+            };
+            let mut bc = BroadcastServiceClient::connect(args.addr.clone()).await?;
+            let r = bc
+                .push_override(PushOverrideRequest {
+                    content: Some(content),
+                    mode: (if hard { Mode::Hard } else { Mode::Soft }) as i32,
+                    expiry: expiry.unwrap_or_default(),
+                    tracks: tracks.unwrap_or(0),
+                })
+                .await?
+                .into_inner();
+            println!("queued: override #{} ({} pending)", r.id, r.pending);
+            if r.degraded {
+                println!("note:   hard degraded to soft (no Liquidsoap yet): airs at the next track boundary");
+            }
+        }
+        Command::Override(OverrideCommand::List) => {
+            let mut bc = BroadcastServiceClient::connect(args.addr.clone()).await?;
+            let r = bc.list_overrides(ListOverridesRequest {}).await?.into_inner();
+            if r.overrides.is_empty() {
+                println!("(no pending override)");
+            }
+            for o in &r.overrides {
+                let what = if o.media_path.is_empty() {
+                    format!("playlist {}", o.playlist_ref)
+                } else {
+                    format!("media {}", o.media_path)
+                };
+                let exp = if o.expires_at == 0 {
+                    "never stale".to_string()
+                } else {
+                    format!("expires at {}", o.expires_at)
+                };
+                println!(
+                    "#{:<4} {what}  mode={}  left={}  by={}  ({exp})",
+                    o.id, o.mode, o.remaining, o.source
+                );
+            }
+        }
+        Command::Override(OverrideCommand::Clear { id }) => {
+            let mut bc = BroadcastServiceClient::connect(args.addr.clone()).await?;
+            let r = bc
+                .clear_overrides(ClearOverridesRequest { id: id.unwrap_or(0) })
+                .await?
+                .into_inner();
+            println!("removed: {}", r.removed);
+        }
+        Command::Debug(DebugCommand::Listeners { count }) => {
+            let mut bc = BroadcastServiceClient::connect(args.addr.clone()).await?;
+            let s = bc
+                .sample_listeners(SampleListenersRequest { count })
+                .await?
+                .into_inner();
+            print_broadcast_status(&s);
+        }
     }
 
     Ok(())
+}
+
+fn state_name(state: i32) -> &'static str {
+    broadcast::State::try_from(state)
+        .map(|s| s.as_str_name())
+        .unwrap_or("UNKNOWN")
+}
+
+fn print_broadcast_status(s: &broadcast::BroadcastStatus) {
+    println!("state:     {}", state_name(s.state));
+    match s.listeners {
+        Some(n) => println!("listeners: {n}"),
+        None => println!("listeners: (never sampled)"),
+    }
 }
 
 /// Read a grid TOML file and fail fast if it isn't well-formed TOML. Business

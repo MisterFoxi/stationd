@@ -16,7 +16,6 @@
 
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
 
 use sqlx::SqlitePool;
 
@@ -28,6 +27,7 @@ use crate::resolver::{
     resolve_next, resolve_ranked, Cadence, Epoch, EveryState, Grid, GridDecision, LocalNow,
     Origin, PlaybackState, Rule, RuleKind,
 };
+use crate::station_control::{BroadcastState, Gate, OverrideContent, StationControl};
 use crate::store;
 
 #[derive(Debug, thiserror::Error)]
@@ -64,8 +64,10 @@ pub struct GridEngine {
     /// Media root for the on-resolution existence check. `None` (tests) turns
     /// the check off.
     media_root: Option<PathBuf>,
-    /// Manual clock override for testing (`None` = real time).
-    now_override: Arc<Mutex<Option<Epoch>>>,
+    /// Station runtime control: broadcast state (the gate before any
+    /// resolution), the override queue (consulted before the grid) and the
+    /// manual clock. Shared with the plugin host surface and gRPC.
+    control: StationControl,
 }
 
 /// One entry of a grid projection ([`GridEngine::preview`]): the instant a
@@ -113,6 +115,12 @@ pub struct ResolvedDecision {
     /// a local file: the LS wiring relays it via `input.http` rather than
     /// playing a file. `false` for a file or a fallback.
     pub stream: bool,
+    /// The station is paused/stopped: nothing to play (media `None`). Distinct
+    /// from a fallback — Liquidsoap must NOT fill the air here.
+    pub halted: Option<BroadcastState>,
+    /// This media came from the override queue, pushed by this source (a
+    /// plugin name or `cli`); the grid was bypassed for this pull.
+    pub override_source: Option<String>,
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -433,8 +441,19 @@ impl GridEngine {
             tz: tz.into(),
             plugins: None,
             media_root: None,
-            now_override: Arc::new(Mutex::new(None)),
+            control: StationControl::new_in_memory(),
         }
+    }
+
+    /// Share the station control (broadcast state, overrides, manual clock)
+    /// with the plugin host surface and the broadcast gRPC service.
+    pub fn with_control(mut self, control: StationControl) -> Self {
+        self.control = control;
+        self
+    }
+
+    pub fn control(&self) -> &StationControl {
+        &self.control
     }
 
     /// Attach the plugin system so decisions are broadcast to plugins.
@@ -454,19 +473,19 @@ impl GridEngine {
     /// Manual clock: freeze the instant `resolve_next` uses when the request
     /// gives no explicit `now` (`Some`), or return to real time (`None`).
     pub fn set_clock(&self, frozen: Option<Epoch>) {
-        *self.now_override.lock().unwrap() = frozen;
+        self.control.set_clock(frozen);
     }
 
     /// The current manual-clock override, if any.
     pub fn clock_override(&self) -> Option<Epoch> {
-        *self.now_override.lock().unwrap()
+        self.control.clock_override()
     }
 
     /// The instant to resolve at: an explicit request `now`, else the manual
     /// clock override, else real wall-clock time.
     pub fn effective_now(&self, explicit: Option<Epoch>) -> Epoch {
         explicit
-            .or_else(|| *self.now_override.lock().unwrap())
+            .or_else(|| self.control.clock_override())
             .unwrap_or_else(real_now)
     }
 
@@ -911,7 +930,32 @@ impl GridEngine {
     /// - every applicable source (incl. the floor) empty → `PoolEmpty` surfaced
     ///   (legitimate dead air → Liquidsoap on-empty covers it);
     /// - no rule covers `now` at all → a `Fallback` decision, media `None`.
+    ///
+    /// Two layers come BEFORE the grid (the pure resolver is untouched):
+    /// 1. the broadcast **gate** — paused/stopped → `halted`, nothing resolved
+    ///    (a draining station with zero listeners stops right here);
+    /// 2. the **override queue** — the highest priority of the architecture
+    ///    (`override > one-shot > grid > fallback`).
     pub async fn next_media(&self, now: Epoch) -> Result<ResolvedDecision, EngineError> {
+        if let Gate::Halt(state) = self.control.gate() {
+            tracing::debug!(state = state.as_str(), "broadcast halted: nothing resolved");
+            return Ok(ResolvedDecision {
+                decision: GridDecision {
+                    origin: Origin::Fallback,
+                    rule_id: None,
+                    playlist_ref: None,
+                    mark_taken: None,
+                },
+                media_path: None,
+                stream: false,
+                halted: Some(state),
+                override_source: None,
+            });
+        }
+        if let Some(resolved) = self.next_override(now).await? {
+            return Ok(resolved);
+        }
+
         let local = clock::to_local_now(now, &self.tz)?;
         let grid = grid_index::load_grid(&self.pool).await?;
         let state = grid_store::load_playback_state(&self.pool).await?;
@@ -964,24 +1008,14 @@ impl GridEngine {
             if let Some(resolved) = produced {
                 // Persist effects only now that this source actually produced.
                 self.persist_effects(&decision, now).await?;
-                let (media_path, stream) = match resolved {
-                    crate::selection::Resolved::File(media) => {
-                        // Log the track START into the station history (family B)
-                        // so the anti-repetition constraints see it on the next
-                        // pull. Artist from the media index (None = untagged).
-                        let artist = crate::media_index::artist_of(&self.pool, &media).await?;
-                        crate::broadcast_log::record(&self.pool, &media, artist.as_deref(), now)
-                            .await?;
-                        (media, false)
-                    }
-                    // A stream has no file identity / artist → no play history.
-                    crate::selection::Resolved::Stream(url) => (url, true),
-                };
-                self.emit_resolved(&decision, Some(&media_path));
+                let (media_path, stream) = self.log_start(resolved, now).await?;
+                self.emit_resolved(&decision, Some(&media_path), format!("{:?}", decision.origin));
                 return Ok(ResolvedDecision {
                     decision,
                     media_path: Some(media_path),
                     stream,
+                    halted: None,
+                    override_source: None,
                 });
             }
 
@@ -1008,8 +1042,103 @@ impl GridEngine {
             playlist_ref: None,
             mark_taken: None,
         };
-        self.emit_resolved(&decision, None);
-        Ok(ResolvedDecision { decision, media_path: None, stream: false })
+        self.emit_resolved(&decision, None, format!("{:?}", decision.origin));
+        Ok(ResolvedDecision {
+            decision,
+            media_path: None,
+            stream: false,
+            halted: None,
+            override_source: None,
+        })
+    }
+
+    /// The override layer: air the head of the override queue, if any. A media
+    /// is checked on disk (it may be outside the index — arbitrary path
+    /// allowed); a playlist is resolved like a grid source (plugins, constraints
+    /// included) and holds the air for its `tracks`. An override that can't
+    /// air (missing file, empty pool, unknown ref) is DROPPED loudly and the
+    /// next one / the grid takes over — never a silent gap, never a retry loop
+    /// (each iteration consumes or drops one entry). Grid side effects (AtClock
+    /// marks, Every resets) are not touched: the grid did not play.
+    async fn next_override(&self, now: Epoch) -> Result<Option<ResolvedDecision>, EngineError> {
+        use crate::selection::{Resolved, SelectionError};
+        while let Some(entry) = self.control.next_override(now) {
+            let produced: Result<Resolved, String> = match &entry.content {
+                OverrideContent::Media(path) => {
+                    if self.media_exists(path) {
+                        Ok(Resolved::File(path.clone()))
+                    } else {
+                        Err(format!("media `{path}` not found under the media root"))
+                    }
+                }
+                OverrideContent::Playlist(reference) => {
+                    match crate::selection::resolve_ref_with_plugins(
+                        &self.pool,
+                        self.plugins.as_ref(),
+                        now.0,
+                        reference,
+                    )
+                    .await
+                    {
+                        Ok(Resolved::File(media)) if !self.media_exists(&media) => {
+                            crate::media_index::mark_unavailable(&self.pool, &media).await?;
+                            Err(format!("resolved media `{media}` missing on disk"))
+                        }
+                        Ok(resolved) => Ok(resolved),
+                        Err(SelectionError::Sqlx(e)) => return Err(EngineError::Sqlx(e)),
+                        Err(e) => Err(e.to_string()),
+                    }
+                }
+            };
+            match produced {
+                Err(reason) => {
+                    self.control.drop_override(entry.id, &reason);
+                    continue;
+                }
+                Ok(resolved) => {
+                    self.control.consume_override(entry.id);
+                    let playlist_ref = match &entry.content {
+                        OverrideContent::Playlist(r) => Some(r.clone()),
+                        OverrideContent::Media(_) => None,
+                    };
+                    let decision = GridDecision {
+                        origin: Origin::Fallback, // not a grid origin; see override_source
+                        rule_id: None,
+                        playlist_ref,
+                        mark_taken: None,
+                    };
+                    let (media_path, stream) = self.log_start(resolved, now).await?;
+                    self.emit_resolved(&decision, Some(&media_path), "Override".to_string());
+                    return Ok(Some(ResolvedDecision {
+                        decision,
+                        media_path: Some(media_path),
+                        stream,
+                        halted: None,
+                        override_source: Some(entry.source.clone()),
+                    }));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// Log a track START into the station history (family B) so the
+    /// anti-repetition constraints see it on the next pull (artist from the
+    /// media index, `None` = untagged). A stream has no file identity / artist
+    /// → no play history. Returns (media_path, is_stream).
+    async fn log_start(
+        &self,
+        resolved: crate::selection::Resolved,
+        now: Epoch,
+    ) -> Result<(String, bool), EngineError> {
+        Ok(match resolved {
+            crate::selection::Resolved::File(media) => {
+                let artist = crate::media_index::artist_of(&self.pool, &media).await?;
+                crate::broadcast_log::record(&self.pool, &media, artist.as_deref(), now).await?;
+                (media, false)
+            }
+            crate::selection::Resolved::Stream(url) => (url, true),
+        })
     }
 
     /// Persist a decision's side effects — a consumed AtClock occurrence and an
@@ -1031,14 +1160,15 @@ impl GridEngine {
         Ok(())
     }
 
-    /// Notify plugins of a decision (best-effort, fire-and-forget).
-    fn emit_resolved(&self, decision: &GridDecision, media_path: Option<&str>) {
+    /// Notify plugins of a decision (best-effort, fire-and-forget). `origin`
+    /// is the short label (`BaseRotation`, …, or `Override`).
+    fn emit_resolved(&self, decision: &GridDecision, media_path: Option<&str>, origin: String) {
         if let Some(plugins) = &self.plugins {
             plugins.emit(crate::plugin::PluginEvent::TrackResolved {
                 media_path: media_path.map(|s| s.to_string()),
                 playlist_ref: decision.playlist_ref.clone(),
                 rule_id: decision.rule_id.clone(),
-                origin: format!("{:?}", decision.origin),
+                origin,
             });
         }
     }
@@ -1574,5 +1704,159 @@ mode = "dynamic""#;
         let rpl = crate::playlist::Playlist::parse(rtoml).unwrap();
         crate::store::upsert(&eng.pool, "rot", &rpl, rtoml, Some("rot")).await.unwrap();
         assert!(eng.enqueue("rot", "x.mp3").await.is_err());
+    }
+
+    // ----- A2: broadcast gate + override layer ----------------------------
+
+    /// Engine with one media `music/a.mp3` and a `music` floor over it.
+    async fn engine_with_floor() -> (tempfile::TempDir, GridEngine) {
+        let (dir, eng) = engine().await;
+        let m = |p: &str| crate::media::ScannedMedia {
+            rel_path: p.into(),
+            title: None,
+            artist: None,
+            album: None,
+            year: None,
+            genres: vec![],
+            duration_ms: 1000,
+            size_bytes: 1,
+            mtime_ns: 0,
+        };
+        crate::media_index::replace_library(
+            &eng.pool,
+            &[m("music/a.mp3"), m("news/flash.mp3"), m("news/flash2.mp3")],
+            1000,
+        )
+        .await
+        .unwrap();
+        for (r, prefix, order) in [("music", "music/", "shuffle"), ("news", "news/", "sequential")] {
+            let toml = format!(
+                "name = \"{r}\"\n[selection]\nmode = \"dynamic\"\norder = \"{order}\"\n\
+                 [[selection.filter]]\nfield = \"path\"\nop = \"prefix\"\nvalue = \"{prefix}\"\n"
+            );
+            let pl = crate::playlist::Playlist::parse(&toml).unwrap();
+            crate::store::upsert(&eng.pool, r, &pl, &toml, Some(r)).await.unwrap();
+        }
+        insert_rule(&eng.pool, &rule("floor", RuleKind::BaseRotation { playlist_ref: "music".into() }))
+            .await
+            .unwrap();
+        (dir, eng)
+    }
+
+    fn media_override(p: &str) -> crate::station_control::OverrideRequest {
+        crate::station_control::OverrideRequest {
+            content: OverrideContent::Media(p.into()),
+            mode: Default::default(),
+            expiry: None,
+            tracks: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn stopped_station_resolves_nothing_and_logs_nothing() {
+        use crate::station_control::ControlAction;
+        let (_dir, eng) = engine_with_floor().await;
+        eng.control().apply(ControlAction::Stop, "cli").unwrap();
+        let r = eng.next_media(at(9, 0)).await.unwrap();
+        assert_eq!(r.halted, Some(BroadcastState::Stopped));
+        assert!(r.media_path.is_none());
+        assert!(crate::broadcast_log::tracks_since(&eng.pool, 0).await.unwrap().is_empty());
+        // Resume → the grid plays again.
+        eng.control().apply(ControlAction::Resume, "cli").unwrap();
+        let r = eng.next_media(at(9, 1)).await.unwrap();
+        assert_eq!(r.media_path.as_deref(), Some("music/a.mp3"));
+        assert!(r.halted.is_none());
+    }
+
+    #[tokio::test]
+    async fn draining_stops_at_the_boundary_once_listeners_are_zero() {
+        use crate::station_control::ControlAction;
+        let (_dir, eng) = engine_with_floor().await;
+        eng.control().apply(ControlAction::StopWhenIdle, "cli").unwrap();
+        eng.control().sample_listeners(2);
+        assert_eq!(
+            eng.next_media(at(9, 0)).await.unwrap().media_path.as_deref(),
+            Some("music/a.mp3"),
+            "audience present → keeps playing while armed"
+        );
+        eng.control().sample_listeners(0);
+        let r = eng.next_media(at(9, 3)).await.unwrap();
+        assert_eq!(r.halted, Some(BroadcastState::Stopped));
+        assert_eq!(eng.control().state(), BroadcastState::Stopped);
+    }
+
+    #[tokio::test]
+    async fn a_media_override_preempts_the_grid_once() {
+        let (_dir, eng) = engine_with_floor().await;
+        // Arbitrary media: not required to be indexed (media_root off in tests).
+        eng.control().push_override(media_override("jingles/unindexed.mp3"), "cli").unwrap();
+        let r = eng.next_media(at(9, 0)).await.unwrap();
+        assert_eq!(r.media_path.as_deref(), Some("jingles/unindexed.mp3"));
+        assert_eq!(r.override_source.as_deref(), Some("cli"));
+        // Consumed → back to the grid.
+        let r = eng.next_media(at(9, 1)).await.unwrap();
+        assert_eq!(r.media_path.as_deref(), Some("music/a.mp3"));
+        assert!(r.override_source.is_none());
+        assert_eq!(r.decision.origin, Origin::BaseRotation);
+    }
+
+    #[tokio::test]
+    async fn a_playlist_override_holds_the_air_for_its_tracks() {
+        let (_dir, eng) = engine_with_floor().await;
+        eng.control()
+            .push_override(
+                crate::station_control::OverrideRequest {
+                    content: OverrideContent::Playlist("News".into()),
+                    mode: crate::station_control::OverrideMode::Hard, // degraded to soft
+                    expiry: None,
+                    tracks: Some(2),
+                },
+                "urgence",
+            )
+            .unwrap();
+        let one = eng.next_media(at(9, 0)).await.unwrap();
+        let two = eng.next_media(at(9, 1)).await.unwrap();
+        assert_eq!(one.media_path.as_deref(), Some("news/flash.mp3"));
+        assert_eq!(two.media_path.as_deref(), Some("news/flash2.mp3"));
+        assert_eq!(one.decision.playlist_ref.as_deref(), Some("news"));
+        assert_eq!(two.override_source.as_deref(), Some("urgence"));
+        // Exhausted → the grid.
+        assert_eq!(
+            eng.next_media(at(9, 2)).await.unwrap().media_path.as_deref(),
+            Some("music/a.mp3")
+        );
+    }
+
+    #[tokio::test]
+    async fn an_override_that_cannot_air_is_dropped_and_the_grid_takes_over() {
+        let (_dir, eng) = engine_with_floor().await;
+        eng.control()
+            .push_override(
+                crate::station_control::OverrideRequest {
+                    content: OverrideContent::Playlist("ghost".into()),
+                    mode: Default::default(),
+                    expiry: None,
+                    tracks: None,
+                },
+                "cli",
+            )
+            .unwrap();
+        let r = eng.next_media(at(9, 0)).await.unwrap();
+        assert_eq!(r.media_path.as_deref(), Some("music/a.mp3"));
+        assert!(r.override_source.is_none());
+        assert!(eng.control().list_overrides().is_empty(), "dropped, not retried");
+    }
+
+    #[tokio::test]
+    async fn an_expired_override_is_abandoned_on_the_engine_clock() {
+        let (_dir, eng) = engine_with_floor().await;
+        eng.set_clock(Some(at(9, 0)));
+        let mut req = media_override("news/flash.mp3");
+        req.expiry = Some("1m".into());
+        eng.control().push_override(req, "cli").unwrap();
+        // Next boundary comes 5 minutes later: stale → grid.
+        let r = eng.next_media(at(9, 5)).await.unwrap();
+        assert_eq!(r.media_path.as_deref(), Some("music/a.mp3"));
+        assert!(eng.control().list_overrides().is_empty());
     }
 }

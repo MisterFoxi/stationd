@@ -59,12 +59,9 @@ inférieure jusqu'au plancher (fini le dead-air par sélection vide) ; groupe
 **Preview — statistiques de pool : patch préparé et testé (2026-09-19).**
 Voir la section Fait ci-dessous et `Doc/preview-pools.md`.
 
-**Plugins A2 — surface hôte** (`Doc/plugin-host.md`, *host functions* extism) :
-`control` (Stop/Pause/Resume/StopWhenIdle, first-class station + invocable
-plugin), `push_override` (file lue par `next_media`, `soft` honoré / `hard`→LS),
-base par plugin. Puis le plugin `stop-when-idle` en démo (`on_event(
-ListenersSampled)` + `control`) — `ListenersSampled` n'aura de vraie source
-qu'avec Icecast, tester par injection.
+**Plugins A2 — surface hôte : livré et validé (2026-09-23).** Voir Fait.
+Reste de la surface hôte : **`db_*`** (base SQLite par plugin, ouverte par le
+core pour son compte : `db_get`/`db_put`/`db_query`).
 
 Autres, indépendants :
 - **`on_scan`** : dernier hook non câblé (enrichissement au scan biblio).
@@ -76,6 +73,65 @@ Autres, indépendants :
 ---
 
 ## Fait
+
+### — Plugins A2 : surface hôte (control + override + host functions) (2026-09-23) —
+
+Décisions tranchées (détail dans `Doc/plugin-host.md` § Décisions) : `hard`
+sans LS **dégradé en soft + warn** ; **capacités déclarées** par plugin ;
+`media_path` **arbitraire** accepté (chemin sûr sous `media/`, vérifié sur
+disque au passage) ; override PL = `tracks` pistes (défaut 1) ; file bornée (64)
+et **volatile** (perte annoncée à l'arrêt). `db_*` = tranche suivante.
+
+- **`src/station_control.rs`** (neuf) : `StationControl` clonable, API
+  synchrone (appelable depuis un hook). État `running|paused|stopped|draining`
+  (`apply(action, by)`, transitions refusées si absurdes), `gate()` au bord de
+  piste (`draining` + dernier échantillon = 0 → `stopped`), `sample_listeners`,
+  file d'override (`push`/`next`/`consume`/`drop`/`list`/`clear`, péremption,
+  plafond), **horloge manuelle déplacée ici** (partagée avec `GridEngine` :
+  péremption et résolution sur la même horloge). Émission `BroadcastStateChanged`
+  / `ListenersSampled` via le handle plugins (`attach_plugins`, OnceLock).
+- **Migration 0014** `broadcast_state` (ligne unique, famille B) : état
+  persisté par un writer ordonné (mpsc), restauré au démarrage (warn si ≠
+  running). Un `stop` opérateur survit au redémarrage.
+- **`GridEngine::next_media`** : 1) gate → `halted` (aucune résolution, aucun
+  log) ; 2) **couche override** avant la grille (résolveur pur intouché) —
+  média vérifié sur disque, PL résolue avec plugins/contraintes ; échec →
+  override abandonné (loggué) et la grille reprend ; effets grille (AtClock /
+  Every) non touchés ; 3) grille inchangée. `ResolvedDecision` += `halted`,
+  `override_source`. `log_start` factorisé. `with_control(...)`.
+- **`plugin.rs`** : `Host` (nom + capacités + control) remis dans
+  **`on_load(host)`** (signature du trait changée) ; `Capability {Control,
+  PushOverride}`, `PluginDecl.capabilities`, `HostError::Denied` loggué.
+  `spawn_with(decls, control)` (`spawn` = sans control). Events
+  `ListenersSampled{count,at}`, `BroadcastStateChanged{from,to,by}`. **Host
+  functions extism** `station_control` / `push_override` (JSON in/out, refus =
+  `{"ok":false}` jamais un trap), liées au `Host` du plugin. Plugin natif
+  **`stop-when-idle`** (exige `control`, `min_zero_samples`).
+- **Guest** `plugins/stop-when-idle-wasm/` (crate séparé) : `on_event` →
+  `station_control({"action":"stop_when_idle"})` à 0 auditeur.
+- **Contrat** : `proto/broadcast_v1.proto` (6 RPC, `BroadcastService`, 6ᵉ
+  service du serveur) ; `schedule_v1` `Decision` += `OVERRIDE`/`HALTED`,
+  `override_source`, `halted_state` ; `plugin_v1` `PluginInfo.capabilities`.
+- **CLI** : `stationctl station state|stop|pause|resume|stop-when-idle`,
+  `override push (--media|--playlist) [--hard] [--expiry 5m] [--tracks N] |
+  list | clear [--id]`, `debug listeners <n>` ; `schedule next` affiche
+  override/halted ; `plugin list` affiche `caps=[…]`.
+- `stationd.example.toml` : exemples `[[plugin]]` commentés.
+- Tests : `station_control` (machine d'états, drain, normalisation chemin,
+  push/ordre/validation, hard dégradé, péremption, consume/drop, plafond,
+  persistance restaurée), `plugin` (refus capacité, signature du plugin,
+  JSON host fns, stop-when-idle via l'acteur + min_zero_samples),
+  `grid_engine` (stopped → rien, drain au bord, override média une fois,
+  override PL `tracks=2`, override injouable abandonné, péremption sur
+  l'horloge moteur).
+
+**Validation** : `cargo build` + `cargo test -p stationd` verts (2026-09-23).
+Guest wasm compilé (`--target wasm32-unknown-unknown`) et validé en réel
+(`debug listeners 0` → draining → `schedule next` → HALTED).
+**Effet audio réel = LS-gated** : sans Liquidsoap, `stopped`/`HALTED` ne coupe
+rien (seul le CLI consomme `ResolveNext`). Au câblage LS : sur `HALTED`, LS
+doit couper sa sortie, **pas** basculer sur son fallback de sécurité.
+Le TUI (`--features tui`) n'est pas touché (aucun littéral proto modifié).
 
 ### — Contraintes portées par un groupe + refs de membres relatives (2026-09-23) —
 
@@ -1000,6 +1056,10 @@ dans le découpage des modules (`grid_index` = A, `grid_store` = B).
 | `src/library_grpc.rs` | Transport gRPC biblio (traducteur mince acteur↔proto) |
 | `src/plugin.rs` | Système de plugins : trait, acteur à état, quarantaine, `filter_pool`, `WasmPlugin` (extism), natifs logger/blacklist |
 | `src/plugin_grpc.rs` | Transport gRPC plugins (list + control) |
+| `src/station_control.rs` | État de diffusion + file d'override + horloge manuelle (mécanisme de la surface hôte A2) |
+| `src/broadcast_grpc.rs` | Transport gRPC `BroadcastService` (état, control, overrides, injection auditeurs) |
+| `proto/broadcast_v1.proto` | Contrat contrôle de diffusion (compilé/servi ; 6 RPC) |
+| `plugins/stop-when-idle-wasm/` | Guest WASM démo A2 : host function `station_control` |
 | `plugins/{require-title,blacklist}-wasm/` | Crates guest WASM de démo (séparés, cible wasm32) : `filter_pool` |
 | `src/grpc.rs` | Service `Station` (status/quit/playlist*) |
 | `src/db.rs` | Init pool SQLite + migrations |

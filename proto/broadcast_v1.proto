@@ -1,0 +1,119 @@
+// broadcast_v1.proto
+// ─────────────────────────────────────────────────────────────────────────
+// Contrôle de diffusion, FIRST-CLASS sur la station (Doc/plugin-host.md) :
+// ces actions existent indépendamment de tout plugin — un plugin (via sa
+// surface hôte, capacités déclarées) n'est qu'un émetteur parmi d'autres.
+//
+//   État      running | paused | stopped | draining
+//             draining = arrêt gracieux ARMÉ : devient stopped au prochain
+//             bord de piste si le dernier échantillon d'auditeurs vaut 0.
+//   Override  contenu poussé DEVANT la grille (override > one-shot > grille
+//             > fallback). `hard` accepté mais dégradé en `soft` (warn) tant
+//             que Liquidsoap n'est pas câblé. Péremption par override.
+//   Auditeurs échantillon injectable (test) — la vraie source sera Icecast.
+
+syntax = "proto3";
+
+package webradio.broadcast.v1;
+
+service BroadcastService {
+  // État courant + dernier échantillon d'auditeurs.
+  rpc GetState(GetStateRequest) returns (BroadcastStatus);
+
+  // stop | pause | resume | stop-when-idle. Refusé (failed_precondition) si
+  // la transition n'a pas de sens (pause d'une station arrêtée…).
+  rpc Control(ControlRequest) returns (ControlResponse);
+
+  // Injection de test d'un échantillon d'auditeurs (émet ListenersSampled).
+  rpc SampleListeners(SampleListenersRequest) returns (BroadcastStatus);
+
+  // File d'override.
+  rpc PushOverride(PushOverrideRequest) returns (PushOverrideResponse);
+  rpc ListOverrides(ListOverridesRequest) returns (ListOverridesResponse);
+  rpc ClearOverrides(ClearOverridesRequest) returns (ClearOverridesResponse);
+}
+
+enum State {
+  STATE_UNSPECIFIED = 0;
+  RUNNING  = 1;
+  PAUSED   = 2;
+  STOPPED  = 3;
+  DRAINING = 4;
+}
+
+message GetStateRequest {}
+
+message BroadcastStatus {
+  State state = 1;
+  optional uint32 listeners = 2;   // absent = jamais échantillonné
+}
+
+message ControlRequest {
+  Action action = 1;
+  enum Action {
+    ACTION_UNSPECIFIED = 0;
+    STOP           = 1;
+    PAUSE          = 2;
+    RESUME         = 3;
+    STOP_WHEN_IDLE = 4;
+  }
+}
+
+message ControlResponse {
+  State from    = 1;
+  State to      = 2;
+  bool  changed = 3;   // false = déjà dans l'état visé (no-op)
+}
+
+message SampleListenersRequest {
+  uint32 count = 1;
+}
+
+message PushOverrideRequest {
+  oneof content {
+    string media_path   = 1;   // chemin sous media/ (pas forcément indexé ; vérifié au passage)
+    string playlist_ref = 2;   // playlist résolue au passage
+  }
+  Mode mode = 3;
+  // Fenêtre de péremption depuis le push ("30s", "5m", "2h"). Vide = jamais périmé.
+  string expiry = 4;
+  // Playlist seulement : pistes tenues à l'antenne. 0 = 1.
+  uint32 tracks = 5;
+
+  enum Mode {
+    MODE_UNSPECIFIED = 0;   // → SOFT
+    SOFT = 1;               // au prochain bord de piste
+    HARD = 2;               // coupe/duck — dégradé en SOFT sans Liquidsoap
+  }
+}
+
+message PushOverrideResponse {
+  uint64 id       = 1;
+  bool   degraded = 2;   // HARD demandé, joué SOFT (pas de Liquidsoap)
+  uint32 pending  = 3;   // overrides en attente après le push
+}
+
+message ListOverridesRequest {}
+
+message ListOverridesResponse {
+  repeated Override overrides = 1;   // ordre de passage
+}
+
+message Override {
+  uint64 id           = 1;
+  string media_path   = 2;   // l'un des deux est rempli
+  string playlist_ref = 3;
+  string mode         = 4;   // soft | hard
+  string source       = 5;   // nom du plugin, ou "cli"
+  int64  pushed_at    = 6;   // epoch s
+  int64  expires_at   = 7;   // epoch s ; 0 = jamais
+  uint32 remaining    = 8;   // pistes restantes
+}
+
+message ClearOverridesRequest {
+  uint64 id = 1;   // 0 = tous
+}
+
+message ClearOverridesResponse {
+  uint32 removed = 1;
+}

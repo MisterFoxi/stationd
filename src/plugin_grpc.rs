@@ -33,6 +33,7 @@ fn map_info(i: CoreInfo) -> PluginInfo {
         state: i.state,
         reason: i.reason,
         failures: i.failures,
+        capabilities: i.capabilities,
     }
 }
 

@@ -14,3 +14,7 @@ pub mod library {
 pub mod plugin {
     tonic::include_proto!("webradio.plugin.v1");
 }
+
+pub mod broadcast {
+    tonic::include_proto!("webradio.broadcast.v1");
+}

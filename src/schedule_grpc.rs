@@ -185,6 +185,15 @@ impl ScheduleService for ScheduleGrpc {
             .await
             .map_err(map_next_error)?;
         let d = resolved.decision;
+        // Two layers sit above the grid origin: a halted station (nothing to
+        // play, LS must not fill) and the override queue.
+        let origin = if resolved.halted.is_some() {
+            schedule::decision::Origin::Halted
+        } else if resolved.override_source.is_some() {
+            schedule::decision::Origin::Override
+        } else {
+            map_origin(d.origin)
+        };
 
         Ok(Response::new(Decision {
             // The grid resolves a source; the selection stage turns that
@@ -192,7 +201,12 @@ impl ScheduleService for ScheduleGrpc {
             media_path: resolved.media_path.unwrap_or_default(),
             playlist_ref: d.playlist_ref.unwrap_or_default(),
             rule_id: d.rule_id.unwrap_or_default(),
-            origin: map_origin(d.origin) as i32,
+            origin: origin as i32,
+            override_source: resolved.override_source.unwrap_or_default(),
+            halted_state: resolved
+                .halted
+                .map(|s| s.as_str().to_string())
+                .unwrap_or_default(),
         }))
     }
 

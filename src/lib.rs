@@ -9,6 +9,7 @@
 //! `signal::unix` shutdown handling) stays in `main.rs`, deliberately kept
 //! out of here so the library itself stays portable.
 
+pub mod broadcast_grpc;
 pub mod broadcast_log;
 pub mod clock;
 pub mod config;
@@ -34,5 +35,6 @@ pub mod queue_state;
 pub mod resolver;
 pub mod schedule_grpc;
 pub mod selection;
+pub mod station_control;
 pub mod store;
 pub mod sync;
