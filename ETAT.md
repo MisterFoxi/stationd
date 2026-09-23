@@ -96,7 +96,9 @@ groupe s'appliquent désormais à **chaque piste émise par le groupe**.
 **Refs de membres relatives** — tranché : **syntaxe explicite**.
 - `ref` commençant par `./` ou `../` (ou `.`/`..`) → relatif au **dossier du
   groupe** (`./intro` depuis `shows/main` → `shows/intro`) ; `..` peut remonter
-  jusqu'à la racine, jamais au-delà (erreur bruyante).
+  jusqu'à la racine, jamais au-delà (erreur bruyante). Un ref relatif doit
+  **nommer une playlist** : `./`, `.`, `..`, `./x/..` (qui désignent un
+  dossier) sont rejetés.
 - Tout autre `ref` → relatif à la racine, **inchangé** (rétro-compatible).
 - **Aucun fallback implicite** entre les deux : `./intro` introuvable ne
   retombe jamais sur la racine `intro` (→ `PlaylistNotFound` / erreur `sync`).
@@ -114,7 +116,7 @@ groupe s'appliquent désormais à **chaque piste émise par le groupe**.
   sequence + weighted, pas de fallback racine) ; `tests/pool_preview.rs`
   (inspection avec refs relatives).
 
-**Validation** : édité ; `cargo test -p stationd` à confirmer.
+**Validation** : `cargo test -p stationd` vert (2026-09-23).
 
 ### — queue : tampon runtime + enqueue (CLI-complete) (2026-09-22) —
 
