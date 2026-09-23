@@ -969,16 +969,23 @@ fn filter_sql(f: &Filter) -> Result<Where, SelectionError> {
 /// they are field-agnostic: `genre` is the first entry, another set field is
 /// one line here and inherits the operators unchanged. `table`/`column` are a
 /// closed whitelist — constant SQL identifiers, never user input.
+///
+/// `fold`, when set, normalises every filter value before binding; `column` is
+/// then the matching pre-folded column. For `genre`: `genre_key`, filled at
+/// scan time by the same `media_index::genre_key` → case-insensitive (Unicode)
+/// match, while `genre` keeps the original spelling for display.
 struct SetField {
     table: &'static str,
     column: &'static str,
+    fold: Option<fn(&str) -> String>,
 }
 
 fn set_field(field: &str) -> Option<SetField> {
     match field {
         "genre" => Some(SetField {
             table: "media_genre",
-            column: "genre",
+            column: "genre_key",
+            fold: Some(crate::media_index::genre_key),
         }),
         _ => None,
     }
@@ -1000,6 +1007,12 @@ fn set_field_sql(sf: &SetField, f: &Filter) -> Result<Where, SelectionError> {
         op: f.op.clone(),
     };
     let (table, column) = (sf.table, sf.column);
+    let fold = |s: String| match sf.fold {
+        Some(f) => f(&s),
+        None => s,
+    };
+    let as_text = |f: &Filter| as_text(f).map(fold);
+    let as_text_list = |f: &Filter| as_text_list(f).map(|v| v.into_iter().map(fold).collect::<Vec<_>>());
     // One `EXISTS (… d.<col> = ?)` fragment (one bind).
     let exists_eq = || {
         format!("EXISTS (SELECT 1 FROM {table} d WHERE d.rel_path = media.rel_path AND d.{column} = ?)")
@@ -1197,7 +1210,7 @@ mod tests {
         let w = filter_sql(&filt("genre", "has", toml::Value::String("jazz".into()))).unwrap();
         assert_eq!(
             w.sql,
-            "EXISTS (SELECT 1 FROM media_genre d WHERE d.rel_path = media.rel_path AND d.genre = ?)"
+            "EXISTS (SELECT 1 FROM media_genre d WHERE d.rel_path = media.rel_path AND d.genre_key = ?)"
         );
         assert_eq!(w.binds, vec![Bind::Text("jazz".into())]);
     }
@@ -1215,7 +1228,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             w.sql,
-            "EXISTS (SELECT 1 FROM media_genre d WHERE d.rel_path = media.rel_path AND d.genre IN (?, ?))"
+            "EXISTS (SELECT 1 FROM media_genre d WHERE d.rel_path = media.rel_path AND d.genre_key IN (?, ?))"
         );
         assert_eq!(
             w.binds,
@@ -1273,8 +1286,8 @@ mod tests {
         .unwrap();
         assert_eq!(
             w.sql,
-            "EXISTS (SELECT 1 FROM media_genre d WHERE d.rel_path = media.rel_path AND d.genre = ?) \
-             AND EXISTS (SELECT 1 FROM media_genre d WHERE d.rel_path = media.rel_path AND d.genre = ?)"
+            "EXISTS (SELECT 1 FROM media_genre d WHERE d.rel_path = media.rel_path AND d.genre_key = ?) \
+             AND EXISTS (SELECT 1 FROM media_genre d WHERE d.rel_path = media.rel_path AND d.genre_key = ?)"
         );
         assert_eq!(
             w.binds,
@@ -1295,7 +1308,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             w.sql,
-            "NOT EXISTS (SELECT 1 FROM media_genre d WHERE d.rel_path = media.rel_path AND d.genre IN (?, ?))"
+            "NOT EXISTS (SELECT 1 FROM media_genre d WHERE d.rel_path = media.rel_path AND d.genre_key IN (?, ?))"
         );
         assert_eq!(
             w.binds,
@@ -1467,6 +1480,54 @@ mod tests {
         "#;
         add_playlist(&pool, "rot/jazz", toml).await;
         assert_eq!(resolve_ref(&pool, "rot/jazz").await.unwrap(), "a.mp3");
+    }
+
+    #[tokio::test]
+    async fn genre_filter_is_case_insensitive_unicode() {
+        let (_d, pool) = fresh_db().await;
+        media_index::replace_library(
+            &pool,
+            &[
+                media("a.mp3", "A", 2000, &["Jazz"]),
+                media("b.mp3", "B", 2000, &["Électro"]),
+                media("c.mp3", "C", 2000, &["rock"]),
+            ],
+            1000,
+        )
+        .await
+        .unwrap();
+        let has = |value: &str| {
+            format!(
+                r#"
+            name = "G"
+            [selection]
+            mode = "dynamic"
+            order = "shuffle"
+            [[selection.filter]]
+            field = "genre"
+            op = "has"
+            value = "{value}"
+        "#
+            )
+        };
+        add_playlist(&pool, "rot/jazz", &has("JAZZ")).await;
+        assert_eq!(resolve_ref(&pool, "rot/jazz").await.unwrap(), "a.mp3");
+        add_playlist(&pool, "rot/electro", &has("électro")).await;
+        assert_eq!(resolve_ref(&pool, "rot/electro").await.unwrap(), "b.mp3");
+
+        // has_none folds too: excluding "ROCK" / "jazz" leaves only b.
+        let toml = r#"
+            name = "NotRockNorJazz"
+            [selection]
+            mode = "dynamic"
+            order = "shuffle"
+            [[selection.filter]]
+            field = "genre"
+            op = "has_none"
+            value = ["ROCK", "jazz"]
+        "#;
+        add_playlist(&pool, "rot/other", toml).await;
+        assert_eq!(resolve_ref(&pool, "rot/other").await.unwrap(), "b.mp3");
     }
 
     #[tokio::test]

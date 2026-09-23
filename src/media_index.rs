@@ -90,9 +90,12 @@ pub async fn replace_library(
             .execute(&mut *tx)
             .await?;
         for g in &m.genres {
-            sqlx::query("INSERT OR IGNORE INTO media_genre (rel_path, genre) VALUES (?1, ?2)")
+            sqlx::query(
+                "INSERT OR IGNORE INTO media_genre (rel_path, genre, genre_key) VALUES (?1, ?2, ?3)",
+            )
                 .bind(&m.rel_path)
                 .bind(g)
+                .bind(genre_key(g))
                 .execute(&mut *tx)
                 .await?;
         }
@@ -114,10 +117,26 @@ pub async fn replace_library(
     })
 }
 
+/// Case-folding key for genre comparison: trimmed, Unicode lowercase. Done in
+/// Rust rather than with SQLite `COLLATE NOCASE` / `lower()`, which only fold
+/// ASCII — "Électro" and "électro" must land in the same bucket. Stored at
+/// scan time in `media_genre.genre_key` (migration 0015), which the playlist
+/// `genre` filters compare against: single source of truth for the fold.
+pub fn genre_key(genre: &str) -> String {
+    genre.trim().to_lowercase()
+}
+
 /// List media rows ordered by `rel_path`. When `only_available` is true, rows
-/// marked unavailable (vanished from disk) are excluded. Genres are fetched
-/// per row (N+1, fine for a CLI listing; a JOIN can replace it if it matters).
-pub async fn list(pool: &SqlitePool, only_available: bool) -> Result<Vec<MediaRow>, sqlx::Error> {
+/// marked unavailable (vanished from disk) are excluded. `genres` filters
+/// case-insensitively (see [`genre_key`]): a row is kept when it carries AT
+/// LEAST ONE of them (`any`); an empty slice means no genre filter. Genres are
+/// fetched per row (N+1, fine for a CLI listing; a JOIN can replace it if it
+/// matters). Blank filter entries are the caller's job to reject.
+pub async fn list(
+    pool: &SqlitePool,
+    only_available: bool,
+    genres: &[String],
+) -> Result<Vec<MediaRow>, sqlx::Error> {
     let sql = if only_available {
         "SELECT rel_path, title, artist, album, year, duration_ms, size_bytes, available
          FROM media WHERE available = 1 ORDER BY rel_path"
@@ -125,6 +144,8 @@ pub async fn list(pool: &SqlitePool, only_available: bool) -> Result<Vec<MediaRo
         "SELECT rel_path, title, artist, album, year, duration_ms, size_bytes, available
          FROM media ORDER BY rel_path"
     };
+
+    let wanted: std::collections::HashSet<String> = genres.iter().map(|g| genre_key(g)).collect();
 
     let rows: Vec<(
         String,
@@ -148,6 +169,10 @@ pub async fn list(pool: &SqlitePool, only_available: bool) -> Result<Vec<MediaRo
                 .map(|(g,)| g)
                 .collect();
 
+        if !wanted.is_empty() && !genres.iter().any(|g| wanted.contains(&genre_key(g))) {
+            continue;
+        }
+
         out.push(MediaRow {
             rel_path,
             title,
@@ -161,6 +186,76 @@ pub async fn list(pool: &SqlitePool, only_available: bool) -> Result<Vec<MediaRo
         });
     }
     Ok(out)
+}
+
+/// One genre bucket of the inventory: case-folded, with every spelling seen.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GenreCount {
+    /// Display label: the most frequent spelling (ties → smallest string).
+    pub genre: String,
+    /// Distinct media carrying this genre (any spelling), counted once each.
+    pub count: usize,
+    /// Every distinct spelling folded into this bucket, sorted. More than one
+    /// = inconsistent tags ("Jazz" / "jazz") worth fixing at the source.
+    pub spellings: Vec<String>,
+}
+
+/// Genre inventory of the library, for `library genres`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GenreInventory {
+    /// Buckets sorted by case-folded key.
+    pub genres: Vec<GenreCount>,
+    /// Media carrying no genre at all.
+    pub untagged: usize,
+}
+
+/// Count media per genre, case-insensitively (see [`genre_key`]). Same
+/// `only_available` scope as [`list`].
+pub async fn genres(pool: &SqlitePool, only_available: bool) -> Result<GenreInventory, sqlx::Error> {
+    use std::collections::{BTreeMap, BTreeSet, HashMap};
+
+    let (pairs_sql, untagged_sql) = if only_available {
+        (
+            "SELECT g.genre, g.rel_path FROM media_genre g
+             JOIN media m ON m.rel_path = g.rel_path WHERE m.available = 1",
+            "SELECT count(*) FROM media m WHERE m.available = 1
+             AND NOT EXISTS (SELECT 1 FROM media_genre g WHERE g.rel_path = m.rel_path)",
+        )
+    } else {
+        (
+            "SELECT g.genre, g.rel_path FROM media_genre g
+             JOIN media m ON m.rel_path = g.rel_path",
+            "SELECT count(*) FROM media m
+             WHERE NOT EXISTS (SELECT 1 FROM media_genre g WHERE g.rel_path = m.rel_path)",
+        )
+    };
+
+    let pairs: Vec<(String, String)> = sqlx::query_as(pairs_sql).fetch_all(pool).await?;
+    let (untagged,): (i64,) = sqlx::query_as(untagged_sql).fetch_one(pool).await?;
+
+    // key → (media set, spelling → occurrences)
+    let mut buckets: BTreeMap<String, (BTreeSet<String>, HashMap<String, usize>)> = BTreeMap::new();
+    for (genre, rel_path) in pairs {
+        let entry = buckets.entry(genre_key(&genre)).or_default();
+        entry.0.insert(rel_path);
+        *entry.1.entry(genre).or_default() += 1;
+    }
+
+    let genres = buckets
+        .into_values()
+        .map(|(media, spellings)| {
+            let label = spellings
+                .iter()
+                .max_by(|(a, na), (b, nb)| na.cmp(nb).then_with(|| b.cmp(a)))
+                .map(|(s, _)| s.clone())
+                .unwrap_or_default();
+            let mut all: Vec<String> = spellings.into_keys().collect();
+            all.sort();
+            GenreCount { genre: label, count: media.len(), spellings: all }
+        })
+        .collect();
+
+    Ok(GenreInventory { genres, untagged: untagged as usize })
 }
 
 /// Flip a media row to unavailable — e.g. its file vanished from disk between
@@ -239,7 +334,7 @@ mod tests {
         assert_eq!(stats.present, 2);
         assert_eq!(stats.unavailable, 0);
 
-        let rows = list(&pool, true).await.unwrap();
+        let rows = list(&pool, true, &[]).await.unwrap();
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].rel_path, "a/one.mp3");
         assert_eq!(rows[0].genres, vec!["dance".to_string(), "pop".to_string()]);
@@ -262,8 +357,8 @@ mod tests {
         assert_eq!(stats.unavailable, 1, "the vanished file is kept, marked unavailable");
 
         // It is filtered out of the available listing but still on record.
-        assert_eq!(list(&pool, true).await.unwrap().len(), 1);
-        assert_eq!(list(&pool, false).await.unwrap().len(), 2);
+        assert_eq!(list(&pool, true, &[]).await.unwrap().len(), 1);
+        assert_eq!(list(&pool, false, &[]).await.unwrap().len(), 2);
     }
 
     #[tokio::test]
@@ -287,7 +382,86 @@ mod tests {
             .await
             .unwrap();
 
-        let rows = list(&pool, true).await.unwrap();
+        let rows = list(&pool, true, &[]).await.unwrap();
         assert_eq!(rows[0].genres, vec!["jazz".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn list_filters_by_genre_case_insensitively_any() {
+        let (_dir, pool) = fresh_db().await;
+        replace_library(
+            &pool,
+            &[
+                sample("a.mp3", &["Jazz"]),
+                sample("b.mp3", &["jazz"]),
+                sample("c.mp3", &["Électro"]),
+                sample("d.mp3", &["Rock"]),
+                sample("e.mp3", &[]),
+            ],
+            1000,
+        )
+        .await
+        .unwrap();
+
+        let paths = |rows: Vec<MediaRow>| rows.into_iter().map(|r| r.rel_path).collect::<Vec<_>>();
+
+        assert_eq!(paths(list(&pool, true, &["JAZZ".into()]).await.unwrap()), vec!["a.mp3", "b.mp3"]);
+        // Unicode fold, not just ASCII.
+        assert_eq!(paths(list(&pool, true, &["électro".into()]).await.unwrap()), vec!["c.mp3"]);
+        // Several genres = any.
+        assert_eq!(
+            paths(list(&pool, true, &["rock".into(), " jazz ".into()]).await.unwrap()),
+            vec!["a.mp3", "b.mp3", "d.mp3"]
+        );
+        assert!(list(&pool, true, &["polka".into()]).await.unwrap().is_empty());
+        // No filter = everything, untagged included; genres keep their spelling.
+        let all = list(&pool, true, &[]).await.unwrap();
+        assert_eq!(all.len(), 5);
+        assert_eq!(all[0].genres, vec!["Jazz".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn genre_inventory_folds_case_and_counts_untagged() {
+        let (_dir, pool) = fresh_db().await;
+        replace_library(
+            &pool,
+            &[
+                sample("a.mp3", &["Jazz"]),
+                sample("b.mp3", &["jazz"]),
+                sample("c.mp3", &["Jazz"]),
+                sample("d.mp3", &["Rock"]),
+                sample("e.mp3", &[]),
+                sample("f.mp3", &[]),
+            ],
+            1000,
+        )
+        .await
+        .unwrap();
+
+        let inv = genres(&pool, true).await.unwrap();
+        assert_eq!(inv.untagged, 2);
+        assert_eq!(inv.genres.len(), 2);
+        assert_eq!(inv.genres[0].genre, "Jazz", "most frequent spelling is the label");
+        assert_eq!(inv.genres[0].count, 3);
+        assert_eq!(inv.genres[0].spellings, vec!["Jazz".to_string(), "jazz".to_string()]);
+        assert_eq!(inv.genres[1].genre, "Rock");
+        assert_eq!(inv.genres[1].spellings, vec!["Rock".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn genre_inventory_respects_availability() {
+        let (_dir, pool) = fresh_db().await;
+        replace_library(&pool, &[sample("a.mp3", &["pop"]), sample("b.mp3", &[])], 1000)
+            .await
+            .unwrap();
+        replace_library(&pool, &[], 2000).await.unwrap(); // both vanish
+
+        let avail = genres(&pool, true).await.unwrap();
+        assert!(avail.genres.is_empty());
+        assert_eq!(avail.untagged, 0);
+
+        let all = genres(&pool, false).await.unwrap();
+        assert_eq!(all.genres.len(), 1);
+        assert_eq!(all.untagged, 1);
     }
 }

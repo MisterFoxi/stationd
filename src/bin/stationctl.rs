@@ -12,7 +12,7 @@ use station::{PlaylistAddRequest, PlaylistListRequest, PlaylistSyncRequest, Quit
 use schedule::schedule_service_client::ScheduleServiceClient;
 use schedule::{ApplyGridRequest, CheckCoverageRequest, EnqueueRequest, ExportGridRequest, GridFile, PreviewRequest, ResolveNextRequest, SetClockRequest};
 use library::library_service_client::LibraryServiceClient;
-use library::{ListMediaRequest, ScanRequest};
+use library::{ListGenresRequest, ListMediaRequest, ScanRequest};
 use plugin::plugin_service_client::PluginServiceClient;
 use plugin::{plugin_control_request::Action as PluginAction, PluginControlRequest, PluginListRequest};
 use broadcast::broadcast_service_client::BroadcastServiceClient;
@@ -154,6 +154,21 @@ enum LibraryCommand {
     /// List the media index. Available files only, unless --all also shows
     /// vanished-but-known files (available = 0).
     List {
+        /// Include vanished-but-known files.
+        #[arg(long)]
+        all: bool,
+        /// Keep only media carrying this genre (case-insensitive). Repeatable:
+        /// several --genre match ANY of them.
+        #[arg(long = "genre", value_name = "GENRE")]
+        genres: Vec<String>,
+        /// Group the listing by genre (a multi-genre media appears under each;
+        /// media without genre under "(no genre)").
+        #[arg(long)]
+        by_genre: bool,
+    },
+    /// Genre inventory: media count per genre (case-insensitive), plus the
+    /// number of media without genre.
+    Genres {
         /// Include vanished-but-known files.
         #[arg(long)]
         all: bool,
@@ -622,25 +637,74 @@ async fn main() -> anyhow::Result<()> {
             }
             // A skipped audio file is diagnostic, not a failure: exit zero.
         }
-        Command::Library(LibraryCommand::List { all }) => {
+        Command::Library(LibraryCommand::List { all, genres, by_genre }) => {
             let mut lib = LibraryServiceClient::connect(args.addr.clone()).await?;
+            let filtered = !genres.is_empty();
             let reply = lib
-                .list_media(ListMediaRequest { only_available: !all })
+                .list_media(ListMediaRequest { only_available: !all, genres })
                 .await?
                 .into_inner();
             if reply.media.is_empty() {
+                if filtered {
+                    println!("(no media with these genres)");
+                } else {
+                    println!("(no media in the index)");
+                }
+            } else if by_genre {
+                // Presentation-only grouping of what the server returned; the
+                // case fold matches the server's (trim + Unicode lowercase).
+                use std::collections::BTreeMap;
+                let mut groups: BTreeMap<String, (String, Vec<&library::Media>)> = BTreeMap::new();
+                let mut untagged: Vec<&library::Media> = Vec::new();
+                for m in &reply.media {
+                    if m.genres.is_empty() {
+                        untagged.push(m);
+                    }
+                    for g in &m.genres {
+                        groups
+                            .entry(g.trim().to_lowercase())
+                            .or_insert_with(|| (g.clone(), Vec::new()))
+                            .1
+                            .push(m);
+                    }
+                }
+                for (label, media) in groups.values() {
+                    println!("{label} ({})", media.len());
+                    for m in media {
+                        println!("  {}", fmt_media_line(m));
+                    }
+                }
+                if !untagged.is_empty() {
+                    println!("(no genre) ({})", untagged.len());
+                    for m in &untagged {
+                        println!("  {}", fmt_media_line(m));
+                    }
+                }
+            } else {
+                for m in &reply.media {
+                    println!("{}", fmt_media_line(m));
+                }
+            }
+        }
+        Command::Library(LibraryCommand::Genres { all }) => {
+            let mut lib = LibraryServiceClient::connect(args.addr.clone()).await?;
+            let reply = lib
+                .list_genres(ListGenresRequest { only_available: !all })
+                .await?
+                .into_inner();
+            if reply.genres.is_empty() && reply.untagged == 0 {
                 println!("(no media in the index)");
             }
-            for m in &reply.media {
-                let secs = m.duration_ms / 1000;
-                let dur = format!("{}:{:02}", secs / 60, secs % 60);
-                let flag = if m.available { "" } else { "  (unavailable)" };
-                let who = match (m.artist.is_empty(), m.title.is_empty()) {
-                    (false, false) => format!("{} \u{2014} {}", m.artist, m.title),
-                    (true, false) => m.title.clone(),
-                    _ => "(no tags)".to_string(),
+            for g in &reply.genres {
+                let variants = if g.spellings.len() > 1 {
+                    format!("  [spellings: {}]", g.spellings.join(" | "))
+                } else {
+                    String::new()
                 };
-                println!("{dur:>7}  {}  {who}{flag}", m.rel_path);
+                println!("{:>5}  {}{variants}", g.count, g.genre);
+            }
+            if reply.untagged > 0 {
+                println!("{:>5}  (no genre)", reply.untagged);
             }
         }
         Command::Plugin(PluginCommand::List) => {
@@ -823,6 +887,25 @@ fn read_grid_toml(path: &std::path::Path) -> anyhow::Result<String> {
 
 /// Count and duration have independent presence (e.g. a remote member with
 /// runtime). Keep milliseconds: a short sting must not be printed as zero.
+/// One media line for `library list`: duration, path, "artist — title",
+/// genres, availability flag.
+fn fmt_media_line(m: &library::Media) -> String {
+    let secs = m.duration_ms / 1000;
+    let dur = format!("{}:{:02}", secs / 60, secs % 60);
+    let flag = if m.available { "" } else { "  (unavailable)" };
+    let who = match (m.artist.is_empty(), m.title.is_empty()) {
+        (false, false) => format!("{} \u{2014} {}", m.artist, m.title),
+        (true, false) => m.title.clone(),
+        _ => "(no tags)".to_string(),
+    };
+    let genres = if m.genres.is_empty() {
+        "\u{2014}".to_string()
+    } else {
+        m.genres.join(", ")
+    };
+    format!("{dur:>7}  {}  {who}  [{genres}]{flag}", m.rel_path)
+}
+
 fn fmt_pool(count: Option<u64>, duration: Option<&prost_types::Duration>) -> String {
     let count = count.map(|n| n.to_string()).unwrap_or_else(|| "unknown".into());
     let duration = duration.map(|d| {

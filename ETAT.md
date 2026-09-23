@@ -36,7 +36,7 @@ grammaire + les 7 RPC réels. `cargo build` + `cargo test -p stationd` étaient 
 au dernier build compilé ; les ajouts récents (shuffle/runtime de groupe,
 décomposition preview, fix casse de ref) **attendent un `cargo build`** (Rust
 indispo dans l'env de préparation).
-Biblio média scannée et pilotable au CLI (`library scan|list`). **Étage
+Biblio média scannée et pilotable au CLI (`library scan|list|genres`, filtre `--genre`). **Étage
 sélection livré** : `playlist_ref` → `media_path` concret (shuffle, sequential,
 newest/oldest via curseur, groupe `sequence`/`shuffle` + quota `take`/`runtime`,
 membres décomposés au `preview`). Validé en réel de bout en bout :
@@ -73,6 +73,49 @@ Autres, indépendants :
 ---
 
 ## Fait
+
+### — Biblio : filtre et inventaire par genre (2026-09-23) —
+
+Base : aucune migration (les genres étaient déjà lus au scan et stockés dans
+`media_genre`). Comparaison **insensible à la casse, repli Unicode** (`trim` +
+`to_lowercase` côté Rust) : SQLite `NOCASE`/`lower()` ne replient que l'ASCII,
+« Électro » ≠ « électro » sinon.
+
+- **Contrat** `library_v1.proto` (additif) : `ListMediaRequest.genres`
+  (repeated, **any**, vide = pas de filtre) ; nouveau RPC `ListGenres` →
+  `GenreCount { genre, count, spellings }` + `untagged`.
+- **`media_index`** : `genre_key` (clé de repli), `list(pool, only_available,
+  genres)` filtre, `genres(pool, only_available) -> GenreInventory` (un seau par
+  clé repliée, libellé = graphie la plus fréquente, `spellings` > 1 = tags
+  incohérents à corriger à la source ; un média compté une fois par seau).
+- **`library_actor`** : `list(only_available, genres)` ; genre vide → erreur
+  bruyante `BadFilter` (→ `invalid_argument`) ; commande `Genres`.
+- **CLI** : `library list` affiche `[genre, …]` (`—` si aucun) ;
+  `--genre X` (répétable, any) ; `--by-genre` (regroupement d'affichage, un
+  média multi-genre sous chacun, `(no genre)` à la fin) ; `library genres
+  [--all]` (compte par genre + graphies divergentes + sans genre).
+- Tests : `media_index` (filtre casse/Unicode/any, inventaire replié, portée
+  available), `library_actor` (genre vide rejeté).
+
+**Validation** : `cargo build --locked --bins` + `cargo test --locked -p
+stationd` verts (246 tests unitaires + intégration) dans l'env de préparation.
+
+**Filtre `genre` des playlists aligné** (même jour) : `has`/`has_any`/
+`has_all`/`has_none` sont désormais **insensibles à la casse (Unicode)**.
+- **Migration 0015** `media_genre.genre_key` (+ index) : clé repliée écrite au
+  scan par `media_index::genre_key` (source unique du repli). Backfill SQL
+  `lower(trim(genre))` = ASCII seulement → **relancer `library scan`** après
+  migration pour les genres accentués.
+- `selection.rs` : `SetField` gagne `fold` ; `genre` compare `genre_key`, les
+  valeurs de filtre sont repliées avant bind. `genre` garde la graphie
+  d'origine (affichage, `Candidate.genres`). Test
+  `genre_filter_is_case_insensitive_unicode` (has JAZZ, has électro,
+  has_none [ROCK, jazz]).
+- ⚠ Changement de sens : une playlist `has "Jazz"` qui excluait `jazz`
+  l'inclut désormais.
+
+**Limite** : le scan lit **une seule chaîne** genre par fichier (pas de
+découpe `Rock; Pop` — raffinement prévu dans `media.rs`).
 
 ### — Plugins A2 : surface hôte (control + override + host functions) (2026-09-23) —
 
@@ -791,7 +834,7 @@ comme dégradé, pas d'erreur).
   `failed_precondition`, reste → `internal`. Un skip est diagnostic → le scan
   sort en code 0 (contrairement à un apply rejeté).
 - `build.rs`/`proto.rs`/`lib.rs`/`main.rs` : câblage (3ᵉ service sur le port).
-- `stationctl library scan|list [--all]`.
+- `stationctl library scan|list [--all]` (+ `genres`, `--genre`, `--by-genre` depuis 2026-09-23).
 
 ### — Socle scan bibliothèque média (2026-09-14) —
 

@@ -12,7 +12,10 @@ use crate::library_actor::{LibraryError, LibraryHandle};
 pub use crate::proto::library;
 
 use library::library_service_server::LibraryService;
-use library::{ListMediaRequest, ListMediaResponse, Media, ScanRequest, ScanResponse, Skip};
+use library::{
+    GenreCount, ListGenresRequest, ListGenresResponse, ListMediaRequest, ListMediaResponse, Media,
+    ScanRequest, ScanResponse, Skip,
+};
 
 pub struct LibraryGrpc {
     handle: LibraryHandle,
@@ -25,12 +28,14 @@ impl LibraryGrpc {
 }
 
 /// A missing media root is a deployment/config fault the operator must fix →
-/// `failed_precondition`; everything else is ours → `internal`.
+/// `failed_precondition`; a bad request filter → `invalid_argument`;
+/// everything else is ours → `internal`.
 fn map_error(e: LibraryError) -> Status {
     match e {
         LibraryError::BadRoot(p) => {
             Status::failed_precondition(format!("media root unavailable: {}", p.display()))
         }
+        LibraryError::BadFilter(m) => Status::invalid_argument(m),
         other => Status::internal(other.to_string()),
     }
 }
@@ -85,15 +90,35 @@ impl LibraryService for LibraryGrpc {
         &self,
         request: Request<ListMediaRequest>,
     ) -> Result<Response<ListMediaResponse>, Status> {
-        let only_available = request.into_inner().only_available;
+        let req = request.into_inner();
         let media = self
             .handle
-            .list(only_available)
+            .list(req.only_available, req.genres)
             .await
             .map_err(map_error)?
             .into_iter()
             .map(map_media)
             .collect();
         Ok(Response::new(ListMediaResponse { media }))
+    }
+
+    async fn list_genres(
+        &self,
+        request: Request<ListGenresRequest>,
+    ) -> Result<Response<ListGenresResponse>, Status> {
+        let only_available = request.into_inner().only_available;
+        let inv = self.handle.genres(only_available).await.map_err(map_error)?;
+        Ok(Response::new(ListGenresResponse {
+            genres: inv
+                .genres
+                .into_iter()
+                .map(|g| GenreCount {
+                    genre: g.genre,
+                    count: g.count as u32,
+                    spellings: g.spellings,
+                })
+                .collect(),
+            untagged: inv.untagged as u32,
+        }))
     }
 }

@@ -27,6 +27,10 @@ service LibraryService {
   // Liste l'index média. `only_available` exclut les fichiers disparus (gardés
   // en base, marqués indisponibles).
   rpc ListMedia(ListMediaRequest) returns (ListMediaResponse);
+
+  // Inventaire des genres : nombre de médias par genre, insensible à la casse
+  // (repli Unicode, « Électro » = « électro »), + nombre de médias sans genre.
+  rpc ListGenres(ListGenresRequest) returns (ListGenresResponse);
 }
 
 message ScanRequest {}
@@ -54,6 +58,25 @@ message Skip {
 
 message ListMediaRequest {
   bool only_available = 1;
+  // Filtre genre, insensible à la casse. Un média est gardé s'il porte AU MOINS
+  // UN de ces genres (any). Vide = pas de filtre. Entrée vide = INVALID_ARGUMENT.
+  repeated string genres = 2;
+}
+
+message ListGenresRequest {
+  bool only_available = 1;
+}
+
+message ListGenresResponse {
+  repeated GenreCount genres = 1;   // trié par clé repliée (ordre alphabétique)
+  uint32 untagged            = 2;   // médias sans aucun genre
+}
+
+// Un genre, toutes graphies confondues (repli de casse).
+message GenreCount {
+  string genre              = 1;   // libellé : graphie la plus fréquente
+  uint32 count              = 2;   // médias distincts portant ce genre
+  repeated string spellings = 3;   // graphies rencontrées ; > 1 = tags incohérents
 }
 
 message ListMediaResponse {
