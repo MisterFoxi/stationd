@@ -598,6 +598,38 @@ members = [{ ref = "inner", take = 1 }, { ref = "jazz", take = 1 }]"#,
     assert_eq!(members[1].stats.selected_count, Some(2));
 }
 
+#[tokio::test]
+async fn inspect_ref_resolves_member_refs_relative_to_the_group_dir() {
+    // `./x` / `../x` resolve from the group's directory, exactly like playout.
+    let (_dir, pool) = fixture().await;
+    add(
+        &pool,
+        "shows/jazz",
+        r#"mode = "dynamic"
+[[selection.filter]]
+field = "genre"
+op = "has"
+value = "jazz""#,
+    )
+    .await;
+    add(
+        &pool,
+        "shows/grp",
+        r#"mode = "group"
+strategy = "sequence"
+members = [{ ref = "./jazz", take = 1 }, { ref = "../static", take = 1 }]"#,
+    )
+    .await;
+    let result = inspect_ref(&pool, "Shows/Grp").await.unwrap();
+    let members = result.group.unwrap().members;
+    // The ref is displayed as written; the stats come from the resolved key.
+    assert_eq!(members[0].r#ref, "./jazz");
+    assert_eq!(members[0].stats.selected_count, Some(2));
+    assert_eq!(members[1].r#ref, "../static");
+    assert_eq!(members[1].stats.selected_count, Some(2));
+    assert_eq!(result.stats.selected_count, Some(4));
+}
+
 // ----- CheckCoverage (sizing verdict) ------------------------------------
 
 /// A BaseRotation rule `id` pointing at playlist `pl`, inserted into the grid.

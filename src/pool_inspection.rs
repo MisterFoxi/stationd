@@ -86,6 +86,10 @@ async fn inspect_ref_at_depth(
     let strategy = sel
         .strategy
         .ok_or_else(|| SelectionError::Unsupported("group without strategy".into()))?;
+    // The group's canonical key: base for `./` / `../` member refs (same
+    // resolution as the playout path, `playlist::resolve_member_ref`).
+    let group_key = crate::playlist::normalize_ref(playlist_ref)
+        .map_err(|_| SelectionError::PlaylistNotFound(playlist_ref.to_string()))?;
     // Reuse the existing take/runtime and offset projection unchanged.
     let projection = playlist.project_group_members();
     let mut members = Vec::with_capacity(sel.members.len());
@@ -98,10 +102,12 @@ async fn inspect_ref_at_depth(
         distinct_artists: None,
     };
     for (i, member) in sel.members.iter().enumerate() {
-        let child = load_playlist(pool, &member.r#ref).await?;
+        let member_key = crate::playlist::resolve_member_ref(&group_key, &member.r#ref)
+            .map_err(|_| SelectionError::PlaylistNotFound(member.r#ref.clone()))?;
+        let child = load_playlist(pool, &member_key).await?;
         let mut stats = if child.selection.mode == Mode::Group {
             // Nested group: recurse and fold in its aggregate stats.
-            Box::pin(inspect_ref_at_depth(pool, &member.r#ref, depth + 1))
+            Box::pin(inspect_ref_at_depth(pool, &member_key, depth + 1))
                 .await?
                 .stats
         } else {

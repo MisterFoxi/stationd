@@ -167,6 +167,10 @@ pub struct Filter {
 /// `shuffle` group a member may carry a per-member quota, either in tracks
 /// (`take`) or in wall-clock time (`runtime`, e.g. "20m") — the two are
 /// mutually exclusive.
+///
+/// `ref` is relative to the playlist root (`shows/intro`), unless it starts
+/// with `./` or `../`: then it is relative to the GROUP's own directory
+/// (`./intro` from `shows/main` → `shows/intro`). See [`resolve_member_ref`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Member {
@@ -561,6 +565,73 @@ pub fn normalize_ref(raw: &str) -> Result<String, String> {
     Ok(segments.join("/"))
 }
 
+/// Resolve a group member's `ref` to its canonical key, given the group's own
+/// canonical key (`group_key`, e.g. `shows/main`).
+///
+/// - A ref starting with `./` or `../` (or exactly `.`/`..`) is **relative to
+///   the group's directory**: `./intro` from `shows/main` → `shows/intro`,
+///   `../jingles/id` from `shows/main` → `jingles/id`. `..` may climb up to
+///   the playlist root, never above it (loud error).
+/// - Any other ref is **root-relative**, exactly as before ([`normalize_ref`]).
+///   No implicit fallback between the two: the syntax says which one it is,
+///   so a ref never silently resolves to a different playlist.
+///
+/// Same canonicalization as `normalize_ref` otherwise (`\` → `/`, `.toml`
+/// stripped, lowercased, empty/`.` segments dropped).
+pub fn resolve_member_ref(group_key: &str, raw: &str) -> Result<String, String> {
+    let unified = raw.replace('\\', "/");
+    let relative = unified == "."
+        || unified == ".."
+        || unified.starts_with("./")
+        || unified.starts_with("../");
+    if !relative {
+        return normalize_ref(raw);
+    }
+    let trimmed = unified.strip_suffix(".toml").unwrap_or(&unified);
+
+    // A member ref must NAME a playlist, not designate a directory: `./`,
+    // `.`, `..`, `./x/..` all end on a directory (the group's own, or a
+    // parent) → loud error, never silently resolved to a same-named playlist.
+    let last = trimmed
+        .split('/')
+        .filter(|s| !s.is_empty() && *s != ".")
+        .last();
+    if !matches!(last, Some(s) if s != "..") {
+        return Err(format!(
+            "`{raw}` designates a directory, not a playlist (relative to group `{group_key}`)"
+        ));
+    }
+
+    // Base = the group's directory: its key minus its own last segment.
+    let mut segments: Vec<String> = group_key
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_lowercase())
+        .collect();
+    segments.pop();
+
+    for seg in trimmed.split('/') {
+        match seg {
+            "" | "." => continue,
+            ".." => {
+                if segments.pop().is_none() {
+                    return Err(format!(
+                        "`{raw}` climbs above the playlist root (relative to group `{group_key}`)"
+                    ));
+                }
+            }
+            s => segments.push(s.to_lowercase()),
+        }
+    }
+
+    if segments.is_empty() {
+        return Err(format!(
+            "`{raw}` is an empty reference (relative to group `{group_key}`)"
+        ));
+    }
+    Ok(segments.join("/"))
+}
+
 /// One entry to validate as part of the whole set: its canonical key (the
 /// normalized relative path, from the file's location) and the parsed
 /// playlist.
@@ -599,7 +670,7 @@ pub fn validate_set(entries: &[SetEntry]) -> Vec<SetError> {
         }
         let mut targets = Vec::new();
         for m in &e.playlist.selection.members {
-            match normalize_ref(&m.r#ref) {
+            match resolve_member_ref(&e.key, &m.r#ref) {
                 Ok(key) => {
                     if !known.contains(&key) {
                         errors.push(SetError {
@@ -1376,6 +1447,85 @@ mod tests {
             errors.iter().any(|e| e.message.contains("cycle")),
             "A->B->C->A must be detected"
         );
+    }
+
+    // ----- resolve_member_ref (relative member refs) -------------------
+
+    #[test]
+    fn member_ref_without_dot_prefix_stays_root_relative() {
+        // Backward compatible: a plain ref ignores the group's location.
+        assert_eq!(resolve_member_ref("shows/main", "jingles/id").unwrap(), "jingles/id");
+        assert_eq!(resolve_member_ref("shows/main", "Shows/Intro.toml").unwrap(), "shows/intro");
+    }
+
+    #[test]
+    fn member_ref_dot_slash_is_relative_to_the_group_dir() {
+        assert_eq!(resolve_member_ref("shows/main", "./intro").unwrap(), "shows/intro");
+        assert_eq!(
+            resolve_member_ref("homestone-chronicles/homestone-chronicles", "./Homestone-Chronicles-Intro.toml")
+                .unwrap(),
+            "homestone-chronicles/homestone-chronicles-intro"
+        );
+        // Windows separator folded.
+        assert_eq!(resolve_member_ref("shows/main", ".\\sub\\x").unwrap(), "shows/sub/x");
+        // A group at the root: `./x` is just `x`.
+        assert_eq!(resolve_member_ref("main", "./x").unwrap(), "x");
+    }
+
+    #[test]
+    fn member_ref_dot_dot_climbs_but_never_above_root() {
+        assert_eq!(resolve_member_ref("a/b/g", "../jingles/id").unwrap(), "a/jingles/id");
+        assert_eq!(resolve_member_ref("a/b/g", "../../x").unwrap(), "x");
+        assert_eq!(resolve_member_ref("a/b/g", "./c/../d").unwrap(), "a/b/d");
+        assert!(resolve_member_ref("a/g", "../../x").is_err(), "above the root");
+        assert!(resolve_member_ref("g", "../x").is_err(), "above the root");
+    }
+
+    #[test]
+    fn member_ref_relative_empty_is_rejected() {
+        assert!(resolve_member_ref("shows/main", "./").is_err());
+        assert!(resolve_member_ref("shows/main", ".").is_err());
+        assert!(resolve_member_ref("shows/main", "..").is_err());
+        // Ends on a directory even though it passes through a name.
+        assert!(resolve_member_ref("a/b/g", "./c/..").is_err());
+    }
+
+    #[test]
+    fn set_resolves_relative_member_refs_from_the_group_dir() {
+        let entries = vec![
+            leaf_entry("shows/intro"),
+            leaf_entry("jingles/id"),
+            group_entry("shows/main", &["./intro", "../jingles/id"]),
+        ];
+        assert!(validate_set(&entries).is_empty(), "relative refs resolve from shows/");
+    }
+
+    #[test]
+    fn set_reports_unknown_relative_ref_with_its_resolved_key() {
+        // `./intro` from shows/main is shows/intro — NOT the root `intro`.
+        let entries = vec![leaf_entry("intro"), group_entry("shows/main", &["./intro"])];
+        let errors = validate_set(&entries);
+        assert!(
+            errors.iter().any(|e| e.message.contains("shows/intro")),
+            "no silent fallback to the root playlist"
+        );
+    }
+
+    #[test]
+    fn set_detects_a_cycle_through_a_relative_ref() {
+        let entries = vec![
+            group_entry("shows/a", &["./b"]),
+            group_entry("shows/b", &["./a"]),
+        ];
+        let errors = validate_set(&entries);
+        assert!(errors.iter().any(|e| e.message.contains("cycle")));
+    }
+
+    #[test]
+    fn set_reports_a_relative_ref_climbing_above_root() {
+        let entries = vec![group_entry("main", &["../x"])];
+        let errors = validate_set(&entries);
+        assert!(errors.iter().any(|e| e.message.contains("above the playlist root")));
     }
 
     #[test]

@@ -5,7 +5,7 @@ sans reconstruire le contexte. À distinguer des docs de `Doc/` (décisions
 d'architecture durables) : ce fichier-ci est volatil, à mettre à jour à
 chaque session.
 
-Dernière mise à jour : 2026-09-22.
+Dernière mise à jour : 2026-09-23.
 
 
 ## Ajout : TUI d'administration (correctif préparé, compilation à confirmer)
@@ -72,11 +72,49 @@ Autres, indépendants :
   les dupliquent plus — aujourd'hui recopiés dans les 2 crates guest).
 - **Refacto acteur `GridEngine`** (gabarit `library_actor`).
 - **Câblage Liquidsoap** (le vrai « ça diffuse » ; débloque aussi `hard`).
-- **Refs de membres relatives** au dossier du groupe (chemin complet requis).
 
 ---
 
 ## Fait
+
+### — Contraintes portées par un groupe + refs de membres relatives (2026-09-23) —
+
+**Contraintes de groupe** : les `[broadcast.constraints]` déclarées sur un
+groupe s'appliquent désormais à **chaque piste émise par le groupe**.
+- Sémantique : **cumulatives** — portée d'une feuille = contraintes de tous les
+  groupes englobants + les siennes ; chaque jeu est appliqué (la fenêtre la
+  plus stricte gagne). Héritées à travers les groupes imbriqués, jamais
+  comptées deux fois, jamais relâchées (pool vidé → `PoolEmpty` → fallthrough).
+- `selection.rs` : `resolve_media`/`resolve_member`/`resolve_group_{rotation,
+  weighted}` threadent `inherited: &[&Constraints]` ; `resolve_leaf` et
+  `apply_constraints` prennent une slice (boucle `apply_one_constraint_set`).
+- Membres `remote`/`queue` : non filtrés (comme leurs propres contraintes —
+  un flux n'a pas d'identité de piste, une entrée de queue a été poussée
+  explicitement).
+- CheckCoverage inchangé (l'axe A lisait déjà les contraintes du groupe).
+
+**Refs de membres relatives** — tranché : **syntaxe explicite**.
+- `ref` commençant par `./` ou `../` (ou `.`/`..`) → relatif au **dossier du
+  groupe** (`./intro` depuis `shows/main` → `shows/intro`) ; `..` peut remonter
+  jusqu'à la racine, jamais au-delà (erreur bruyante).
+- Tout autre `ref` → relatif à la racine, **inchangé** (rétro-compatible).
+- **Aucun fallback implicite** entre les deux : `./intro` introuvable ne
+  retombe jamais sur la racine `intro` (→ `PlaylistNotFound` / erreur `sync`).
+- `playlist::resolve_member_ref(group_key, raw)` = point unique, utilisé par
+  `validate_set` (sync : refs + cycles), `selection` (rotation + weighted) et
+  `pool_inspection` (preview / CheckCoverage). Les refs de grille
+  (`grid.toml`) restent racine-relatives (`normalize_ref`, inchangé).
+- ⚠ Changement de sens limité : un `ref` de membre déjà écrit `./x` dans un
+  groupe en sous-dossier visait la racine ; il vise désormais le dossier du
+  groupe. Sans effet pour un groupe à la racine.
+- Tests : `playlist` (résolution, remontée, racine dépassée, vide, set :
+  relatif OK / inconnu sans fallback / cycle via relatif / au-delà racine) ;
+  `selection` (contraintes de groupe : appliquées, héritées en imbriqué,
+  cumulatives avec celles du membre, pool vidé → PoolEmpty ; refs relatives
+  sequence + weighted, pas de fallback racine) ; `tests/pool_preview.rs`
+  (inspection avec refs relatives).
+
+**Validation** : édité ; `cargo test -p stationd` à confirmer.
 
 ### — queue : tampon runtime + enqueue (CLI-complete) (2026-09-22) —
 
@@ -881,15 +919,11 @@ dans le découpage des modules (`grid_index` = A, `grid_store` = B).
 - **Refacto acteur** : `GridEngine` en tâche tokio possédante, grille en
   mémoire invalidée à l'apply, mutations par mpsc (gabarit `library_actor`).
 - **Sélection** : complète (static / dynamic / remote / queue / group +
-  anti-répétition + unplayed_only). Reste : contraintes portées par un GROUPE
-  lui-même (non threadées jusqu'aux membres — cf. Fait anti-répétition).
+  anti-répétition, y compris contraintes de groupe héritées + unplayed_only).
   `limit` standalone : écarté ; marquage `unplayed_only` et relais remote :
-  auto-câblés avec Liquidsoap.
-- **Refs de membres relatives au dossier du groupe** : `normalize_ref` ne
-  résout pas un `ref` de membre relativement à l'emplacement du groupe — il
-  faut aujourd'hui le chemin complet
-  (`homestone-chronicles/homestone-chronicles-intro`). À trancher : résolution
-  relative ou refs toujours absolues.
+  auto-câblés avec Liquidsoap. Contraintes sur une `queue` : non appliquées
+  (préexistant ; la proposition v1 veut « entrée exclue reste, on cherche la
+  suivante éligible » — à faire si besoin).
 
 ### Playlists (périmètre existant)
 - Compiler+servir `playlist_v1.proto` (nouveau contrat) et migrer le code
@@ -920,10 +954,10 @@ dans le découpage des modules (`grid_index` = A, `grid_store` = B).
   sqlx.
 - **`lofty` ajouté** : premier `cargo build` doit actualiser `Cargo.lock`
   (Rust indispo dans l'env de préparation).
-- **Refs de membres = chemin complet** : un `ref` de membre de groupe doit être
-  le rel_path complet (`homestone-chronicles/homestone-chronicles-intro`), pas
-  relatif au dossier du groupe. Un ref court résout une clé absente → PoolEmpty
-  ou PlaylistNotFound. (cf. Reste à faire.)
+- **Refs de membres** : racine-relatives par défaut
+  (`homestone-chronicles/homestone-chronicles-intro`) ; relatives au dossier du
+  groupe **seulement** si écrites `./x` / `../x`. Un ref nu court (`intro`)
+  vise la racine, pas le dossier du groupe.
 - **Casse des chemins** : `media.rel_path` CONSERVE la casse (fichiers réels,
   FS potentiellement sensible à la casse) ; les refs playlists sont, elles,
   normalisées en minuscules. Ne pas traiter les deux pareil.

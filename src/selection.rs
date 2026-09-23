@@ -13,10 +13,14 @@
 //! cursor), `newest` (head, stateless).
 //!
 //! SCOPE:
-//!   * modes: `static`, `dynamic`, `group`(sequence/shuffle/rotate/weighted).
-//!     `queue`/`remote` → error.
-//!   * NOT YET honoured: `limit`, `constraints`, `unplayed_only`,
-//!     `order_by = published` (loud errors or tolerated-not-applied).
+//!   * modes: `static`, `dynamic`, `queue` (pop), `remote` (stream URL),
+//!     `group` (sequence/shuffle/rotate/weighted, nested).
+//!   * `constraints` apply to every leaf track: the leaf's own, plus those of
+//!     every enclosing group (inherited down the nesting, cumulative).
+//!   * Member refs: root-relative, or relative to the group's directory when
+//!     written `./x` / `../x` (`playlist::resolve_member_ref`).
+//!   * NOT honoured: `limit` standalone (advisory, by design),
+//!     `order_by = published` (loud error).
 //!
 //! No-silent-failure: unsupported mode/order/feature, unknown field/op, bad
 //! filter value, unknown ref, empty pool — all loud errors. Media paths keep
@@ -130,7 +134,7 @@ async fn resolve_inner(
         .await?
         .ok_or_else(|| SelectionError::PlaylistNotFound(playlist_ref.to_string()))?;
     let playlist = Playlist::parse(&toml)?;
-    resolve_media(pool, plugins, now, &key, &playlist, 0).await
+    resolve_media(pool, plugins, now, &key, &playlist, 0, &[]).await
 }
 
 /// Wall-clock now in epoch seconds, for callers that don't supply an instant.
@@ -142,6 +146,14 @@ fn wall_now() -> i64 {
         .unwrap_or(0)
 }
 
+/// Resolve one media for `playlist` (canonical key `reference`).
+///
+/// `inherited` = the anti-repetition constraints of every ENCLOSING group
+/// (empty at the top level). This playlist's own constraints are appended to
+/// form its scope: a leaf filters its pool against the whole scope, a group
+/// hands the scope down to its members. Cumulative — a track must satisfy
+/// every constraint in scope, so the strictest window wins; nothing is ever
+/// relaxed on the way down.
 async fn resolve_media(
     pool: &SqlitePool,
     plugins: Option<&PluginHandle>,
@@ -149,30 +161,35 @@ async fn resolve_media(
     reference: &str,
     playlist: &Playlist,
     depth: u32,
+    inherited: &[&Constraints],
 ) -> Result<Resolved, SelectionError> {
     let sel = &playlist.selection;
+    let mut scope: Vec<&Constraints> = inherited.to_vec();
+    scope.extend(playlist.broadcast.as_ref().and_then(|b| b.constraints.as_ref()));
     match sel.mode {
-        Mode::Static | Mode::Dynamic => {
-            let constraints = playlist.broadcast.as_ref().and_then(|b| b.constraints.as_ref());
-            resolve_leaf(pool, plugins, now, reference, sel, constraints)
-                .await
-                .map(Resolved::File)
-        }
+        Mode::Static | Mode::Dynamic => resolve_leaf(pool, plugins, now, reference, sel, &scope)
+            .await
+            .map(Resolved::File),
         Mode::Group => match sel.strategy {
             Some(Strategy::Sequence) => {
-                resolve_group_rotation(pool, plugins, now, reference, sel, false, depth).await
+                resolve_group_rotation(pool, plugins, now, reference, sel, false, depth, &scope)
+                    .await
             }
             Some(Strategy::Shuffle) => {
-                resolve_group_rotation(pool, plugins, now, reference, sel, true, depth).await
+                resolve_group_rotation(pool, plugins, now, reference, sel, true, depth, &scope)
+                    .await
             }
             // Rotate = plain round-robin, one track per member per turn. Its
             // members are bare (validation forbids take/runtime/weight), so the
             // sequence walk with the default take = 1 already IS a rotation;
             // position persists across turns via group_state.
             Some(Strategy::Rotate) => {
-                resolve_group_rotation(pool, plugins, now, reference, sel, false, depth).await
+                resolve_group_rotation(pool, plugins, now, reference, sel, false, depth, &scope)
+                    .await
             }
-            Some(Strategy::Weighted) => resolve_group_weighted(pool, plugins, now, sel, depth).await,
+            Some(Strategy::Weighted) => {
+                resolve_group_weighted(pool, plugins, now, reference, sel, depth, &scope).await
+            }
             None => Err(SelectionError::Unsupported("group without strategy".into())),
         },
         // A remote relays an external stream: resolve to its URL, tagged as a
@@ -197,15 +214,15 @@ async fn resolve_media(
 }
 
 /// Resolve one file for a LEAF playlist (static or dynamic): materialize the
-/// pool, run plugin filtering, then choose. Groups call back here per member —
-/// never into `resolve_media` — so there is no async recursion.
+/// pool, run plugin filtering, apply the constraints in scope (the leaf's own
+/// plus every enclosing group's), then choose.
 async fn resolve_leaf(
     pool: &SqlitePool,
     plugins: Option<&PluginHandle>,
     now: i64,
     reference: &str,
     sel: &Selection,
-    constraints: Option<&Constraints>,
+    constraints: &[&Constraints],
 ) -> Result<String, SelectionError> {
     let order = effective_order(sel);
 
@@ -279,24 +296,34 @@ async fn resolve_leaf(
     }
 }
 
-/// Drop candidates barred by the playlist's own anti-repetition constraints,
-/// evaluated against the station-wide broadcast history (`broadcast_log`):
-/// a candidate whose `rel_path` played within `no_same_track_within`, or whose
-/// `artist` played within `no_same_artist_within`, is removed. A HARD filter,
+/// Drop candidates barred by the anti-repetition constraints in scope — the
+/// leaf's own plus those inherited from every enclosing group — evaluated
+/// against the station-wide broadcast history (`broadcast_log`): a candidate
+/// whose `rel_path` played within a `no_same_track_within`, or whose `artist`
+/// played within a `no_same_artist_within`, is removed. Each constraint set is
+/// applied in turn (cumulative: the strictest window wins). A HARD filter,
 /// never relaxed implicitly (doc): if it empties the pool the caller surfaces
 /// `PoolEmpty` and the grid falls through. An untagged candidate (no artist) is
 /// never excluded by the artist window. `now` is epoch seconds; each window's
-/// cutoff is `now - window`. Constraints declared on a GROUP itself (not its
-/// members) are not threaded here yet — a member's own constraints do apply.
+/// cutoff is `now - window`.
 async fn apply_constraints(
     pool: &SqlitePool,
     now: i64,
-    constraints: Option<&Constraints>,
+    constraints: &[&Constraints],
     candidates: &mut Vec<Candidate>,
 ) -> Result<(), SelectionError> {
-    let Some(c) = constraints else {
-        return Ok(());
-    };
+    for c in constraints {
+        apply_one_constraint_set(pool, now, c, candidates).await?;
+    }
+    Ok(())
+}
+
+async fn apply_one_constraint_set(
+    pool: &SqlitePool,
+    now: i64,
+    c: &Constraints,
+    candidates: &mut Vec<Candidate>,
+) -> Result<(), SelectionError> {
     if let Some(window) = &c.no_same_track_within {
         let secs = crate::playlist::parse_duration_secs(window).map_err(|e| {
             SelectionError::Unsupported(format!("no_same_track_within `{window}`: {e}"))
@@ -336,6 +363,7 @@ async fn apply_constraints(
 ///   may overrun. `now` is epoch seconds on the controllable station clock, so
 ///   the budget is testable and `--at`-drivable, and a downtime longer than the
 ///   budget simply expires the member at restart (catch-up).
+#[allow(clippy::too_many_arguments)]
 async fn resolve_group_rotation(
     pool: &SqlitePool,
     plugins: Option<&PluginHandle>,
@@ -344,6 +372,7 @@ async fn resolve_group_rotation(
     sel: &Selection,
     shuffle: bool,
     depth: u32,
+    scope: &[&Constraints],
 ) -> Result<Resolved, SelectionError> {
     let n = sel.members.len();
     if n == 0 {
@@ -388,7 +417,7 @@ async fn resolve_group_rotation(
         }
 
         let member = &sel.members[order[st.member_idx]];
-        let member_key = crate::playlist::normalize_ref(&member.r#ref)
+        let member_key = crate::playlist::resolve_member_ref(group_ref, &member.r#ref)
             .map_err(|_| SelectionError::PlaylistNotFound(member.r#ref.clone()))?;
 
         // Time-budget expiry is checked BEFORE emitting: if the current
@@ -407,7 +436,7 @@ async fn resolve_group_rotation(
             }
         }
 
-        match resolve_member(pool, plugins, now, &member_key, depth).await {
+        match resolve_member(pool, plugins, now, &member_key, depth, scope).await {
             Ok(track) => {
                 if member.runtime.is_some() {
                     // Time budget: stamp the slot start on the first track and
@@ -476,12 +505,15 @@ pub(crate) const MAX_GROUP_DEPTH: u32 = 8;
 /// (default) bubbles `PoolEmpty` so the grid falls through to a lower-priority
 /// source. A member may itself be a group (resolved recursively via
 /// `resolve_member`, bounded by `MAX_GROUP_DEPTH`).
+#[allow(clippy::too_many_arguments)]
 async fn resolve_group_weighted(
     pool: &SqlitePool,
     plugins: Option<&PluginHandle>,
     now: i64,
+    group_ref: &str,
     sel: &Selection,
     depth: u32,
+    scope: &[&Constraints],
 ) -> Result<Resolved, SelectionError> {
     let policy = sel
         .on_member_unavailable
@@ -504,9 +536,9 @@ async fn resolve_group_weighted(
             .choose_weighted(&mut rand::thread_rng(), |&(_, w)| w)
             .map_err(|_| SelectionError::PoolEmpty)?;
         let member = &sel.members[member_i];
-        let member_key = crate::playlist::normalize_ref(&member.r#ref)
+        let member_key = crate::playlist::resolve_member_ref(group_ref, &member.r#ref)
             .map_err(|_| SelectionError::PlaylistNotFound(member.r#ref.clone()))?;
-        match resolve_member(pool, plugins, now, &member_key, depth).await {
+        match resolve_member(pool, plugins, now, &member_key, depth, scope).await {
             Ok(track) => return Ok(track),
             // `skip`: drop this empty member and re-draw among the rest.
             Err(SelectionError::PoolEmpty) if policy == MemberUnavailable::Skip => {
@@ -548,13 +580,20 @@ fn member_runtime_secs(member: &Member) -> Result<Option<i64>, SelectionError> {
 /// `group_state` under its own ref). The recursion is boxed (mutually recursive
 /// async) and capped at `MAX_GROUP_DEPTH`, a runtime backstop for a cycle that
 /// slipped the apply-time DAG check. A `remote` member resolves to its stream
-/// URL; `queue` members are unsupported.
+/// URL; a `queue` member pops its buffer.
+///
+/// `inherited` = the constraints of the enclosing group(s). A leaf member adds
+/// its own and filters against the lot; a nested group gets `inherited` and
+/// adds its own itself (in `resolve_media`) — never counted twice. Remote and
+/// queue members are not filtered (a stream has no track identity; a queue
+/// entry was explicitly pushed) — same as their own constraints.
 async fn resolve_member(
     pool: &SqlitePool,
     plugins: Option<&PluginHandle>,
     now: i64,
     member_key: &str,
     depth: u32,
+    inherited: &[&Constraints],
 ) -> Result<Resolved, SelectionError> {
     let toml = store::playlist_toml_by_ref(pool, member_key)
         .await?
@@ -562,8 +601,9 @@ async fn resolve_member(
     let playlist = Playlist::parse(&toml)?;
     match playlist.selection.mode {
         Mode::Static | Mode::Dynamic => {
-            let constraints = playlist.broadcast.as_ref().and_then(|b| b.constraints.as_ref());
-            resolve_leaf(pool, plugins, now, member_key, &playlist.selection, constraints)
+            let mut scope: Vec<&Constraints> = inherited.to_vec();
+            scope.extend(playlist.broadcast.as_ref().and_then(|b| b.constraints.as_ref()));
+            resolve_leaf(pool, plugins, now, member_key, &playlist.selection, &scope)
                 .await
                 .map(Resolved::File)
         }
@@ -573,7 +613,16 @@ async fn resolve_member(
                     "group nesting exceeds depth {MAX_GROUP_DEPTH} at `{member_key}` (cycle?)"
                 )));
             }
-            Box::pin(resolve_media(pool, plugins, now, member_key, &playlist, depth + 1)).await
+            Box::pin(resolve_media(
+                pool,
+                plugins,
+                now,
+                member_key,
+                &playlist,
+                depth + 1,
+                inherited,
+            ))
+            .await
         }
         // A remote member relays its stream (e.g. a night relay inside a group).
         Mode::Remote => {
@@ -2441,6 +2490,251 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resolve_ref_at(&pool, now, "rot").await.unwrap(), "a.mp3");
+    }
+
+    // ----- constraints declared on a GROUP (inherited by members) ------
+
+    /// Leaf `leaf` over the whole library, `sequential` — so without any
+    /// constraint the first pick is deterministic (`a.mp3`).
+    async fn add_sequential_leaf(pool: &SqlitePool, reference: &str, extra: &str) {
+        let toml = format!(
+            "name = \"{reference}\"\n[selection]\nmode = \"dynamic\"\norder = \"sequential\"\n\
+             [[selection.filter]]\nfield = \"path\"\nop = \"prefix\"\nvalue = \"\"\n{extra}"
+        );
+        add_playlist(pool, reference, &toml).await;
+    }
+
+    #[tokio::test]
+    async fn group_constraints_apply_to_its_member_tracks() {
+        let (_d, pool) = fresh_db().await;
+        media_index::replace_library(
+            &pool,
+            &[media("a.mp3", "X", 0, &[]), media("b.mp3", "Y", 0, &[])],
+            1000,
+        )
+        .await
+        .unwrap();
+        // The member declares NO constraint; only the group does.
+        add_sequential_leaf(&pool, "leaf", "").await;
+        add_playlist(
+            &pool,
+            "grp",
+            r#"
+                name = "Grp"
+                [selection]
+                mode = "group"
+                strategy = "rotate"
+                members = [{ ref = "leaf" }]
+                [broadcast.constraints]
+                no_same_track_within = "1h"
+            "#,
+        )
+        .await;
+        let now = 1_000_000;
+        crate::broadcast_log::record(&pool, "a.mp3", Some("X"), crate::resolver::Epoch(now - 1800))
+            .await
+            .unwrap();
+        // Sequential would start at a.mp3; the group's window bars it.
+        assert_eq!(resolve_ref_at(&pool, now, "grp").await.unwrap(), "b.mp3");
+    }
+
+    #[tokio::test]
+    async fn group_constraints_are_inherited_through_nested_groups() {
+        let (_d, pool) = fresh_db().await;
+        media_index::replace_library(
+            &pool,
+            &[media("a.mp3", "X", 0, &[]), media("b.mp3", "Y", 0, &[])],
+            1000,
+        )
+        .await
+        .unwrap();
+        add_sequential_leaf(&pool, "leaf", "").await;
+        // inner: no constraint ; outer: the window. Must reach the leaf.
+        add_playlist(
+            &pool,
+            "inner",
+            "name = \"Inner\"\n[selection]\nmode = \"group\"\nstrategy = \"rotate\"\n\
+             members = [{ ref = \"leaf\" }]\n",
+        )
+        .await;
+        add_playlist(
+            &pool,
+            "outer",
+            "name = \"Outer\"\n[selection]\nmode = \"group\"\nstrategy = \"sequence\"\n\
+             members = [{ ref = \"inner\" }]\n\
+             [broadcast.constraints]\nno_same_track_within = \"1h\"\n",
+        )
+        .await;
+        let now = 1_000_000;
+        crate::broadcast_log::record(&pool, "a.mp3", Some("X"), crate::resolver::Epoch(now - 1800))
+            .await
+            .unwrap();
+        assert_eq!(resolve_ref_at(&pool, now, "outer").await.unwrap(), "b.mp3");
+    }
+
+    #[tokio::test]
+    async fn group_and_member_constraints_are_cumulative() {
+        let (_d, pool) = fresh_db().await;
+        media_index::replace_library(
+            &pool,
+            &[
+                media("a.mp3", "X", 0, &[]),
+                media("b.mp3", "Y", 0, &[]),
+                media("c.mp3", "Z", 0, &[]),
+            ],
+            1000,
+        )
+        .await
+        .unwrap();
+        // Member: artist window. Group: track window. Each bars one candidate.
+        add_sequential_leaf(
+            &pool,
+            "leaf",
+            "[broadcast.constraints]\nno_same_artist_within = \"1h\"\n",
+        )
+        .await;
+        add_playlist(
+            &pool,
+            "grp",
+            r#"
+                name = "Grp"
+                [selection]
+                mode = "group"
+                strategy = "weighted"
+                members = [{ ref = "leaf", weight = 1 }]
+                [broadcast.constraints]
+                no_same_track_within = "1h"
+            "#,
+        )
+        .await;
+        let now = 1_000_000;
+        // a.mp3 logged untagged → only the (group) TRACK window can bar it.
+        crate::broadcast_log::record(&pool, "a.mp3", None, crate::resolver::Epoch(now - 1800))
+            .await
+            .unwrap();
+        // Artist Y aired via another file → only the (member) ARTIST window bars b.
+        crate::broadcast_log::record(&pool, "other.mp3", Some("Y"), crate::resolver::Epoch(now - 1800))
+            .await
+            .unwrap();
+        assert_eq!(resolve_ref_at(&pool, now, "grp").await.unwrap(), "c.mp3");
+    }
+
+    #[tokio::test]
+    async fn group_constraint_emptying_the_pool_is_pool_empty() {
+        let (_d, pool) = fresh_db().await;
+        media_index::replace_library(&pool, &[media("a.mp3", "X", 0, &[])], 1000)
+            .await
+            .unwrap();
+        add_sequential_leaf(&pool, "leaf", "").await;
+        add_playlist(
+            &pool,
+            "grp",
+            r#"
+                name = "Grp"
+                [selection]
+                mode = "group"
+                strategy = "sequence"
+                members = [{ ref = "leaf" }]
+                [broadcast.constraints]
+                no_same_track_within = "1h"
+            "#,
+        )
+        .await;
+        let now = 1_000_000;
+        crate::broadcast_log::record(&pool, "a.mp3", Some("X"), crate::resolver::Epoch(now - 1800))
+            .await
+            .unwrap();
+        // Never relaxed: no forced repeat, PoolEmpty → the grid falls through.
+        assert!(matches!(
+            resolve_ref_at(&pool, now, "grp").await,
+            Err(SelectionError::PoolEmpty)
+        ));
+    }
+
+    // ----- member refs relative to the group's directory ---------------
+
+    #[tokio::test]
+    async fn relative_member_refs_resolve_from_the_group_dir() {
+        let (_d, pool) = fresh_db().await;
+        media_index::replace_library(
+            &pool,
+            &[media("intros/i.mp3", "", 0, &[]), media("jingles/j.wav", "", 0, &[])],
+            1000,
+        )
+        .await
+        .unwrap();
+        add_playlist(
+            &pool,
+            "shows/intro",
+            "name = \"Intro\"\n[selection]\nmode = \"static\"\nfiles = [\"intros/i.mp3\"]\n",
+        )
+        .await;
+        add_playlist(
+            &pool,
+            "jingles/id",
+            "name = \"Id\"\n[selection]\nmode = \"static\"\nfiles = [\"jingles/j.wav\"]\n",
+        )
+        .await;
+        add_playlist(
+            &pool,
+            "shows/main",
+            r#"
+                name = "Main"
+                [selection]
+                mode = "group"
+                strategy = "sequence"
+                members = [{ ref = "./Intro" }, { ref = "../jingles/id" }]
+            "#,
+        )
+        .await;
+        assert_eq!(resolve_ref(&pool, "shows/main").await.unwrap(), "intros/i.mp3");
+        assert_eq!(resolve_ref(&pool, "shows/main").await.unwrap(), "jingles/j.wav");
+
+        // Same for a weighted group (distinct code path).
+        add_playlist(
+            &pool,
+            "shows/w",
+            r#"
+                name = "W"
+                [selection]
+                mode = "group"
+                strategy = "weighted"
+                members = [{ ref = "./intro", weight = 1 }]
+            "#,
+        )
+        .await;
+        assert_eq!(resolve_ref(&pool, "shows/w").await.unwrap(), "intros/i.mp3");
+    }
+
+    #[tokio::test]
+    async fn relative_member_ref_never_falls_back_to_the_root() {
+        let (_d, pool) = fresh_db().await;
+        media_index::replace_library(&pool, &[media("intros/i.mp3", "", 0, &[])], 1000)
+            .await
+            .unwrap();
+        // Only the ROOT `intro` exists; `./intro` from shows/ means shows/intro.
+        add_playlist(
+            &pool,
+            "intro",
+            "name = \"Intro\"\n[selection]\nmode = \"static\"\nfiles = [\"intros/i.mp3\"]\n",
+        )
+        .await;
+        add_playlist(
+            &pool,
+            "shows/main",
+            r#"
+                name = "Main"
+                [selection]
+                mode = "group"
+                strategy = "sequence"
+                members = [{ ref = "./intro" }]
+            "#,
+        )
+        .await;
+        assert!(matches!(
+            resolve_ref(&pool, "shows/main").await,
+            Err(SelectionError::PlaylistNotFound(_))
+        ));
     }
 
     // ----- play-once (unplayed_only vs episode_play) -------------------
