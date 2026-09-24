@@ -21,7 +21,7 @@ use liquidsoap::{GetStatusRequest as LsStatusRequest, RenderScriptRequest};
 use broadcast::{
     control_request::Action as BroadcastAction, push_override_request, ClearOverridesRequest,
     ControlRequest, GetStateRequest, ListOverridesRequest, PushOverrideRequest,
-    SampleListenersRequest,
+    SampleListenersRequest, SkipRequest,
 };
 
 use std::path::PathBuf;
@@ -87,12 +87,15 @@ enum LsCommand {
 enum StationCommand {
     /// Show the broadcast state and the last listener sample
     State,
-    /// Stop the broadcast now
+    /// Stop the broadcast (graceful: at the end of the current track)
     Stop,
-    /// Suspend the broadcast
+    /// Pause now: current track frozen, background noise on air (Liquidsoap)
     Pause,
-    /// Resume (also cancels an armed stop-when-idle)
+    /// Resume: the frozen track plays on (also cancels an armed stop-when-idle)
     Resume,
+    /// Skip to the next track now
+    #[command(alias = "skip")]
+    Next,
     /// Arm a graceful stop: at the next track boundary with zero listeners
     StopWhenIdle,
 }
@@ -108,7 +111,8 @@ enum OverrideCommand {
         /// Playlist ref, resolved when it airs
         #[arg(long)]
         playlist: Option<String>,
-        /// Cut/duck the current track (degraded to soft until Liquidsoap is wired)
+        /// Cut the current track now (degraded to soft without Liquidsoap, or
+        /// while the station is paused/stopped)
         #[arg(long)]
         hard: bool,
         /// Staleness window from now, e.g. 30s, 5m, 2h (default: never stale)
@@ -785,13 +789,18 @@ async fn main() -> anyhow::Result<()> {
             let s = bc.get_state(GetStateRequest {}).await?.into_inner();
             print_broadcast_status(&s);
         }
+        Command::Station(StationCommand::Next) => {
+            let mut bc = BroadcastServiceClient::connect(args.addr.clone()).await?;
+            bc.skip(SkipRequest {}).await?;
+            println!("skipped: the next track is starting");
+        }
         Command::Station(cmd) => {
             let action = match cmd {
                 StationCommand::Stop => BroadcastAction::Stop,
                 StationCommand::Pause => BroadcastAction::Pause,
                 StationCommand::Resume => BroadcastAction::Resume,
                 StationCommand::StopWhenIdle => BroadcastAction::StopWhenIdle,
-                StationCommand::State => unreachable!("handled above"),
+                StationCommand::State | StationCommand::Next => unreachable!("handled above"),
             };
             let mut bc = BroadcastServiceClient::connect(args.addr.clone()).await?;
             // A meaningless transition comes back as failed_precondition → `?`
@@ -825,7 +834,7 @@ async fn main() -> anyhow::Result<()> {
                 .into_inner();
             println!("queued: override #{} ({} pending)", r.id, r.pending);
             if r.degraded {
-                println!("note:   hard degraded to soft (no Liquidsoap yet): airs at the next track boundary");
+                println!("note:   hard degraded to soft (no Liquidsoap, or station paused/stopped): airs at the next track boundary");
             }
         }
         Command::Override(OverrideCommand::List) => {
@@ -896,7 +905,13 @@ fn print_ls_status(s: &liquidsoap::LiquidsoapStatus) {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs() as i64 - t)
                 .unwrap_or(0);
-            format!("{ago}s ago (epoch {t})")
+            // Past a minute, hh:mm:ss reads better than a raw second count.
+            let ago = if ago < 60 {
+                format!("{ago}s")
+            } else {
+                format!("{:02}:{:02}:{:02}", ago / 3600, ago % 3600 / 60, ago % 60)
+            };
+            format!("{ago} ago (epoch {t})")
         }
     };
     let with_playlist = |media: &str, playlist: &str| {
@@ -928,7 +943,22 @@ fn print_ls_status(s: &liquidsoap::LiquidsoapStatus) {
     } else {
         println!("next:       {}", with_playlist(&s.next_media, &s.next_playlist));
     }
-    println!("tracks:     {} started", s.tracks_started);
+    match s.air_state.as_str() {
+        "playing" | "" => println!("tracks:     {} started", s.tracks_started),
+        "stopping" => println!(
+            "tracks:     stopping — at the end of the current track ({} started)",
+            s.tracks_started
+        ),
+        other => println!("tracks:     {other} ({} started)", s.tracks_started),
+    }
+    let control = if !s.control_error.is_empty() {
+        format!("ERROR {} ({})", s.control_error, when(s.control_error_at))
+    } else if !s.control_last_ok.is_empty() {
+        format!("ok — last `{}` {}", s.control_last_ok, when(s.control_last_ok_at))
+    } else {
+        "not contacted yet".to_string()
+    };
+    println!("control:    {}  [{}]", control, s.control_socket);
 }
 
 fn state_name(state: i32) -> &'static str {

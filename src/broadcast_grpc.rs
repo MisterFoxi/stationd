@@ -19,7 +19,7 @@ use broadcast::{
     push_override_request::Mode as ProtoMode, BroadcastStatus, ClearOverridesRequest,
     ClearOverridesResponse, ControlRequest, ControlResponse, GetStateRequest,
     ListOverridesRequest, ListOverridesResponse, PushOverrideRequest, PushOverrideResponse,
-    SampleListenersRequest, State as ProtoState,
+    SampleListenersRequest, SkipRequest, SkipResponse, State as ProtoState,
 };
 
 /// The emitter recorded for actions coming through this service.
@@ -27,11 +27,18 @@ const SOURCE: &str = "cli";
 
 pub struct BroadcastGrpc {
     control: StationControl,
+    /// Liquidsoap control socket, when wired (`Skip` needs it).
+    ls: Option<crate::ls_control::LsControl>,
 }
 
 impl BroadcastGrpc {
     pub fn new(control: StationControl) -> Self {
-        Self { control }
+        Self { control, ls: None }
+    }
+
+    pub fn with_liquidsoap(mut self, ls: crate::ls_control::LsControl) -> Self {
+        self.ls = Some(ls);
+        self
     }
 
     fn status(&self) -> BroadcastStatus {
@@ -93,6 +100,18 @@ impl BroadcastService for BroadcastGrpc {
             to: map_state(to) as i32,
             changed,
         }))
+    }
+
+    async fn skip(&self, _request: Request<SkipRequest>) -> Result<Response<SkipResponse>, Status> {
+        let ls = self
+            .ls
+            .as_ref()
+            .ok_or_else(|| Status::failed_precondition("Liquidsoap is not wired (no [liquidsoap] section)"))?;
+        ls.command("stationd.skip")
+            .await
+            .map_err(|e| Status::unavailable(e.to_string()))?;
+        tracing::info!(by = SOURCE, "skip");
+        Ok(Response::new(SkipResponse {}))
     }
 
     async fn sample_listeners(

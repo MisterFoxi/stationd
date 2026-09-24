@@ -1064,65 +1064,91 @@ impl GridEngine {
     /// (each iteration consumes or drops one entry). Grid side effects (AtClock
     /// marks, Every resets) are not touched: the grid did not play.
     async fn next_override(&self, now: Epoch) -> Result<Option<ResolvedDecision>, EngineError> {
-        use crate::selection::{Resolved, SelectionError};
         while let Some(entry) = self.control.next_override(now) {
-            let produced: Result<Resolved, String> = match &entry.content {
-                OverrideContent::Media(path) => {
-                    if self.media_exists(path) {
-                        Ok(Resolved::File(path.clone()))
-                    } else {
-                        Err(format!("media `{path}` not found under the media root"))
-                    }
-                }
-                OverrideContent::Playlist(reference) => {
-                    match crate::selection::resolve_ref_with_plugins(
-                        &self.pool,
-                        self.plugins.as_ref(),
-                        now.0,
-                        reference,
-                    )
-                    .await
-                    {
-                        Ok(Resolved::File(media)) if !self.media_exists(&media) => {
-                            crate::media_index::mark_unavailable(&self.pool, &media).await?;
-                            Err(format!("resolved media `{media}` missing on disk"))
-                        }
-                        Ok(resolved) => Ok(resolved),
-                        Err(SelectionError::Sqlx(e)) => return Err(EngineError::Sqlx(e)),
-                        Err(e) => Err(e.to_string()),
-                    }
-                }
-            };
-            match produced {
-                Err(reason) => {
-                    self.control.drop_override(entry.id, &reason);
-                    continue;
-                }
-                Ok(resolved) => {
-                    self.control.consume_override(entry.id);
-                    let playlist_ref = match &entry.content {
-                        OverrideContent::Playlist(r) => Some(r.clone()),
-                        OverrideContent::Media(_) => None,
-                    };
-                    let decision = GridDecision {
-                        origin: Origin::Fallback, // not a grid origin; see override_source
-                        rule_id: None,
-                        playlist_ref,
-                        mark_taken: None,
-                    };
-                    let (media_path, stream) = self.log_start(resolved, now).await?;
-                    self.emit_resolved(&decision, Some(&media_path), "Override".to_string());
-                    return Ok(Some(ResolvedDecision {
-                        decision,
-                        media_path: Some(media_path),
-                        stream,
-                        halted: None,
-                        override_source: Some(entry.source.clone()),
-                    }));
-                }
+            if let Some(resolved) = self.air_override_entry(entry, now).await? {
+                return Ok(Some(resolved));
             }
         }
         Ok(None)
+    }
+
+    /// Air override `id` NOW, out of queue order (a `hard` cut): resolved like
+    /// any override (one track consumed; dropped loudly if it can't air).
+    /// `None` = gone (already aired by a pull, expired, or unplayable).
+    pub async fn air_override_now(
+        &self,
+        id: u64,
+        now: Epoch,
+    ) -> Result<Option<ResolvedDecision>, EngineError> {
+        match self.control.override_by_id(id, now) {
+            None => Ok(None),
+            Some(entry) => self.air_override_entry(entry, now).await,
+        }
+    }
+
+    /// Resolve one override entry: `Some` = it produced (one track consumed),
+    /// `None` = it could not air and was dropped (logged).
+    async fn air_override_entry(
+        &self,
+        entry: crate::station_control::OverrideEntry,
+        now: Epoch,
+    ) -> Result<Option<ResolvedDecision>, EngineError> {
+        use crate::selection::{Resolved, SelectionError};
+        let produced: Result<Resolved, String> = match &entry.content {
+            OverrideContent::Media(path) => {
+                if self.media_exists(path) {
+                    Ok(Resolved::File(path.clone()))
+                } else {
+                    Err(format!("media `{path}` not found under the media root"))
+                }
+            }
+            OverrideContent::Playlist(reference) => {
+                match crate::selection::resolve_ref_with_plugins(
+                    &self.pool,
+                    self.plugins.as_ref(),
+                    now.0,
+                    reference,
+                )
+                .await
+                {
+                    Ok(Resolved::File(media)) if !self.media_exists(&media) => {
+                        crate::media_index::mark_unavailable(&self.pool, &media).await?;
+                        Err(format!("resolved media `{media}` missing on disk"))
+                    }
+                    Ok(resolved) => Ok(resolved),
+                    Err(SelectionError::Sqlx(e)) => return Err(EngineError::Sqlx(e)),
+                    Err(e) => Err(e.to_string()),
+                }
+            }
+        };
+        match produced {
+            Err(reason) => {
+                self.control.drop_override(entry.id, &reason);
+                Ok(None)
+            }
+            Ok(resolved) => {
+                self.control.consume_override(entry.id);
+                let playlist_ref = match &entry.content {
+                    OverrideContent::Playlist(r) => Some(r.clone()),
+                    OverrideContent::Media(_) => None,
+                };
+                let decision = GridDecision {
+                    origin: Origin::Fallback, // not a grid origin; see override_source
+                    rule_id: None,
+                    playlist_ref,
+                    mark_taken: None,
+                };
+                let (media_path, stream) = self.log_start(resolved, now).await?;
+                self.emit_resolved(&decision, Some(&media_path), "Override".to_string());
+                Ok(Some(ResolvedDecision {
+                    decision,
+                    media_path: Some(media_path),
+                    stream,
+                    halted: None,
+                    override_source: Some(entry.source.clone()),
+                }))
+            }
+        }
     }
 
     /// Log a track START into the station history (family B) so the

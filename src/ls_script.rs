@@ -110,8 +110,14 @@ pub fn render(ls: &LiquidsoapConfig, station_name: &str) -> String {
         "log.stdout := true\n\
          log.file := false\n\
          log.level := {}\n\
-         settings.encoder.metadata.export := [\"artist\", \"title\", \"album\", \"song\"]\n\n",
-        ls.log_level
+         settings.encoder.metadata.export := [\"artist\", \"title\", \"album\", \"song\"]\n\n\
+         # Control socket (stationd → Liquidsoap): pause / resume / skip.\n\
+         # Group-writable: the stationd user must be in Liquidsoap's group.\n\
+         settings.server.socket := true\n\
+         settings.server.socket.path := {socket}\n\
+         settings.server.socket.permissions := 0o660\n\n",
+        ls.log_level,
+        socket = liq_path(&absolute(&ls.control_socket)),
     ));
 
     // ── bridge ────────────────────────────────────────────────────────────
@@ -120,8 +126,11 @@ pub fn render(ls: &LiquidsoapConfig, station_name: &str) -> String {
 stationd = ()
 let stationd.api_url = {api_url}
 let stationd.api_token = {token}
-# True while stationd reports the station paused/stopped.
+# True while stationd reports the station paused/stopped (at a track boundary).
 let stationd.halted = ref(false)
+# True while paused through the control socket: immediate, the current track
+# is frozen (not read) and resumes where it stopped.
+let stationd.paused = ref(false)
 # True until stationd answered once (start-up: silence, not the fallback file).
 let stationd.loading = ref(true)
 # Last reply kind, to log transitions only (the pull polls while idle).
@@ -226,7 +235,9 @@ end
     o.push_str(&format!(
         "# ─── air chain ─────────────────────────────────────────────────────────\n\
          pull = request.dynamic(id=\"stationd_pull\", retry_delay={retry}, timeout={rto}, stationd.next)\n\
-         source.methods(pull).on_track(synchronous=false, fun (m) -> stationd.report(m[\"stationd_rid\"], \"\"))\n",
+         source.methods(pull).on_track(synchronous=false, fun (m) -> stationd.report(m[\"stationd_rid\"], \"\"))\n\
+         # Skip target: the track source itself, before the crossfade.\n\
+         pull_raw = pull\n",
         retry = liq_float(PULL_RETRY_S),
         rto = liq_float(REQUEST_TIMEOUT_S),
     ));
@@ -247,16 +258,27 @@ end
         "\n# Liquidsoap's own sources. Plain `single` on a local file (no annotate:)\n\
          # stays infallible.\n\
          halted_noise = single(id=\"stationd_halted\", {halted})\n\
-         source.methods(halted_noise).on_track(synchronous=false, fun (_) -> stationd.report(\"\", \"halted\"))\n\
          safety = single(id=\"stationd_fallback\", {fallback})\n\
-         source.methods(safety).on_track(synchronous=false, fun (_) -> stationd.report(\"\", \"fallback\"))\n\
          startup = blank(id=\"stationd_startup\")\n\n\
+         # Report Liquidsoap's own sources on every SWITCH to them, not on a track\n\
+         # start: a noise loop left mid-way is resumed (no new track), a later stop\n\
+         # would go unreported. Off the streaming thread (HTTP call).\n\
+         def stationd.switched_to(kind, b) =\n  \
+           thread.run(fast=false, {{stationd.report(\"\", kind)}})\n  \
+           b\n\
+         end\n\n\
          radio = fallback(\n  \
            id=\"stationd_air\",\n  \
            track_sensitive=false,\n  \
+           transitions=[\n    \
+             fun (_, b) -> b,\n    \
+             fun (_, b) -> stationd.switched_to(\"halted\", b),\n    \
+             fun (_, b) -> b,\n    \
+             fun (_, b) -> stationd.switched_to(\"fallback\", b)\n  \
+           ],\n  \
            [\n    \
-             pull,\n    \
-             source.available(halted_noise, {{stationd.halted()}}),\n    \
+             source.available(pull, {{not stationd.paused()}}),\n    \
+             source.available(halted_noise, {{stationd.halted() or stationd.paused()}}),\n    \
              source.available(startup, {{stationd.loading()}}),\n    \
              safety\n  \
            ]\n\
@@ -264,6 +286,69 @@ end
         halted = liq_path(&absolute(&ls.halted_path)),
         fallback = liq_path(&absolute(&ls.fallback_path)),
     ));
+
+    o.push_str(
+        "\n# Hard overrides: pushed by stationd (`stationd.interrupt`), they cut the\n\
+         # air now (track_sensitive=false) and give it back when they end.\n\
+         interrupt = request.queue(id=\"stationd_interrupt\")\n\
+         source.methods(interrupt).on_track(synchronous=false, fun (m) -> stationd.report(m[\"stationd_rid\"], \"\"))\n\
+         radio = fallback(id=\"stationd_cut\", track_sensitive=false, [interrupt, radio])\n",
+    );
+
+    o.push_str(
+        r##"
+# ─── control commands (socket, namespace `stationd`) ──────────────────────
+def stationd.cmd_pause(_) =
+  stationd.paused := true
+  log.important(label="stationd", "pause: halted noise on air, current track frozen")
+  "OK"
+end
+
+def stationd.cmd_resume(_) =
+  stationd.paused := false
+  stationd.next_not_before := 0.
+  log.important(label="stationd", "resume")
+  "OK"
+end
+
+def stationd.cmd_skip(_) =
+  source.skip(pull_raw)
+  log.important(label="stationd", "skip")
+  "OK"
+end
+
+# Drop the track already prepared (prefetched) so the next pull asks stationd
+# again: a stop then takes effect at the end of the CURRENT track. A track the
+# crossfade already started mixing can no longer be dropped.
+def stationd.cmd_flush(_) =
+  pull_raw.set_queue([])
+  stationd.next_not_before := 0.
+  log.important(label="stationd", "flush: prepared track dropped")
+  "OK"
+end
+
+# Hard override: cut in now. The cut track is skipped: after the insert the
+# prepared track plays (stationd flushes it beforehand when it should be
+# re-asked — never when it is itself an override).
+def stationd.cmd_interrupt(uri) =
+  interrupt.push(request.create(uri))
+  source.skip(pull_raw)
+  log.important(label="stationd", "interrupt: hard override cut in")
+  "OK"
+end
+
+def stationd.cmd_state(_) =
+  "paused=#{stationd.paused()} halted=#{stationd.halted()} loading=#{stationd.loading()}"
+end
+
+server.register(namespace="stationd", usage="pause", description="Pause now (noise on air, track frozen).", "pause", stationd.cmd_pause)
+server.register(namespace="stationd", usage="resume", description="Resume the frozen track.", "resume", stationd.cmd_resume)
+server.register(namespace="stationd", usage="skip", description="Skip the current track.", "skip", stationd.cmd_skip)
+server.register(namespace="stationd", usage="flush", description="Drop the prepared track (re-ask stationd).", "flush", stationd.cmd_flush)
+server.register(namespace="stationd", usage="interrupt <uri>", description="Hard override: cut in now.", "interrupt", stationd.cmd_interrupt)
+server.register(namespace="stationd", usage="state", description="Bridge flags.", "state", stationd.cmd_state)
+"##,
+    );
 
     if ls.normalize {
         o.push_str(
@@ -350,6 +435,7 @@ mod tests {
     fn cfg() -> LiquidsoapConfig {
         LiquidsoapConfig {
             script_path: PathBuf::from("/tmp/x.liq"),
+            control_socket: PathBuf::from("/tmp/ls.sock"),
             http_bind: "127.0.0.1:8081".into(),
             api_token: "tok".into(),
             fallback_path: PathBuf::from("/srv/error.mp3"),
@@ -395,15 +481,37 @@ mod tests {
         assert!(s.contains("let stationd.api_token = \"tok\""));
         assert!(s.contains("request.dynamic(id=\"stationd_pull\""));
         assert!(s.contains("stationd.next_not_before := time() + 2."));
+        assert!(s.contains("settings.server.socket.path := \"/tmp/ls.sock\""));
+        assert!(s.contains("settings.server.socket.permissions := 0o660"));
+        assert!(s.contains("source.available(halted_noise, {stationd.halted() or stationd.paused()})"));
+        assert!(s.contains("pull_raw.set_queue([])"));
+        assert!(s.contains("interrupt = request.queue(id=\"stationd_interrupt\")"));
+        assert!(s.contains("fallback(id=\"stationd_cut\", track_sensitive=false, [interrupt, radio])"));
+        // the cut sits above the whole air chain, before the outputs
+        assert!(s.find("stationd_cut").unwrap() > s.find("stationd_air").unwrap());
+        assert!(s.find("stationd_cut").unwrap() < s.find("output.icecast").unwrap());
+        for cmd in ["pause", "resume", "skip", "flush", "state"] {
+            assert!(s.contains(&format!("namespace=\"stationd\", usage=\"{cmd}\"")), "{cmd}");
+        }
+        assert!(s.contains("usage=\"interrupt <uri>\""));
+        assert!(s.contains("source.skip(pull_raw)"));
         assert!(s.contains("cross(id=\"stationd_cross\", duration=3."));
         assert!(s.contains("fade_in=2., fade_out=2."));
         assert!(s.contains("single(id=\"stationd_halted\", \"/srv/noise.mp3\")"));
-        assert!(s.contains("source.methods(halted_noise).on_track(synchronous=false, fun (_) -> stationd.report(\"\", \"halted\"))"));
+        // own sources reported on every switch (fallback transitions), never
+        // on a track start (a resumed noise loop starts no track)
+        assert!(s.contains("fun (_, b) -> stationd.switched_to(\"halted\", b)"));
+        assert!(!s.contains("source.methods(halted_noise).on_track"));
         assert!(s.contains("single(id=\"stationd_fallback\", \"/srv/error.mp3\")"));
-        assert!(s.contains("source.methods(safety).on_track(synchronous=false, fun (_) -> stationd.report(\"\", \"fallback\"))"));
+        assert!(s.contains("fun (_, b) -> stationd.switched_to(\"fallback\", b)"));
+        assert!(!s.contains("source.methods(safety).on_track"));
+        // one transition per fallback member, in the same order
+        let tr = s.find("transitions=[").unwrap();
+        let members = s.find("source.available(pull").unwrap();
+        assert_eq!(s[tr..members].matches("fun (_, b)").count(), 4);
         assert!(!s.contains("\"annotate:"), "annotate: makes single() fallible");
         // pull first, halted noise before the safety fallback.
-        let pull = s.find("    pull,").unwrap();
+        let pull = s.find("source.available(pull, {not stationd.paused()})").unwrap();
         let halted = s.find("source.available(halted_noise").unwrap();
         let safety = s.find("    safety\n").unwrap();
         assert!(pull < halted && halted < safety);

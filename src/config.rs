@@ -37,6 +37,11 @@ pub struct LiquidsoapConfig {
     /// address: the bridge is never exposed (checked at load).
     #[serde(default = "default_ls_http_bind")]
     pub http_bind: String,
+    /// Liquidsoap's control socket (stationd → Liquidsoap: pause, resume,
+    /// skip). Created by Liquidsoap (mode 0660): the stationd user must be in
+    /// Liquidsoap's group.
+    #[serde(default = "default_ls_control_socket")]
+    pub control_socket: PathBuf,
     /// Shared secret Liquidsoap sends in the `X-Stationd-Token` header.
     pub api_token: String,
     /// Safety fallback, looped when stationd has nothing to air (no rule
@@ -127,6 +132,9 @@ pub enum OutputFormat {
 fn default_ls_http_bind() -> String {
     "127.0.0.1:8081".to_string()
 }
+fn default_ls_control_socket() -> PathBuf {
+    PathBuf::from("./data/liquidsoap.sock")
+}
 fn default_ls_log_level() -> u8 {
     3
 }
@@ -156,6 +164,16 @@ impl LiquidsoapConfig {
             return Err(format!(
                 "http_bind {:?} is not a loopback address: the Liquidsoap bridge is never exposed",
                 self.http_bind
+            ));
+        }
+        // sun_path is 108 bytes (NUL included) on Linux: a longer path makes
+        // Liquidsoap fail to create the socket.
+        let sock = std::path::absolute(&self.control_socket)
+            .unwrap_or_else(|_| self.control_socket.clone());
+        let sock_len = sock.as_os_str().len();
+        if sock_len >= 108 {
+            return Err(format!(
+                "control_socket {sock:?} is {sock_len} bytes long: a Unix socket path must be < 108"
             ));
         }
         if self.api_token.trim().is_empty() {
@@ -404,6 +422,7 @@ mod tests {
         let c = load_str(LS).unwrap();
         let ls = c.liquidsoap.unwrap();
         assert_eq!(ls.http_bind, "127.0.0.1:8081");
+        assert_eq!(ls.control_socket, PathBuf::from("./data/liquidsoap.sock"));
         assert_eq!(ls.crossfade.mode, CrossfadeMode::Simple);
         assert_eq!(ls.crossfade.duration, 3.0);
         assert_eq!(ls.log_level, 3);

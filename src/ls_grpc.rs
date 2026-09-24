@@ -24,6 +24,7 @@ struct Wired {
     config: LiquidsoapConfig,
     script: String,
     bridge: LsBridge,
+    control: crate::ls_control::LsControl,
 }
 
 impl LsGrpc {
@@ -31,8 +32,13 @@ impl LsGrpc {
         Self { wired: None }
     }
 
-    pub fn new(config: LiquidsoapConfig, script: String, bridge: LsBridge) -> Self {
-        Self { wired: Some(Wired { config, script, bridge }) }
+    pub fn new(
+        config: LiquidsoapConfig,
+        script: String,
+        bridge: LsBridge,
+        control: crate::ls_control::LsControl,
+    ) -> Self {
+        Self { wired: Some(Wired { config, script, bridge, control }) }
     }
 }
 
@@ -60,6 +66,7 @@ impl LiquidsoapService for LsGrpc {
             return Ok(Response::new(LiquidsoapStatus { enabled: false, ..Default::default() }));
         };
         let s = w.bridge.status();
+        let health = w.control.health();
         let (last_reply, last_detail) = match &s.last_reply {
             None => (String::new(), String::new()),
             Some(r) => {
@@ -93,7 +100,13 @@ impl LiquidsoapService for LsGrpc {
             on_air_playlist,
             on_air_since,
             tracks_started: s.tracks_started,
+            air_state: w.bridge.air_state().to_string(),
             next_media: s.next.as_ref().map(|n| n.media_path.clone()).unwrap_or_default(),
+            control_socket: w.control.path().to_string_lossy().into_owned(),
+            control_last_ok: health.last_ok.as_ref().map(|(c, _)| c.clone()).unwrap_or_default(),
+            control_last_ok_at: health.last_ok.as_ref().map(|(_, t)| *t).unwrap_or(0),
+            control_error: health.last_error.as_ref().map(|(e, _)| e.clone()).unwrap_or_default(),
+            control_error_at: health.last_error.as_ref().map(|(_, t)| *t).unwrap_or(0),
             next_playlist: s
                 .next
                 .as_ref()

@@ -43,4 +43,13 @@ message LiquidsoapStatus {
   // démarrée. Vide = rien en attente (halted / none, ou pas encore demandée).
   string next_media     = 13;  // rel_path
   string next_playlist  = 14;
+  // Socket de contrôle (stationd → Liquidsoap : pause / resume / skip).
+  string control_socket = 15;
+  string control_last_ok = 16;      // dernière commande passée ; vide = aucune
+  int64  control_last_ok_at = 17;   // epoch s
+  string control_error = 18;        // dernier échec, effacé au succès suivant
+  int64  control_error_at = 19;     // epoch s
+  // Ce que fait l'antenne : playing | paused | stop armed (stop-when-idle) |
+  // stopping (stop demandé, la piste en cours va au bout) | stopped.
+  string air_state = 20;
 }

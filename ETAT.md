@@ -26,6 +26,17 @@ Voir `Doc/tui-dev.md` pour le périmètre, les commandes et les limites.
 
 ## Où on en est en une phrase
 
+**Ça diffuse (2026-09-24).** stationd pilote Liquidsoap 2.4 → Icecast 2.5 sur
+devstationd : script `.liq` généré par stationd, pull de chaque piste par un
+pont HTTP loopback (`/ls/v1/next`, `/ls/v1/track`), contrôle par socket
+(`pause` immédiate avec piste gelée, `resume`, `next`, stop à la fin de la
+piste en cours, override soft au prochain bord, override hard coupant), bruit
+de fond quand la station est arrêtée/en pause, fallback de sécurité si rien à
+diffuser ou stationd injoignable. `stationctl ls status` : `on air`, `next`,
+état de l'antenne, santé du socket. Étapes 1 et 2 du câblage terminées ;
+reste l'étape 3 (tâche de diffusion) et 4 (fins de piste). Référence :
+`Doc/liquidsoap.md`.
+
 La **grille est pilotable de bout en bout en CLI**, projection comprise :
 `grid.toml` (4 familles) → `stationctl schedule validate|apply|export|list|next|preview|check`
 → gRPC → moteur → SQLite. Testé en vrai : apply de 4 règles, `next` rend
@@ -56,6 +67,23 @@ inférieure jusqu'au plancher (fini le dead-air par sélection vide) ; groupe
 
 ## ⭐ TÂCHE D'ENTRÉE PROCHAINE SESSION
 
+**Câblage Liquidsoap — étape 3 : tâche de diffusion** (stationd agit sur
+l'antenne sans attendre un pull) :
+- **relais des flux `remote`** : `input.http` piloté par stationd (démarrage /
+  arrêt quand la règle gagnante change) — aujourd'hui `/next` répond
+  `none/stream_unsupported` → fallback ;
+- **`AtClock hard`** : rendez-vous à l'heure pile (coupe, même mécanique que
+  l'override hard) ;
+- **résolution à l'heure réelle de passage** (`remaining` envoyé par
+  Liquidsoap) : aujourd'hui la piste suivante est choisie une piste en avance
+  (changement de `DayPart`, `AtClock` soft, `Every` décalés d'une piste).
+
+Puis **étape 4 — fins de piste** : `unplayed_only` marqué automatiquement
+(la décision doit porter la playlist feuille, pas le groupe),
+`TrackStarted`/`TrackFinished` aux plugins, compteur `Every` exact.
+Et côté Icecast : **échantillonnage réel des auditeurs** (API admin 2.5 →
+`ListenersSampled`, rend `stop-when-idle` réel).
+
 **Preview — statistiques de pool : patch préparé et testé (2026-09-19).**
 Voir la section Fait ci-dessous et `Doc/preview-pools.md`.
 
@@ -73,17 +101,86 @@ Autres, indépendants :
 - **Crate de types partagé** `Candidate`/`PluginEvent` (host + guests wasm ne
   les dupliquent plus — aujourd'hui recopiés dans les 2 crates guest).
 - **Refacto acteur `GridEngine`** (gabarit `library_actor`).
-- **Câblage Liquidsoap** — étape 1 « ça diffuse » livrée (2026-09-24, voir
-  Fait + `Doc/liquidsoap.md`). **À valider sur devstationd** :
-  `liquidsoap --check` du script généré sous LS 2.4, puis diffusion réelle vers
-  Icecast 2.5. Suite : étape 2 socket de contrôle (skip, halt, flush, override
-  `hard` via file interruptrice), étape 3 tâche de diffusion (relais remote,
-  `AtClock hard`, `remaining`), étape 4 fins de piste (`unplayed_only` auto,
-  `TrackStarted`/`TrackFinished` plugins).
+- **Câblage Liquidsoap** : étapes 1 et 2 terminées (2026-09-24, voir Fait +
+  `Doc/liquidsoap.md`) ; étape 3 = tâche d'entrée ci-dessus.
+- Petits restes Liquidsoap : validation au chargement plus stricte (jeton
+  ASCII obligatoire, fichier fallback/bruit absent = démarrage refusé — proposé,
+  non tranché) ; bloc `[[plugin]]` égaré en fin de `Cargo.toml` (warning
+  `unused manifest key`) ; fondu sur la coupe d'un override hard.
 
 ---
 
 ## Fait
+
+### — Fix : `ls status` bloqué sur `stopping` au 2ᵉ stop (2026-09-24) —
+
+Le bruit (et le fallback) étaient signalés par `on_track` ; après un resume,
+la boucle de bruit reste gelée en cours et est **reprise** au stop suivant →
+aucun nouveau morceau, rien de signalé. Désormais signalés à chaque bascule
+via `fallback(transitions=[…])` (`stationd.switched_to`, HTTP dans
+`thread.run`). Reproduit puis validé en réel (stop → resume → stop → pause →
+resume).
+
+### — Liquidsoap : overrides soft réactif + hard coupant — fin de l'étape 2 (2026-09-24) —
+
+- **Soft** : le push déclenche `flush` → l'override passe à la fin de la piste
+  en cours (plus une piste plus tard).
+- **Hard** : résolu au push (`GridEngine::air_override_now(id)` — l'entrée
+  par id, hors ordre de file ; `StationControl::override_by_id`), puis
+  `flush` + `stationd.interrupt <uri>` → file `interrupt` (request.queue) en
+  tête de chaîne, `track_sensitive=false` : coupe immédiate, piste coupée
+  abandonnée, la suite reprend après l'insert. `degraded` seulement sans
+  Liquidsoap ou station en pause/arrêtée.
+- **Règle** : une piste préparée issue d'un override n'est jamais vidée (elle
+  a été consommée de la file) — trouvé en E2E : un hard vidait le soft
+  préparé, perdu. `NextUp.from_override`, `LsBridge::prepared_is_override`.
+- `StationControl` : canal `AirEvent { Transition | Override{id, mode} }`
+  (remplace le canal de transitions). `next_override` refactoré
+  (`air_override_entry` commun au pull et au hard).
+- Tests (280) : hard résolu par id hors ordre, dégradé si halted, soft → flush,
+  hard → flush + interrupt, override préparé jamais vidé (soft/hard/stop).
+- E2E réel : jingle soft poussé → `next: jingle` ; flash hard → coupe
+  immédiate ; puis jingle, puis la grille.
+
+### — Liquidsoap : pause / resume / next par le socket de contrôle (2026-09-24) —
+
+Sémantique : **pause immédiate** (piste gelée, bruit de fond à l'antenne),
+**resume** = la piste gelée reprend où elle s'était arrêtée, **next** = skip
+immédiat (la piste préparée démarre) ; **stop reste gracieux** (fin de piste,
+non poussé).
+
+- Config `[liquidsoap] control_socket` (défaut `./data/liquidsoap.sock`,
+  longueur < 108 octets vérifiée). Script : serveur socket Liquidsoap (0660 —
+  l'utilisateur stationd doit être dans le groupe de Liquidsoap), drapeau
+  `stationd.paused` (retire le pull du `fallback`, garde le bruit), commandes
+  `stationd.pause|resume|skip|state` ; skip sur la source de pistes **avant**
+  le crossfade.
+- **`src/ls_control.rs`** : client socket (commande → lignes → `END`, 3 s,
+  réponse ≠ `OK` = refus), santé (dernier OK / dernière erreur) ; tâche
+  **air sync** : `StationControl::attach_air` reçoit chaque transition →
+  `paused` ⇒ `pause`, `running` ⇒ `resume` (CLI **et** plugins), échec retenté
+  toutes les 5 s, état restauré réaffirmé au démarrage.
+- `ls_bridge` : au resume depuis pause, la piste gelée repasse `on air` (même
+  `since` : ce n'est pas un nouveau démarrage).
+- Contrat : `BroadcastService.Skip` (7ᵉ RPC) ; `LiquidsoapStatus` +
+  `control_*`. CLI : `stationctl station next` (alias `skip`) ; `ls status`
+  ligne `control:`.
+- **Stop sans piste en trop** : une transition vers `stopped` pousse
+  `stationd.flush` (`pull_raw.set_queue([])` côté script) → la piste préparée
+  est abandonnée, le pull redemande et reçoit `halted` : le bruit arrive à la
+  fin de la piste **en cours**. Validé en réel (1 piste démarrée, pas 2).
+- `ls status` : `LiquidsoapStatus.air_state` (`playing | paused | stop armed |
+  stopping | stopped`) ; la ligne `tracks:` affiche `stopping — at the end of
+  the current track` tant que la piste en cours (voire celle déjà préparée)
+  va au bout après un `stop`.
+- Tests : client socket (aller-retour, injoignable, refus), air sync (suit la
+  machine d'états, stop non poussé, retry jusqu'à l'arrivée de Liquidsoap),
+  bridge (piste gelée remise à l'antenne).
+
+**Validation** : `cargo test --locked` vert (274). E2E réel Liquidsoap :
+pause → bruit immédiat, piste gelée ; resume → même piste, même position ;
+next → piste suivante immédiate ; pause + next + resume → la suivante démarre
+au resume.
 
 ### — Câblage Liquidsoap, étape 1 : « ça diffuse » (2026-09-24) —
 
@@ -127,8 +224,9 @@ pistes tirées et annoncées, stop → bruit à la fin de la piste en cours, res
 Constats intégrés au générateur : `on_track` écouté **avant** `cross` (après
 un crossfade il ne se déclenche pas), pas d'`annotate:` sur `single` (rend la
 source faillible), rafale de `/next` autour d'une fin de piste bornée côté
-script. **Syntaxe 2.4 (`null`, `source.methods`, `synchronous=`) calquée sur le
-script AzuraCast 2.4.5 — reste à passer `liquidsoap --check` sur devstationd.**
+script. Syntaxe 2.4 (`null`, `source.methods`, `synchronous=`) calquée sur le
+script AzuraCast 2.4.5 ; **validé en diffusion réelle sur devstationd**
+(Liquidsoap 2.4 → Icecast 2.5).
 
 ### — Biblio : filtre et inventaire par genre (2026-09-23) —
 
@@ -1093,8 +1191,11 @@ dans le découpage des modules (`grid_index` = A, `grid_store` = B).
   ouverts `Doc/playlists.md`.
 
 ### Hors périmètre (chantiers suivants)
-- Câblage Liquidsoap/Icecast (`request.dynamic` + fallback). Scan biblio
-  (tags). Rôles/permissions (différés). Plugins WASM, mTLS gRPC (reportés).
+- Liquidsoap : étapes 3 (tâche de diffusion) et 4 (fins de piste) — voir
+  tâche d'entrée. Reportés : DJ live (harbor), cue/fade/loudness par piste,
+  formats autres que mp3.
+- Rôles/permissions (différés). mTLS gRPC (reporté). Couche `api` (Axum BFF)
+  + UI web.
 - Maintenance : `apalis` (scan, retry NFS) — `Doc/modele-programmation.md`.
 
 ---
@@ -1129,6 +1230,22 @@ dans le découpage des modules (`grid_index` = A, `grid_store` = B).
   (même dépôt, lecteur mappé).
 - **Chemins relatifs de config** résolus depuis le CWD (piège `WorkingDirectory`
   systemd).
+- **Liquidsoap** :
+  - stationd **réécrit** le `.liq` au démarrage (s'il a changé) mais ne lance
+    pas Liquidsoap : après une modif de `[liquidsoap]` ou du générateur,
+    **relancer Liquidsoap** (log stationd : « script (re)written »).
+  - Changement de stationd seul (pont, CLI) : relancer stationd suffit ;
+    Liquidsoap retombe sur le fallback le temps du redémarrage.
+  - `api_token` / mots de passe : **ASCII** (un `…` copié d'un exemple → 401
+    sur le pont). `fallback_path` / `halted_path` doivent exister, sinon
+    « That source is fallible » au chargement du script.
+  - Socket de contrôle en **0660** : l'utilisateur de stationd doit être dans
+    le groupe de Liquidsoap ; chemin < 108 octets.
+  - Une piste est résolue **une piste en avance** (préchargement
+    `request.dynamic`) : `schedule next` consomme une vraie piste — ne pas
+    l'utiliser quand Liquidsoap tourne.
+  - Écriture via le pont fichiers : une écriture a déjà été signalée réussie
+    avec l'ancien contenu → **relire après écriture** (cmp) avant de compiler.
 
 ---
 
@@ -1157,13 +1274,19 @@ dans le découpage des modules (`grid_index` = A, `grid_store` = B).
 | `src/plugin_grpc.rs` | Transport gRPC plugins (list + control) |
 | `src/station_control.rs` | État de diffusion + file d'override + horloge manuelle (mécanisme de la surface hôte A2) |
 | `src/broadcast_grpc.rs` | Transport gRPC `BroadcastService` (état, control, overrides, injection auditeurs) |
-| `proto/broadcast_v1.proto` | Contrat contrôle de diffusion (compilé/servi ; 6 RPC) |
+| `proto/broadcast_v1.proto` | Contrat contrôle de diffusion (compilé/servi ; 7 RPC, dont `Skip`) |
+| `src/ls_script.rs` | Générateur du script Liquidsoap (pur : config → `.liq`) |
+| `src/ls_bridge.rs` | Pont HTTP loopback Liquidsoap → stationd (`/next`, `/track`), `on air` / `next` |
+| `src/ls_control.rs` | Socket de contrôle stationd → Liquidsoap + tâche air sync (état, overrides) |
+| `src/ls_grpc.rs` | Transport gRPC `LiquidsoapService` (`RenderScript`, `GetStatus`) |
+| `proto/liquidsoap_v1.proto` | Contrat `stationctl ls render` / `ls status` |
+| `Doc/liquidsoap.md` | Câblage Liquidsoap : chaîne, contrat du pont, socket, limites (référence durable) |
 | `plugins/stop-when-idle-wasm/` | Guest WASM démo A2 : host function `station_control` |
 | `plugins/{require-title,blacklist}-wasm/` | Crates guest WASM de démo (séparés, cible wasm32) : `filter_pool` |
 | `src/grpc.rs` | Service `Station` (status/quit/playlist*) |
 | `src/db.rs` | Init pool SQLite + migrations |
-| `src/main.rs` | Daemon : démarrage, 5 services gRPC, shutdown |
-| `src/bin/stationctl.rs` | CLI (station + `schedule …` + `library …` + `plugin …`) |
+| `src/main.rs` | Daemon : démarrage, 6 services gRPC, pont Liquidsoap (écrit le `.liq`, sert `/ls/v1`, air sync), shutdown |
+| `src/bin/stationctl.rs` | CLI (station + `schedule …` + `library …` + `plugin …` + `ls render` / `ls status`) |
 | `proto/station.proto` | Contrat `Station` |
 | `proto/schedule_v1.proto` | Contrat `ScheduleService` (compilé/servi ; 7 RPC réels) |
 | `proto/library_v1.proto` | Contrat `LibraryService` (compilé/servi ; Scan + ListMedia) |

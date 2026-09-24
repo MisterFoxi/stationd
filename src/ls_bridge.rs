@@ -116,6 +116,9 @@ pub struct NextUp {
     pub rid: u64,
     pub media_path: String,
     pub playlist_ref: Option<String>,
+    /// Came from the override queue (already consumed there): a flush must
+    /// never drop it, or the override would be lost.
+    pub from_override: bool,
 }
 
 /// Snapshot for `stationctl ls status`.
@@ -136,6 +139,9 @@ struct BridgeState {
     next_rid: u64,
     pending: VecDeque<Pending>,
     status: BridgeStatus,
+    /// The track that was on air when the halted noise took over: a resume
+    /// from pause continues it (frozen, not restarted), so it is on air again.
+    before_halt: Option<OnAir>,
 }
 
 #[derive(Clone)]
@@ -182,28 +188,13 @@ impl LsBridge {
                             NextReply::none("stream_unsupported")
                         }
                         Some(media) => {
-                            let mut st = self.lock();
-                            let rid = st.next_rid;
-                            st.next_rid += 1;
-                            let abs = self.media_root.join(&media);
-                            let uri = format!(
-                                "annotate:stationd_rid=\"{rid}\":{}",
-                                abs.to_string_lossy()
-                            );
-                            st.status.next = Some(NextUp {
-                                rid,
-                                media_path: media.clone(),
-                                playlist_ref: r.decision.playlist_ref.clone(),
-                            });
-                            st.pending.push_back(Pending {
+                            let (rid, uri) = self.hand_out(&media, r.decision.playlist_ref.clone());
+                            self.lock().status.next = Some(NextUp {
                                 rid,
                                 media_path: media,
                                 playlist_ref: r.decision.playlist_ref.clone(),
+                                from_override: r.override_source.is_some(),
                             });
-                            while st.pending.len() > PENDING_CAP {
-                                st.pending.pop_front();
-                            }
-                            drop(st);
                             NextReply::file(uri)
                         }
                         None => NextReply::none("fallback"),
@@ -229,6 +220,46 @@ impl LsBridge {
         reply
     }
 
+    /// Number a track handed to Liquidsoap and remember it until it starts:
+    /// returns (rid, annotated absolute uri).
+    fn hand_out(&self, media: &str, playlist_ref: Option<String>) -> (u64, String) {
+        let mut st = self.lock();
+        let rid = st.next_rid;
+        st.next_rid += 1;
+        let abs = self.media_root.join(media);
+        let uri = format!("annotate:stationd_rid=\"{rid}\":{}", abs.to_string_lossy());
+        st.pending.push_back(Pending { rid, media_path: media.to_string(), playlist_ref });
+        while st.pending.len() > PENDING_CAP {
+            st.pending.pop_front();
+        }
+        (rid, uri)
+    }
+
+    /// A hard override: resolve override `id` now (one track consumed) and
+    /// return the uri Liquidsoap interrupts with. `None` = nothing to cut in
+    /// with (already aired by a pull, expired, unplayable — each logged).
+    pub async fn interrupt_uri(&self, id: u64) -> Option<String> {
+        let now = self.engine.effective_now(None);
+        match self.engine.air_override_now(id, now).await {
+            Ok(Some(r)) => match r.media_path {
+                Some(url) if r.stream => {
+                    tracing::warn!(id, %url, "hard override resolved to a remote stream: relay not wired yet, not aired");
+                    None
+                }
+                Some(media) => Some(self.hand_out(&media, r.decision.playlist_ref.clone()).1),
+                None => None,
+            },
+            Ok(None) => {
+                tracing::info!(id, "hard override no longer pending (aired, expired or dropped)");
+                None
+            }
+            Err(e) => {
+                tracing::error!(id, error = %e, "hard override could not be resolved");
+                None
+            }
+        }
+    }
+
     /// Liquidsoap reports a track starting on air.
     pub async fn track_started(&self, ev: &TrackEvent) {
         let now = self.engine.effective_now(None).0;
@@ -247,6 +278,7 @@ impl LsBridge {
                     }
                     {
                         let mut st = self.lock();
+                        st.before_halt = None;
                         st.status.tracks_started += 1;
                         if st.status.next.as_ref().is_some_and(|n| n.rid == p.rid) {
                             st.status.next = None;
@@ -289,9 +321,65 @@ impl LsBridge {
             if was.as_ref() == Some(&kind) {
                 return; // same loop continuing: keep `since` = when it began
             }
+            if kind == OnAirKind::Halted {
+                let mut st = self.lock();
+                if st.status.on_air.as_ref().is_some_and(|a| a.kind == OnAirKind::Track) {
+                    st.before_halt = st.status.on_air.clone();
+                }
+            }
             OnAir { kind, media_path: None, playlist_ref: None, since: now }
         };
         self.lock().status.on_air = Some(on_air);
+    }
+
+    /// Liquidsoap acknowledged a resume from pause: the frozen track plays on
+    /// (no new track start will be reported for it) — put it back on air.
+    pub fn resumed_from_pause(&self) {
+        let mut st = self.lock();
+        let halted = st.status.on_air.as_ref().is_some_and(|a| a.kind == OnAirKind::Halted);
+        if halted {
+            if let Some(track) = st.before_halt.take() {
+                tracing::info!(media = track.media_path.as_deref().unwrap_or("-"), "resumed: back on air");
+                st.status.on_air = Some(track);
+            }
+        }
+    }
+
+    /// What the air is doing, from the broadcast state and what Liquidsoap
+    /// last reported: `playing`, `paused`, `stop armed` (stop-when-idle),
+    /// `stopping` (stop requested, the current track plays to its end) or
+    /// `stopped` (halted noise on air).
+    pub fn air_state(&self) -> &'static str {
+        use crate::station_control::BroadcastState::*;
+        match self.engine.control().state() {
+            Running => "playing",
+            Paused => "paused",
+            Draining => "stop armed",
+            Stopped => {
+                let track_on_air = self
+                    .lock()
+                    .status
+                    .on_air
+                    .as_ref()
+                    .is_some_and(|a| a.kind == OnAirKind::Track);
+                if track_on_air {
+                    "stopping"
+                } else {
+                    "stopped"
+                }
+            }
+        }
+    }
+
+    /// Is the track Liquidsoap has prepared an override? Then it must not be
+    /// flushed (it was consumed from the queue when handed out).
+    pub fn prepared_is_override(&self) -> bool {
+        self.lock().status.next.as_ref().is_some_and(|n| n.from_override)
+    }
+
+    /// The station control the engine answers to (tests / wiring).
+    pub fn engine_control(&self) -> crate::station_control::StationControl {
+        self.engine.control().clone()
     }
 
     pub fn status(&self) -> BridgeStatus {
@@ -445,10 +533,71 @@ mod tests {
         b.next().await; // rid 2: prefetched while 1 airs
         let n = b.status().next.unwrap();
         assert_eq!((n.rid, n.media_path.as_str(), n.playlist_ref.as_deref()), (2, "music/a.mp3", Some("music")));
+        assert!(!b.prepared_is_override());
         // A halted reply: nothing queued behind the current track.
         b.engine.control().apply(ControlAction::Stop, "cli").unwrap();
         b.next().await;
         assert!(b.status().next.is_none());
+    }
+
+    #[tokio::test]
+    async fn resume_from_pause_puts_the_frozen_track_back_on_air() {
+        let (_d, b) = bridge().await;
+        b.next().await;
+        b.track_started(&TrackEvent { rid: "1".into(), kind: String::new() }).await;
+        let before = b.status().on_air.unwrap();
+        b.track_started(&TrackEvent { rid: String::new(), kind: "halted".into() }).await;
+        assert_eq!(b.status().on_air.unwrap().kind, OnAirKind::Halted);
+        b.resumed_from_pause();
+        let after = b.status().on_air.unwrap();
+        assert_eq!(after.kind, OnAirKind::Track);
+        assert_eq!(after.media_path, before.media_path);
+        assert_eq!(after.since, before.since, "same airing, not a new start");
+        // A second resume without a halt in between changes nothing.
+        b.resumed_from_pause();
+        assert_eq!(b.status().on_air.unwrap().kind, OnAirKind::Track);
+    }
+
+    #[tokio::test]
+    async fn stop_is_stopping_until_the_track_ends() {
+        let (_d, b) = bridge().await;
+        b.next().await;
+        b.track_started(&TrackEvent { rid: "1".into(), kind: String::new() }).await;
+        assert_eq!(b.air_state(), "playing");
+        b.engine.control().apply(ControlAction::Stop, "cli").unwrap();
+        assert_eq!(b.air_state(), "stopping", "the current track plays to its end");
+        b.track_started(&TrackEvent { rid: String::new(), kind: "halted".into() }).await;
+        assert_eq!(b.air_state(), "stopped");
+        b.engine.control().apply(ControlAction::Resume, "cli").unwrap();
+        b.engine.control().apply(ControlAction::Pause, "cli").unwrap();
+        assert_eq!(b.air_state(), "paused");
+    }
+
+    #[tokio::test]
+    async fn a_hard_override_is_resolved_by_id_out_of_queue_order() {
+        use crate::station_control::{OverrideContent, OverrideMode, OverrideRequest};
+        let (_d, b) = bridge().await;
+        let push = |p: &str, mode| OverrideRequest {
+            content: OverrideContent::Media(p.into()),
+            mode,
+            expiry: None,
+            tracks: None,
+        };
+        let c = b.engine.control();
+        c.push_override(push("jingles/soft.mp3", OverrideMode::Soft), "cli").unwrap();
+        let hard = c.push_override(push("news/flash.mp3", OverrideMode::Hard), "cli").unwrap();
+        let uri = b.interrupt_uri(hard.id).await.unwrap();
+        assert!(uri.ends_with(":/srv/media/news/flash.mp3"), "{uri}");
+        // consumed: gone from the queue; the soft one is still first
+        let left = c.list_overrides();
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].content, OverrideContent::Media("jingles/soft.mp3".into()));
+        // its start is recognised (rid handed out)
+        let rid = uri.split('"').nth(1).unwrap().to_string();
+        b.track_started(&TrackEvent { rid, kind: String::new() }).await;
+        assert_eq!(b.status().on_air.unwrap().media_path.as_deref(), Some("news/flash.mp3"));
+        // already consumed → nothing to interrupt with
+        assert!(b.interrupt_uri(hard.id).await.is_none());
     }
 
     #[tokio::test]

@@ -8,8 +8,10 @@
 //             draining = arrêt gracieux ARMÉ : devient stopped au prochain
 //             bord de piste si le dernier échantillon d'auditeurs vaut 0.
 //   Override  contenu poussé DEVANT la grille (override > one-shot > grille
-//             > fallback). `hard` accepté mais dégradé en `soft` (warn) tant
-//             que Liquidsoap n'est pas câblé. Péremption par override.
+//             > fallback). Avec Liquidsoap : `soft` = au prochain bord de
+//             piste (la piste préparée est vidée), `hard` = coupe la piste en
+//             cours maintenant. `hard` dégradé en `soft` (warn) sans
+//             Liquidsoap ou station en pause/arrêtée. Péremption par override.
 //   Auditeurs échantillon injectable (test) — la vraie source sera Icecast.
 
 syntax = "proto3";
@@ -22,10 +24,19 @@ service BroadcastService {
 
   // stop | pause | resume | stop-when-idle. Refusé (failed_precondition) si
   // la transition n'a pas de sens (pause d'une station arrêtée…).
+  // Avec Liquidsoap : pause = immédiate (piste gelée, bruit de fond à
+  // l'antenne), resume = reprise de la piste gelée ; stop reste gracieux
+  // (fin de la piste en cours).
   rpc Control(ControlRequest) returns (ControlResponse);
 
   // Injection de test d'un échantillon d'auditeurs (émet ListenersSampled).
   rpc SampleListeners(SampleListenersRequest) returns (BroadcastStatus);
+
+  // Passe au morceau suivant MAINTENANT (Liquidsoap : skip de la piste en
+  // cours ; la piste déjà préparée démarre). failed_precondition sans
+  // Liquidsoap câblé, unavailable si son socket de contrôle ne répond pas.
+  // En pause : la piste gelée est abandonnée, la suivante démarre au resume.
+  rpc Skip(SkipRequest) returns (SkipResponse);
 
   // File d'override.
   rpc PushOverride(PushOverrideRequest) returns (PushOverrideResponse);
@@ -65,6 +76,10 @@ message ControlResponse {
   bool  changed = 3;   // false = déjà dans l'état visé (no-op)
 }
 
+message SkipRequest {}
+
+message SkipResponse {}
+
 message SampleListenersRequest {
   uint32 count = 1;
 }
@@ -83,13 +98,13 @@ message PushOverrideRequest {
   enum Mode {
     MODE_UNSPECIFIED = 0;   // → SOFT
     SOFT = 1;               // au prochain bord de piste
-    HARD = 2;               // coupe/duck — dégradé en SOFT sans Liquidsoap
+    HARD = 2;               // coupe maintenant — dégradé en SOFT sans Liquidsoap / station arrêtée
   }
 }
 
 message PushOverrideResponse {
   uint64 id       = 1;
-  bool   degraded = 2;   // HARD demandé, joué SOFT (pas de Liquidsoap)
+  bool   degraded = 2;   // HARD demandé, joué SOFT (pas de Liquidsoap, ou station en pause/arrêtée)
   uint32 pending  = 3;   // overrides en attente après le push
 }
 

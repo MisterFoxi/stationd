@@ -24,6 +24,7 @@ pub mod grpc;
 pub mod library_actor;
 pub mod library_grpc;
 pub mod ls_bridge;
+pub mod ls_control;
 pub mod ls_grpc;
 pub mod ls_script;
 pub mod media;

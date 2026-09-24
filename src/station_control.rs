@@ -13,10 +13,17 @@
 //!   API stays callable from a plugin hook.
 //! - **Override queue**: content pushed ahead of the grid (`next_media`
 //!   consults it before `resolve_next`). In memory, capped, with per-entry
-//!   expiry (a missed override is dropped, never replayed late). `hard` is
-//!   accepted but degraded to `soft` (warned) until Liquidsoap is wired.
+//!   expiry (a missed override is dropped, never replayed late). With
+//!   Liquidsoap wired, a push is forwarded to the air: `soft` drops the
+//!   prepared track (airs at the next boundary), `hard` cuts the current track
+//!   now. Without Liquidsoap — or while the station is halted — `hard` is
+//!   degraded to `soft` (warned).
 //! - **Manual clock** (testing): the frozen instant shared with `GridEngine`,
 //!   so override expiry and grid resolution ride the same clock.
+//!
+//! With Liquidsoap wired, every transition is also forwarded to the air
+//! (`attach_air` → `ls_control`): `paused` pauses the air now, `running`
+//! resumes it; `stopped` stays graceful (track boundary, via `gate`).
 //!
 //! Every state change emits `BroadcastStateChanged`; every listener sample
 //! emits `ListenersSampled` (best-effort, via the plugin handle once
@@ -98,6 +105,16 @@ pub enum ControlError {
     InvalidOverride(String),
 }
 
+/// What the air (Liquidsoap control) is told about. See `ls_control`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AirEvent {
+    /// A broadcast state change (pause / resume / stop act on the air).
+    Transition(Transition),
+    /// An override was queued: `soft` → drop the prepared track so it airs
+    /// at the next boundary; `hard` → cut the current track now.
+    Override { id: u64, mode: OverrideMode },
+}
+
 /// What `next_media` may do at a track boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Gate {
@@ -125,8 +142,8 @@ pub enum OverrideMode {
     /// Inserted at the next track boundary. Honoured now.
     #[default]
     Soft,
-    /// Cut/duck the current track. Needs Liquidsoap: until then it is
-    /// accepted and degraded to `soft`, with a warning.
+    /// Cut the current track now. Needs Liquidsoap (and a running station):
+    /// otherwise accepted and degraded to `soft`, with a warning.
     Hard,
 }
 
@@ -150,7 +167,7 @@ pub struct OverrideRequest {
 pub struct OverrideEntry {
     pub id: u64,
     pub content: OverrideContent,
-    /// As requested. A `Hard` is played as `soft` until LS is wired.
+    /// As requested. A degraded `Hard` is played as `soft`.
     pub mode: OverrideMode,
     /// Who pushed it: a plugin name, or `cli`.
     pub source: String,
@@ -163,7 +180,8 @@ pub struct OverrideEntry {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct PushOutcome {
     pub id: u64,
-    /// A `hard` was requested and degraded to `soft` (no Liquidsoap yet).
+    /// A `hard` was requested and degraded to `soft` (no Liquidsoap wired,
+    /// or the station is paused/stopped).
     pub degraded: bool,
     /// Pending overrides after the push.
     pub pending: usize,
@@ -190,6 +208,9 @@ struct Inner {
 pub struct StationControl {
     inner: Arc<Mutex<Inner>>,
     plugins: Arc<OnceLock<PluginHandle>>,
+    /// Transitions forwarded to the air (Liquidsoap control socket): pause /
+    /// resume act NOW on the air, whoever made them. Set once when wired.
+    air: Arc<OnceLock<mpsc::UnboundedSender<AirEvent>>>,
     /// Ordered persistence of state changes (single consumer → writes land in
     /// order). `None` = in-memory only (tests).
     persist: Option<mpsc::UnboundedSender<(BroadcastState, Epoch)>>,
@@ -215,6 +236,7 @@ impl StationControl {
                 clock: None,
             })),
             plugins: Arc::new(OnceLock::new()),
+            air: Arc::new(OnceLock::new()),
             persist,
         }
     }
@@ -258,6 +280,18 @@ impl StationControl {
     /// events. Set once (after the plugin actor is spawned with this control).
     pub fn attach_plugins(&self, handle: PluginHandle) {
         let _ = self.plugins.set(handle);
+    }
+
+    /// Wire the air (Liquidsoap control): every transition is forwarded, the
+    /// receiver decides what acts on the air. Set once.
+    pub fn attach_air(&self, tx: mpsc::UnboundedSender<AirEvent>) {
+        let _ = self.air.set(tx);
+    }
+
+    fn to_air(&self, ev: AirEvent) {
+        if let Some(tx) = self.air.get() {
+            let _ = tx.send(ev);
+        }
     }
 
     fn emit(&self, event: PluginEvent) {
@@ -334,6 +368,7 @@ impl StationControl {
         if let Some(tx) = &self.persist {
             let _ = tx.send((t.to, at));
         }
+        self.to_air(AirEvent::Transition(t));
         self.emit(PluginEvent::BroadcastStateChanged {
             from: t.from.as_str().to_string(),
             to: t.to.as_str().to_string(),
@@ -413,7 +448,11 @@ impl StationControl {
                 Some(Epoch(now.0.saturating_add(secs as i64)))
             }
         };
-        let degraded = req.mode == OverrideMode::Hard;
+        // A hard cut needs the air wired AND a station on air: a halted
+        // station keeps it queued; it plays as soft once resumed.
+        let air_live = self.air.get().is_some()
+            && matches!(self.state(), BroadcastState::Running | BroadcastState::Draining);
+        let degraded = req.mode == OverrideMode::Hard && !air_live;
         let outcome = {
             let mut g = self.lock();
             if g.overrides.len() >= MAX_PENDING_OVERRIDES {
@@ -438,11 +477,13 @@ impl StationControl {
             tracing::warn!(
                 id = outcome.id,
                 source,
-                "hard override requested without Liquidsoap: degraded to soft (next track boundary)"
+                "hard override without a live air (no Liquidsoap, or station halted): degraded to soft"
             );
         } else {
-            tracing::info!(id = outcome.id, source, "override queued");
+            tracing::info!(id = outcome.id, source, mode = ?req.mode, "override queued");
         }
+        let mode = if degraded { OverrideMode::Soft } else { req.mode };
+        self.to_air(AirEvent::Override { id: outcome.id, mode });
         Ok(outcome)
     }
 
@@ -474,6 +515,21 @@ impl StationControl {
             _ => true,
         });
         g.overrides.front().cloned()
+    }
+
+    /// Override `id` itself (a hard cut airs it out of queue order), if still
+    /// pending and not stale (a stale one is dropped, logged).
+    pub fn override_by_id(&self, id: u64, now: Epoch) -> Option<OverrideEntry> {
+        let mut g = self.lock();
+        let pos = g.overrides.iter().position(|e| e.id == id)?;
+        if let Some(exp) = g.overrides[pos].expires_at {
+            if now > exp {
+                let e = g.overrides.remove(pos).expect("position is valid");
+                tracing::warn!(id, source = %e.source, "override expired before airing; abandoned");
+                return None;
+            }
+        }
+        Some(g.overrides[pos].clone())
     }
 
     /// One track of override `id` aired: decrement, drop when exhausted.
@@ -652,6 +708,43 @@ mod tests {
         let out = c.push_override(r, "cli").unwrap();
         assert!(out.degraded);
         assert_eq!(c.list_overrides()[0].mode, OverrideMode::Hard);
+    }
+
+    #[test]
+    fn with_the_air_wired_hard_cuts_unless_halted() {
+        let c = StationControl::new_in_memory();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        c.attach_air(tx);
+        let hard = || {
+            let mut r = media("a.mp3");
+            r.mode = OverrideMode::Hard;
+            r
+        };
+        let out = c.push_override(hard(), "cli").unwrap();
+        assert!(!out.degraded, "live air: a real cut");
+        assert_eq!(rx.try_recv().unwrap(), AirEvent::Override { id: out.id, mode: OverrideMode::Hard });
+        let soft = c.push_override(media("b.mp3"), "cli").unwrap();
+        assert_eq!(rx.try_recv().unwrap(), AirEvent::Override { id: soft.id, mode: OverrideMode::Soft });
+        // paused: nothing to cut — queued, played as soft once resumed
+        c.apply(ControlAction::Pause, "cli").unwrap();
+        let _ = rx.try_recv(); // the transition
+        let out = c.push_override(hard(), "cli").unwrap();
+        assert!(out.degraded);
+        assert_eq!(rx.try_recv().unwrap(), AirEvent::Override { id: out.id, mode: OverrideMode::Soft });
+    }
+
+    #[test]
+    fn override_by_id_skips_queue_order_and_expiry() {
+        let c = StationControl::new_in_memory();
+        let a = c.push_override(media("a.mp3"), "cli").unwrap();
+        let b = c.push_override(media("b.mp3"), "cli").unwrap();
+        assert_eq!(c.override_by_id(b.id, c.now()).unwrap().id, b.id);
+        assert!(c.override_by_id(999, c.now()).is_none());
+        let mut r = media("c.mp3");
+        r.expiry = Some("1s".into());
+        let e = c.push_override(r, "cli").unwrap();
+        assert!(c.override_by_id(e.id, Epoch(c.now().0 + 10)).is_none(), "stale: dropped");
+        assert_eq!(c.list_overrides().iter().map(|o| o.id).collect::<Vec<_>>(), [a.id, b.id]);
     }
 
     #[test]

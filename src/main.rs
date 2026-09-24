@@ -89,7 +89,7 @@ async fn main() -> anyhow::Result<()> {
     let plugins = stationd::plugin::spawn_with(cfg.plugins.clone(), Some(control.clone()));
     control.attach_plugins(plugins.clone());
     let plugin_service = PluginGrpc::new(plugins.clone());
-    let broadcast_service = BroadcastGrpc::new(control.clone());
+    let mut broadcast_service = BroadcastGrpc::new(control.clone());
 
     // Grid engine: the live resolver over the SQLite-backed grid, in the
     // station timezone. `sync_grid` reconciles the Every counter rows for the
@@ -123,6 +123,13 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
             let bridge = stationd::ls_bridge::LsBridge::new(engine.clone(), &cfg.media.library_path)?;
+            // Control socket: pause/resume follow the broadcast state machine
+            // (whoever changes it); skip is a direct RPC.
+            let ls_control = stationd::ls_control::LsControl::new(std::path::absolute(&ls_cfg.control_socket)?);
+            let (air_tx, air_rx) = tokio::sync::mpsc::unbounded_channel();
+            control.attach_air(air_tx);
+            stationd::ls_control::spawn_air_sync(air_rx, ls_control.clone(), bridge.clone(), control.state());
+            broadcast_service = broadcast_service.with_liquidsoap(ls_control.clone());
             let router = stationd::ls_bridge::router(bridge.clone(), &ls_cfg.api_token);
             let listener = tokio::net::TcpListener::bind(ls_cfg.http_addr()).await?;
             info!(addr = %ls_cfg.http_bind, "Liquidsoap bridge listening (loopback)");
@@ -131,7 +138,7 @@ async fn main() -> anyhow::Result<()> {
                     tracing::error!(error = %e, "Liquidsoap bridge stopped");
                 }
             });
-            (LsGrpc::new(ls_cfg.clone(), script, bridge), Some(task))
+            (LsGrpc::new(ls_cfg.clone(), script, bridge, ls_control), Some(task))
         }
     };
 
