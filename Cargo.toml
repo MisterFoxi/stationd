@@ -39,12 +39,14 @@ lofty = "0.24"          # lecture tags + durée (mp3/flac/ogg/opus/m4a/wav…), 
 rand = "0.8"            # tirage shuffle en mémoire (pool matérialisé, filtrable)
 extism = "1"            # runtime WASM hôte pour les plugins (tire wasmtime)
 serde_json = "1"        # sérialisation à la frontière host↔wasm
+axum = { version = "0.7", default-features = false, features = ["tokio", "http1", "json"] }  # pont HTTP loopback Liquidsoap → stationd
 
 [build-dependencies]
 tonic-build = "0.12"
 
 [dev-dependencies]
 tempfile = "3"
+tower = { version = "0.5", features = ["util"] }   # oneshot sur le routeur du pont LS
 
 [[plugin]]
 name = "logger"

@@ -17,6 +17,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     tonic_build::configure()
         .protoc_arg("--experimental_allow_proto3_optional")
         .compile_protos(&["proto/broadcast_v1.proto"], &["proto"])?;
+    // The Liquidsoap service (script render + bridge status, stationctl ls).
+    tonic_build::compile_protos("proto/liquidsoap_v1.proto")?;
 
     // Force a rebuild whenever a migration file is added, changed, or
     // removed. `sqlx::migrate!` embeds the migrations into the binary at
@@ -33,6 +35,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-changed=proto/library_v1.proto");
     println!("cargo:rerun-if-changed=proto/plugin_v1.proto");
     println!("cargo:rerun-if-changed=proto/broadcast_v1.proto");
+    println!("cargo:rerun-if-changed=proto/liquidsoap_v1.proto");
 
     Ok(())
 }

@@ -5,7 +5,7 @@ sans reconstruire le contexte. À distinguer des docs de `Doc/` (décisions
 d'architecture durables) : ce fichier-ci est volatil, à mettre à jour à
 chaque session.
 
-Dernière mise à jour : 2026-09-23.
+Dernière mise à jour : 2026-09-24.
 
 
 ## Ajout : TUI d'administration (correctif préparé, compilation à confirmer)
@@ -73,11 +73,62 @@ Autres, indépendants :
 - **Crate de types partagé** `Candidate`/`PluginEvent` (host + guests wasm ne
   les dupliquent plus — aujourd'hui recopiés dans les 2 crates guest).
 - **Refacto acteur `GridEngine`** (gabarit `library_actor`).
-- **Câblage Liquidsoap** (le vrai « ça diffuse » ; débloque aussi `hard`).
+- **Câblage Liquidsoap** — étape 1 « ça diffuse » livrée (2026-09-24, voir
+  Fait + `Doc/liquidsoap.md`). **À valider sur devstationd** :
+  `liquidsoap --check` du script généré sous LS 2.4, puis diffusion réelle vers
+  Icecast 2.5. Suite : étape 2 socket de contrôle (skip, halt, flush, override
+  `hard` via file interruptrice), étape 3 tâche de diffusion (relais remote,
+  `AtClock hard`, `remaining`), étape 4 fins de piste (`unplayed_only` auto,
+  `TrackStarted`/`TrackFinished` plugins).
 
 ---
 
 ## Fait
+
+### — Câblage Liquidsoap, étape 1 : « ça diffuse » (2026-09-24) —
+
+Décisions : A+C (pont HTTP loopback + socket, le socket = étape 2) ; stationd
+**écrit** le `.liq`, Liquidsoap tourne sous **sa propre unité** ; `axum` en
+direct ; pas de cue/fade/loudness en v1 (crossfade fixe) ; DJ live plus tard ;
+**station arrêtée/en pause = bruit de fond en boucle** (le stream reste
+occupé), jamais le fallback de sécurité. Détail : `Doc/liquidsoap.md`.
+
+- **Config** `[liquidsoap]` (optionnelle, `deny_unknown_fields`) :
+  `script_path`, `http_bind` (**loopback exigé**), `api_token`,
+  `fallback_path`, `halted_path`, `[liquidsoap.crossfade]` (`simple|none`,
+  `fade`, `duration`), `normalize`, `custom_include`, `log_level`,
+  `[[liquidsoap.output]]` (Icecast, mp3, bitrate LAME validé). Validation
+  bruyante au chargement (`ConfigError::Liquidsoap`).
+- **`src/ls_script.rs`** (pur) : génère le script — pull `request.dynamic`
+  → crossfade → `fallback([pull, bruit si halted, blank au démarrage,
+  fallback sécu])` → normalize (option) → `%include` → outputs. Chaînes
+  échappées + `#{` neutralisé. Chemins rendus absolus. `write_if_changed`
+  (atomique).
+- **`src/ls_bridge.rs`** : `POST /ls/v1/next` (→ `next_media` : gate,
+  overrides, grille) répond `file` (uri annotée `stationd_rid`, chemin absolu)
+  / `halted` / `none` ; `POST /ls/v1/track` (démarrage réel) → `on_air`,
+  `on_track_completed` (compteur `Every`). Token `X-Stationd-Token`.
+- **Contrat** `proto/liquidsoap_v1.proto` (`RenderScript`, `GetStatus`) →
+  `src/ls_grpc.rs` ; **CLI** `stationctl ls render|status`. `ls status` montre
+  `on air` (démarrage réel) et `next` (piste préchargée par Liquidsoap, pas
+  encore démarrée ; vidée par une réponse halted/none) ; `last reply` n'est
+  affiché que pour halted/none.
+- `main.rs` : écrit le script, avertit si fallback/bruit absents, sert le pont
+  (échec de bind = fatal). `GridEngine` dérive `Clone`.
+- Tests : config (défauts, loopback, sorties, typo), script (échappement,
+  ordre des sources, options), pont (uri, halted ≠ fallback, pas de règle,
+  on-air + compteur, rid consommé une fois, boucle bruit, token HTTP).
+
+**Validation** : `cargo build` + `cargo test` verts (267 unitaires +
+intégration). **E2E réel** stationd + Liquidsoap (2.2.4 de la distro, script
+adapté à la marge : `null()` et `on_track` sans `synchronous`) sortie dummy :
+pistes tirées et annoncées, stop → bruit à la fin de la piste en cours, resume
+→ musique en ~2 s, stationd tué → fallback, stationd relancé → musique.
+Constats intégrés au générateur : `on_track` écouté **avant** `cross` (après
+un crossfade il ne se déclenche pas), pas d'`annotate:` sur `single` (rend la
+source faillible), rafale de `/next` autour d'une fin de piste bornée côté
+script. **Syntaxe 2.4 (`null`, `source.methods`, `synchronous=`) calquée sur le
+script AzuraCast 2.4.5 — reste à passer `liquidsoap --check` sur devstationd.**
 
 ### — Biblio : filtre et inventaire par genre (2026-09-23) —
 

@@ -1,0 +1,46 @@
+// liquidsoap_v1.proto
+// ─────────────────────────────────────────────────────────────────────────
+// Câblage Liquidsoap : introspection du script généré et du pont LS → stationd.
+// Le pont lui-même (pull /next, /track) est en HTTP loopback — Liquidsoap n'a
+// pas de client gRPC ; ce service-ci est la face CLI (stationctl ls …).
+
+syntax = "proto3";
+
+package webradio.liquidsoap.v1;
+
+service LiquidsoapService {
+  // Le script .liq tel que stationd le génère depuis [liquidsoap] (identique
+  // à celui écrit au démarrage). failed_precondition si [liquidsoap] absent.
+  rpc RenderScript(RenderScriptRequest) returns (RenderScriptResponse);
+
+  // État du pont : dernier pull de Liquidsoap, ce qui est réellement à l'antenne.
+  rpc GetStatus(GetStatusRequest) returns (LiquidsoapStatus);
+}
+
+message RenderScriptRequest {}
+
+message RenderScriptResponse {
+  string script = 1;
+  string path   = 2;   // où stationd l'écrit
+}
+
+message GetStatusRequest {}
+
+message LiquidsoapStatus {
+  bool   enabled        = 1;   // false = pas de section [liquidsoap]
+  string http_bind      = 2;
+  string script_path    = 3;
+  uint64 pulls          = 4;   // requêtes /next reçues depuis le démarrage
+  int64  last_pull_at   = 5;   // epoch s ; 0 = jamais
+  string last_reply     = 6;   // file | halted | none ; vide = jamais
+  string last_detail    = 7;   // uri, état (paused|stopped) ou raison
+  string on_air_kind    = 8;   // track | fallback | halted | unknown ; vide = rien reçu
+  string on_air_media   = 9;   // rel_path (track seulement)
+  string on_air_playlist = 10;
+  int64  on_air_since   = 11;  // epoch s
+  uint64 tracks_started = 12;  // pistes stationd réellement démarrées
+  // À suivre : la piste déjà remise à Liquidsoap (préchargée), pas encore
+  // démarrée. Vide = rien en attente (halted / none, ou pas encore demandée).
+  string next_media     = 13;  // rel_path
+  string next_playlist  = 14;
+}

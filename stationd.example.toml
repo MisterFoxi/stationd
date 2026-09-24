@@ -39,3 +39,35 @@ level = "info"
 # name = "stop-when-idle-wasm"
 # wasm = "plugins/stop-when-idle-wasm/target/wasm32-unknown-unknown/release/stop_when_idle_wasm.wasm"
 # capabilities = ["control"]
+
+# Liquidsoap wiring (optional). Absent = nothing airs (scheduling only).
+# stationd writes the generated script to `script_path` at start-up (only when
+# it changed) and serves the loopback bridge Liquidsoap pulls from. Liquidsoap
+# runs under its own unit (cf. Doc/liquidsoap.md): restart it after a change.
+# Relative paths are resolved against stationd's working directory and handed
+# to Liquidsoap as absolute paths.
+#
+# [liquidsoap]
+# script_path   = "./data/station.liq"
+# http_bind     = "127.0.0.1:8081"          # loopback only (checked)
+# api_token     = "change-me"               # shared secret, X-Stationd-Token
+# fallback_path = "/srv/radio/error.mp3"    # safety net: nothing to air / stationd down
+# halted_path   = "/srv/radio/noise.mp3"    # looped while paused/stopped
+# normalize     = false                     # normalize + compress on the air chain
+# custom_include = "/etc/stationd/custom.liq"  # sees `radio`, may reassign it
+# log_level     = 3
+# [liquidsoap.crossfade]
+# mode     = "simple"                       # "simple" | "none"
+# fade     = 2.0                            # fade in/out, s
+# duration = 3.0                            # overlap, s
+#
+# [[liquidsoap.output]]
+# host     = "127.0.0.1"
+# port     = 8000
+# password = "hackme"
+# mount    = "/radio.mp3"
+# bitrate  = 192                            # mp3 (format = "mp3", the only one for now)
+# name     = "My Radio"                     # default: [station] name
+# description = ""
+# genre    = ""
+# public   = false

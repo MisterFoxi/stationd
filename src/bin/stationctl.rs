@@ -5,7 +5,7 @@
 
 use clap::{Parser, Subcommand};
 
-use stationd::proto::{broadcast, library, plugin, schedule, station};
+use stationd::proto::{broadcast, library, liquidsoap, plugin, schedule, station};
 
 use station::station_client::StationClient;
 use station::{PlaylistAddRequest, PlaylistListRequest, PlaylistSyncRequest, QuitRequest, StatusRequest};
@@ -16,6 +16,8 @@ use library::{ListGenresRequest, ListMediaRequest, ScanRequest};
 use plugin::plugin_service_client::PluginServiceClient;
 use plugin::{plugin_control_request::Action as PluginAction, PluginControlRequest, PluginListRequest};
 use broadcast::broadcast_service_client::BroadcastServiceClient;
+use liquidsoap::liquidsoap_service_client::LiquidsoapServiceClient;
+use liquidsoap::{GetStatusRequest as LsStatusRequest, RenderScriptRequest};
 use broadcast::{
     control_request::Action as BroadcastAction, push_override_request, ClearOverridesRequest,
     ControlRequest, GetStateRequest, ListOverridesRequest, PushOverrideRequest,
@@ -68,6 +70,17 @@ enum Command {
     /// Test injection of sources not wired yet (Icecast, …)
     #[command(subcommand)]
     Debug(DebugCommand),
+    /// Liquidsoap wiring: generated script, bridge status
+    #[command(subcommand)]
+    Ls(LsCommand),
+}
+
+#[derive(Subcommand, Debug)]
+enum LsCommand {
+    /// Print the generated Liquidsoap script (as written at stationd start-up)
+    Render,
+    /// Bridge status: last pull from Liquidsoap, what is really on air
+    Status,
 }
 
 #[derive(Subcommand, Debug)]
@@ -846,6 +859,17 @@ async fn main() -> anyhow::Result<()> {
                 .into_inner();
             println!("removed: {}", r.removed);
         }
+        Command::Ls(LsCommand::Render) => {
+            let mut ls = LiquidsoapServiceClient::connect(args.addr.clone()).await?;
+            let r = ls.render_script(RenderScriptRequest {}).await?.into_inner();
+            eprintln!("# written to {}", r.path);
+            print!("{}", r.script);
+        }
+        Command::Ls(LsCommand::Status) => {
+            let mut ls = LiquidsoapServiceClient::connect(args.addr.clone()).await?;
+            let s = ls.get_status(LsStatusRequest {}).await?.into_inner();
+            print_ls_status(&s);
+        }
         Command::Debug(DebugCommand::Listeners { count }) => {
             let mut bc = BroadcastServiceClient::connect(args.addr.clone()).await?;
             let s = bc
@@ -857,6 +881,54 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+fn print_ls_status(s: &liquidsoap::LiquidsoapStatus) {
+    if !s.enabled {
+        println!("liquidsoap: not configured (no [liquidsoap] section) — nothing airs");
+        return;
+    }
+    let when = |t: i64| {
+        if t == 0 {
+            "never".to_string()
+        } else {
+            let ago = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64 - t)
+                .unwrap_or(0);
+            format!("{ago}s ago (epoch {t})")
+        }
+    };
+    let with_playlist = |media: &str, playlist: &str| {
+        if playlist.is_empty() {
+            media.to_string()
+        } else {
+            format!("{media}  [{playlist}]")
+        }
+    };
+    println!("bridge:     {}", s.http_bind);
+    println!("script:     {}", s.script_path);
+    println!("pulls:      {} (last {})", s.pulls, when(s.last_pull_at));
+    // A `file` reply is the prefetched next track, shown as `next:` below;
+    // only a halted / none reply is worth showing as such.
+    if !s.last_reply.is_empty() && s.last_reply != "file" {
+        println!("last reply: {} ({})", s.last_reply, s.last_detail);
+    }
+    if s.on_air_kind.is_empty() {
+        println!("on air:     (nothing reported by Liquidsoap yet)");
+    } else {
+        let what = match s.on_air_kind.as_str() {
+            "track" => with_playlist(&s.on_air_media, &s.on_air_playlist),
+            other => other.to_string(),
+        };
+        println!("on air:     {what} — since {}", when(s.on_air_since));
+    }
+    if s.next_media.is_empty() {
+        println!("next:       (nothing queued in Liquidsoap)");
+    } else {
+        println!("next:       {}", with_playlist(&s.next_media, &s.next_playlist));
+    }
+    println!("tracks:     {} started", s.tracks_started);
 }
 
 fn state_name(state: i32) -> &'static str {

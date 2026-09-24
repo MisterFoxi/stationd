@@ -18,3 +18,7 @@ pub mod plugin {
 pub mod broadcast {
     tonic::include_proto!("webradio.broadcast.v1");
 }
+
+pub mod liquidsoap {
+    tonic::include_proto!("webradio.liquidsoap.v1");
+}

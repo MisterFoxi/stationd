@@ -12,6 +12,8 @@ use stationd::library_grpc::library::library_service_server::LibraryServiceServe
 use stationd::plugin_grpc::plugin::plugin_service_server::PluginServiceServer;
 use stationd::broadcast_grpc::broadcast::broadcast_service_server::BroadcastServiceServer;
 use stationd::broadcast_grpc::BroadcastGrpc;
+use stationd::ls_grpc::liquidsoap::liquidsoap_service_server::LiquidsoapServiceServer;
+use stationd::ls_grpc::LsGrpc;
 use stationd::grid_engine::GridEngine;
 use stationd::station_control::StationControl;
 use stationd::library_grpc::LibraryGrpc;
@@ -72,8 +74,6 @@ async fn main() -> anyhow::Result<()> {
         "SQLite database ready (migrations applied)"
     );
 
-    // TODO: Liquidsoap/Icecast control — deliberately absent at this stage
-
     // Station runtime control: broadcast state (restored from the last run —
     // an operator's stop stays a stop), override queue, manual clock. Shared
     // by the grid engine, the plugin host surface and `stationctl station|
@@ -99,6 +99,42 @@ async fn main() -> anyhow::Result<()> {
         .with_plugins(plugins.clone())
         .with_media_root(cfg.media.library_path.clone());
     engine.sync_grid().await?;
+
+    // Liquidsoap wiring (optional `[liquidsoap]`): write the generated script
+    // (only when it changed — Liquidsoap runs under its own unit and must be
+    // restarted to pick it up) and serve the loopback bridge it pulls from.
+    // A bind failure is fatal: a configured station that cannot air must not
+    // pretend to run.
+    let (ls_service, ls_task) = match &cfg.liquidsoap {
+        None => {
+            info!("no [liquidsoap] section: nothing airs (scheduling only)");
+            (LsGrpc::disabled(), None)
+        }
+        Some(ls_cfg) => {
+            let script = stationd::ls_script::render(ls_cfg, &cfg.station.name);
+            if stationd::ls_script::write_if_changed(&ls_cfg.script_path, &script)? {
+                warn!(path = ?ls_cfg.script_path, "Liquidsoap script (re)written: restart Liquidsoap to apply it");
+            } else {
+                info!(path = ?ls_cfg.script_path, "Liquidsoap script unchanged");
+            }
+            for (what, p) in [("fallback_path", &ls_cfg.fallback_path), ("halted_path", &ls_cfg.halted_path)] {
+                if !p.exists() {
+                    warn!(path = ?p, "[liquidsoap] {what} does not exist: Liquidsoap will refuse to start");
+                }
+            }
+            let bridge = stationd::ls_bridge::LsBridge::new(engine.clone(), &cfg.media.library_path)?;
+            let router = stationd::ls_bridge::router(bridge.clone(), &ls_cfg.api_token);
+            let listener = tokio::net::TcpListener::bind(ls_cfg.http_addr()).await?;
+            info!(addr = %ls_cfg.http_bind, "Liquidsoap bridge listening (loopback)");
+            let task = tokio::spawn(async move {
+                if let Err(e) = axum::serve(listener, router).await {
+                    tracing::error!(error = %e, "Liquidsoap bridge stopped");
+                }
+            });
+            (LsGrpc::new(ls_cfg.clone(), script, bridge), Some(task))
+        }
+    };
+
     let schedule_service = ScheduleGrpc::new(engine);
 
     // Media library: single owning actor over the `media` view. The heavy scan
@@ -123,7 +159,7 @@ async fn main() -> anyhow::Result<()> {
         shutdown_tx,
     );
 
-    info!(%addr, "gRPC server listening (status, quit, schedule, library, plugin, broadcast)");
+    info!(%addr, "gRPC server listening (status, quit, schedule, library, plugin, broadcast, liquidsoap)");
 
     // Three ways to shut down cleanly: via `stationctl quit` (shutdown_rx,
     // triggered by the service's `quit` handler), or via a signal — Ctrl+C
@@ -153,8 +189,14 @@ async fn main() -> anyhow::Result<()> {
         .add_service(LibraryServiceServer::new(library_service))
         .add_service(PluginServiceServer::new(plugin_service))
         .add_service(BroadcastServiceServer::new(broadcast_service))
+        .add_service(LiquidsoapServiceServer::new(ls_service))
         .serve_with_shutdown(addr, shutdown_signal)
         .await?;
+
+    // The bridge only answers short requests: stop it with the daemon.
+    if let Some(task) = ls_task {
+        task.abort();
+    }
 
     // The override queue is volatile (in memory): say what is lost, never
     // drop it silently.

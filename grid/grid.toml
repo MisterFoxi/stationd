@@ -16,21 +16,3 @@ id = "floor"
 kind = "base_rotation"
 playlist_ref = "rotation"
 
-
-
-
-
-
-
-
-
-# L'émission Homestone : au-dessus du plancher, sur un créneau. Si un membre
-# est vide (épisode manquant) et le groupe est en abort → on retombe sur le
-# plancher au lieu du dead-air.
-[[rule]]
-id = "homestone"
-kind = "day_part"
-playlist_ref = "homestone-chronicles/homestone-chronicles"
-start = "16:00"
-end   = "17:00"
-days  = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]

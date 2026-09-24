@@ -54,6 +54,9 @@ pub enum GridOpError {
 }
 
 /// Live resolver over a SQLite-backed grid, in the station timezone.
+/// Cheap to clone (pool, handles): the gRPC service and the Liquidsoap bridge
+/// each hold one; all mutable state lives in SQLite / `StationControl`.
+#[derive(Clone)]
 pub struct GridEngine {
     pool: SqlitePool,
     /// IANA name of the station timezone (config), e.g. "Europe/Paris".
