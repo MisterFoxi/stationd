@@ -64,7 +64,12 @@ Reste de la surface hôte : **`db_*`** (base SQLite par plugin, ouverte par le
 core pour son compte : `db_get`/`db_put`/`db_query`).
 
 Autres, indépendants :
-- **`on_scan`** : dernier hook non câblé (enrichissement au scan biblio).
+- **`on_scan`** : câblé (2026-09-24). Le scan collecte les tags personnalisés
+  (`TXXX`, clés Vorbis/APE, MP4 freeform — `media::CustomTag`, non persistés),
+  les passe en lot à `on_scan` (natif + export WASM) ; les genres renvoyés sont
+  fusionnés dans `media_genre` (dédup `genre_key`). Plugin
+  `plugins/custom-tags-wasm` (`[plugin.config] tags = ["Type"]`) :
+  `TXXX:Type = talks` → genre `talks`. `.wasm` à compiler (cible wasm32).
 - **Crate de types partagé** `Candidate`/`PluginEvent` (host + guests wasm ne
   les dupliquent plus — aujourd'hui recopiés dans les 2 crates guest).
 - **Refacto acteur `GridEngine`** (gabarit `library_actor`).

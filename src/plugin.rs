@@ -12,7 +12,8 @@
 //! event must NEVER block or fail the caller (a track resolution), so a slow or
 //! crashed plugin never holds the air.
 //!
-//! Scope: lifecycle + `on_event` (A1), `filter_pool` (sync hook), and the
+//! Scope: lifecycle + `on_event` (A1), `filter_pool` and `on_scan` (sync
+//! hooks), and the
 //! **host surface** (A2): a [`Host`] handed to the plugin in `on_load`, scoped
 //! to that plugin and gated by the capabilities it DECLARES
 //! (`capabilities = ["control", "push_override"]`). Native plugins call it
@@ -60,11 +61,37 @@ pub struct Candidate {
     pub mtime_ns: i64,
 }
 
+/// One scanned media handed to `on_scan`: its standard attributes (as the
+/// scanner read them) plus the user-defined tags the core does not interpret
+/// (`TXXX`, Vorbis/APE keys, MP4 freeform — see `media::CustomTag`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScanInput {
+    pub rel_path: String,
+    pub artist: Option<String>,
+    pub title: Option<String>,
+    pub album: Option<String>,
+    pub year: Option<u32>,
+    pub duration_ms: u64,
+    pub genres: Vec<String>,
+    pub custom_tags: Vec<crate::media::CustomTag>,
+}
+
+/// What a plugin adds to one media at scan time. v1: extra genres only — they
+/// land in `media_genre` like any tag genre, so the playlist `genre` filters
+/// (`has`/`has_any`/`has_all`/`has_none`) see them with no new grammar.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScanEnrichment {
+    pub rel_path: String,
+    #[serde(default)]
+    pub genres: Vec<String>,
+}
+
 /// What a plugin implements. `Send` because plugins live on the actor task.
 ///
 /// A1 wires `on_load` / `on_unload` (lifecycle) and `on_event` (observation).
-/// A2 adds `filter_pool` (synchronous, influences the decision). `on_scan`
-/// will follow with its call site.
+/// A2 adds the synchronous hooks: `filter_pool` (influences the decision) and
+/// `on_scan` (enriches the library scan).
 pub trait Plugin: Send {
     /// Stable name (matches the declaration). Identity for `plugin list`.
     fn name(&self) -> &str;
@@ -93,6 +120,16 @@ pub trait Plugin: Send {
     /// failure.
     fn filter_pool(&mut self, candidates: Vec<Candidate>) -> Vec<Candidate> {
         candidates
+    }
+
+    /// Enrich the scanned library, once per scan with the whole batch (one
+    /// boundary crossing, not one per file). Returns only the media it has
+    /// something to add to. Synchronous, in the scan path. An `Err` or a panic
+    /// counts as a failure (visible in `plugin list`) and that plugin's
+    /// enrichment is dropped for this scan: media are still indexed, just
+    /// without it (degraded, never lost). Default: nothing to add.
+    fn on_scan(&mut self, _media: &[ScanInput]) -> Result<Vec<ScanEnrichment>, String> {
+        Ok(Vec::new())
     }
 }
 
@@ -255,6 +292,7 @@ pub enum Phase {
     Unload,
     Event,
     FilterPool,
+    Scan,
 }
 
 /// Runtime state of a plugin — kept even when inactive, so it stays visible.
@@ -438,7 +476,15 @@ enum Msg {
         candidates: Vec<Candidate>,
         reply: oneshot::Sender<Vec<Candidate>>,
     },
+    Scan {
+        media: Vec<ScanInput>,
+        reply: oneshot::Sender<ScanExtras>,
+    },
 }
+
+/// Merged `on_scan` output: extra genres per `rel_path`, every loaded plugin
+/// contributing in `order`. Deduplicated case-insensitively per media.
+pub type ScanExtras = std::collections::BTreeMap<String, Vec<String>>;
 
 /// Cheap, clonable handle to the plugin actor. The only way to reach plugins.
 #[derive(Clone)]
@@ -468,6 +514,21 @@ impl PluginHandle {
             return fallback;
         }
         rx.await.unwrap_or(fallback)
+    }
+
+    /// Run the scanned batch through every loaded plugin's `on_scan`. Awaits a
+    /// reply (it feeds the index). If the actor is gone, degrades to "nothing
+    /// to add" with a warning rather than failing the scan.
+    pub async fn on_scan(&self, media: Vec<ScanInput>) -> ScanExtras {
+        let (reply, rx) = oneshot::channel();
+        if self.tx.send(Msg::Scan { media, reply }).await.is_err() {
+            tracing::warn!("plugin actor gone: scan indexed without plugin enrichment");
+            return ScanExtras::new();
+        }
+        rx.await.unwrap_or_else(|_| {
+            tracing::warn!("plugin actor gone: scan indexed without plugin enrichment");
+            ScanExtras::new()
+        })
     }
 
     /// Snapshot of every declared plugin and its state.
@@ -530,6 +591,9 @@ pub fn spawn_with(mut decls: Vec<PluginDecl>, control: Option<StationControl>) -
                 Msg::Event(event) => dispatch_event(&mut slots, &event),
                 Msg::FilterPool { candidates, reply } => {
                     let _ = reply.send(run_filters(&mut slots, candidates));
+                }
+                Msg::Scan { media, reply } => {
+                    let _ = reply.send(run_scan(&mut slots, &media));
                 }
                 Msg::List(reply) => {
                     let _ = reply.send(slots.iter().map(Slot::info).collect());
@@ -612,6 +676,64 @@ fn run_filters(slots: &mut [Slot], candidates: Vec<Candidate>) -> Vec<Candidate>
         }
     }
     cur
+}
+
+/// Check a plugin's `on_scan` reply against the batch it was given. A reply
+/// naming an unknown media or carrying a blank genre is a plugin bug: the
+/// whole reply is refused (loud), never partially applied.
+fn validate_enrichment(
+    known: &std::collections::HashSet<&str>,
+    out: &[ScanEnrichment],
+) -> Result<(), String> {
+    for e in out {
+        if !known.contains(e.rel_path.as_str()) {
+            return Err(format!("on_scan returned unknown media `{}`", e.rel_path));
+        }
+        if e.genres.iter().any(|g| g.trim().is_empty()) {
+            return Err(format!("on_scan returned a blank genre for `{}`", e.rel_path));
+        }
+    }
+    Ok(())
+}
+
+/// Run every loaded plugin's `on_scan` over the same batch (additive, not
+/// chained) and merge the extra genres. A plugin that errs, panics or returns
+/// an invalid reply contributes nothing this scan and counts as a failure.
+fn run_scan(slots: &mut [Slot], media: &[ScanInput]) -> ScanExtras {
+    let known: std::collections::HashSet<&str> =
+        media.iter().map(|m| m.rel_path.as_str()).collect();
+    let mut extras = ScanExtras::new();
+    for slot in slots.iter_mut() {
+        if !matches!(slot.state, PluginState::Loaded) {
+            continue;
+        }
+        let Some(p) = slot.plugin.as_mut() else { continue };
+        let outcome = catch(|| p.on_scan(media))
+            .and_then(|r| r)
+            .and_then(|out| validate_enrichment(&known, &out).map(|()| out));
+        match outcome {
+            Ok(out) => {
+                let mut added = 0usize;
+                for e in out {
+                    let entry = extras.entry(e.rel_path).or_default();
+                    for g in e.genres {
+                        let g = g.trim().to_string();
+                        let key = crate::media_index::genre_key(&g);
+                        if !entry.iter().any(|x| crate::media_index::genre_key(x) == key) {
+                            entry.push(g);
+                            added += 1;
+                        }
+                    }
+                }
+                if added > 0 {
+                    tracing::info!(plugin = %slot.decl.name, added, "on_scan enriched the library");
+                }
+            }
+            Err(reason) => slot.note_failure(Phase::Scan, reason),
+        }
+    }
+    extras.retain(|_, v| !v.is_empty());
+    extras
 }
 
 // ---------------------------------------------------------------------------
@@ -880,7 +1002,8 @@ host_fn!(push_override(user_data: Host; input: String) -> String {
 /// this lives on the actor task like any other plugin.
 ///
 /// Exports (all optional): `filter_pool` (missing → pass-through), `on_event`
-/// (missing → ignored). Host functions offered to the guest (A2), bound to
+/// (missing → ignored), `on_scan` (JSON `[ScanInput]` → `[ScanEnrichment]`;
+/// missing → nothing to add). Host functions offered to the guest (A2), bound to
 /// this plugin's scoped `Host`: `station_control`, `push_override` (imported
 /// by the guest from `extern "ExtismHost"`). Config reaches the guest as JSON
 /// under the key "config".
@@ -889,6 +1012,7 @@ struct WasmPlugin {
     plugin: ExtismPlugin,
     has_filter: bool,
     has_event: bool,
+    has_scan: bool,
 }
 
 impl WasmPlugin {
@@ -918,11 +1042,13 @@ impl WasmPlugin {
             ExtismPlugin::new(&manifest, functions, false).map_err(|e| e.to_string())?;
         let has_filter = plugin.function_exists("filter_pool");
         let has_event = plugin.function_exists("on_event");
+        let has_scan = plugin.function_exists("on_scan");
         Ok(Self {
             name,
             plugin,
             has_filter,
             has_event,
+            has_scan,
         })
     }
 }
@@ -963,6 +1089,22 @@ impl Plugin for WasmPlugin {
                 candidates
             }
         }
+    }
+
+    fn on_scan(&mut self, media: &[ScanInput]) -> Result<Vec<ScanEnrichment>, String> {
+        if !self.has_scan {
+            return Ok(Vec::new());
+        }
+        // Any boundary error is returned (→ counted failure, visible), not
+        // swallowed: a scan plugin that silently adds nothing would be
+        // indistinguishable from one with nothing to add.
+        let input = serde_json::to_string(media).map_err(|e| format!("serialise: {e}"))?;
+        let out = self
+            .plugin
+            .call::<&str, String>("on_scan", input.as_str())
+            .map_err(|e| format!("wasm on_scan failed: {e}"))?;
+        serde_json::from_str::<Vec<ScanEnrichment>>(&out)
+            .map_err(|e| format!("bad on_scan output: {e}"))
     }
 }
 
@@ -1293,5 +1435,112 @@ mod tests {
         let out = p.filter_pool(vec![keep, drop_path, drop_artist]);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].rel_path, "music/a.mp3");
+    }
+
+    // ----- on_scan (direct on a Slot, no actor) --------------------------
+
+    fn scan_input(rel: &str, tags: &[(&str, &str)]) -> ScanInput {
+        ScanInput {
+            rel_path: rel.into(),
+            artist: None,
+            title: None,
+            album: None,
+            year: None,
+            duration_ms: 1000,
+            genres: vec![],
+            custom_tags: tags
+                .iter()
+                .map(|(n, v)| crate::media::CustomTag { name: (*n).into(), value: (*v).into() })
+                .collect(),
+        }
+    }
+
+    /// Test double: every `TXXX`-like tag named `tag` → a genre.
+    struct TagToGenre(&'static str);
+    impl Plugin for TagToGenre {
+        fn name(&self) -> &str {
+            "tag-to-genre"
+        }
+        fn on_scan(&mut self, media: &[ScanInput]) -> Result<Vec<ScanEnrichment>, String> {
+            Ok(media
+                .iter()
+                .map(|m| ScanEnrichment {
+                    rel_path: m.rel_path.clone(),
+                    genres: m
+                        .custom_tags
+                        .iter()
+                        .filter(|t| t.name == self.0)
+                        .map(|t| t.value.clone())
+                        .collect(),
+                })
+                .collect())
+        }
+    }
+
+    /// Test double returning a fixed (possibly invalid) reply, or an error.
+    struct FixedScan(Result<Vec<ScanEnrichment>, String>);
+    impl Plugin for FixedScan {
+        fn name(&self) -> &str {
+            "fixed"
+        }
+        fn on_scan(&mut self, _m: &[ScanInput]) -> Result<Vec<ScanEnrichment>, String> {
+            self.0.clone()
+        }
+    }
+
+    fn loaded(name: &str, plugin: Box<dyn Plugin>) -> Slot {
+        Slot {
+            decl: decl(name, true, toml::Table::new()),
+            state: PluginState::Loaded,
+            plugin: Some(plugin),
+            failures: VecDeque::new(),
+        }
+    }
+
+    #[test]
+    fn on_scan_merges_plugins_and_dedups_case_insensitively() {
+        let mut slots = vec![
+            loaded("a", Box::new(TagToGenre("Type"))),
+            loaded(
+                "b",
+                Box::new(FixedScan(Ok(vec![ScanEnrichment {
+                    rel_path: "x.mp3".into(),
+                    genres: vec!["TALKS".into(), "news".into()],
+                }]))),
+            ),
+            loaded("logger", Box::new(LoggerPlugin { fail_on_load: false })), // default: nothing
+        ];
+        let media = vec![
+            scan_input("x.mp3", &[("Type", "talks")]),
+            scan_input("y.mp3", &[("Mood", "calm")]),
+        ];
+        let extras = run_scan(&mut slots, &media);
+        assert_eq!(extras.len(), 1, "media with nothing to add are absent");
+        assert_eq!(extras["x.mp3"], vec!["talks".to_string(), "news".to_string()]);
+        assert!(slots.iter().all(|s| matches!(s.state, PluginState::Loaded)));
+    }
+
+    #[test]
+    fn on_scan_error_or_invalid_reply_counts_as_failure_and_adds_nothing() {
+        let bad_path = ScanEnrichment { rel_path: "ghost.mp3".into(), genres: vec!["x".into()] };
+        let blank = ScanEnrichment { rel_path: "x.mp3".into(), genres: vec!["  ".into()] };
+        let mut slots = vec![
+            loaded("err", Box::new(FixedScan(Err("boom".into())))),
+            loaded("ghost", Box::new(FixedScan(Ok(vec![bad_path])))),
+            loaded("blank", Box::new(FixedScan(Ok(vec![blank])))),
+        ];
+        let media = vec![scan_input("x.mp3", &[])];
+        assert!(run_scan(&mut slots, &media).is_empty());
+        for s in &slots {
+            assert_eq!(s.failures.len(), 1, "{} must record a failure", s.decl.name);
+        }
+    }
+
+    #[tokio::test]
+    async fn on_scan_through_the_actor_with_default_plugins_adds_nothing() {
+        let h = spawn(vec![decl("logger", true, toml::Table::new())]);
+        let extras = h.on_scan(vec![scan_input("x.mp3", &[("Type", "talks")])]).await;
+        assert!(extras.is_empty());
+        assert_eq!(h.list().await[0].state, "loaded");
     }
 }

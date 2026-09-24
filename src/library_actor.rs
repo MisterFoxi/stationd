@@ -25,6 +25,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::media::{self, ScanError, ScanReport};
 use crate::media_index::{self, GenreInventory, MediaRow, ReplaceStats};
+use crate::plugin::{PluginHandle, ScanInput};
 
 #[derive(Debug, thiserror::Error)]
 pub enum LibraryError {
@@ -122,15 +123,22 @@ impl LibraryHandle {
     }
 }
 
-/// Spawn the owning task and return a handle to it. The task lives until every
-/// handle is dropped (the channel closes and the loop ends).
+/// Spawn the owning task without plugins: scans are indexed as read (tests,
+/// tools).
 pub fn spawn(pool: SqlitePool, root: PathBuf) -> LibraryHandle {
+    spawn_with(pool, root, None)
+}
+
+/// Spawn the owning task and return a handle to it. The task lives until every
+/// handle is dropped (the channel closes and the loop ends). `plugins`, when
+/// set, runs each scan through the plugins' `on_scan` before indexing.
+pub fn spawn_with(pool: SqlitePool, root: PathBuf, plugins: Option<PluginHandle>) -> LibraryHandle {
     let (tx, mut rx) = mpsc::channel::<Command>(32);
     tokio::spawn(async move {
         while let Some(cmd) = rx.recv().await {
             match cmd {
                 Command::Scan { reply } => {
-                    let _ = reply.send(do_scan(&pool, &root).await);
+                    let _ = reply.send(do_scan(&pool, &root, plugins.as_ref()).await);
                 }
                 Command::List { only_available, genres, reply } => {
                     let out = media_index::list(&pool, only_available, &genres)
@@ -158,14 +166,57 @@ fn now_epoch_seconds() -> i64 {
         .unwrap_or(0)
 }
 
-/// Run the blocking scan off the async runtime, then reconcile the view. The
-/// `??` unwraps two layers: the `spawn_blocking` join, then the scan's own
-/// `Result` (a bad root → `LibraryError::BadRoot`).
-async fn do_scan(pool: &SqlitePool, root: &Path) -> Result<ScanOutcome, LibraryError> {
+/// Hand the scanned batch to the plugins' `on_scan` and fold the extra genres
+/// they return into each media's genre set (case-insensitive dedup, the tag
+/// spelling wins). Never fails: a failing plugin is recorded on its side and
+/// simply contributes nothing.
+async fn enrich(report: &mut ScanReport, plugins: &PluginHandle) {
+    let inputs: Vec<ScanInput> = report
+        .media
+        .iter()
+        .map(|m| ScanInput {
+            rel_path: m.rel_path.clone(),
+            artist: m.artist.clone(),
+            title: m.title.clone(),
+            album: m.album.clone(),
+            year: m.year,
+            duration_ms: m.duration_ms,
+            genres: m.genres.clone(),
+            custom_tags: report.custom_tags.get(&m.rel_path).cloned().unwrap_or_default(),
+        })
+        .collect();
+    let extras = plugins.on_scan(inputs).await;
+    apply_extras(report, &extras);
+}
+
+/// Fold the plugins' extra genres into the report (pure; tested directly).
+fn apply_extras(report: &mut ScanReport, extras: &crate::plugin::ScanExtras) {
+    for m in report.media.iter_mut() {
+        let Some(add) = extras.get(&m.rel_path) else { continue };
+        for g in add {
+            let key = media_index::genre_key(g);
+            if !m.genres.iter().any(|x| media_index::genre_key(x) == key) {
+                m.genres.push(g.clone());
+            }
+        }
+    }
+}
+
+/// Run the blocking scan off the async runtime, let the plugins enrich it,
+/// then reconcile the view. The `??` unwraps two layers: the `spawn_blocking`
+/// join, then the scan's own `Result` (a bad root → `LibraryError::BadRoot`).
+async fn do_scan(
+    pool: &SqlitePool,
+    root: &Path,
+    plugins: Option<&PluginHandle>,
+) -> Result<ScanOutcome, LibraryError> {
     let root = root.to_path_buf();
-    let report: ScanReport = tokio::task::spawn_blocking(move || media::scan_library(&root))
+    let mut report: ScanReport = tokio::task::spawn_blocking(move || media::scan_library(&root))
         .await
         .map_err(|e| LibraryError::Join(e.to_string()))??;
+    if let Some(plugins) = plugins {
+        enrich(&mut report, plugins).await;
+    }
     let stats = media_index::replace_library(pool, &report.media, now_epoch_seconds()).await?;
     Ok(ScanOutcome { report, stats })
 }
@@ -197,6 +248,41 @@ mod tests {
         let missing = db_dir.path().join("nope/nested/missing");
         let lib = spawn(pool, missing);
         assert!(matches!(lib.scan().await, Err(LibraryError::BadRoot(_))));
+    }
+
+    #[tokio::test]
+    async fn plugin_genres_are_merged_and_indexed_in_media_genre() {
+        let db_dir = tempfile::tempdir().unwrap();
+        let pool = db::init(&db_dir.path().join("t.db")).await.unwrap();
+        let m = |rel: &str, genres: &[&str]| media::ScannedMedia {
+            rel_path: rel.into(),
+            title: None,
+            artist: None,
+            album: None,
+            year: None,
+            genres: genres.iter().map(|g| g.to_string()).collect(),
+            duration_ms: 1000,
+            size_bytes: 1,
+            mtime_ns: 1,
+        };
+        let mut report = ScanReport {
+            media: vec![m("talk.mp3", &["Talks"]), m("song.mp3", &["Rock"])],
+            ..Default::default()
+        };
+        let mut extras = crate::plugin::ScanExtras::new();
+        extras.insert("talk.mp3".into(), vec!["talks".into(), "news".into()]);
+        apply_extras(&mut report, &extras);
+        assert_eq!(report.media[1].genres, vec!["Rock".to_string()], "untouched");
+        assert_eq!(
+            report.media[0].genres,
+            vec!["Talks".to_string(), "news".to_string()],
+            "case-insensitive dedup, tag spelling wins"
+        );
+
+        media_index::replace_library(&pool, &report.media, 0).await.unwrap();
+        let rows = media_index::list(&pool, true, &["NEWS".to_string()]).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].rel_path, "talk.mp3");
     }
 
     #[tokio::test]

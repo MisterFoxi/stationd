@@ -96,15 +96,21 @@ async fn main() -> anyhow::Result<()> {
     // current grid (catch-up on start-up); it never resets an existing counter.
     let engine = GridEngine::new(db_pool.clone(), cfg.station.timezone.clone())
         .with_control(control.clone())
-        .with_plugins(plugins)
+        .with_plugins(plugins.clone())
         .with_media_root(cfg.media.library_path.clone());
     engine.sync_grid().await?;
     let schedule_service = ScheduleGrpc::new(engine);
 
     // Media library: single owning actor over the `media` view. The heavy scan
     // runs off the async runtime (spawn_blocking); scans are serialised by the
-    // actor's command loop. Reachable via `stationctl library scan|list`.
-    let library = stationd::library_actor::spawn(db_pool.clone(), cfg.media.library_path.clone());
+    // actor's command loop. Each scan goes through the plugins' `on_scan`
+    // (e.g. `TXXX:Type` → genre) before indexing. Reachable via `stationctl
+    // library scan|list`.
+    let library = stationd::library_actor::spawn_with(
+        db_pool.clone(),
+        cfg.media.library_path.clone(),
+        Some(plugins),
+    );
     let library_service = LibraryGrpc::new(library);
 
     let addr = cfg.server.grpc_bind.parse()?;

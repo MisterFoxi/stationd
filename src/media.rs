@@ -74,11 +74,29 @@ pub struct ScanSkip {
     pub reason: SkipReason,
 }
 
+/// One user-defined tag as found in the file, before any interpretation:
+/// ID3v2 `TXXX` (name = description), Vorbis comment and APE item (name =
+/// key), MP4 freeform atom (name = the part after `----:mean:`). A multi-valued
+/// tag yields one `CustomTag` per value. Names keep the case of the file.
+///
+/// Not persisted: the core catalogue stays closed to standard tags. These are
+/// scan-time input for the plugins' `on_scan` hook, which decides what (if
+/// anything) they become — e.g. `TXXX:Type = talks` → genre `talks`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CustomTag {
+    pub name: String,
+    pub value: String,
+}
+
 /// Outcome of a scan: the playable media plus everything deliberately left out.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ScanReport {
     pub media: Vec<ScannedMedia>,
     pub skipped: Vec<ScanSkip>,
+    /// User-defined tags per `rel_path` (only media that carry at least one).
+    /// Kept beside `media` rather than in `ScannedMedia`: transient plugin
+    /// input, never a column of the index.
+    pub custom_tags: std::collections::BTreeMap<String, Vec<CustomTag>>,
 }
 
 impl ScanReport {
@@ -133,11 +151,146 @@ fn parse_year(s: &str) -> Option<u32> {
     }
 }
 
-/// Read one audio file's tags + duration. Returns `Ok(ScannedMedia)` on
-/// success, `Err(SkipReason)` for a surfaced per-file failure.
-fn read_one(root: &Path, full: &Path) -> Result<ScannedMedia, SkipReason> {
+/// Push `value` under `name`, splitting ID3v2.4 multi-values (NUL-separated)
+/// and dropping blank names/values (nothing to say, not an error).
+fn push_custom(out: &mut Vec<CustomTag>, name: &str, value: &str) {
+    let name = name.trim();
+    if name.is_empty() {
+        return;
+    }
+    for v in value.split('\0') {
+        let v = v.trim();
+        if !v.is_empty() {
+            out.push(CustomTag { name: name.to_string(), value: v.to_string() });
+        }
+    }
+}
+
+fn id3v2_custom(tag: Option<&lofty::id3::v2::Id3v2Tag>, out: &mut Vec<CustomTag>) {
+    use lofty::id3::v2::Frame;
+    for frame in tag.into_iter().flatten() {
+        if let Frame::UserText(f) = frame {
+            push_custom(out, &f.description, &f.content);
+        }
+    }
+}
+
+fn vorbis_custom(tag: Option<&lofty::ogg::VorbisComments>, out: &mut Vec<CustomTag>) {
+    for (k, v) in tag.into_iter().flat_map(|t| t.items()) {
+        push_custom(out, k, v);
+    }
+}
+
+fn ape_custom(tag: Option<&lofty::ape::ApeTag>, out: &mut Vec<CustomTag>) {
+    for item in tag.into_iter().flatten() {
+        if let lofty::tag::ItemValue::Text(v) = item.value() {
+            push_custom(out, item.key(), v);
+        }
+    }
+}
+
+fn mp4_custom(tag: Option<&lofty::mp4::Ilst>, out: &mut Vec<CustomTag>) {
+    use lofty::mp4::{AtomData, AtomIdent};
+    for atom in tag.into_iter().flatten() {
+        if let AtomIdent::Freeform { name, .. } = atom.ident() {
+            for data in atom.data() {
+                if let AtomData::UTF8(v) = data {
+                    push_custom(out, name, v);
+                }
+            }
+        }
+    }
+}
+
+/// Parse the file ONCE with its concrete lofty type, harvest the user-defined
+/// tags from the raw tag (the generic `Tag` drops unknown `TXXX` & co.), then
+/// convert to the generic `TaggedFile` for the standard fields. Same parse
+/// options and extension-based type detection as `lofty::read_from_path`.
+fn read_tagged(
+    full: &Path,
+) -> Result<(lofty::file::TaggedFile, Vec<CustomTag>), lofty::error::LoftyError> {
+    use lofty::config::ParseOptions;
+    use lofty::file::{AudioFile, FileType, TaggedFile};
+    use lofty::probe::Probe;
+
+    let probe = Probe::open(full)?;
+    let Some(file_type) = probe.file_type() else {
+        // Unknown to lofty by extension: let the generic path report it.
+        return Ok((probe.read()?, Vec::new()));
+    };
+    let mut f = std::fs::File::open(full)?;
+    let opts = ParseOptions::new();
+    let mut custom = Vec::new();
+    let tagged: TaggedFile = match file_type {
+        FileType::Mpeg => {
+            let x = lofty::mpeg::MpegFile::read_from(&mut f, opts)?;
+            id3v2_custom(x.id3v2(), &mut custom);
+            ape_custom(x.ape(), &mut custom);
+            x.into()
+        }
+        FileType::Wav => {
+            let x = lofty::iff::wav::WavFile::read_from(&mut f, opts)?;
+            id3v2_custom(x.id3v2(), &mut custom);
+            x.into()
+        }
+        FileType::Aiff => {
+            let x = lofty::iff::aiff::AiffFile::read_from(&mut f, opts)?;
+            id3v2_custom(x.id3v2(), &mut custom);
+            x.into()
+        }
+        FileType::Flac => {
+            let x = lofty::flac::FlacFile::read_from(&mut f, opts)?;
+            vorbis_custom(x.vorbis_comments(), &mut custom);
+            x.into()
+        }
+        FileType::Vorbis => {
+            let x = lofty::ogg::VorbisFile::read_from(&mut f, opts)?;
+            vorbis_custom(Some(x.vorbis_comments()), &mut custom);
+            x.into()
+        }
+        FileType::Opus => {
+            let x = lofty::ogg::OpusFile::read_from(&mut f, opts)?;
+            vorbis_custom(Some(x.vorbis_comments()), &mut custom);
+            x.into()
+        }
+        FileType::Speex => {
+            let x = lofty::ogg::SpeexFile::read_from(&mut f, opts)?;
+            vorbis_custom(Some(x.vorbis_comments()), &mut custom);
+            x.into()
+        }
+        FileType::Mp4 => {
+            let x = lofty::mp4::Mp4File::read_from(&mut f, opts)?;
+            mp4_custom(x.ilst(), &mut custom);
+            x.into()
+        }
+        FileType::Ape => {
+            let x = lofty::ape::ApeFile::read_from(&mut f, opts)?;
+            id3v2_custom(x.id3v2(), &mut custom);
+            ape_custom(x.ape(), &mut custom);
+            x.into()
+        }
+        FileType::WavPack => {
+            let x = lofty::wavpack::WavPackFile::read_from(&mut f, opts)?;
+            ape_custom(x.ape(), &mut custom);
+            x.into()
+        }
+        FileType::Mpc => {
+            let x = lofty::musepack::MpcFile::read_from(&mut f, opts)?;
+            id3v2_custom(x.id3v2(), &mut custom);
+            ape_custom(x.ape(), &mut custom);
+            x.into()
+        }
+        // AAC (ADTS) and custom resolvers: no user-defined tag harvesting.
+        _ => probe.read()?,
+    };
+    Ok((tagged, custom))
+}
+
+/// Read one audio file's tags + duration. Returns the media and its
+/// user-defined tags on success, `Err(SkipReason)` for a surfaced per-file
+/// failure.
+fn read_one(root: &Path, full: &Path) -> Result<(ScannedMedia, Vec<CustomTag>), SkipReason> {
     use lofty::file::{AudioFile, TaggedFileExt};
-    use lofty::read_from_path;
     use lofty::tag::{Accessor, ItemKey};
 
     let rel_path = to_rel_path(root, full)
@@ -152,7 +305,8 @@ fn read_one(root: &Path, full: &Path) -> Result<ScannedMedia, SkipReason> {
         .map(|d| d.as_nanos() as i64)
         .unwrap_or(0);
 
-    let tagged = read_from_path(full).map_err(|e| SkipReason::Unreadable(e.to_string()))?;
+    let (tagged, custom_tags) =
+        read_tagged(full).map_err(|e| SkipReason::Unreadable(e.to_string()))?;
 
     let duration_ms = tagged.properties().duration().as_millis() as u64;
     if duration_ms == 0 {
@@ -173,17 +327,20 @@ fn read_one(root: &Path, full: &Path) -> Result<ScannedMedia, SkipReason> {
             None => (None, None, None, None, Vec::new()),
         };
 
-    Ok(ScannedMedia {
-        rel_path,
-        title,
-        artist,
-        album,
-        year,
-        genres,
-        duration_ms,
-        size_bytes,
-        mtime_ns,
-    })
+    Ok((
+        ScannedMedia {
+            rel_path,
+            title,
+            artist,
+            album,
+            year,
+            genres,
+            duration_ms,
+            size_bytes,
+            mtime_ns,
+        },
+        custom_tags,
+    ))
 }
 
 /// Walk `root` and read every audio-extension file. Per-file failures are
@@ -217,7 +374,12 @@ pub fn scan_library(root: &Path) -> Result<ScanReport, ScanError> {
         }
 
         match read_one(root, entry.path()) {
-            Ok(media) => report.media.push(media),
+            Ok((media, custom)) => {
+                if !custom.is_empty() {
+                    report.custom_tags.insert(media.rel_path.clone(), custom);
+                }
+                report.media.push(media);
+            }
             Err(reason) => {
                 let path = to_rel_path(root, entry.path())
                     .unwrap_or_else(|| entry.path().to_string_lossy().replace('\\', "/"));
@@ -331,5 +493,44 @@ mod tests {
             report.skipped[0].reason,
             SkipReason::Unreadable(_)
         ));
+    }
+
+    #[test]
+    fn user_defined_id3v2_tags_are_harvested_with_multi_values() {
+        use lofty::config::WriteOptions;
+        use lofty::file::AudioFile;
+        use lofty::id3::v2::Id3v2Tag;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("talk.wav");
+        write_wav(&path, 1);
+        // WAV carries ID3v2 like mp3 (same TXXX frames), without shipping a
+        // binary mp3 fixture.
+        let mut file = std::fs::OpenOptions::new().read(true).write(true).open(&path).unwrap();
+        let mut wav =
+            lofty::iff::wav::WavFile::read_from(&mut file, lofty::config::ParseOptions::new())
+                .unwrap();
+        let mut tag = Id3v2Tag::default();
+        tag.insert_user_text("Type".into(), "talks\0news".into());
+        tag.insert_user_text("Mood".into(), "calm".into());
+        wav.set_id3v2(tag);
+        drop(file);
+        wav.save_to_path(&path, WriteOptions::default()).unwrap();
+
+        let report = scan_library(dir.path()).unwrap();
+        assert_eq!(report.found(), 1);
+        let mut tags = report.custom_tags["talk.wav"].clone();
+        tags.sort_by(|a, b| (&a.name, &a.value).cmp(&(&b.name, &b.value)));
+        let flat: Vec<(&str, &str)> =
+            tags.iter().map(|t| (t.name.as_str(), t.value.as_str())).collect();
+        assert_eq!(flat, vec![("Mood", "calm"), ("Type", "news"), ("Type", "talks")]);
+        assert!(report.media[0].genres.is_empty(), "custom tags are not genres by themselves");
+    }
+
+    #[test]
+    fn media_without_user_defined_tags_have_no_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        write_wav(&dir.path().join("plain.wav"), 1);
+        assert!(scan_library(dir.path()).unwrap().custom_tags.is_empty());
     }
 }
