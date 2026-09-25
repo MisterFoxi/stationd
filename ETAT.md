@@ -87,19 +87,17 @@ l'antenne sans attendre un pull) :
   arrêt quand la règle gagnante change) — aujourd'hui `/next` répond
   `none/stream_unsupported` → fallback ;
 - **`AtClock hard`** : ✅ coupe à l'heure pile (2026-09-25, voir Fait) ;
-- **résolution à l'heure réelle de passage** (`remaining` envoyé par
-  Liquidsoap) : aujourd'hui la piste suivante est choisie une piste en avance
-  (changement de `DayPart`, `AtClock` soft, `Every` décalés d'une piste).
+- **résolution à l'heure réelle de passage** : ✅ (2026-09-25, voir Fait —
+  piste suivante demandée ~7 s avant la fin de la courante).
 
 Puis **étape 4 — fins de piste** : `unplayed_only` marqué automatiquement
 ✅ (2026-09-25, voir Fait) ; restent `TrackStarted`/`TrackFinished` aux
 plugins, compteur `Every` exact.
 Côté Icecast (échantillonnage livré, voir Fait) :
-- **stop-when-idle sans piste de trop** : aujourd'hui le passage
-  `draining → stopped` se fait au pull, et la piste déjà préparée passe
-  d'abord (le bruit arrive une piste plus tard qu'un `stop`). Proposé, non
-  tranché : un échantillon à 0 pendant `draining` pousse `flush` (comme
-  `stop` ; piste préparée d'override jamais vidée) ;
+- **stop-when-idle sans piste de trop** : largement réglé par la demande en
+  fin de piste (point 5) — le pull, qui décide `stopped`, n'arrive plus que
+  quelques secondes avant la fin. Reste le cas d'un échantillon à 0 reçu
+  après cette demande. Le `flush` pendant `draining` n'a plus d'intérêt ;
 - `X-Forwarded-For` : **tranché** (2.5 : sockets virtuels, cf.
   `Doc/liquidsoap.md`) ;
 - auditeurs **par mount** dans `ListenersSampled` (change le contrat
@@ -145,6 +143,35 @@ Autres, indépendants :
 ---
 
 ## Fait
+
+### — Piste suivante choisie à l'heure réelle de passage (2026-09-25) —
+
+Point 5 de la 0.1. Décision : Liquidsoap ne demande la suivante qu'en **fin
+de piste** — seul le script généré change, aucune logique stationd. Écarté :
+re-résoudre côté stationd par `flush` (la résolution a des effets de bord —
+curseur, quota de groupe, jeton `AtClock`, historique — qu'une piste jetée
+fausserait).
+
+- **`ls_script`** : `stationd.next` répond `null` sans appel HTTP tant que
+  `pull_raw.remaining() > stationd.lead` et pas `urgent` ;
+  `pull_lead_s()` = crossfade + retry (2 s) + `PULL_LEAD_MARGIN_S` (2 s) =
+  7 s par défaut ; `stationd.remaining` (ref de fonction, branchée après la
+  définition du pull) ; `cmd_skip` : si rien n'est préparé, `urgent` +
+  `pull_raw.fetch()` avant `source.skip`.
+- Tests : +1 (valeur de `lead`, garde avant l'appel, branchement de
+  `remaining`, ordre `fetch` → `skip`).
+- **Essai réel sur Liquidsoap 2.2.4** (ici ; 2.4 absente) : script généré,
+  syntaxe `null` → `null()` et `source.methods(x).on_track(…)` →
+  `x.on_track(…)` adaptées pour la 2.2 seulement, faux stationd Python,
+  pistes de 20 s, crossfade 3 s : `/next` à 7 s de chaque début de piste
+  (au lieu de 17 s), skip → suivante immédiate sans fallback, interrupt →
+  pull redemandé à la coupe, joué après l'insert.
+
+**Validation** : `cargo test --locked` vert (344). À valider sur la 2.4 de
+devstationd : relancer Liquidsoap (nouveau script) ; `ls status` → `next`
+vide la plupart du temps, rempli dans les dernières secondes ; journal
+stationd : les pulls arrivent ~7 s avant chaque `on air` ; un skip enchaîne
+sans fichier de secours.
 
 ### — `AtClock hard` : coupe à l'heure pile (2026-09-25) —
 
@@ -1476,9 +1503,11 @@ dans le découpage des modules (`grid_index` = A, `grid_store` = B).
   - Socket de contrôle en **0660** : l'utilisateur de stationd doit être dans
     le groupe de Liquidsoap ; chemin < 108 octets. En Docker :
     `/run/stationd/liquidsoap.sock` (hors du dépôt monté).
-  - Une piste est résolue **une piste en avance** (préchargement
-    `request.dynamic`) : `schedule next` consomme une vraie piste — ne pas
-    l'utiliser quand Liquidsoap tourne.
+  - La piste suivante est résolue **~7 s avant la fin** de la courante
+    (`stationd.lead` dans le `.liq`) ; `schedule next` consomme toujours une
+    vraie piste — ne pas l'utiliser quand Liquidsoap tourne.
+  - Nouveau script `.liq` (point 5) : **relancer Liquidsoap** après la mise
+    à jour de stationd (`s6-svc -r /run/service/liquidsoap`).
   - Écriture via le pont fichiers : une écriture a déjà été signalée réussie
     avec l'ancien contenu → **relire après écriture** (cmp) avant de compiler.
     Reproduit le 2026-09-24 (dépôt `device_commit_files` réutilisant un

@@ -40,8 +40,35 @@ radio  → normalize/compress (option) → %include custom → output.icecast
 `/track` : `rid` connu = une de nos pistes démarre réellement → compteur de
 pistes station (`Every` au compteur) ; `kind = halted|fallback` = une source
 propre à Liquidsoap. Visible dans `stationctl ls status` : `on air` (en cours)
-et `next` (la piste préchargée — Liquidsoap en demande une d'avance, au
-démarrage de la courante).
+et `next` (la piste préparée, demandée quelques secondes avant la fin de la
+courante — vide le reste du temps, c'est normal).
+
+### Piste suivante demandée en fin de piste (2026-09-25)
+
+`request.dynamic` garde une requête d'avance : laissé tel quel, il
+demanderait la suivante **au démarrage** de la courante, et stationd la
+choisirait une piste entière avant sa diffusion (`DayPart`, `AtClock` soft,
+`Every`, historique : tout décalé d'une piste). La fonction du pull
+(`stationd.next`) répond donc « rien pour l'instant » **sans appeler
+stationd** tant que la piste en cours a plus de `stationd.lead` secondes à
+jouer (`pull_raw.remaining()`) ; `request.dynamic` réessaie à son délai
+(2 s). `lead` = chevauchement du crossfade + délai de réessai + 2 s de marge
+(**7 s** par défaut, 4 s sans crossfade) : la suivante est choisie ~5–7 s
+avant la fin, ~8–10 s avant d'être entendue. Au démarrage, après une fin de
+piste, ou durée restante inconnue (-1) : demande immédiate.
+
+- **skip** : rien n'est préparé d'avance la plupart du temps → `urgent`
+  levé et `pull_raw.fetch()` **avant** `source.skip` (sinon le fichier de
+  secours comblerait le trou).
+- **interrupt** (override / `AtClock` hard) : la piste coupée est sautée, le
+  pull (sans piste) redemande tout de suite, pendant l'insert.
+- **stop / override soft** : le `flush` n'a en général plus rien à vider ;
+  la demande de fin de piste reçoit `halted` / l'override.
+- Validé contre Liquidsoap **2.2.4** (script généré, adapté à la syntaxe
+  `null()` de la 2.2 pour l'essai, face à un faux stationd ; pistes de 20 s,
+  crossfade 3 s) : `/next` 7 s avant chaque début de piste (au lieu de 17 s) ;
+  skip → piste suivante immédiate, pas de fallback ; interrupt → pull
+  redemandé à la coupe, piste jouée après l'insert. À confirmer sur la 2.4.
 
 ### `AtClock` hard : coupe à l'heure pile (2026-09-25)
 
@@ -175,9 +202,10 @@ Constats Icecast 2.5.0 : erreurs en enveloppe `<report>` (reportxml) avec
 `<incident><state><text>` ; plus de `<bitrate>` par source ; titre mp3 en
 une seule chaîne (`title` = `display-title` = `x_icy_title`).
 
-Limite connue : le passage `draining → stopped` a lieu au pull suivant ; la
-piste déjà préparée par Liquidsoap passe d'abord (une piste de plus qu'un
-`stop`).
+Le passage `draining → stopped` a lieu au pull suivant, désormais demandé
+en fin de piste : le bruit arrive à la fin de la piste en cours (plus de
+piste de trop, sauf échantillon à 0 reçu dans les dernières secondes, après
+la demande).
 
 ### `icecast.xml` généré (`[icecast.server]`)
 
@@ -298,14 +326,16 @@ de systemd = groupe ou utilisateur de l'unité inexistant.
 
 ## Limites connues (étapes suivantes)
 
-- **Résolution une piste en avance** : `request.dynamic` demande la suivante
-  quand la courante démarre. Journal de diffusion, jeton `AtClock`, reset
-  `Every` sont écrits à la résolution. Un override soft / un stop agit après
-  la piste déjà préparée. → étape 3 (`remaining`) + `flush` (étape 2).
+- **Résolution quelques secondes avant la fin** (plus une piste en avance) :
+  un `AtClock` soft dont le repère tombe dans ces dernières secondes passe
+  une piste plus tard (pour l'heure pile : `hard`). Un `flush` qui tombe
+  après la demande de fin de piste jette encore une piste déjà résolue
+  (effets de bord gardés) — rare désormais.
 - **Remote** : non relayé (`none/stream_unsupported`, warn) → étape 3
   (`input.http` piloté par une tâche stationd).
 - **Coupe sèche** d'un override hard ou d'un `AtClock` hard (pas de fondu
   sur la piste coupée).
 - **Compteur `Every` au compteur** : avancé à chaque démarrage réel de piste ;
-  avec le préchargement, la piste `Every` elle-même peut compter pour 1.
+  la piste suivante étant résolue avant le démarrage de la courante (de
+  quelques secondes), la piste `Every` elle-même peut compter pour 1.
 - Encodage : mp3 seulement.

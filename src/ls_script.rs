@@ -5,7 +5,9 @@
 //! script is only an air chain plus the bridge back to stationd:
 //!
 //! ```text
-//! pull   = request.dynamic(POST /ls/v1/next)   # stationd resolves every track
+//! pull   = request.dynamic(POST /ls/v1/next)   # stationd resolves every track,
+//!                                              # asked only near the end of the
+//!                                              # current one (real air time)
 //! pull   = cross(pull)                         # optional crossfade
 //! radio  = fallback(track_sensitive=false, [
 //!            pull,
@@ -27,6 +29,17 @@
 //! Liquidsoap), while the pull source always does — when it starts being
 //! read, i.e. at the start of the transition.
 //!
+//! The next track is asked for LATE: `request.dynamic` keeps one request
+//! ahead, which would make stationd choose it a whole track before it airs
+//! (a day part, an `every`, the history, all one track off). The pull
+//! function therefore answers "nothing yet" while the current track has more
+//! than [`pull_lead_s`] left, without calling stationd (`request.dynamic`
+//! re-polls every retry delay): the choice happens a few seconds before the
+//! track airs. At start-up, after a track ended, or when the remaining time is
+//! unknown, it asks at once. A skip must not wait: it raises `urgent` and
+//! fetches the next track synchronously before skipping (no gap filled by the
+//! safety file).
+//!
 //! Every user-provided string is emitted through [`liq_string`], which also
 //! neutralises Liquidsoap's `#{…}` interpolation.
 
@@ -45,6 +58,21 @@ const PULL_RETRY_S: f64 = 2.0;
 const HTTP_TIMEOUT_S: f64 = 5.0;
 /// Timeout for preparing one request (file resolution), seconds.
 const REQUEST_TIMEOUT_S: f64 = 20.0;
+/// Margin, beyond the crossfade and one retry delay, for stationd to answer
+/// and Liquidsoap to prepare the next track before it is needed.
+const PULL_LEAD_MARGIN_S: f64 = 2.0;
+
+/// How long before the end of the current track (seconds of it left) the next
+/// one is asked for: the crossfade overlap (the next track must be ready when
+/// the mix starts) + one pull retry delay (the pull re-polls at that period)
+/// + [`PULL_LEAD_MARGIN_S`]. 7 s with the default crossfade.
+pub fn pull_lead_s(ls: &LiquidsoapConfig) -> f64 {
+    let overlap = match ls.crossfade.mode {
+        CrossfadeMode::Simple => ls.crossfade.duration,
+        CrossfadeMode::None => 0.0,
+    };
+    overlap + PULL_RETRY_S + PULL_LEAD_MARGIN_S
+}
 
 /// A Liquidsoap string literal. Escapes `\` and `"`, turns control chars into
 /// escapes, and splits every `#{` so Liquidsoap never interpolates it:
@@ -140,6 +168,14 @@ let stationd.last_kind = ref("")
 # second around a track end (seen on a real Liquidsoap). Bounds the polling to
 # one call per retry delay — also the resume latency.
 let stationd.next_not_before = ref(0.)
+# The next track is asked for only when the current one has at most this many
+# seconds left (see `stationd.next`): chosen at its real air time.
+let stationd.lead = {lead}
+# Raised by a skip: ask stationd now, whatever the current track has left.
+let stationd.urgent = ref(true)
+# Seconds left in the current pull track (-1. = unknown / none). Set once the
+# pull source exists (it is defined after the function that reads this).
+let stationd.remaining = ref(fun () -> -1.)
 
 def stationd.post(endpoint, payload) =
   try
@@ -204,9 +240,16 @@ def stationd.fetch_next() =
 end
 
 def stationd.next() =
-  if time() < stationd.next_not_before() then
+  remaining = stationd.remaining()
+  left = remaining()
+  if not stationd.urgent() and left > stationd.lead then
+    # Too early: the current track still has more than `lead` s to go.
+    # Nothing asked; request.dynamic polls again after its retry delay.
+    null
+  elsif time() < stationd.next_not_before() then
     null
   else
+    stationd.urgent := false
     r = stationd.fetch_next()
     if not null.defined(r) then
       stationd.next_not_before := time() + {retry}
@@ -229,6 +272,7 @@ end
         token = liq_string(&ls.api_token),
         http_timeout = liq_float(HTTP_TIMEOUT_S),
         retry = liq_float(PULL_RETRY_S),
+        lead = liq_float(pull_lead_s(ls)),
     ));
 
     // ── sources ───────────────────────────────────────────────────────────
@@ -237,7 +281,8 @@ end
          pull = request.dynamic(id=\"stationd_pull\", retry_delay={retry}, timeout={rto}, stationd.next)\n\
          source.methods(pull).on_track(synchronous=false, fun (m) -> stationd.report(m[\"stationd_rid\"], \"\"))\n\
          # Skip target: the track source itself, before the crossfade.\n\
-         pull_raw = pull\n",
+         pull_raw = pull\n\
+         stationd.remaining := fun () -> pull_raw.remaining()\n",
         retry = liq_float(PULL_RETRY_S),
         rto = liq_float(REQUEST_TIMEOUT_S),
     ));
@@ -311,7 +356,14 @@ def stationd.cmd_resume(_) =
   "OK"
 end
 
+# The next track is normally asked for only near the end of the current one:
+# fetch it NOW (urgent) before skipping, or the safety file would fill the gap.
 def stationd.cmd_skip(_) =
+  if list.length(pull_raw.queue()) == 0 then
+    stationd.urgent := true
+    stationd.next_not_before := 0.
+    ignore(pull_raw.fetch())
+  end
   source.skip(pull_raw)
   log.important(label="stationd", "skip")
   "OK"
@@ -525,6 +577,35 @@ mod tests {
         assert!(s.contains("public=false"));
         assert!(!s.contains("normalize("));
         assert!(!s.contains("%include"));
+    }
+
+    #[test]
+    fn the_next_track_is_asked_for_near_the_end_of_the_current_one() {
+        // lead = crossfade overlap + one retry delay + margin.
+        assert_eq!(pull_lead_s(&cfg()), 3.0 + 2.0 + 2.0);
+        let mut none = cfg();
+        none.crossfade.mode = CrossfadeMode::None;
+        assert_eq!(pull_lead_s(&none), 4.0);
+
+        let s = render(&cfg(), "R");
+        assert!(s.contains("let stationd.lead = 7."));
+        assert!(s.contains("let stationd.urgent = ref(true)"));
+        // The gate: too early → nothing asked (no HTTP call), unless urgent.
+        let gate = s.find("if not stationd.urgent() and left > stationd.lead then").unwrap();
+        let ask = s.find("r = stationd.fetch_next()").unwrap();
+        assert!(gate < ask);
+        assert!(s[gate..ask].contains("stationd.urgent := false"));
+        // The remaining time comes from the pull source once it exists.
+        let pull = s.find("pull = request.dynamic(").unwrap();
+        let wired = s.find("stationd.remaining := fun () -> pull_raw.remaining()").unwrap();
+        assert!(pull < wired);
+        // A skip fetches the next track (urgent) BEFORE skipping.
+        let skip = s.find("def stationd.cmd_skip(_) =").unwrap();
+        let body = &s[skip..s[skip..].find("\nend\n").unwrap() + skip];
+        let fetch = body.find("ignore(pull_raw.fetch())").unwrap();
+        assert!(body.find("stationd.urgent := true").unwrap() < fetch);
+        assert!(fetch < body.find("source.skip(pull_raw)").unwrap());
+        assert!(body.contains("if list.length(pull_raw.queue()) == 0 then"));
     }
 
     #[test]

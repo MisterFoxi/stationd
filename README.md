@@ -225,8 +225,9 @@ script at start-up from the `[liquidsoap]` config section. Liquidsoap runs
 under its own service, so restarting stationd never cuts the air.
 
 - **Pull:** Liquidsoap asks `POST /ls/v1/next` on a loopback HTTP bridge
-  (shared token) for every track, and reports what really starts airing on
-  `POST /ls/v1/track`.
+  (shared token) for every track — only a few seconds before the current one
+  ends, so the choice is made at the real air time — and reports what really
+  starts airing on `POST /ls/v1/track`.
 - **Control socket:** stationd sends `pause`, `resume`, `skip`, `flush` and
   `interrupt` to Liquidsoap for immediate actions.
 - **Air chain:** stationd's tracks, then background noise while the station
@@ -477,17 +478,13 @@ ETAT.md              development log / hand-over notes (French)
 ## Roadmap
 
 **Liquidsoap, step 3 — stationd acting on the air on its own:**
-- relay of `remote` streams (`input.http` driven by stationd);
-- tracks chosen for their actual air time (today the next track is chosen
-  one track ahead).
+- relay of `remote` streams (`input.http` driven by stationd).
 
 **Liquidsoap, step 4 — end of track:**
 - `TrackStarted` / `TrackFinished` events for plugins;
 - exact track counting for `every` rules.
 
 **Icecast:**
-- `stop-when-idle` without an extra track: drop the prepared track when a
-  zero sample arrives while draining (today the stop comes one track late);
 - listeners per mount in `ListenersSampled`;
 
 **Later:**
