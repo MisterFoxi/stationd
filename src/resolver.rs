@@ -147,10 +147,12 @@ pub enum ClockAnchor {
 pub enum Mode {
     /// Waits for the next track boundary.
     Soft,
-    /// Preempts (duck/fade) to hit the target instant exactly. NB: the actual
-    /// mid-track preemption is driven by a wall timer outside this function;
-    /// here `Hard` only affects *priority* when several rules are due at the
-    /// same boundary.
+    /// Cuts in to hit the target instant exactly. NB: the actual mid-track
+    /// cut is driven by a wall timer outside this function (the AtClock
+    /// ticker, `ls_control::spawn_at_clock_ticker` →
+    /// `GridEngine::air_at_clock_hard`); here `Hard` only affects *priority*
+    /// when several rules are due at the same boundary — and a mark the
+    /// timer could not cut (late, station halted) airs soft that way.
     Hard,
 }
 

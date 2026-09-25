@@ -1006,43 +1006,7 @@ impl GridEngine {
             let Some(playlist_ref) = decision.playlist_ref.clone() else {
                 continue;
             };
-            // Bounded re-pick: a chosen file that vanished from disk (between
-            // scans) is flipped unavailable in the index and we re-pick from
-            // the same source. Capped so a pool of dead entries can't spin.
-            const MAX_DEAD_PICKS: u32 = 32;
-            let mut produced: Option<crate::selection::Resolved> = None;
-            for _ in 0..MAX_DEAD_PICKS {
-                match crate::selection::resolve_ref_with_plugins(
-                    &self.pool,
-                    self.plugins.as_ref(),
-                    now.0,
-                    &playlist_ref,
-                )
-                .await
-                {
-                    // A remote stream: no file on disk to check, no re-pick.
-                    Ok(stream @ crate::selection::Resolved::Stream(_)) => {
-                        produced = Some(stream);
-                        break;
-                    }
-                    Ok(crate::selection::Resolved::File { path, leaf }) if self.media_exists(&path) => {
-                        produced = Some(crate::selection::Resolved::File { path, leaf });
-                        break;
-                    }
-                    Ok(crate::selection::Resolved::File { path: missing, .. }) => {
-                        tracing::warn!(
-                            media = %missing,
-                            "resolved media missing on disk; marking unavailable and re-picking"
-                        );
-                        crate::media_index::mark_unavailable(&self.pool, &missing).await?;
-                        continue;
-                    }
-                    Err(crate::selection::SelectionError::PoolEmpty) => break,
-                    // A config error (unknown ref, unsupported order/mode, bad
-                    // filter value) is not an empty pool — surface it.
-                    Err(e) => return Err(EngineError::Selection(e)),
-                }
-            }
+            let produced = self.produce(&playlist_ref, now).await?;
 
             if let Some(resolved) = produced {
                 // Persist effects only now that this source actually produced.
@@ -1091,6 +1055,151 @@ impl GridEngine {
             override_source: None,
             leaf_ref: None,
         })
+    }
+
+    /// Resolve one grid source to something playable NOW: plugins,
+    /// constraints, and a bounded re-pick when the chosen file vanished from
+    /// disk (flipped unavailable in the index). `None` = the source produced
+    /// nothing usable (empty pool) — the caller falls through. A config error
+    /// (unknown ref, unsupported order/mode, bad filter) is surfaced.
+    async fn produce(
+        &self,
+        playlist_ref: &str,
+        now: Epoch,
+    ) -> Result<Option<crate::selection::Resolved>, EngineError> {
+        // Capped so a pool of dead entries can't spin.
+        const MAX_DEAD_PICKS: u32 = 32;
+        for _ in 0..MAX_DEAD_PICKS {
+            match crate::selection::resolve_ref_with_plugins(
+                &self.pool,
+                self.plugins.as_ref(),
+                now.0,
+                playlist_ref,
+            )
+            .await
+            {
+                // A remote stream: no file on disk to check, no re-pick.
+                Ok(stream @ crate::selection::Resolved::Stream(_)) => return Ok(Some(stream)),
+                Ok(crate::selection::Resolved::File { path, leaf }) if self.media_exists(&path) => {
+                    return Ok(Some(crate::selection::Resolved::File { path, leaf }));
+                }
+                Ok(crate::selection::Resolved::File { path: missing, .. }) => {
+                    tracing::warn!(
+                        media = %missing,
+                        "resolved media missing on disk; marking unavailable and re-picking"
+                    );
+                    crate::media_index::mark_unavailable(&self.pool, &missing).await?;
+                }
+                Err(crate::selection::SelectionError::PoolEmpty) => return Ok(None),
+                Err(e) => return Err(EngineError::Selection(e)),
+            }
+        }
+        Ok(None)
+    }
+
+    /// The next `AtClock` **hard** rendez-vous at or after `now` — or one
+    /// that fell at most [`HARD_CUT_LATE_S`] ago and is still untaken (a
+    /// timer that woke a little late must still cut). Walks the minute
+    /// boundaries with the resolver itself, restricted to the enabled hard
+    /// AtClock rules and the real playback state (a consumed occurrence is
+    /// skipped), over at most [`HARD_MARK_LOOKAHEAD_MIN`] minutes: timezone,
+    /// DST and tokens are the resolver's, never recomputed here. `None` =
+    /// no hard mark in that window (the ticker re-plans later).
+    pub async fn next_hard_mark(&self, now: Epoch) -> Result<Option<Epoch>, EngineError> {
+        let loaded = grid_index::load_grid(&self.pool).await?;
+        let hard = Grid {
+            rules: loaded
+                .rules
+                .into_iter()
+                .filter(|r| {
+                    r.enabled
+                        && matches!(
+                            r.kind,
+                            RuleKind::AtClock { mode: crate::resolver::Mode::Hard, .. }
+                        )
+                })
+                .collect(),
+        };
+        if hard.rules.is_empty() {
+            return Ok(None);
+        }
+        let state = grid_store::load_playback_state(&self.pool).await?;
+        let this_minute = now.0 - now.0.rem_euclid(60);
+        let first = if now.0 - this_minute <= HARD_CUT_LATE_S { this_minute } else { this_minute + 60 };
+        for i in 0..HARD_MARK_LOOKAHEAD_MIN {
+            let at = Epoch(first + i * 60);
+            let local = clock::to_local_now(at, &self.tz)?;
+            // A rendez-vous FALLS on this minute — not an older one still due
+            // (within its expiry): its occurrence token names this HH:MM.
+            let this_mark = format!("T{:02}:{:02}", local.wall.hour, local.wall.minute);
+            let due = resolve_ranked(local, &hard, &state).into_iter().any(|d| {
+                d.origin == Origin::AtClockHard
+                    && d.mark_taken.as_deref().is_some_and(|t| t.ends_with(&this_mark))
+            });
+            if due {
+                return Ok(Some(at));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Air the `AtClock` hard rendez-vous `mark` NOW, mid-track (the caller
+    /// cuts it in). Cuts only when it is really time: `now` within
+    /// [`HARD_CUT_LATE_S`] after `mark`, the station on air (not paused /
+    /// stopped), and the resolver giving an untaken `AtClockHard` due now.
+    /// Its source is resolved like a pull (plugins, constraints, re-pick) and
+    /// its occurrence token consumed, so the next pull does not air it again.
+    /// `None` = no cut: the token stays free and the rule airs **soft** at the
+    /// next track boundary, within its `expiry` (a paused station, a restart
+    /// or a clock jump past the mark, an empty pool…).
+    pub async fn air_at_clock_hard(
+        &self,
+        mark: Epoch,
+        now: Epoch,
+    ) -> Result<Option<ResolvedDecision>, EngineError> {
+        let late = now.0 - mark.0;
+        if !(0..=HARD_CUT_LATE_S).contains(&late) {
+            tracing::info!(mark = mark.0, late, "AtClock hard: not on time, no cut (soft at the next boundary)");
+            return Ok(None);
+        }
+        if let Gate::Halt(state) = self.control.gate() {
+            tracing::info!(state = state.as_str(), "AtClock hard: station halted, no cut (soft once it airs again)");
+            return Ok(None);
+        }
+        let local = clock::to_local_now(now, &self.tz)?;
+        let mark_local = clock::to_local_now(mark, &self.tz)?;
+        let this_mark = format!("T{:02}:{:02}", mark_local.wall.hour, mark_local.wall.minute);
+        let grid = grid_index::load_grid(&self.pool).await?;
+        let state = grid_store::load_playback_state(&self.pool).await?;
+        // The hard rendez-vous of THIS mark (not an older one still due).
+        let Some(decision) = resolve_ranked(local, &grid, &state).into_iter().find(|d| {
+            d.origin == Origin::AtClockHard
+                && d.mark_taken.as_deref().is_some_and(|t| t.ends_with(&this_mark))
+        }) else {
+            return Ok(None); // already aired by a pull at this boundary, or not due
+        };
+        let Some(playlist_ref) = decision.playlist_ref.clone() else {
+            return Ok(None);
+        };
+        let Some(resolved) = self.produce(&playlist_ref, now).await? else {
+            tracing::warn!(
+                rule = decision.rule_id.as_deref().unwrap_or("-"),
+                playlist = %playlist_ref,
+                "AtClock hard: its source produced nothing, no cut"
+            );
+            return Ok(None);
+        };
+        self.persist_effects(&decision, now).await?;
+        let (media_path, stream, leaf_ref) = self.log_start(resolved, now).await?;
+        self.emit_resolved(&decision, Some(&media_path), format!("{:?}", decision.origin));
+        Ok(Some(ResolvedDecision {
+            decision,
+            media_path: Some(media_path),
+            stream,
+            halted: None,
+            override_source: None,
+            leaf_ref,
+        }))
     }
 
     /// The override layer: air the head of the override queue, if any. A media
@@ -1243,6 +1352,15 @@ impl GridEngine {
     }
 }
 
+/// How late (seconds) an `AtClock` hard rendez-vous may still be cut in:
+/// the ticker waking a little after the mark. Later (a restart, a clock
+/// jump), no cut — the rule airs soft at the next boundary instead.
+pub const HARD_CUT_LATE_S: i64 = 10;
+
+/// How far ahead (minutes) the next hard rendez-vous is searched; the
+/// ticker re-plans at least every minute anyway.
+pub const HARD_MARK_LOOKAHEAD_MIN: i64 = 60;
+
 /// Slack between the time a track really spent on air and its indexed
 /// duration for it to count as played to the end: covers the crossfade (the
 /// next track starts before this one ends — 3 s by default) and the
@@ -1392,6 +1510,116 @@ mod tests {
         // Same mark again (09:16 still floors to :15) → already consumed → base.
         let second = eng.next(at(9, 16)).await.unwrap();
         assert_eq!(second.origin, Origin::BaseRotation);
+    }
+
+    // ----- AtClock hard: the timer's side ---------------------------------
+
+    /// `music` floor + `news` AtClock HARD every 15 min (+ an optional soft
+    /// jingle rule), each playlist one file.
+    async fn hard_fixture(with_soft: bool) -> (tempfile::TempDir, GridEngine) {
+        let (dir, eng) = engine().await;
+        let m = |p: &str| crate::media::ScannedMedia {
+            rel_path: p.into(),
+            title: None,
+            artist: None,
+            album: None,
+            year: None,
+            genres: vec![],
+            duration_ms: 60_000,
+            size_bytes: 1,
+            mtime_ns: 0,
+        };
+        crate::media_index::replace_library(&eng.pool, &[m("music/a.mp3"), m("news/n.mp3"), m("jingle/j.mp3")], 1000)
+            .await
+            .unwrap();
+        for r in ["music", "news", "jingle"] {
+            let toml = format!(
+                "name = \"{r}\"\n[selection]\nmode = \"dynamic\"\norder = \"shuffle\"\n\
+                 [[selection.filter]]\nfield = \"path\"\nop = \"prefix\"\nvalue = \"{r}/\"\n"
+            );
+            let pl = crate::playlist::Playlist::parse(&toml).unwrap();
+            crate::store::upsert(&eng.pool, r, &pl, &toml, Some(r)).await.unwrap();
+        }
+        insert_rule(&eng.pool, &rule("floor", RuleKind::BaseRotation { playlist_ref: "music".into() }))
+            .await
+            .unwrap();
+        let clock_rule = |id: &str, r: &str, n: u32, mode: Mode| {
+            rule(
+                id,
+                RuleKind::AtClock {
+                    playlist_ref: r.into(),
+                    anchor: ClockAnchor::EveryMinutes(n),
+                    mode,
+                    expiry_secs: Some(600),
+                },
+            )
+        };
+        insert_rule(&eng.pool, &clock_rule("news", "news", 15, Mode::Hard)).await.unwrap();
+        if with_soft {
+            insert_rule(&eng.pool, &clock_rule("jingle", "jingle", 5, Mode::Soft)).await.unwrap();
+        }
+        (dir, eng)
+    }
+
+    #[tokio::test]
+    async fn next_hard_mark_is_the_next_hard_rendez_vous_only() {
+        let (_d, eng) = hard_fixture(true).await;
+        // 09:07:30 → 09:15:00 (the soft :10 jingle mark is not a hard mark).
+        assert_eq!(eng.next_hard_mark(Epoch(at(9, 7).0 + 30)).await.unwrap(), Some(at(9, 15)));
+        // Exactly on the mark, and a few seconds after it: still this mark.
+        assert_eq!(eng.next_hard_mark(at(9, 15)).await.unwrap(), Some(at(9, 15)));
+        assert_eq!(eng.next_hard_mark(Epoch(at(9, 15).0 + 8)).await.unwrap(), Some(at(9, 15)));
+        // Past the grace: the next one.
+        assert_eq!(eng.next_hard_mark(Epoch(at(9, 15).0 + 30)).await.unwrap(), Some(at(9, 30)));
+        // Once the 09:15 occurrence is consumed, it is skipped.
+        eng.air_at_clock_hard(at(9, 15), at(9, 15)).await.unwrap().unwrap();
+        assert_eq!(eng.next_hard_mark(at(9, 15)).await.unwrap(), Some(at(9, 30)));
+    }
+
+    #[tokio::test]
+    async fn next_hard_mark_is_none_without_hard_rules() {
+        let (_d, eng) = engine().await;
+        insert_rule(&eng.pool, &rule("floor", RuleKind::BaseRotation { playlist_ref: "music".into() }))
+            .await
+            .unwrap();
+        assert_eq!(eng.next_hard_mark(at(9, 0)).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn a_hard_mark_on_time_airs_now_and_is_consumed() {
+        let (_d, eng) = hard_fixture(false).await;
+        let r = eng.air_at_clock_hard(at(9, 15), Epoch(at(9, 15).0 + 2)).await.unwrap().unwrap();
+        assert_eq!(r.media_path.as_deref(), Some("news/n.mp3"));
+        assert_eq!(r.decision.origin, Origin::AtClockHard);
+        assert_eq!(r.leaf_ref.as_deref(), Some("news"));
+        // The next pull at the same mark does not air it again.
+        let pull = eng.next_media(Epoch(at(9, 15).0 + 5)).await.unwrap();
+        assert_eq!(pull.media_path.as_deref(), Some("music/a.mp3"));
+        // Nor does a second cut.
+        assert!(eng.air_at_clock_hard(at(9, 15), Epoch(at(9, 15).0 + 5)).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_late_hard_mark_is_not_cut_and_stays_soft() {
+        let (_d, eng) = hard_fixture(false).await;
+        // 30 s late (restart, clock jump): no cut…
+        assert!(eng.air_at_clock_hard(at(9, 15), Epoch(at(9, 15).0 + 30)).await.unwrap().is_none());
+        // …the occurrence is still free: the next pull airs it (soft path).
+        let pull = eng.next_media(Epoch(at(9, 16).0)).await.unwrap();
+        assert_eq!(pull.media_path.as_deref(), Some("news/n.mp3"));
+        // Too early is not a cut either.
+        assert!(eng.air_at_clock_hard(at(9, 30), Epoch(at(9, 30).0 - 1)).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_paused_station_is_not_cut_and_airs_the_mark_once_resumed() {
+        use crate::station_control::ControlAction;
+        let (_d, eng) = hard_fixture(false).await;
+        eng.control().apply(ControlAction::Pause, "cli").unwrap();
+        assert!(eng.air_at_clock_hard(at(9, 15), at(9, 15)).await.unwrap().is_none());
+        eng.control().apply(ControlAction::Resume, "cli").unwrap();
+        let pull = eng.next_media(Epoch(at(9, 17).0)).await.unwrap();
+        assert_eq!(pull.media_path.as_deref(), Some("news/n.mp3"), "within expiry: soft");
     }
 
     async fn preview_leaves(pool: &SqlitePool, refs: &[&str]) {

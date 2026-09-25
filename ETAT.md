@@ -86,8 +86,7 @@ l'antenne sans attendre un pull) :
 - **relais des flux `remote`** : `input.http` piloté par stationd (démarrage /
   arrêt quand la règle gagnante change) — aujourd'hui `/next` répond
   `none/stream_unsupported` → fallback ;
-- **`AtClock hard`** : rendez-vous à l'heure pile (coupe, même mécanique que
-  l'override hard) ;
+- **`AtClock hard`** : ✅ coupe à l'heure pile (2026-09-25, voir Fait) ;
 - **résolution à l'heure réelle de passage** (`remaining` envoyé par
   Liquidsoap) : aujourd'hui la piste suivante est choisie une piste en avance
   (changement de `DayPart`, `AtClock` soft, `Every` décalés d'une piste).
@@ -125,14 +124,61 @@ Autres, indépendants :
 - **Refacto acteur `GridEngine`** (gabarit `library_actor`).
 - **Câblage Liquidsoap** : étapes 1 et 2 terminées (2026-09-24, voir Fait +
   `Doc/liquidsoap.md`) ; étape 3 = tâche d'entrée ci-dessus.
+- **Redémarrage de stationd = pont amnésique** (constaté en réel le
+  2026-09-25) : l'état du pont (pulls, `on air`, pistes préparées) est en
+  mémoire ; Liquidsoap continue sa piste et ne rappelle `/next` / `/track`
+  qu'au début de la suivante. Conséquences : `ls status` vide jusqu'au
+  prochain changement de piste ; la piste préparée par l'ancienne instance
+  démarre en `unknown request id` ; ces deux pistes ne sont **jamais
+  marquées `unplayed_only`**. Piste proposée (non tranchée, à faire plus
+  tard) : (1) pistes auto-décrites — l'annotation porte aussi média et
+  feuille, renvoyés sur `/track` ; (2) resynchronisation au démarrage — demander
+  à Liquidsoap, par le socket, ce qui est à l'antenne et depuis quand.
+- Journaux : stationd en **UTC** (`…Z`), Liquidsoap en heure locale —
+  lecture croisée pénible ; journaliser stationd en heure locale (à faire).
 - Petits restes Liquidsoap : validation au chargement plus stricte (jeton
   ASCII obligatoire, fichier fallback/bruit absent = démarrage refusé — proposé,
-  non tranché) ; bloc `[[plugin]]` égaré en fin de `Cargo.toml` (warning
-  `unused manifest key`) ; fondu sur la coupe d'un override hard.
+  non tranché ; à étendre à « illisible par Liquidsoap », vu en Docker) ;
+  fondu sur la coupe d'un override hard. (Bloc `[[plugin]]` égaré de
+  `Cargo.toml` : retiré le 2026-09-25.)
 
 ---
 
 ## Fait
+
+### — `AtClock hard` : coupe à l'heure pile (2026-09-25) —
+
+Point 4 de la 0.1. Décisions : une **tâche horloge** dans stationd (pas dans
+Liquidsoap) ; la coupe reprend celle de l'override hard (`flush` +
+`interrupt`) ; coupe seulement à **≤ 10 s** du repère, station à l'antenne,
+repère non consommé — sinon **dégradé en soft** (jeton laissé libre).
+
+- **`GridEngine::next_hard_mark(now)`** : frontières de minute, résolveur
+  réduit aux `AtClock` hard + état réel ; un repère « tombe » sur la minute
+  si son jeton porte ce HH:MM (un repère plus ancien encore dans son
+  `expiry` n'est pas un nouveau repère) ; fenêtre 60 min ; repère passé de
+  ≤ 10 s encore rendu.
+- **`GridEngine::air_at_clock_hard(mark, now)`** : garde (retard, gate,
+  jeton de CE repère), résolution partagée avec le pull (`produce`, extrait
+  de `next_media` : plugins, contraintes, repioche d'un fichier disparu),
+  `persist_effects` (jeton), `log_start`, événement plugin.
+- **`AirEvent::HardMark { at }`** ; `ls_control::spawn_at_clock_ticker`
+  (réveil sur l'horloge système, correction sub-seconde, ≤ 60 s, un envoi par
+  repère) ; `cut_in_at_clock` + `cut` (commun avec l'override hard) ;
+  `LsBridge::at_clock_uri`. Branché dans `main.rs` avec `[liquidsoap]`.
+- Constantes : `HARD_CUT_LATE_S = 10`, `HARD_MARK_LOOKAHEAD_MIN = 60`,
+  `TICK_MAX = 60 s`.
+- Tests (+7) : prochain repère (soft ignoré, repère exact et tout juste
+  passé, jeton consommé sauté, aucune règle hard) ; coupe à l'heure (jeton
+  consommé, pull suivant sans doublon) ; en retard / en avance (pas de
+  coupe, soft ensuite) ; station en pause (pas de coupe, soft après
+  reprise) ; tâche horloge → `flush` + `interrupt` une seule fois ; pause →
+  aucune commande.
+
+**Validation** : `cargo test --locked` vert (343), aucun nouvel
+avertissement clippy dans le code touché. À valider en réel : une règle
+`at_clock` hard (ex. `every_minutes = 5`) coupe la piste en cours à la
+seconde du repère (`AtClock hard cut in` dans le journal).
 
 ### — `unplayed_only` : marquage automatique en fin de piste (2026-09-25) —
 
@@ -1410,7 +1456,8 @@ dans le découpage des modules (`grid_index` = A, `grid_store` = B).
   et simulable sans horloge. Toute conversion de fuseau passe par `clock`.
 - **`AtClock` soft sans `expiry`** peut se déclencher tard (au prochain bord de
   piste), repères intermédiaires sautés (fusion). Pour taper l'heure pile :
-  `Mode::Hard` + `expiry` court.
+  `Mode::Hard` (coupe au repère, à 10 s près ; sinon dégradé en soft) +
+  `expiry` court pour ne pas diffuser trop tard un repère non coupé.
 - **`ref_effective` pas encore unique en base** (index différé, cf. 0004).
 - **`signal::unix` dans `main.rs`** = Linux only. Dev Windows (`X:`) / build+run
   Linux (`/data/dev/stationd`). `X:\stationd` = `\\devradio.lan\dev\stationd`

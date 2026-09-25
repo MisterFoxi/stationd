@@ -328,6 +328,31 @@ impl LsBridge {
         }
     }
 
+    /// An `AtClock` hard rendez-vous `mark`: resolve it now (the engine
+    /// decides whether it must still cut — on time, station on air, untaken)
+    /// and return the uri Liquidsoap interrupts with. `None` = no cut (the
+    /// rule stays soft-eligible; logged by the engine).
+    pub async fn at_clock_uri(&self, mark: crate::resolver::Epoch) -> Option<String> {
+        let now = self.engine.effective_now(None);
+        match self.engine.air_at_clock_hard(mark, now).await {
+            Ok(Some(r)) => match r.media_path {
+                Some(url) if r.stream => {
+                    tracing::warn!(%url, "AtClock hard resolved to a remote stream: relay not wired yet, not aired");
+                    None
+                }
+                Some(media) => {
+                    Some(self.hand_out(&media, r.decision.playlist_ref.clone(), r.leaf_ref.clone()).1)
+                }
+                None => None,
+            },
+            Ok(None) => None,
+            Err(e) => {
+                tracing::error!(error = %e, "AtClock hard could not be resolved");
+                None
+            }
+        }
+    }
+
     /// Liquidsoap reports a track starting on air. Whatever was on air before
     /// leaves it (except a track frozen by a pause, which waits for its
     /// resume): each of our tracks that leaves is judged by the engine

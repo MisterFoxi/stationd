@@ -43,6 +43,28 @@ propre à Liquidsoap. Visible dans `stationctl ls status` : `on air` (en cours)
 et `next` (la piste préchargée — Liquidsoap en demande une d'avance, au
 démarrage de la courante).
 
+### `AtClock` hard : coupe à l'heure pile (2026-09-25)
+
+Une tâche horloge de stationd (`ls_control::spawn_at_clock_ticker`) dort
+jusqu'au prochain repère **hard** (`GridEngine::next_hard_mark` : le
+résolveur lui-même, réduit aux `AtClock` hard, parcouru de minute en minute —
+fuseau, heure d'été et jetons consommés compris), en se replanifiant au
+moins toutes les 60 s (nouvelle grille, `clock set`). Au repère, elle envoie
+`AirEvent::HardMark` à la tâche du socket, qui coupe **comme un override
+hard** : `flush` (sauf piste préparée d'override) puis `interrupt <uri>` ;
+après l'insert, le pull redemande et la grille reprend.
+
+`GridEngine::air_at_clock_hard` ne coupe que si c'est vraiment l'heure :
+au plus **10 s** après le repère, station **à l'antenne** (ni pause ni
+arrêt), `AtClockHard` de CE repère dû et non consommé. Alors la source est
+résolue comme au pull et le **jeton consommé** (le pull suivant ne la rejoue
+pas ; si le pull tombe pile au repère et la prend avant, pas de double).
+Sinon, pas de coupe et le jeton reste libre : la règle passe **en soft** au
+prochain bord de piste, dans la limite de son `expiry` (station en pause,
+redémarrage ou saut d'horloge après le repère, pool vide). Précision : la
+seconde (réveil sur l'horloge système) ; horloge de station figée sur un
+repère (`clock set`) → coupe dans la minute.
+
 ### Fin de piste (déduite, 2026-09-25)
 
 Liquidsoap ne signale que les **débuts**. Une de nos pistes **quitte
@@ -282,7 +304,8 @@ de systemd = groupe ou utilisateur de l'unité inexistant.
   la piste déjà préparée. → étape 3 (`remaining`) + `flush` (étape 2).
 - **Remote** : non relayé (`none/stream_unsupported`, warn) → étape 3
   (`input.http` piloté par une tâche stationd).
-- **Coupe sèche** d'un override hard (pas de fondu sur la piste coupée).
+- **Coupe sèche** d'un override hard ou d'un `AtClock` hard (pas de fondu
+  sur la piste coupée).
 - **Compteur `Every` au compteur** : avancé à chaque démarrage réel de piste ;
   avec le préchargement, la piste `Every` elle-même peut compter pour 1.
 - Encodage : mp3 seulement.

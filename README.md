@@ -141,7 +141,7 @@ rules apply, the highest priority wins:
 |---|---|
 | `base_rotation` | The floor: covers any time nothing else does. |
 | `day_part` | A time window (`start`/`end`, optional `days`). Windows crossing midnight are supported. |
-| `at_clock` | A fixed time (`at = "08:00"`, or `every_minutes`), at the next track boundary. `hard` outranks everything except overrides (cutting in exactly on time: see [Roadmap](#roadmap)). Optional `expiry`. |
+| `at_clock` | A fixed time (`at = "08:00"`, or `every_minutes`). `soft`: at the next track boundary. `hard`: cut in on the second (the current track is interrupted), and outranks everything except overrides; a hard mark that cannot be cut (station paused, more than 10 s late) airs soft instead. Optional `expiry`. |
 | `every` | A cooldown: every N tracks (`min_tracks`) or every elapsed duration. |
 
 Most boundaries are *soft*: stationd never cuts a track; it changes what
@@ -478,7 +478,6 @@ ETAT.md              development log / hand-over notes (French)
 
 **Liquidsoap, step 3 — stationd acting on the air on its own:**
 - relay of `remote` streams (`input.http` driven by stationd);
-- `at_clock` hard rules that cut in on time;
 - tracks chosen for their actual air time (today the next track is chosen
   one track ahead).
 

@@ -31,8 +31,13 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
 
+use crate::grid_engine::GridEngine;
 use crate::ls_bridge::LsBridge;
+use crate::resolver::Epoch;
 use crate::station_control::{AirEvent, BroadcastState, OverrideMode, Transition};
+
+/// The AtClock ticker re-plans at least this often.
+const TICK_MAX: Duration = Duration::from_secs(60);
 
 /// Whole round-trip bound (connect + command + reply).
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(3);
@@ -271,32 +276,110 @@ pub fn spawn_air_sync(
                 Some(Some(AirEvent::Override { id, mode: OverrideMode::Hard })) => {
                     cut_in(&ls, &bridge, id).await;
                 }
+                Some(Some(AirEvent::HardMark { at })) => {
+                    cut_in_at_clock(&ls, &bridge, at).await;
+                }
             }
         }
     })
 }
 
-/// Hard override `id`: resolve it now, cut it in. The prepared track is
-/// flushed first (so the pull re-asks: rest of a multi-track override, or the
-/// grid) — unless it is itself an override, which then plays after the insert.
+/// Hard override `id`: resolve it now, cut it in (see [`cut`]).
 async fn cut_in(ls: &LsControl, bridge: &LsBridge, id: u64) {
     let prepared_override = bridge.prepared_is_override();
     let Some(uri) = bridge.interrupt_uri(id).await else {
         return; // nothing to cut in with (logged by the bridge)
     };
-    if !prepared_override {
-        if let Err(e) = ls.command("stationd.flush").await {
-            tracing::warn!(error = %e, "flush before the cut failed");
-        }
-    }
-    match ls.command(&format!("stationd.interrupt {uri}")).await {
-        Ok(_) => tracing::info!(id, "hard override cut in"),
+    match cut(ls, &uri, prepared_override).await {
+        Ok(()) => tracing::info!(id, "hard override cut in"),
         Err(e) => tracing::error!(
             id,
             error = %e,
             "hard override could NOT be cut in (Liquidsoap unreachable): consumed, not aired"
         ),
     }
+}
+
+/// `AtClock` hard rendez-vous `at`: resolve it now — the engine decides
+/// whether it must still cut — and cut it in (see [`cut`]).
+async fn cut_in_at_clock(ls: &LsControl, bridge: &LsBridge, at: Epoch) {
+    let prepared_override = bridge.prepared_is_override();
+    let Some(uri) = bridge.at_clock_uri(at).await else {
+        return; // no cut: stays soft-eligible (logged by the engine)
+    };
+    match cut(ls, &uri, prepared_override).await {
+        Ok(()) => tracing::info!(mark = at.0, "AtClock hard cut in"),
+        Err(e) => tracing::error!(
+            mark = at.0,
+            error = %e,
+            "AtClock hard could NOT be cut in (Liquidsoap unreachable): occurrence consumed, not aired"
+        ),
+    }
+}
+
+/// Cut `uri` in NOW. The prepared track is flushed first (so the pull
+/// re-asks after the insert: rest of a multi-track override, or the grid) —
+/// unless it is itself an override, which then plays after the insert.
+async fn cut(ls: &LsControl, uri: &str, prepared_override: bool) -> Result<(), LsControlError> {
+    if !prepared_override {
+        if let Err(e) = ls.command("stationd.flush").await {
+            tracing::warn!(error = %e, "flush before the cut failed");
+        }
+    }
+    ls.command(&format!("stationd.interrupt {uri}")).await.map(|_| ())
+}
+
+/// The `AtClock` **hard** timer: sleeps until the next hard rendez-vous
+/// (`GridEngine::next_hard_mark`, re-planned at least every
+/// [`TICK_MAX`]: a new grid or a `clock set` is seen within a minute) and
+/// sends [`AirEvent::HardMark`] to the air sync task, which cuts it in if it
+/// still must. Each mark is sent once. Woken on the system clock (to the
+/// second, sub-second corrected); with a frozen station clock (`clock set`)
+/// a mark equal to the frozen instant fires within a minute.
+pub fn spawn_at_clock_ticker(
+    engine: GridEngine,
+    tx: mpsc::UnboundedSender<AirEvent>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut last_sent: Option<Epoch> = None;
+        loop {
+            let now = engine.effective_now(None);
+            let next = match engine.next_hard_mark(now).await {
+                Ok(n) => n,
+                Err(e) => {
+                    tracing::warn!(error = %e, "AtClock hard: could not plan the next mark");
+                    None
+                }
+            };
+            let wait = match next {
+                Some(mark) if mark.0 <= now.0 => {
+                    if last_sent != Some(mark) {
+                        last_sent = Some(mark);
+                        if tx.send(AirEvent::HardMark { at: mark }).is_err() {
+                            break; // air sync gone: daemon shutting down
+                        }
+                    }
+                    Duration::from_secs(1)
+                }
+                Some(mark) => {
+                    let secs = Duration::from_secs((mark.0 - now.0) as u64);
+                    // The station clock is whole seconds: remove the part of
+                    // the current second already elapsed (real clock only).
+                    let elapsed = if engine.clock_override().is_none() {
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| Duration::from_nanos(d.subsec_nanos() as u64))
+                            .unwrap_or_default()
+                    } else {
+                        Duration::ZERO
+                    };
+                    secs.saturating_sub(elapsed).min(TICK_MAX)
+                }
+                None => TICK_MAX,
+            };
+            tokio::time::sleep(wait).await;
+        }
+    })
 }
 
 #[cfg(test)]
@@ -432,6 +515,99 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(300)).await;
         let got = seen.lock().unwrap().clone();
         assert_eq!(got.iter().filter(|c| *c == "stationd.flush").count(), 1, "{got:?}");
+    }
+
+    /// Engine with a `music` floor and a `news` AtClock HARD every 15 min.
+    async fn hard_engine() -> (tempfile::TempDir, GridEngine) {
+        use crate::resolver::{ClockAnchor, Mode, Rule, RuleKind, Validity};
+        let dir = tempfile::tempdir().unwrap();
+        let pool = crate::db::init(&dir.path().join("t.db")).await.unwrap();
+        let m = |p: &str| crate::media::ScannedMedia {
+            rel_path: p.into(),
+            title: None,
+            artist: None,
+            album: None,
+            year: None,
+            genres: vec![],
+            duration_ms: 60_000,
+            size_bytes: 1,
+            mtime_ns: 0,
+        };
+        crate::media_index::replace_library(&pool, &[m("music/a.mp3"), m("news/n.mp3")], 1000).await.unwrap();
+        for r in ["music", "news"] {
+            let toml = format!(
+                "name = \"{r}\"\n[selection]\nmode = \"dynamic\"\norder = \"shuffle\"\n\
+                 [[selection.filter]]\nfield = \"path\"\nop = \"prefix\"\nvalue = \"{r}/\"\n"
+            );
+            let pl = crate::playlist::Playlist::parse(&toml).unwrap();
+            crate::store::upsert(&pool, r, &pl, &toml, Some(r)).await.unwrap();
+        }
+        let rule = |id: &str, kind| Rule { id: id.into(), enabled: true, validity: Validity::default(), kind };
+        crate::grid_index::insert_rule(&pool, &rule("floor", RuleKind::BaseRotation { playlist_ref: "music".into() }))
+            .await
+            .unwrap();
+        crate::grid_index::insert_rule(
+            &pool,
+            &rule(
+                "news",
+                RuleKind::AtClock {
+                    playlist_ref: "news".into(),
+                    anchor: ClockAnchor::EveryMinutes(15),
+                    mode: Mode::Hard,
+                    expiry_secs: Some(600),
+                },
+            ),
+        )
+        .await
+        .unwrap();
+        (dir, GridEngine::new(pool, "UTC"))
+    }
+
+    #[tokio::test]
+    async fn the_ticker_cuts_a_hard_mark_in_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, seen) = fake_ls(dir.path(), "OK");
+        let (_d, eng) = hard_engine().await;
+        let bridge = LsBridge::new(eng.clone(), std::path::Path::new("/m")).unwrap();
+        let control = eng.control().clone();
+        let (tx, rx) = mpsc::unbounded_channel();
+        control.attach_air(tx.clone());
+        spawn_air_sync(rx, LsControl::new(path), bridge, control.state());
+        assert_eq!(wait_for(&seen, 1).await, ["stationd.resume"]);
+        // The station clock stands on a hard mark (09:15): cut in now.
+        eng.set_clock(Some(Epoch(9 * 3600 + 15 * 60)));
+        let ticker = spawn_at_clock_ticker(eng.clone(), tx);
+        let got = wait_for(&seen, 3).await;
+        assert_eq!(got[1], "stationd.flush", "prepared grid track re-asked after the insert");
+        assert!(
+            got[2].starts_with("stationd.interrupt annotate:stationd_rid=")
+                && got[2].ends_with(":/m/news/n.mp3"),
+            "{got:?}"
+        );
+        // Sent once: the ticker keeps running, nothing more is cut.
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        assert_eq!(seen.lock().unwrap().len(), 3, "{:?}", seen.lock().unwrap());
+        ticker.abort();
+    }
+
+    #[tokio::test]
+    async fn a_hard_mark_on_a_paused_station_is_not_cut() {
+        use crate::station_control::ControlAction;
+        let dir = tempfile::tempdir().unwrap();
+        let (path, seen) = fake_ls(dir.path(), "OK");
+        let (_d, eng) = hard_engine().await;
+        let bridge = LsBridge::new(eng.clone(), std::path::Path::new("/m")).unwrap();
+        let control = eng.control().clone();
+        let (tx, rx) = mpsc::unbounded_channel();
+        control.attach_air(tx.clone());
+        spawn_air_sync(rx, LsControl::new(path), bridge, control.state());
+        assert_eq!(wait_for(&seen, 1).await, ["stationd.resume"]);
+        control.apply(ControlAction::Pause, "cli").unwrap();
+        assert_eq!(wait_for(&seen, 2).await[1], "stationd.pause");
+        eng.set_clock(Some(Epoch(9 * 3600 + 15 * 60)));
+        tx.send(AirEvent::HardMark { at: Epoch(9 * 3600 + 15 * 60) }).unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(seen.lock().unwrap().len(), 2, "no flush, no interrupt");
     }
 
     fn bridge_control(b: &LsBridge) -> crate::station_control::StationControl {

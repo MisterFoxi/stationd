@@ -113,6 +113,9 @@ pub enum AirEvent {
     /// An override was queued: `soft` → drop the prepared track so it airs
     /// at the next boundary; `hard` → cut the current track now.
     Override { id: u64, mode: OverrideMode },
+    /// An `AtClock` hard rendez-vous is due at `at` (sent by the ticker,
+    /// `ls_control::spawn_at_clock_ticker`): cut it in now if it still must.
+    HardMark { at: Epoch },
 }
 
 /// What `next_media` may do at a track boundary.
