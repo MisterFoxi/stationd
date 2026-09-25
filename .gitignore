@@ -11,3 +11,6 @@ stationd.toml
 
 # Généré
 playlist.schema.json
+
+# Environnement Docker local (build args : UID/GID de l'hôte)
+.env

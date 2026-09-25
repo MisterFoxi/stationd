@@ -255,7 +255,7 @@ reverse proxy), every `poll_interval` seconds:
   `icecast.xml` like it writes the `.liq` — one mount per output with its own
   source password and UTF-8 titles, no global source password (only our
   mounts can be fed), admin credentials, trusted reverse proxies for
-  `X-Forwarded-For` (Icecast 2.5). Icecast runs under its own unit.
+  `X-Forwarded-For` (Icecast 2.5). Icecast runs as its own service.
 
 ---
 
@@ -263,20 +263,11 @@ reverse proxy), every `poll_interval` seconds:
 
 ### Prerequisites
 
-- Linux (the daemon uses Unix signals and a Unix control socket)
-- Rust (stable, edition 2021) and `protoc` (the protobuf compiler, needed by
-  `tonic-build`)
-- Liquidsoap **2.4** and Icecast **2.5**, to put the station on air
-- Optional: the `wasm32-unknown-unknown` target, to build WASM plugins
-
-### Build
-
-```sh
-cargo build --release          # stationd + stationctl
-cargo test                     # unit + integration tests
-# optional WASM plugins
-cd plugins/custom-tags-wasm && cargo build --release --target wasm32-unknown-unknown
-```
+- A Linux host with **Docker** and the **compose** plugin. Everything else —
+  Rust (stable) and the `wasm32-unknown-unknown` target, `protoc`,
+  Liquidsoap **2.4**, Icecast **2.5** — ships in the development image
+  (`docker/Dockerfile.dev`, Ubuntu 26.04 packages).
+- The media library mounted on the host (NFS in our setup).
 
 ### Configure
 
@@ -303,7 +294,7 @@ path = "./playlist"
 [liquidsoap]
 script_path    = "./data/station.liq"
 api_token      = "change-me"                 # ASCII shared secret
-control_socket = "./data/liquidsoap.sock"
+control_socket = "/run/stationd/liquidsoap.sock"  # created by the image
 fallback_path  = "/srv/radio/error.mp3"      # safety net
 halted_path    = "/srv/radio/noise.mp3"      # looped while paused/stopped
 
@@ -322,12 +313,91 @@ admin_password = "icecast-admin-password"    # admin, not the source password
 trusted_proxies = ["192.168.1.94"]           # reverse proxy (X-Forwarded-For)
 ```
 
-### Run
+### Run (Docker)
+
+stationd, Icecast and Liquidsoap run in one container, supervised by
+[s6-overlay](https://github.com/just-containers/s6-overlay)
+(`docker/Dockerfile.dev`, `compose.yaml`). The repository is bind-mounted at
+`/src` and built inside the container; `target/` and the cargo registry live
+in named volumes. The container uses the **host network**: Icecast listens
+on the host's port 8000, gRPC (`127.0.0.1:50051`) and the Liquidsoap bridge
+(`127.0.0.1:8081`) stay on the host's loopback.
+
+Start-up order (`docker/rootfs/etc/s6-overlay/s6-rc.d`):
+
+```
+init-perms (oneshot) → stationd ──(ready: answers gRPC)──→ icecast → liquidsoap
+```
+
+stationd writes `data/station.liq` and `data/icecast.xml` before it opens its
+gRPC port, so Icecast and Liquidsoap only start on up-to-date files.
+Restarting stationd does not restart them: the station stays on air
+(Liquidsoap plays the fallback meanwhile).
+
+Users inside the image — same shared-group model as a native install:
+
+| User | Groups | Why |
+|---|---|---|
+| `dev` (host UID/GID) | `stationd` | runs stationd and cargo; files on the mounted repository stay yours |
+| `icecast2` | + `stationd` | reads the generated `icecast.xml` (`0640`, `file_group = "stationd"`) |
+| `liquidsoap` | primary `stationd`, + media group (`MEDIA_GID`) | control socket (`0660`); reads the fallback, the noise and the media |
+
+`init-perms` creates `/run/stationd` (tmpfs, `root:stationd`, `2770`) for the
+control socket: set `[liquidsoap] control_socket =
+"/run/stationd/liquidsoap.sock"`.
+
+**Once, on the host:**
 
 ```sh
-./target/release/stationd -c stationd.toml     # writes ./data/station.liq
-liquidsoap ./data/station.liq                  # or a systemd unit (see Doc/liquidsoap.md)
+# the shared group (its GID is baked into the image)
+getent group stationd || sudo groupadd --system stationd
+# build arguments: host identity, shared group, group owning the media
+printf 'DEV_UID=%s\nDEV_GID=%s\nSTATIOND_GID=%s\nMEDIA_GID=%s\n' \
+  "$(id -u)" "$(id -g)" "$(getent group stationd | cut -d: -f3)" \
+  "$(stat -c %g /mnt/nfs/radio)" > .env
+# the container uses the host network: stop any native service first
+sudo systemctl disable --now icecast2 icecast-stationd liquidsoap-stationd
+```
 
+**Build and start:**
+
+```sh
+docker compose build
+docker compose up -d
+docker compose exec -u dev station cargo build          # stationd + stationctl
+docker compose logs -f station
+```
+
+On the very first start the binary does not exist yet: stationd's service
+waits (`… absent: run cargo build`) and Icecast/Liquidsoap are held until
+stationd answers — nothing else to do once `cargo build` has run. After a
+change to `docker/` or `.env`: `docker compose build` then
+`docker compose up -d --force-recreate`.
+
+**Day to day:**
+
+```sh
+# rebuild + restart stationd only (the air is not cut)
+docker compose exec -u dev station cargo build
+docker compose exec station s6-svc -r /run/service/stationd
+
+# after a change to [liquidsoap], [icecast], [icecast.server] or the outputs:
+# restart stationd (rewrites the files), then the consumer
+docker compose exec station s6-svc -r /run/service/icecast
+docker compose exec station s6-svc -r /run/service/liquidsoap
+
+# tests, plugins, TUI
+docker compose exec -u dev station cargo test
+docker compose exec -u dev -w /src/plugins/custom-tags-wasm station \
+  cargo build --release --target wasm32-unknown-unknown
+docker compose exec -u dev station cargo build --features tui
+docker compose exec -it -u dev station ./target/debug/stationd-tui
+```
+
+**CLI** — an alias on the host keeps `stationctl` in step with the daemon:
+
+```sh
+alias stationctl='docker compose -f /data/dev/stationd/compose.yaml exec -u dev station /src/target/debug/stationctl'
 stationctl library scan
 stationctl playlist sync
 stationctl schedule apply grid.toml
@@ -335,11 +405,19 @@ stationctl ls status
 stationctl icecast status
 ```
 
-stationd, Liquidsoap and Icecast share a system group created at install
-(`stationd`): Liquidsoap's control socket (`0660`) and the generated
-`icecast.xml` (`0640`, `file_group`) are readable through it only. No user
-name is assumed (see `Doc/liquidsoap.md`). After a change to `[liquidsoap]`,
-restart stationd (to rewrite the script), then restart Liquidsoap.
+**Listening:** `http://<host>:8000/radio.mp3` (the mount of
+`[[liquidsoap.output]]`), directly or through the reverse proxy.
+
+**Pitfalls:**
+- Files Liquidsoap reads (`fallback_path`, `halted_path`, the media) must be
+  readable by `liquidsoap`: through the media group (`MEDIA_GID`) or
+  world-readable. A file in `0660 you:you` outside that group fails with
+  *"Infallible source.dynamic … was not able to prepare source"*.
+- `COPY` carries the directory modes of the build context into the image
+  (a restrictive `docker/rootfs/etc` once made `/etc` unreadable for every
+  non-root user); the Dockerfile normalises them after the copy.
+- The image is for development (toolchain included); a slim multi-stage
+  production image is still to come.
 
 ---
 
@@ -388,6 +466,8 @@ src/
 proto/               gRPC contracts (station, schedule, library, playlist, plugin, broadcast, liquidsoap, icecast)
 migrations/          SQLite migrations (embedded with sqlx)
 plugins/             example WASM guest plugins (separate crates)
+docker/              development image (Dockerfile.dev) and s6-overlay services (rootfs/)
+compose.yaml         development container (repository mounted at /src)
 Doc/                 architecture and design decisions (mostly in French)
 ETAT.md              development log / hand-over notes (French)
 ```

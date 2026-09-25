@@ -1,0 +1,3 @@
+# Scripts s6 et Dockerfile : fins de ligne LF même édités sous Windows
+# (un CRLF casse la ligne #! des scripts run).
+docker/** text eol=lf

@@ -1,0 +1,4 @@
+#!/command/with-contenv sh
+# Liquidsoap sur le script généré par stationd ([liquidsoap] script_path).
+script="${LIQUIDSOAP_SCRIPT:-$STATIOND_ROOT/data/station.liq}"
+exec s6-setuidgid liquidsoap liquidsoap "$script"

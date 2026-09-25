@@ -51,8 +51,10 @@ level = "info"
 # script_path   = "./data/station.liq"
 # http_bind     = "127.0.0.1:8081"          # loopback only (checked)
 # api_token     = "change-me"               # shared secret, X-Stationd-Token (ASCII)
-# control_socket = "./data/liquidsoap.sock" # pause/resume/skip; mode 0660 — the
-#                                           # stationd user must be in Liquidsoap's group
+# control_socket = "/run/stationd/liquidsoap.sock" # pause/resume/skip; mode 0660 —
+#                                           # the stationd user must be in Liquidsoap's
+#                                           # group. /run/stationd: created by the Docker
+#                                           # image (init-perms); default ./data/liquidsoap.sock
 # fallback_path = "/srv/radio/error.mp3"    # safety net: nothing to air / stationd down
 # halted_path   = "/srv/radio/noise.mp3"    # looped while paused/stopped
 # normalize     = false                     # normalize + compress on the air chain

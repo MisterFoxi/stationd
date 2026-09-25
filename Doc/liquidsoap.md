@@ -45,10 +45,10 @@ démarrage de la courante).
 
 ## Socket de contrôle (stationd → Liquidsoap)
 
-`[liquidsoap] control_socket` (défaut `./data/liquidsoap.sock`). Le script
-active le serveur socket de Liquidsoap (mode **0660** : lisible par le
-groupe de Liquidsoap, qui doit être le groupe partagé `stationd`, cf.
-Déploiement) et y enregistre :
+`[liquidsoap] control_socket` (défaut `./data/liquidsoap.sock` ; en Docker
+`/run/stationd/liquidsoap.sock`, cf. Déploiement). Le script active le
+serveur socket de Liquidsoap (mode **0660** : lisible par le groupe de
+Liquidsoap, qui doit être le groupe partagé `stationd`) et y enregistre :
 
 | Commande | Effet |
 |---|---|
@@ -187,91 +187,75 @@ d'une adresse de confiance peut fournir un `X-Forwarded-For` arbitraire.
 stationd et Liquidsoap parlent à Icecast en direct, sans cet en-tête : non
 concernés. Le comptage d'audience de stationd n'en dépend pas.
 
-## Déploiement
+## Déploiement (Docker, 2026-09-25)
 
-stationd **écrit** le script (au démarrage, seulement s'il a changé) ; il ne
-lance pas Liquidsoap. Unité séparée → redémarrer stationd ne coupe pas
-l'antenne (Liquidsoap passe sur le fallback le temps du redémarrage).
+stationd, Icecast et Liquidsoap tournent dans **un conteneur**, supervisés
+par s6-overlay (`docker/Dockerfile.dev`, `compose.yaml`, services dans
+`docker/rootfs/etc/s6-overlay/s6-rc.d`). Procédure complète : README,
+« Run (Docker) ». Remplace les unités systemd de l'installation native.
 
-```ini
-# /etc/systemd/system/liquidsoap-stationd.service
-[Unit]
-Description=Liquidsoap (script généré par stationd)
-After=network.target
+stationd **écrit** le `.liq` et `icecast.xml` (au démarrage, seulement s'ils
+ont changé) mais ne lance ni Liquidsoap ni Icecast : c'est s6 qui les lance,
+chacun sous son propre service.
 
-[Service]
-User=liquidsoap
-Group=stationd
-ExecStart=/usr/bin/liquidsoap /data/dev/stationd/data/station.liq
-Restart=always
-RestartSec=2
-
-[Install]
-WantedBy=multi-user.target
 ```
+init-perms (oneshot, root) → stationd ──(prêt : répond en gRPC)──→ icecast → liquidsoap
+```
+
+- **Prêt = répond en gRPC** (`s6-notifyoncheck` + `stationctl status`) :
+  `main.rs` écrit les deux fichiers **avant** d'ouvrir le port gRPC, donc
+  Icecast et Liquidsoap ne démarrent jamais sur une version périmée.
+- **Redémarrer stationd ne coupe pas l'antenne** : s6 ne relance pas les
+  services qui en dépendent ; Liquidsoap passe sur le fallback le temps du
+  redémarrage (`s6-svc -r /run/service/stationd`).
+- Après une modification de `[liquidsoap]`, `[icecast]`, `[icecast.server]`
+  ou des sorties : relancer stationd (réécrit les fichiers), puis
+  `s6-svc -r /run/service/icecast` et/ou `/run/service/liquidsoap`.
+- Réseau de l'hôte (`network_mode: host`) : Icecast voit la vraie IP du
+  reverse proxy (`trusted_proxies`), rien ne change pour l'écoute
+  (`http://<hôte>:8000/<mount>`).
 
 Vérifier le script sans le lancer : `liquidsoap --check <script>` ;
 l'afficher : `stationctl ls render`.
 
-### Le groupe partagé `stationd`
+### Utilisateurs et groupe partagé `stationd`
 
-stationd, Liquidsoap et Icecast tournent sous des utilisateurs que
-l'installation choisit : aucun nom d'utilisateur n'est supposé. Ce qu'ils
-partagent passe par **un groupe système créé à l'installation**, `stationd` :
+Même modèle que l'installation native — ce que les trois processus
+partagent passe par le groupe `stationd` — mais figé dans l'image. Le GID
+de `stationd` est celui de l'hôte (argument de build `STATIOND_GID`, `.env`).
 
-- le socket de contrôle, créé par Liquidsoap en 0660 → Liquidsoap tourne
-  avec `Group=stationd` ;
-- `icecast.xml`, écrit par stationd en 0640 (il contient les mots de passe)
-  → `[icecast.server] file_group = "stationd"` ; stationd donne le fichier à
-  ce groupe à chaque démarrage (erreur bruyante si le groupe n'existe pas ou
-  si stationd n'en est pas membre) ; Icecast tourne avec
-  `SupplementaryGroups=stationd`.
+| Utilisateur | Groupes | Pourquoi |
+|---|---|---|
+| `dev` (UID/GID de l'hôte) | `stationd` | lance stationd (et cargo) ; les fichiers écrits sur le dépôt monté restent à l'utilisateur de l'hôte |
+| `icecast2` (paquet) | + `stationd` | lit `icecast.xml` (0640, `file_group = "stationd"`) |
+| `liquidsoap` | principal `stationd`, + groupe des médias (`MEDIA_GID`) | crée le socket de contrôle (0660) ; lit fallback, bruit de fond et médias |
 
-```bash
-sudo groupadd --system stationd
-sudo usermod -aG stationd <utilisateur qui lance stationd>   # se reconnecter ensuite
-```
+- **Socket de contrôle** : `/run/stationd/liquidsoap.sock`. `init-perms` crée
+  `/run/stationd` (tmpfs du conteneur, `root:stationd`, `2770`) : le socket
+  n'est plus sur le dépôt monté (partage Samba), qui n'a pas à être
+  inscriptible par `liquidsoap`.
+- **Médias** : Liquidsoap lit chaque piste lui-même. Le partage NFS de
+  devstationd est en `070 foxi:foxi` (accès par le groupe seulement) →
+  `liquidsoap` rejoint le groupe propriétaire (`MEDIA_GID =
+  $(stat -c %g /mnt/nfs/radio)`). Même chose pour `fallback_path` /
+  `halted_path` : lisibles par ce groupe ou par tous, sinon « Infallible
+  source.dynamic … was not able to prepare source » et Liquidsoap s'arrête.
+- `icecast.xml` : stationd le donne au groupe `file_group` à chaque
+  démarrage (erreur bruyante si le groupe n'existe pas ou si stationd n'en
+  est pas membre) ; droits réels journalisés
+  (`Icecast config access … access=0640, group stationd`) et rappelés par
+  `stationctl icecast render`.
 
-Au démarrage, stationd journalise les droits réels du fichier
-(`Icecast config access … access=0640, group stationd`) ; `stationctl icecast
-render` les rappelle en en-tête.
+### Installation native (abandonnée)
 
-### Lancer Icecast sur la config générée
-
-stationd écrit `data/icecast.xml` mais ne lance pas Icecast. Il faut donc :
-
-1. **Arrêter l'Icecast du paquet**, qui lit `/etc/icecast2/icecast.xml` :
-   `sudo systemctl disable --now icecast2`
-2. **Créer une unité qui lance Icecast sur le fichier de stationd** :
-
-   ```ini
-   # /etc/systemd/system/icecast-stationd.service
-   [Unit]
-   Description=Icecast (config générée par stationd)
-   After=network.target
-
-   [Service]
-   User=icecast2                 # l'utilisateur d'Icecast sur cette machine
-   SupplementaryGroups=stationd
-   ExecStart=/usr/bin/icecast2 -c /data/dev/stationd/data/icecast.xml
-   Restart=always
-   RestartSec=2
-
-   [Install]
-   WantedBy=multi-user.target
-   ```
-
-   `User=` : le nom dépend de l'installation (`getent passwd | grep -i
-   icecast` ; `icecast2` pour le paquet Debian/Ubuntu). `SupplementaryGroups`
-   donne à Icecast le groupe du fichier (0640) : sans lui, il ne peut pas lire
-   sa config (`status=216/GROUP` = groupe inexistant).
-3. `sudo systemctl daemon-reload && sudo systemctl enable --now icecast-stationd`
-
-Après une modification de `[icecast]`, `[icecast.server]` ou des sorties :
-relancer stationd (il réécrit le fichier), puis
-`sudo systemctl restart icecast-stationd`.
-
-Pour voir le fichier que stationd a généré : `stationctl icecast render`.
+Avant Docker, chaque processus avait son unité systemd (`icecast-stationd`,
+`liquidsoap-stationd` : `icecast2 -c data/icecast.xml` sous
+`User=icecast2` + `SupplementaryGroups=stationd`, `liquidsoap
+data/station.liq` sous `Group=stationd`) et le groupe `stationd` était
+créé à la main (`groupadd --system stationd`). Détails dans l'historique git
+de ce fichier. Constats de cette époque toujours valables : **Icecast 2.5
+plante (SEGV) sans message quand sa config est illisible** ; `status=216/GROUP`
+de systemd = groupe ou utilisateur de l'unité inexistant.
 
 ## Limites connues (étapes suivantes)
 

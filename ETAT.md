@@ -42,7 +42,11 @@ reste l'étape 3 (tâche de diffusion) et 4 (fins de piste). Référence :
 `stationctl icecast status`. Lecture ratée = audience **inconnue**, jamais 0.
 **stationd génère `icecast.xml` (2026-09-25)** avec `[icecast.server]`
 (mounts + mots de passe par sortie, UTF-8, proxys de confiance), comme le
-`.liq` ; reste à valider sur la 2.5 de devstationd.
+`.liq` ; validé sur la 2.5 de devstationd.
+**Docker (2026-09-25).** stationd + Icecast + Liquidsoap tournent dans un
+conteneur de dev (s6-overlay, dépôt monté dans `/src`, réseau de l'hôte) —
+remplace l'installation systemd. README « Run (Docker) »,
+`Doc/liquidsoap.md` « Déploiement ».
 
 La **grille est pilotable de bout en bout en CLI**, projection comprise :
 `grid.toml` (4 familles) → `stationctl schedule validate|apply|export|list|next|preview|check`
@@ -74,6 +78,9 @@ inférieure jusqu'au plancher (fini le dead-air par sélection vide) ; groupe
 
 ## ⭐ TÂCHE D'ENTRÉE PROCHAINE SESSION
 
+Environnement : tout se teste désormais dans le conteneur de dev (README
+« Run (Docker) ») ; plus d'unités systemd sur devstationd.
+
 **Câblage Liquidsoap — étape 3 : tâche de diffusion** (stationd agit sur
 l'antenne sans attendre un pull) :
 - **relais des flux `remote`** : `input.http` piloté par stationd (démarrage /
@@ -94,12 +101,6 @@ Côté Icecast (échantillonnage livré, voir Fait) :
   d'abord (le bruit arrive une piste plus tard qu'un `stop`). Proposé, non
   tranché : un échantillon à 0 pendant `draining` pousse `flush` (comme
   `stop` ; piste préparée d'override jamais vidée) ;
-- **Valider `icecast.xml` généré sur la 2.5 de devstationd** (testé ici
-  sur Icecast 2.4.4 ; sur la 2.5 le contenu démarre, bascule de l'unité en
-  cours — groupe `stationd` / `file_group`) : démarrage, Liquidsoap accepté avec le mot
-  de passe de son mount, mount non déclaré refusé sans `<source-password>`
-  global, socket virtuel `trusted-proxy` (IP réelle dans
-  `/admin/listclients`), titre accentué correct (`<charset>UTF-8`) ;
 - `X-Forwarded-For` : **tranché** (2.5 : sockets virtuels, cf.
   `Doc/liquidsoap.md`) ;
 - auditeurs **par mount** dans `ListenersSampled` (change le contrat
@@ -132,6 +133,42 @@ Autres, indépendants :
 ---
 
 ## Fait
+
+### — Environnement Docker de dev : stationd + Icecast + Liquidsoap sous s6 (2026-09-25) —
+
+Décisions : Docker **remplace** l'install systemd (point 6 de la 0.1) ; un
+seul conteneur, trois processus supervisés par **s6-overlay** (choisi
+contre « stationd lance ses enfants » : zéro code, ordre de démarrage
+géré) ; base `ubuntu:26.04` = paquets de l'archive validés sur devstationd
+(`icecast2=2.5.0-1`, `liquidsoap` 2.4.0+dev), pas de dépôt tiers ; mode
+azuradev : dépôt monté dans `/src`, `cargo build` dans le conteneur,
+`target/` et registre cargo en volumes nommés ; `network_mode: host`
+(IP réelle du proxy vue par Icecast, ports inchangés). Image de prod
+multi-stage : plus tard.
+
+- **Fichiers** : `compose.yaml`, `docker/Dockerfile.dev`,
+  `docker/rootfs/etc/s6-overlay/` (services `init-perms` oneshot,
+  `stationd`, `icecast`, `liquidsoap` ; script `init-perms`), `.env`
+  (non versionné : `DEV_UID`, `DEV_GID`, `STATIOND_GID`, `MEDIA_GID`).
+- **Ordre** : `init-perms` → `stationd` → `icecast` → `liquidsoap`.
+  stationd est « prêt » quand `stationctl status` répond
+  (`s6-notifyoncheck`) — `main.rs` écrit `.liq` et `icecast.xml` avant
+  d'ouvrir le gRPC, aucun code ajouté. Redémarrer stationd ne relance pas
+  les deux autres (antenne maintenue).
+- **Utilisateurs** : `dev` (UID/GID de l'hôte, + `stationd`), `icecast2`
+  (+ `stationd`), `liquidsoap` (principal `stationd`, + groupe des médias).
+- **Socket de contrôle déplacé** : `control_socket =
+  "/run/stationd/liquidsoap.sock"` (`/run/stationd` créé par `init-perms`,
+  `root:stationd 2770`) — dans `stationd.toml` et `stationd.example.toml` ;
+  le défaut du code reste `./data/liquidsoap.sock`.
+- **Validation Icecast 2.5 (point 1)** : chaîne générée testée en natif
+  sur devstationd avant la bascule (« Icecast fonctionne ») ; le détail des
+  vérifications (mount non déclaré refusé, IP réelle via le proxy, titre
+  accentué) n'a pas été consigné.
+
+**Validation** : sur devstationd, build de l'image, `cargo build` dans le
+conteneur, les trois services démarrent dans l'ordre, ça diffuse. Pièges
+rencontrés en route : voir « Pièges » → Docker.
 
 ### — stationd génère `icecast.xml` (`[icecast.server]`) (2026-09-25) —
 
@@ -1343,8 +1380,8 @@ dans le découpage des modules (`grid_index` = A, `grid_store` = B).
 - **`signal::unix` dans `main.rs`** = Linux only. Dev Windows (`X:`) / build+run
   Linux (`/data/dev/stationd`). `X:\stationd` = `\\devradio.lan\dev\stationd`
   (même dépôt, lecteur mappé).
-- **Chemins relatifs de config** résolus depuis le CWD (piège `WorkingDirectory`
-  systemd).
+- **Chemins relatifs de config** résolus depuis le CWD (en Docker : `/src`,
+  la racine du dépôt monté).
 - **Liquidsoap** :
   - stationd **réécrit** le `.liq` au démarrage (s'il a changé) mais ne lance
     pas Liquidsoap : après une modif de `[liquidsoap]` ou du générateur,
@@ -1355,7 +1392,8 @@ dans le découpage des modules (`grid_index` = A, `grid_store` = B).
     sur le pont). `fallback_path` / `halted_path` doivent exister, sinon
     « That source is fallible » au chargement du script.
   - Socket de contrôle en **0660** : l'utilisateur de stationd doit être dans
-    le groupe de Liquidsoap ; chemin < 108 octets.
+    le groupe de Liquidsoap ; chemin < 108 octets. En Docker :
+    `/run/stationd/liquidsoap.sock` (hors du dépôt monté).
   - Une piste est résolue **une piste en avance** (préchargement
     `request.dynamic`) : `schedule next` consomme une vraie piste — ne pas
     l'utiliser quand Liquidsoap tourne.
@@ -1363,6 +1401,11 @@ dans le découpage des modules (`grid_index` = A, `grid_store` = B).
     avec l'ancien contenu → **relire après écriture** (cmp) avant de compiler.
     Reproduit le 2026-09-24 (dépôt `device_commit_files` réutilisant un
     chemin déjà déposé) ; parade : **un chemin de dépôt neuf par écriture**.
+    **Reproduit deux fois le 2026-09-25 malgré des dossiers de dépôt neufs**
+    (`stationd.example.toml`, puis `compose.yaml` ; nouvelle date de
+    modification mais ancien contenu, l'autre fichier du même envoi
+    correct) : la relecture `cmp` après chaque écriture reste la seule
+    garde fiable ; réécrire depuis un autre dossier neuf a suffi.
     Ce jour-là les outils Filesystem MCP étaient en panne (erreur de schéma) :
     lecture/écriture par stage/commit.
 - **Icecast** :
@@ -1370,11 +1413,10 @@ dans le découpage des modules (`grid_index` = A, `grid_store` = B).
     pas le mot de passe source. Sur devstationd ils sont **identiques**
     (à séparer : changer `<admin-password>` ne touche pas Liquidsoap). Avec
     `[icecast.server]`, stationd refuse de démarrer s'ils sont égaux.
-  - Avec `[icecast.server]` : désactiver l'unité du paquet (`systemctl
-    disable --now icecast2`, elle lit `/etc/icecast2/icecast.xml`) et lancer
-    `icecast2 -c data/icecast.xml` sous sa propre unité
-    (`icecast-stationd`, cf. `Doc/liquidsoap.md`). Après une modif :
-    relancer stationd (réécrit) puis Icecast.
+  - Avec `[icecast.server]` : Icecast est lancé par s6 dans le conteneur
+    (`icecast2 -c /src/data/icecast.xml`). Après une modif : relancer
+    stationd (réécrit) puis `s6-svc -r /run/service/icecast`. (Avant
+    Docker : unité `icecast-stationd`, unité du paquet désactivée.)
   - **Groupe partagé `stationd`** (créé à l'install, aucun nom d'utilisateur
     supposé) : `file_group = "stationd"` → `icecast.xml` (0640) donné à ce
     groupe à chaque démarrage (erreur si groupe absent / stationd non
@@ -1402,6 +1444,30 @@ dans le découpage des modules (`grid_index` = A, `grid_store` = B).
     stationd lit ; un auditeur de test : `curl -s …/radio.mp3 -o /dev/null &`.
   - `icecast.xml` copié dans le dépôt pour lecture : mots de passe en clair,
     **ne pas committer**.
+- **Docker (dev)** :
+  - `COPY rootfs/ /` reporte les droits des dossiers du contexte (créés via
+    le partage Samba, restrictifs) **jusque sur `/etc`** : plus aucun
+    utilisateur non-root ne lisait `/etc/resolv.conf`, `/etc/hosts`,
+    `/etc/passwd` (symptôme : `cargo` en `dev` « Could not resolve host »,
+    alors que `getent` en root résout). Le Dockerfile normalise les droits
+    après le `COPY` ; tout futur `COPY` depuis le partage doit en faire
+    autant.
+  - `protobuf-compiler` avec `--no-install-recommends` n'amène pas les
+    `.proto` standard (`google/protobuf/timestamp.proto`…) :
+    `libprotobuf-dev` explicite.
+  - `tzdata` obligatoire : jiff résout `[station] timezone` dans
+    `/usr/share/zoneinfo` (absent de l'image de base).
+  - Liquidsoap lit lui-même fallback, bruit et médias : tout ce qu'il lit
+    doit être lisible par `liquidsoap` (groupe `MEDIA_GID` ou lecture pour
+    tous). Partage NFS de devstationd en `070 foxi:foxi`. Non expliqué :
+    le Liquidsoap natif (106:110, groupes `liquidsoap`/`audio`) n'était pas
+    non plus dans ce groupe — remappage côté TrueNAS ou jamais lu depuis le
+    NFS ? À éclaircir avant la prod.
+  - Le conteneur est en réseau de l'hôte : arrêter tout Icecast / Liquidsoap
+    natif avant `docker compose up` (ports 8000, 8081, 50051).
+  - Après une modification de `docker/` ou de `.env` : `docker compose build`
+    puis `docker compose up -d --force-recreate` (sinon l'ancienne image
+    tourne).
 
 ---
 
@@ -1440,7 +1506,9 @@ dans le découpage des modules (`grid_index` = A, `grid_store` = B).
 | `src/icecast_xml.rs` | Générateur `icecast.xml` (pur : `[icecast.server]` + sorties → XML), écriture 0640 |
 | `proto/icecast_v1.proto` | Contrat `stationctl icecast status` / `render` |
 | `proto/liquidsoap_v1.proto` | Contrat `stationctl ls render` / `ls status` |
-| `Doc/liquidsoap.md` | Câblage Liquidsoap : chaîne, contrat du pont, socket, limites (référence durable) |
+| `Doc/liquidsoap.md` | Câblage Liquidsoap : chaîne, contrat du pont, socket, déploiement Docker, limites (référence durable) |
+| `compose.yaml` / `docker/Dockerfile.dev` | Conteneur de dev : dépôt monté, stationd + Icecast + Liquidsoap sous s6-overlay |
+| `docker/rootfs/etc/s6-overlay/` | Services s6 (`init-perms`, `stationd`, `icecast`, `liquidsoap`) et leur ordre |
 | `plugins/stop-when-idle-wasm/` | Guest WASM démo A2 : host function `station_control` |
 | `plugins/{require-title,blacklist}-wasm/` | Crates guest WASM de démo (séparés, cible wasm32) : `filter_pool` |
 | `src/grpc.rs` | Service `Station` (status/quit/playlist*) |

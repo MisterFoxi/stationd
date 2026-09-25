@@ -1,0 +1,100 @@
+# syntax=docker/dockerfile:1
+#
+# Image de DEV de stationd, façon azuradev : le dépôt est monté dans /src,
+# cargo compile dans le conteneur, s6-overlay supervise stationd, Icecast et
+# Liquidsoap (ordre et dépendances : docker/rootfs/etc/s6-overlay/s6-rc.d).
+# L'image de prod (multi-stage, sans toolchain) viendra à part.
+#
+# Contexte de build = docker/ (pas la racine du dépôt : target/ n'est jamais
+# envoyé au démon).
+FROM ubuntu:26.04
+
+# Versions épinglées = celles validées sur devstationd (archive Ubuntu).
+ARG ICECAST_VERSION=2.5.0-1
+# Vide = version du dépôt ; sinon la chaîne exacte de `apt policy liquidsoap`.
+ARG LIQUIDSOAP_VERSION=
+# À vérifier / mettre à jour (releases just-containers/s6-overlay).
+ARG S6_OVERLAY_VERSION=3.2.0.2
+ARG RUST_TOOLCHAIN=stable
+# Identité de l'utilisateur de l'hôte (fichiers écrits sur le dépôt monté) et
+# GID du groupe partagé `stationd` de l'hôte : cf. .env (README).
+ARG DEV_UID=1000
+ARG DEV_GID=1000
+ARG STATIOND_GID
+# GID du groupe propriétaire de la médiathèque (stat -c %g /mnt/nfs/radio) :
+# Liquidsoap lit les pistes à travers lui.
+ARG MEDIA_GID
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    LANG=C.UTF-8 \
+    RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    PATH=/command:/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    STATIOND_ROOT=/src \
+    STATIOND_BIN=/src/target/debug \
+    S6_CMD_WAIT_FOR_SERVICES_MAXTIME=0
+
+# tzdata : indispensable — jiff résout [station] timezone dans /usr/share/zoneinfo.
+# libprotobuf-dev : les .proto standard (google/protobuf/timestamp.proto…)
+# importés par proto/ — seulement recommandé par protobuf-compiler.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      ca-certificates curl xz-utils tzdata \
+      build-essential pkg-config protobuf-compiler libprotobuf-dev \
+      "icecast2=${ICECAST_VERSION}" \
+      "liquidsoap${LIQUIDSOAP_VERSION:+=${LIQUIDSOAP_VERSION}}" \
+ && rm -rf /var/lib/apt/lists/*
+
+# s6-overlay (PID 1 = /init), archives vérifiées par leur sha256.
+RUN set -eu; \
+    base="https://github.com/just-containers/s6-overlay/releases/download/v${S6_OVERLAY_VERSION}"; \
+    cd /tmp; \
+    for f in s6-overlay-noarch.tar.xz s6-overlay-x86_64.tar.xz; do \
+      curl -fsSLO "$base/$f"; curl -fsSLO "$base/$f.sha256"; \
+      sha256sum -c "$f.sha256"; \
+      tar -C / -Jxpf "$f"; \
+      rm -f "$f" "$f.sha256"; \
+    done
+
+# Toolchain Rust + cible des plugins WASM.
+RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --no-modify-path \
+      --profile minimal --default-toolchain "${RUST_TOOLCHAIN}" \
+      --target wasm32-unknown-unknown
+
+# Utilisateurs — même modèle que sur la VM (Doc/liquidsoap.md, « groupe
+# partagé ») :
+#   dev        = UID/GID de l'hôte, membre de stationd  → stationd, cargo
+#   icecast2   = utilisateur du paquet, + stationd      → lit icecast.xml (0640)
+#   liquidsoap = groupe principal stationd              → socket de contrôle 0660
+#                + groupe MEDIA_GID                     → lit la médiathèque
+# L'utilisateur `ubuntu` (UID 1000) de l'image de base est retiré pour libérer
+# l'UID/GID de l'hôte.
+RUN set -eu; \
+    : "${STATIOND_GID:?STATIOND_GID requis : getent group stationd sur l hote (voir README)}"; \
+    : "${MEDIA_GID:?MEDIA_GID requis : stat -c %g /mnt/nfs/radio (voir README)}"; \
+    userdel -r ubuntu 2>/dev/null || true; \
+    groupadd -g "$STATIOND_GID" stationd; \
+    groupadd -g "$DEV_GID" dev; \
+    useradd -u "$DEV_UID" -g dev -G stationd -m -s /bin/bash dev; \
+    usermod -aG stationd icecast2; \
+    if id liquidsoap >/dev/null 2>&1; then usermod -g stationd liquidsoap; \
+    else useradd --system -g stationd -d /var/lib/liquidsoap -m -s /usr/sbin/nologin liquidsoap; fi; \
+    g="$(getent group "$MEDIA_GID" | cut -d: -f1)"; \
+    [ -n "$g" ] || { groupadd -g "$MEDIA_GID" media; g=media; }; \
+    usermod -aG "$g" liquidsoap; \
+    mkdir -p /src/target "$CARGO_HOME/registry"; \
+    chown dev:dev /src/target; \
+    chown -R dev:dev "$CARGO_HOME" "$RUSTUP_HOME"
+
+COPY rootfs/ /
+# Les droits du partage W: (Samba) ne sont pas fiables : COPY les reporte
+# jusque sur /etc. On normalise tout ce qui vient de rootfs/.
+RUN chmod 0755 /etc \
+ && find /etc/s6-overlay -type d -exec chmod 0755 {} + \
+ && find /etc/s6-overlay -type f -exec chmod 0644 {} + \
+ && chmod 0755 /etc/s6-overlay/scripts/* \
+      /etc/s6-overlay/s6-rc.d/*/run \
+      /etc/s6-overlay/s6-rc.d/stationd/data/check
+
+WORKDIR /src
+ENTRYPOINT ["/init"]

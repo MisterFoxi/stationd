@@ -56,8 +56,3 @@ tonic-build = "0.12"
 [dev-dependencies]
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }   # oneshot sur le routeur du pont LS
-
-[[plugin]]
-name = "logger"
-enabled = true
-order = 50

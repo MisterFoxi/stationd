@@ -1,0 +1,33 @@
+# Environnement de DEV (façon azuradev) : dépôt monté dans /src, compilation
+# dans le conteneur, stationd + Icecast + Liquidsoap supervisés par s6.
+# Prérequis et commandes : README, « Docker (dev) ».
+services:
+  station:
+    build:
+      context: ./docker
+      dockerfile: Dockerfile.dev
+      args:
+        DEV_UID: ${DEV_UID:?DEV_UID manquant (.env, voir README)}
+        DEV_GID: ${DEV_GID:?DEV_GID manquant (.env, voir README)}
+        STATIOND_GID: ${STATIOND_GID:?STATIOND_GID manquant (.env, voir README)}
+        MEDIA_GID: ${MEDIA_GID:?MEDIA_GID manquant (.env, voir README)}
+    image: stationd-dev
+    # Réseau de l'hôte : Icecast voit la vraie IP du reverse proxy
+    # (trusted_proxies) ; ports 8000 (Icecast), 127.0.0.1:50051 (gRPC),
+    # 127.0.0.1:8081 (pont Liquidsoap) comme en natif.
+    network_mode: host
+    environment:
+      TZ: Europe/Paris
+    volumes:
+      - .:/src
+      # Artefacts séparés de ceux de l'hôte, hors du partage W:.
+      - target:/src/target
+      - cargo-registry:/usr/local/cargo/registry
+      # Même chemin que library_path de stationd.toml.
+      - /mnt/nfs/radio:/mnt/nfs/radio
+    restart: unless-stopped
+    stop_grace_period: 15s
+
+volumes:
+  target:
+  cargo-registry:

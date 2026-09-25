@@ -1,0 +1,14 @@
+#!/command/with-contenv sh
+# stationd, sous `dev`, cwd = racine du dépôt (chemins relatifs de
+# stationd.toml inchangés). Prêt = répond en gRPC (data/check) : à ce stade
+# station.liq et icecast.xml sont écrits (main.rs les écrit avant d'ouvrir le
+# port) → Icecast et Liquidsoap peuvent démarrer.
+bin="$STATIOND_BIN/stationd"
+if [ ! -x "$bin" ]; then
+  echo "[stationd] $bin absent : lancer cargo build dans le conteneur (README)" >&2
+  sleep 5
+  exit 1
+fi
+exec s6-notifyoncheck -d -n 0 -s 500 -w 1000 -t 3000 \
+  s6-setuidgid dev \
+  sh -c 'cd "$STATIOND_ROOT" && exec "$STATIOND_BIN/stationd" --config stationd.toml'

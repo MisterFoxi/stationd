@@ -1,0 +1,11 @@
+#!/command/with-contenv sh
+# Oneshot, root, avant stationd. Un volume nommé neuf peut arriver vide et
+# possédé par root : on le rend à `dev` (target/ et registre cargo).
+set -eu
+mkdir -p "$STATIOND_ROOT/target" "$CARGO_HOME/registry"
+chown dev:dev "$STATIOND_ROOT/target" "$CARGO_HOME/registry"
+
+# Répertoire d'exécution partagé (tmpfs, hors du dépôt monté) : socket de
+# contrôle Liquidsoap ([liquidsoap] control_socket). Groupe stationd, setgid :
+# ce qui y est créé hérite du groupe.
+install -d -m 2770 -o root -g stationd /run/stationd

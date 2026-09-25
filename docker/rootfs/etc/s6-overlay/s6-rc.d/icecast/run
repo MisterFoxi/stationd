@@ -1,0 +1,4 @@
+#!/command/with-contenv sh
+# Icecast sur la config générée par stationd ([icecast.server] config_path).
+conf="${ICECAST_CONFIG:-$STATIOND_ROOT/data/icecast.xml}"
+exec s6-setuidgid icecast2 icecast2 -c "$conf"
