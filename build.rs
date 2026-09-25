@@ -19,6 +19,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .compile_protos(&["proto/broadcast_v1.proto"], &["proto"])?;
     // The Liquidsoap service (script render + bridge status, stationctl ls).
     tonic_build::compile_protos("proto/liquidsoap_v1.proto")?;
+    // The Icecast service (audience + mount health, stationctl icecast).
+    // Uses proto3 `optional` (audience, listeners, read_kbps).
+    tonic_build::configure()
+        .protoc_arg("--experimental_allow_proto3_optional")
+        .compile_protos(&["proto/icecast_v1.proto"], &["proto"])?;
 
     // Force a rebuild whenever a migration file is added, changed, or
     // removed. `sqlx::migrate!` embeds the migrations into the binary at
@@ -36,6 +41,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-changed=proto/plugin_v1.proto");
     println!("cargo:rerun-if-changed=proto/broadcast_v1.proto");
     println!("cargo:rerun-if-changed=proto/liquidsoap_v1.proto");
+    println!("cargo:rerun-if-changed=proto/icecast_v1.proto");
 
     Ok(())
 }

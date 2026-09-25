@@ -5,7 +5,7 @@
 
 use clap::{Parser, Subcommand};
 
-use stationd::proto::{broadcast, library, liquidsoap, plugin, schedule, station};
+use stationd::proto::{broadcast, icecast, library, liquidsoap, plugin, schedule, station};
 
 use station::station_client::StationClient;
 use station::{PlaylistAddRequest, PlaylistListRequest, PlaylistSyncRequest, QuitRequest, StatusRequest};
@@ -18,6 +18,8 @@ use plugin::{plugin_control_request::Action as PluginAction, PluginControlReques
 use broadcast::broadcast_service_client::BroadcastServiceClient;
 use liquidsoap::liquidsoap_service_client::LiquidsoapServiceClient;
 use liquidsoap::{GetStatusRequest as LsStatusRequest, RenderScriptRequest};
+use icecast::icecast_service_client::IcecastServiceClient;
+use icecast::{GetStatusRequest as IcecastStatusRequest, RenderConfigRequest as IcecastRenderRequest};
 use broadcast::{
     control_request::Action as BroadcastAction, push_override_request, ClearOverridesRequest,
     ControlRequest, GetStateRequest, ListOverridesRequest, PushOverrideRequest,
@@ -67,12 +69,23 @@ enum Command {
     /// Override queue: content pushed ahead of the grid
     #[command(subcommand)]
     Override(OverrideCommand),
-    /// Test injection of sources not wired yet (Icecast, …)
+    /// Test injection (a listener sample is overwritten by the next Icecast sample)
     #[command(subcommand)]
     Debug(DebugCommand),
     /// Liquidsoap wiring: generated script, bridge status
     #[command(subcommand)]
     Ls(LsCommand),
+    /// Icecast as stationd reads it: audience, health of our mounts
+    #[command(subcommand)]
+    Icecast(IcecastCommand),
+}
+
+#[derive(Subcommand, Debug)]
+enum IcecastCommand {
+    /// Last read of /admin/stats: audience, source, bitrate, listeners, title
+    Status,
+    /// Print the generated icecast.xml ([icecast.server], as written at start-up)
+    Render,
 }
 
 #[derive(Subcommand, Debug)]
@@ -133,7 +146,7 @@ enum OverrideCommand {
 
 #[derive(Subcommand, Debug)]
 enum DebugCommand {
-    /// Inject a listener sample (emits ListenersSampled; Icecast later)
+    /// Inject a listener sample (emits ListenersSampled; overwritten by the next Icecast sample)
     Listeners { count: u32 },
 }
 
@@ -874,6 +887,17 @@ async fn main() -> anyhow::Result<()> {
             eprintln!("# written to {}", r.path);
             print!("{}", r.script);
         }
+        Command::Icecast(IcecastCommand::Render) => {
+            let mut ic = IcecastServiceClient::connect(args.addr.clone()).await?;
+            let r = ic.render_config(IcecastRenderRequest {}).await?.into_inner();
+            eprintln!("# written to {} ({}) — Icecast's user must be in this group", r.path, r.access);
+            print!("{}", r.xml);
+        }
+        Command::Icecast(IcecastCommand::Status) => {
+            let mut ic = IcecastServiceClient::connect(args.addr.clone()).await?;
+            let s = ic.get_status(IcecastStatusRequest {}).await?.into_inner();
+            print_icecast_status(&s);
+        }
         Command::Ls(LsCommand::Status) => {
             let mut ls = LiquidsoapServiceClient::connect(args.addr.clone()).await?;
             let s = ls.get_status(LsStatusRequest {}).await?.into_inner();
@@ -961,6 +985,79 @@ fn print_ls_status(s: &liquidsoap::LiquidsoapStatus) {
     println!("control:    {}  [{}]", control, s.control_socket);
 }
 
+/// `12s ago (epoch …)` / `hh:mm:ss ago (epoch …)`; 0 = never.
+fn ago(t: i64) -> String {
+    if t == 0 {
+        return "never".to_string();
+    }
+    let ago = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64 - t)
+        .unwrap_or(0);
+    let ago = if ago < 60 {
+        format!("{ago}s")
+    } else {
+        format!("{:02}:{:02}:{:02}", ago / 3600, ago % 3600 / 60, ago % 60)
+    };
+    format!("{ago} ago (epoch {t})")
+}
+
+fn print_icecast_status(s: &icecast::IcecastStatus) {
+    if !s.enabled {
+        println!("icecast:   not configured (no [icecast] section) — audience never sampled");
+        return;
+    }
+    let server = if s.server_id.is_empty() {
+        s.server.clone()
+    } else {
+        format!("{} ({})", s.server, s.server_id)
+    };
+    println!("icecast:   {server} — read every {} s", s.poll_interval_s);
+    println!("last read: {}", ago(s.last_ok_at));
+    if !s.problem.is_empty() {
+        println!("problem:   {} ({})", s.problem, ago(s.problem_at));
+    }
+    match s.audience {
+        Some(n) => println!("audience:  {n}"),
+        None => println!("audience:  unknown — a draining station keeps playing"),
+    }
+    if s.last_ok_at == 0 {
+        return;
+    }
+    // The last read failed: what follows is the last successful one.
+    if s.problem_at > s.last_ok_at {
+        println!("(mounts below as of the last successful read, {})", ago(s.last_ok_at));
+    }
+    for m in &s.mounts {
+        println!("{}", m.mount);
+        if !m.present {
+            println!("  source:    absent from Icecast");
+            continue;
+        }
+        if m.connected {
+            let mut who = vec![m.source_ip.as_str(), m.user_agent.as_str()];
+            who.retain(|w| !w.is_empty());
+            let who = if who.is_empty() { String::new() } else { format!(" — {}", who.join(", ")) };
+            println!("  source:    connected since {}{who}", m.stream_start);
+        } else {
+            println!("  source:    NOT connected (mount known to Icecast, nobody feeding it)");
+        }
+        let nominal = if m.bitrate.is_empty() { "?".to_string() } else { format!("{} kbit/s", m.bitrate) };
+        let read = match m.read_kbps {
+            Some(r) => format!("~{r:.0} kbit/s received (last {} s)", m.read_window_s),
+            None => "received: measured after 30 s".to_string(),
+        };
+        let ctype = if m.content_type.is_empty() { String::new() } else { format!("  [{}]", m.content_type) };
+        println!("  bitrate:   {nominal} announced, {read}{ctype}");
+        let listeners = m.listeners.map(|n| n.to_string()).unwrap_or_else(|| "?".into());
+        let peak = m.listener_peak.map(|n| format!(" (peak {n})")).unwrap_or_default();
+        println!("  listeners: {listeners}{peak}");
+        if !m.title.is_empty() {
+            println!("  title:     {}", m.title);
+        }
+    }
+}
+
 fn state_name(state: i32) -> &'static str {
     broadcast::State::try_from(state)
         .map(|s| s.as_str_name())
@@ -971,7 +1068,7 @@ fn print_broadcast_status(s: &broadcast::BroadcastStatus) {
     println!("state:     {}", state_name(s.state));
     match s.listeners {
         Some(n) => println!("listeners: {n}"),
-        None => println!("listeners: (never sampled)"),
+        None => println!("listeners: unknown (never sampled, or Icecast unreadable — see `icecast status`)"),
     }
 }
 

@@ -73,3 +73,37 @@ level = "info"
 # description = ""
 # genre    = ""
 # public   = false
+
+# Icecast admin access (optional, requires [liquidsoap]). stationd samples
+# /admin/stats every poll_interval seconds: the listeners of the mounts it
+# feeds ([[liquidsoap.output]]) → ListenersSampled (stop-when-idle). A failed
+# read — Icecast down, bad credentials, mount without source — makes the
+# audience unknown, never 0: a draining station keeps playing.
+# Admin credentials (<admin-user>/<admin-password> of icecast.xml), NOT the
+# source password. Plain http, Icecast reached directly (not via the proxy).
+#
+# [icecast]
+# admin_url      = "http://127.0.0.1:8000"
+# admin_user     = "admin"                  # default
+# admin_password = "change-me-admin"        # ASCII
+# poll_interval  = 15                       # seconds, 2..=600
+#
+# Optional: stationd generates Icecast's own config (icecast.xml) — one mount
+# per [[liquidsoap.output]] with its source password, UTF-8 titles, only our
+# mounts can be fed (no global source password), trusted reverse proxies.
+# Written at start-up when it changed (mode 0640, holds the passwords):
+# Icecast reads it through `file_group`, the group shared by stationd and
+# Icecast created at install (cf. Doc/liquidsoap.md). Restart Icecast to
+# apply. admin_url and every output must use `port`.
+# [icecast.server]
+# config_path     = "./data/icecast.xml"    # icecast2 -c <this>
+# file_group      = "stationd"              # stationd must be a member; default: its own group
+# port            = 8000
+# bind_address    = "0.0.0.0"               # default: all interfaces
+# hostname        = "radio.example"         # public host name
+# location        = "Earth"                 # default: [station] name
+# admin_email     = "icemaster@localhost"
+# max_clients     = 100
+# trusted_proxies = ["192.168.1.94"]        # X-Forwarded-For (Icecast 2.5), exact IPs
+# share_dir       = "/usr/share/icecast2"   # Icecast's web/, admin/, report-db.xml
+# log_dir         = "/var/log/icecast2"

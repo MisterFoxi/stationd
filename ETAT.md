@@ -5,7 +5,7 @@ sans reconstruire le contexte. À distinguer des docs de `Doc/` (décisions
 d'architecture durables) : ce fichier-ci est volatil, à mettre à jour à
 chaque session.
 
-Dernière mise à jour : 2026-09-24.
+Dernière mise à jour : 2026-09-25.
 
 
 ## Ajout : TUI d'administration (correctif préparé, compilation à confirmer)
@@ -36,6 +36,13 @@ diffuser ou stationd injoignable. `stationctl ls status` : `on air`, `next`,
 état de l'antenne, santé du socket. Étapes 1 et 2 du câblage terminées ;
 reste l'étape 3 (tâche de diffusion) et 4 (fins de piste). Référence :
 `Doc/liquidsoap.md`.
+**Icecast lu (2026-09-24).** stationd lit `/admin/stats` d'Icecast 2.5
+(`[icecast]`) : audience réelle de ses mounts → `ListenersSampled`
+(stop-when-idle validé de bout en bout en réel), santé des mounts dans
+`stationctl icecast status`. Lecture ratée = audience **inconnue**, jamais 0.
+**stationd génère `icecast.xml` (2026-09-25)** avec `[icecast.server]`
+(mounts + mots de passe par sortie, UTF-8, proxys de confiance), comme le
+`.liq` ; reste à valider sur la 2.5 de devstationd.
 
 La **grille est pilotable de bout en bout en CLI**, projection comprise :
 `grid.toml` (4 familles) → `stationctl schedule validate|apply|export|list|next|preview|check`
@@ -81,8 +88,22 @@ l'antenne sans attendre un pull) :
 Puis **étape 4 — fins de piste** : `unplayed_only` marqué automatiquement
 (la décision doit porter la playlist feuille, pas le groupe),
 `TrackStarted`/`TrackFinished` aux plugins, compteur `Every` exact.
-Et côté Icecast : **échantillonnage réel des auditeurs** (API admin 2.5 →
-`ListenersSampled`, rend `stop-when-idle` réel).
+Côté Icecast (échantillonnage livré, voir Fait) :
+- **stop-when-idle sans piste de trop** : aujourd'hui le passage
+  `draining → stopped` se fait au pull, et la piste déjà préparée passe
+  d'abord (le bruit arrive une piste plus tard qu'un `stop`). Proposé, non
+  tranché : un échantillon à 0 pendant `draining` pousse `flush` (comme
+  `stop` ; piste préparée d'override jamais vidée) ;
+- **Valider `icecast.xml` généré sur la 2.5 de devstationd** (testé ici
+  sur Icecast 2.4.4 ; sur la 2.5 le contenu démarre, bascule de l'unité en
+  cours — groupe `stationd` / `file_group`) : démarrage, Liquidsoap accepté avec le mot
+  de passe de son mount, mount non déclaré refusé sans `<source-password>`
+  global, socket virtuel `trusted-proxy` (IP réelle dans
+  `/admin/listclients`), titre accentué correct (`<charset>UTF-8`) ;
+- `X-Forwarded-For` : **tranché** (2.5 : sockets virtuels, cf.
+  `Doc/liquidsoap.md`) ;
+- auditeurs **par mount** dans `ListenersSampled` (change le contrat
+  `Doc/plugin-events.md`, tranche séparée).
 
 **Preview — statistiques de pool : patch préparé et testé (2026-09-19).**
 Voir la section Fait ci-dessous et `Doc/preview-pools.md`.
@@ -111,6 +132,100 @@ Autres, indépendants :
 ---
 
 ## Fait
+
+### — stationd génère `icecast.xml` (`[icecast.server]`) (2026-09-25) —
+
+Décisions : stationd **écrit** la config Icecast comme le `.liq` (au
+démarrage, si changée ; Icecast sous sa propre unité, jamais lancé par
+stationd) ; `[icecast.server]` présent = génération, absent = lecture seule
+comme avant ; **mot de passe source par mount** (celui de chaque
+`[[liquidsoap.output]]`) ; `admin_url` reste explicite (vérifiée contre
+`port`). Validé sur azuradev (config AzuraCast) : proxys de confiance =
+un socket virtuel par adresse.
+
+- **Config** `[icecast.server]` (`deny_unknown_fields`) : `config_path`
+  (`./data/icecast.xml`), `port` (8000), `bind_address`, `hostname`,
+  `location` (défaut : nom de station), `admin_email`, `max_clients`,
+  `trusted_proxies` (IP exactes, pas de CIDR, doublon refusé), `share_dir`
+  (`/usr/share/icecast2`), `log_dir` (`/var/log/icecast2`). Refusé au
+  chargement : `admin_url` ou une sortie hors de `port`, mot de passe admin
+  = un mot de passe source, mount en double.
+- **`src/icecast_xml.rs`** (pur) : un `<mount>` par sortie (son mot de
+  passe, `<charset>UTF-8</charset>`), `<sources>` = nombre de sorties,
+  **pas de `<source-password>` global**, admin de `[icecast]`, socket
+  public + un socket virtuel par proxy (`<trusted-proxy>#proxy-N`), CORS,
+  chemins, logs. Échappement XML. `write_if_changed` atomique en **0640**.
+- Contrat `IcecastService.RenderConfig` ; **CLI** `stationctl icecast
+  render`. `main.rs` : écrit la config, avertit si `share_dir/web` absent.
+- **Débit reçu corrigé** : Icecast ne rafraîchit `total_bytes_read` que
+  toutes les ~5 s (mesuré) → l'écart entre deux lectures était faux (756
+  kbit/s affichés pour 320 réels). Désormais moyenne glissante sur 60 s
+  (affichée après 30 s ; `read_window_s` dans le contrat). Réel : ~314
+  affichés pour ~320 envoyés.
+- **Groupe du fichier** : `[icecast.server] file_group` (groupe partagé
+  créé à l'install, ex. `stationd`) → chgrp à chaque démarrage, erreur
+  bruyante si groupe inexistant ou stationd non membre ; droits réels
+  journalisés et affichés par `icecast render` (`RenderConfigResponse.access`).
+  Validé ici en non-root (membre → OK et Icecast lit via le groupe ;
+  non-membre / groupe absent → refus explicite).
+- Tests : +8 (config serveur, XML relu par roxmltree, sockets virtuels,
+  écriture 0640, groupe, fenêtre de débit, dilution d'un palier).
+
+**Validation** : `cargo test --locked` vert (308), clippy propre. **Contre
+un vrai Icecast 2.4.4** lancé sur la config générée (utilisateur non-root
+dans le groupe du fichier) : démarre ; `/radio.mp3` et `/lo.mp3` acceptent
+chacun leur mot de passe, refusent celui de l'autre et un faux (401) ; un
+mount non déclaré est refusé quel que soit le mot de passe (avec un global,
+il était accepté → global retiré) ; admin refuse le mot de passe source ;
+stationd lit ensuite cet Icecast (`icecast status` : 2 sources, 1
+auditeur). Non testable ici : sockets virtuels (2.5 uniquement).
+
+### — Icecast 2.5 : audience réelle + santé des mounts (2026-09-24) —
+
+Décisions : stationd **lit** Icecast (`/admin/stats`, XML, compte admin) ;
+somme des mounts de `[[liquidsoap.output]]` (pas le total serveur) ;
+**lecture ratée = audience inconnue, jamais 0** (Icecast injoignable, 401,
+XML illisible, un de nos mounts absent ou sans source) ; client
+`hyper-util` (déjà dans l'arbre) ; commande dédiée `icecast status` (Icecast
+tombe indépendamment de Liquidsoap) ; global d'abord, par mount plus tard.
+
+- **Config** `[icecast]` (optionnelle, `deny_unknown_fields`) : `admin_url`
+  (`http://host[:port]` seulement — https refusé : Icecast lu en direct,
+  jamais via le reverse proxy), `admin_user` (défaut `admin`),
+  `admin_password` (ASCII), `poll_interval` (15 s, 2..=600). Exige
+  `[liquidsoap]` (ses mounts sont ceux surveillés). Avertissement au
+  démarrage si une sortie vise un autre `host:port` que `admin_url`.
+- **`src/icecast.rs`** : `parse_stats` (roxmltree, noms comparés sans
+  espace de noms ; enveloppe `<report>` 2.5 → erreur avec le texte de
+  l'incident), `audience` (somme, ou raison de l'inconnu), `IcecastClient`
+  (GET + Basic auth, 3 s, corps ≤ 2 Mio), `IcecastMonitor` (dernière lecture,
+  problème, audience, **débit réel** = croissance de `total_bytes_read` entre
+  deux lectures, remis à zéro si `stream_start` change), `spawn_sampler`
+  (journalise l'apparition / le changement / la fin d'un problème, pas
+  chaque échec).
+- `StationControl::clear_listeners()` : l'audience redevient inconnue
+  (pas d'événement) → un `draining` ne s'achève jamais sur une panne.
+- **Contrat** `proto/icecast_v1.proto` (`IcecastService.GetStatus`) →
+  `src/icecast_grpc.rs` (projection pure du moniteur sur nos mounts).
+  **CLI** `stationctl icecast status` ; `station state` affiche `unknown` au
+  lieu de `(never sampled)`. `debug listeners` reste (écrasé à la lecture
+  suivante).
+- Constats Icecast **2.5.0** (captures réelles devstationd, en fixtures) :
+  succès = `<icestats>` classique ; **erreur = `<report>`** (reportxml,
+  `<incident>…<text>You need to authenticate`) avec `<icestats>` en espace
+  de noms ; **plus de `<bitrate>`** : débit lu dans `<audio_info>…bitrate=`.
+  Source connectée ⇔ `stream_start_iso8601` présent (vérifié). Le titre
+  arrive en une seule chaîne ICY (`title` = `display-title` =
+  `x_icy_title`), pas d'artiste séparé (mp3).
+- Tests : +20 (config, parseur sur captures réelles, audience,
+  inconnu ≠ 0, débit, client HTTP contre un faux Icecast, projection gRPC).
+
+**Validation** : `cargo test --locked` vert (300), clippy propre, build
+`--features tui` OK. E2E local contre un faux Icecast servant la capture
+réelle (audience, mount absent, Icecast coupé → données marquées périmées).
+**E2E réel devstationd** : 3 auditeurs `curl` → `listeners sampled count=3`,
+`stop-when-idle` → `draining`, auditeurs coupés → 0 → `stopped` + bruit de
+fond (une piste plus tard, cf. tâche d'entrée).
 
 ### — Fix : `ls status` bloqué sur `stopping` au 2ᵉ stop (2026-09-24) —
 
@@ -1246,6 +1361,47 @@ dans le découpage des modules (`grid_index` = A, `grid_store` = B).
     l'utiliser quand Liquidsoap tourne.
   - Écriture via le pont fichiers : une écriture a déjà été signalée réussie
     avec l'ancien contenu → **relire après écriture** (cmp) avant de compiler.
+    Reproduit le 2026-09-24 (dépôt `device_commit_files` réutilisant un
+    chemin déjà déposé) ; parade : **un chemin de dépôt neuf par écriture**.
+    Ce jour-là les outils Filesystem MCP étaient en panne (erreur de schéma) :
+    lecture/écriture par stage/commit.
+- **Icecast** :
+  - `[icecast] admin_password` = mot de passe **admin** d'`icecast.xml`,
+    pas le mot de passe source. Sur devstationd ils sont **identiques**
+    (à séparer : changer `<admin-password>` ne touche pas Liquidsoap). Avec
+    `[icecast.server]`, stationd refuse de démarrer s'ils sont égaux.
+  - Avec `[icecast.server]` : désactiver l'unité du paquet (`systemctl
+    disable --now icecast2`, elle lit `/etc/icecast2/icecast.xml`) et lancer
+    `icecast2 -c data/icecast.xml` sous sa propre unité
+    (`icecast-stationd`, cf. `Doc/liquidsoap.md`). Après une modif :
+    relancer stationd (réécrit) puis Icecast.
+  - **Groupe partagé `stationd`** (créé à l'install, aucun nom d'utilisateur
+    supposé) : `file_group = "stationd"` → `icecast.xml` (0640) donné à ce
+    groupe à chaque démarrage (erreur si groupe absent / stationd non
+    membre) ; Icecast `SupplementaryGroups=stationd` ; Liquidsoap
+    `Group=stationd` (socket 0660). `status=216/GROUP` de systemd = groupe
+    ou utilisateur de l'unité inexistant. Un fichier créé prend le groupe
+    **principal** du processus, d'où `file_group` (chgrp explicite).
+  - **Icecast 2.5 : config illisible → SEGV au démarrage** (`code=dumped,
+    signal=SEGV`), pas d'erreur (la 2.4.4 disait `FATAL: error parsing
+    config file`). Constaté sur devstationd : `icecast.xml` encore en groupe
+    `foxi` (stationd pas relancé avec `file_group`). Vérifier dans les
+    conditions de l'unité : `sudo systemd-run --uid=<user Icecast> -p
+    SupplementaryGroups=stationd --pipe --wait head -c 40 <config>` →
+    `Permission denied` = cause. Le contenu de la config était hors de cause
+    (toutes les variantes démarrent lancées à la main sur une copie lisible).
+  - `usermod -aG stationd <user>` ne vaut que pour les **nouvelles**
+    sessions : vérifier `id` avant de relancer stationd, sinon « not a
+    member ».
+  - Débit reçu = moyenne sur 60 s (compteur Icecast rafraîchi toutes les
+    ~5 s) : rien avant 30 s de mesure, c'est normal.
+  - Icecast lu en `http://` direct (loopback/LAN), jamais via Traefik.
+  - Audience inconnue ≠ 0 : si `icecast status` montre un problème, un
+    `stop-when-idle` armé attend (voulu).
+  - `curl -s -u 'admin:…' http://127.0.0.1:8000/admin/stats` pour voir ce que
+    stationd lit ; un auditeur de test : `curl -s …/radio.mp3 -o /dev/null &`.
+  - `icecast.xml` copié dans le dépôt pour lecture : mots de passe en clair,
+    **ne pas committer**.
 
 ---
 
@@ -1279,14 +1435,18 @@ dans le découpage des modules (`grid_index` = A, `grid_store` = B).
 | `src/ls_bridge.rs` | Pont HTTP loopback Liquidsoap → stationd (`/next`, `/track`), `on air` / `next` |
 | `src/ls_control.rs` | Socket de contrôle stationd → Liquidsoap + tâche air sync (état, overrides) |
 | `src/ls_grpc.rs` | Transport gRPC `LiquidsoapService` (`RenderScript`, `GetStatus`) |
+| `src/icecast.rs` | Lecture `/admin/stats` Icecast : parseur, audience, client HTTP, moniteur (débit réel), échantillonneur |
+| `src/icecast_grpc.rs` | Transport gRPC `IcecastService` (`GetStatus`, `RenderConfig`) |
+| `src/icecast_xml.rs` | Générateur `icecast.xml` (pur : `[icecast.server]` + sorties → XML), écriture 0640 |
+| `proto/icecast_v1.proto` | Contrat `stationctl icecast status` / `render` |
 | `proto/liquidsoap_v1.proto` | Contrat `stationctl ls render` / `ls status` |
 | `Doc/liquidsoap.md` | Câblage Liquidsoap : chaîne, contrat du pont, socket, limites (référence durable) |
 | `plugins/stop-when-idle-wasm/` | Guest WASM démo A2 : host function `station_control` |
 | `plugins/{require-title,blacklist}-wasm/` | Crates guest WASM de démo (séparés, cible wasm32) : `filter_pool` |
 | `src/grpc.rs` | Service `Station` (status/quit/playlist*) |
 | `src/db.rs` | Init pool SQLite + migrations |
-| `src/main.rs` | Daemon : démarrage, 6 services gRPC, pont Liquidsoap (écrit le `.liq`, sert `/ls/v1`, air sync), shutdown |
-| `src/bin/stationctl.rs` | CLI (station + `schedule …` + `library …` + `plugin …` + `ls render` / `ls status`) |
+| `src/main.rs` | Daemon : démarrage, 7 services gRPC, pont Liquidsoap (écrit le `.liq`, sert `/ls/v1`, air sync), échantillonneur Icecast, shutdown |
+| `src/bin/stationctl.rs` | CLI (station + `schedule …` + `library …` + `plugin …` + `ls render` / `ls status` + `icecast status` / `render`) |
 | `proto/station.proto` | Contrat `Station` |
 | `proto/schedule_v1.proto` | Contrat `ScheduleService` (compilé/servi ; 7 RPC réels) |
 | `proto/library_v1.proto` | Contrat `LibraryService` (compilé/servi ; Scan + ListMedia) |

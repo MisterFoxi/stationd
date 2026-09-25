@@ -46,8 +46,9 @@ démarrage de la courante).
 ## Socket de contrôle (stationd → Liquidsoap)
 
 `[liquidsoap] control_socket` (défaut `./data/liquidsoap.sock`). Le script
-active le serveur socket de Liquidsoap (mode **0660** : l'utilisateur de
-stationd doit être dans le groupe de Liquidsoap) et y enregistre :
+active le serveur socket de Liquidsoap (mode **0660** : lisible par le
+groupe de Liquidsoap, qui doit être le groupe partagé `stationd`, cf.
+Déploiement) et y enregistre :
 
 | Commande | Effet |
 |---|---|
@@ -108,6 +109,84 @@ Qui envoie quoi :
   bornée côté script (pas de nouvel appel avant `retry_delay` après une réponse
   vide).
 
+## Icecast (lecture seule, `[icecast]`)
+
+stationd **lit** Icecast par l'API admin (`GET /admin/stats`, Basic auth
+admin — pas le mot de passe source), en `http://` direct, jamais via le
+reverse proxy, toutes les `poll_interval` s (15 par défaut). Liquidsoap
+reste le seul client source ; stationd n'écrit rien dans Icecast.
+
+- **Audience** = somme des `<listeners>` des mounts de
+  `[[liquidsoap.output]]` (pas le `<listeners>` global du serveur) →
+  `StationControl::sample_listeners` → `ListenersSampled` → stop-when-idle.
+- **Inconnue, jamais 0** si : Icecast injoignable / pas de réponse en 3 s,
+  401, réponse non XML ou `<report>` d'erreur, un de nos mounts absent,
+  sans source (`stream_start_iso8601` absent) ou sans `<listeners>`.
+  L'audience est alors oubliée (`clear_listeners`) : un `draining` ne
+  s'achève pas.
+- **Santé** (`stationctl icecast status`) : par mount, source connectée
+  depuis quand (IP, user-agent), débit annoncé (`<audio_info>` en 2.5) et
+  débit **reçu** mesuré, auditeurs / pic, titre ICY vu par les auditeurs.
+  Débit reçu = croissance de `total_bytes_read` en **moyenne glissante sur
+  60 s** (affiché après 30 s) : Icecast ne rafraîchit ce compteur que toutes
+  les ~5 s, un écart entre deux lectures serait faux jusqu'à ±33 %. 0 sur
+  toute la fenêtre = source bloquée.
+
+Constats Icecast 2.5.0 : erreurs en enveloppe `<report>` (reportxml) avec
+`<incident><state><text>` ; plus de `<bitrate>` par source ; titre mp3 en
+une seule chaîne (`title` = `display-title` = `x_icy_title`).
+
+Limite connue : le passage `draining → stopped` a lieu au pull suivant ; la
+piste déjà préparée par Liquidsoap passe d'abord (une piste de plus qu'un
+`stop`).
+
+### `icecast.xml` généré (`[icecast.server]`)
+
+Même modèle que le `.liq` : stationd **écrit** `config_path` au démarrage
+(seulement s'il a changé, atomique, mode **0640** — il contient les mots de
+passe), ne lance pas Icecast ; `stationctl icecast render` l'affiche.
+Contenu, tiré de `stationd.toml` :
+
+- un `<mount>` par `[[liquidsoap.output]]`, avec **son** mot de passe source
+  (Liquidsoap et Icecast ne peuvent pas diverger) et
+  `<charset>UTF-8</charset>` (sans lui, Icecast peut lire les titres mp3 en
+  ISO-8859-1) ;
+- **pas de `<source-password>` global** : vérifié sur un vrai Icecast
+  (2.4.4) — avec un global, qui le connaît peut créer n'importe quel autre
+  mount ; sans, un mount non déclaré est refusé (401), les nôtres acceptent
+  leur propre mot de passe. `<sources>` = nombre de sorties ;
+- admin = `[icecast]` (celui que lit l'échantillonneur) ; refusé au
+  chargement s'il est égal à un mot de passe source, si `admin_url` ou une
+  sortie ne vise pas `port` ;
+- chemins d'install (`share_dir`, défaut paquet Debian/Ubuntu
+  `/usr/share/icecast2` : `web/`, `admin/`, `report-db.xml`), `log_dir`,
+  en-têtes CORS (lecteurs web), comme la config livrée avec la 2.5.
+
+### Derrière un reverse proxy (`X-Forwarded-For`, Icecast 2.5)
+
+La 2.4 officielle ignore `X-Forwarded-For` : derrière Traefik, tous les
+auditeurs avaient l'IP de Traefik (le *nombre* restait juste ; les stats par
+IP — uniques, géo — étaient perdues). La 2.5 lit l'en-tête pour les
+connexions venant d'un proxy déclaré : un socket virtuel **par adresse**,
+référencé par le socket public (forme validée sur azuradev, qui en
+déclarait deux) :
+
+```xml
+<listen-socket id="public">
+    <port>8000</port>
+    <trusted-proxy>#proxy-1</trusted-proxy>
+</listen-socket>
+<listen-socket id="proxy-1" type="virtual">
+    <client-address>192.168.1.94</client-address>   <!-- Traefik -->
+</listen-socket>
+```
+
+Généré depuis `[icecast.server] trusted_proxies` (adresses IP exactes ; pas
+de CIDR, non documenté). N'y mettre **que** le proxy : toute connexion venant
+d'une adresse de confiance peut fournir un `X-Forwarded-For` arbitraire.
+stationd et Liquidsoap parlent à Icecast en direct, sans cet en-tête : non
+concernés. Le comptage d'audience de stationd n'en dépend pas.
+
 ## Déploiement
 
 stationd **écrit** le script (au démarrage, seulement s'il a changé) ; il ne
@@ -122,6 +201,7 @@ After=network.target
 
 [Service]
 User=liquidsoap
+Group=stationd
 ExecStart=/usr/bin/liquidsoap /data/dev/stationd/data/station.liq
 Restart=always
 RestartSec=2
@@ -132,6 +212,66 @@ WantedBy=multi-user.target
 
 Vérifier le script sans le lancer : `liquidsoap --check <script>` ;
 l'afficher : `stationctl ls render`.
+
+### Le groupe partagé `stationd`
+
+stationd, Liquidsoap et Icecast tournent sous des utilisateurs que
+l'installation choisit : aucun nom d'utilisateur n'est supposé. Ce qu'ils
+partagent passe par **un groupe système créé à l'installation**, `stationd` :
+
+- le socket de contrôle, créé par Liquidsoap en 0660 → Liquidsoap tourne
+  avec `Group=stationd` ;
+- `icecast.xml`, écrit par stationd en 0640 (il contient les mots de passe)
+  → `[icecast.server] file_group = "stationd"` ; stationd donne le fichier à
+  ce groupe à chaque démarrage (erreur bruyante si le groupe n'existe pas ou
+  si stationd n'en est pas membre) ; Icecast tourne avec
+  `SupplementaryGroups=stationd`.
+
+```bash
+sudo groupadd --system stationd
+sudo usermod -aG stationd <utilisateur qui lance stationd>   # se reconnecter ensuite
+```
+
+Au démarrage, stationd journalise les droits réels du fichier
+(`Icecast config access … access=0640, group stationd`) ; `stationctl icecast
+render` les rappelle en en-tête.
+
+### Lancer Icecast sur la config générée
+
+stationd écrit `data/icecast.xml` mais ne lance pas Icecast. Il faut donc :
+
+1. **Arrêter l'Icecast du paquet**, qui lit `/etc/icecast2/icecast.xml` :
+   `sudo systemctl disable --now icecast2`
+2. **Créer une unité qui lance Icecast sur le fichier de stationd** :
+
+   ```ini
+   # /etc/systemd/system/icecast-stationd.service
+   [Unit]
+   Description=Icecast (config générée par stationd)
+   After=network.target
+
+   [Service]
+   User=icecast2                 # l'utilisateur d'Icecast sur cette machine
+   SupplementaryGroups=stationd
+   ExecStart=/usr/bin/icecast2 -c /data/dev/stationd/data/icecast.xml
+   Restart=always
+   RestartSec=2
+
+   [Install]
+   WantedBy=multi-user.target
+   ```
+
+   `User=` : le nom dépend de l'installation (`getent passwd | grep -i
+   icecast` ; `icecast2` pour le paquet Debian/Ubuntu). `SupplementaryGroups`
+   donne à Icecast le groupe du fichier (0640) : sans lui, il ne peut pas lire
+   sa config (`status=216/GROUP` = groupe inexistant).
+3. `sudo systemctl daemon-reload && sudo systemctl enable --now icecast-stationd`
+
+Après une modification de `[icecast]`, `[icecast.server]` ou des sorties :
+relancer stationd (il réécrit le fichier), puis
+`sudo systemctl restart icecast-stationd`.
+
+Pour voir le fichier que stationd a généré : `stationctl icecast render`.
 
 ## Limites connues (étapes suivantes)
 

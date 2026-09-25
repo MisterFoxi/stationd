@@ -22,3 +22,7 @@ pub mod broadcast {
 pub mod liquidsoap {
     tonic::include_proto!("webradio.liquidsoap.v1");
 }
+
+pub mod icecast {
+    tonic::include_proto!("webradio.icecast.v1");
+}

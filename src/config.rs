@@ -21,6 +21,257 @@ pub struct Config {
     /// bridge listens. Cf. `ls_script` / `ls_bridge`.
     #[serde(default)]
     pub liquidsoap: Option<LiquidsoapConfig>,
+    /// Icecast admin access (optional). Absent = the audience is never read
+    /// (only `stationctl debug listeners` feeds it). Requires `[liquidsoap]`:
+    /// the watched mounts are its `[[liquidsoap.output]]` mounts.
+    #[serde(default)]
+    pub icecast: Option<IcecastConfig>,
+}
+
+/// `[icecast]` — read-only access to Icecast's admin API (`/admin/stats`),
+/// sampled periodically: audience (`ListenersSampled`) and mount health.
+/// Admin credentials, distinct from the source password Liquidsoap uses in
+/// `[[liquidsoap.output]]`. stationd talks to Icecast directly, never through
+/// the reverse proxy: plain `http://` only.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IcecastConfig {
+    /// Base URL of Icecast itself, e.g. "http://127.0.0.1:8000" (no path).
+    pub admin_url: String,
+    #[serde(default = "default_icecast_admin_user")]
+    pub admin_user: String,
+    pub admin_password: String,
+    /// Seconds between two samples.
+    #[serde(default = "default_icecast_poll_interval")]
+    pub poll_interval: u64,
+    /// `[icecast.server]` present = stationd generates Icecast's own config
+    /// (`icecast.xml`). Absent = stationd only reads an Icecast configured
+    /// elsewhere.
+    #[serde(default)]
+    pub server: Option<IcecastServerConfig>,
+}
+
+/// `[icecast.server]` — the `icecast.xml` stationd writes at start-up (only
+/// when it changed; Icecast runs under its own unit and must be restarted to
+/// pick it up). Mounts = `[[liquidsoap.output]]`, each with its own source
+/// password; admin credentials = `[icecast]`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IcecastServerConfig {
+    /// Where the generated `icecast.xml` is written (mode 0640: holds the
+    /// passwords; Icecast's user must be in stationd's group).
+    #[serde(default = "default_icecast_config_path")]
+    pub config_path: PathBuf,
+    /// Listening port. `admin_url` and every output must use it.
+    #[serde(default = "default_icecast_port")]
+    pub port: u16,
+    /// Optional bind address (default: all interfaces).
+    #[serde(default)]
+    pub bind_address: Option<String>,
+    /// Public host name (listen URLs, directory listings).
+    #[serde(default = "default_icecast_hostname")]
+    pub hostname: String,
+    /// `<location>` shown by Icecast. Default: the station name.
+    #[serde(default)]
+    pub location: Option<String>,
+    #[serde(default = "default_icecast_admin_email")]
+    pub admin_email: String,
+    /// Maximum simultaneous clients (listeners + sources + admin).
+    #[serde(default = "default_icecast_max_clients")]
+    pub max_clients: u32,
+    /// Reverse proxies trusted for `X-Forwarded-For` (Icecast 2.5: one
+    /// virtual socket per address). Exact IP addresses only.
+    #[serde(default)]
+    pub trusted_proxies: Vec<String>,
+    /// Icecast's installed data (`web/`, `admin/`, `report-db.xml`).
+    #[serde(default = "default_icecast_share_dir")]
+    pub share_dir: PathBuf,
+    #[serde(default = "default_icecast_log_dir")]
+    pub log_dir: PathBuf,
+    /// Group given to the written `icecast.xml` (mode 0640): the group
+    /// shared by stationd and Icecast's user, created at install (e.g.
+    /// `stationd`). stationd must be a member. Absent = the group of the
+    /// stationd process (logged at start-up).
+    #[serde(default)]
+    pub file_group: Option<String>,
+}
+
+fn default_icecast_config_path() -> PathBuf {
+    PathBuf::from("./data/icecast.xml")
+}
+fn default_icecast_port() -> u16 {
+    8000
+}
+fn default_icecast_hostname() -> String {
+    "localhost".to_string()
+}
+fn default_icecast_admin_email() -> String {
+    "icemaster@localhost".to_string()
+}
+fn default_icecast_max_clients() -> u32 {
+    100
+}
+fn default_icecast_share_dir() -> PathBuf {
+    PathBuf::from("/usr/share/icecast2")
+}
+fn default_icecast_log_dir() -> PathBuf {
+    PathBuf::from("/var/log/icecast2")
+}
+
+fn default_icecast_admin_user() -> String {
+    "admin".to_string()
+}
+
+fn default_icecast_poll_interval() -> u64 {
+    15
+}
+
+/// Bounds of `[icecast] poll_interval` (s).
+const ICECAST_POLL_RANGE: std::ops::RangeInclusive<u64> = 2..=600;
+
+impl IcecastConfig {
+    /// Loud checks at load. `ls` = the `[liquidsoap]` section: its outputs
+    /// are the mounts sampled, so `[icecast]` without it is refused.
+    pub fn validate(&self, ls: Option<&LiquidsoapConfig>) -> Result<(), String> {
+        self.authority()?;
+        if self.admin_user.is_empty() || self.admin_user.contains(':') || !printable_ascii(&self.admin_user) {
+            return Err(format!(
+                "admin_user {:?}: non-empty printable ASCII without ':' required (HTTP Basic auth)",
+                self.admin_user
+            ));
+        }
+        if self.admin_password.is_empty() || !printable_ascii(&self.admin_password) {
+            return Err("admin_password: non-empty printable ASCII required".into());
+        }
+        if !ICECAST_POLL_RANGE.contains(&self.poll_interval) {
+            return Err(format!(
+                "poll_interval {} out of {}..={} s",
+                self.poll_interval,
+                ICECAST_POLL_RANGE.start(),
+                ICECAST_POLL_RANGE.end()
+            ));
+        }
+        let ls = match ls {
+            Some(ls) if !ls.outputs.is_empty() => ls,
+            _ => return Err("[icecast] needs [liquidsoap] outputs: they are the mounts it watches".into()),
+        };
+        if let Some(srv) = &self.server {
+            self.validate_server(srv, ls)?;
+        }
+        Ok(())
+    }
+
+    /// `[icecast.server]`: stationd owns Icecast's config, so every
+    /// contradiction with it is an error (a mount generated for nobody, a
+    /// sampler reading another server, admin = source password).
+    fn validate_server(&self, srv: &IcecastServerConfig, ls: &LiquidsoapConfig) -> Result<(), String> {
+        if srv.port == 0 {
+            return Err("server.port must not be 0".into());
+        }
+        let admin_port = self.authority()?.rsplit_once(':').and_then(|(_, p)| p.parse::<u16>().ok());
+        if admin_port != Some(srv.port) {
+            return Err(format!(
+                "admin_url {:?} does not target server.port {}: stationd would read another Icecast than the one it configures",
+                self.admin_url, srv.port
+            ));
+        }
+        for o in &ls.outputs {
+            if o.port != srv.port {
+                return Err(format!(
+                    "output {} targets port {}, not server.port {}: its mount would be generated for nobody",
+                    o.mount, o.port, srv.port
+                ));
+            }
+            if o.password.is_empty() || !printable_ascii(&o.password) {
+                return Err(format!("output {}: source password must be non-empty printable ASCII", o.mount));
+            }
+            if o.password == self.admin_password {
+                return Err(format!(
+                    "output {}: source password equals admin_password — they must differ",
+                    o.mount
+                ));
+            }
+        }
+        let mut seen = std::collections::HashSet::new();
+        for o in &ls.outputs {
+            if !seen.insert(o.mount.as_str()) {
+                return Err(format!("mount {} declared twice in [[liquidsoap.output]]", o.mount));
+            }
+        }
+        if let Some(b) = &srv.bind_address {
+            b.parse::<std::net::IpAddr>()
+                .map_err(|_| format!("server.bind_address {b:?} is not an IP address"))?;
+        }
+        let mut proxies = std::collections::HashSet::new();
+        for p in &srv.trusted_proxies {
+            let ip: std::net::IpAddr = p.parse().map_err(|_| {
+                format!("server.trusted_proxies: {p:?} is not an IP address (one exact address per proxy, no CIDR)")
+            })?;
+            if !proxies.insert(ip) {
+                return Err(format!("server.trusted_proxies: {p} listed twice"));
+            }
+        }
+        for (what, v) in [("hostname", &srv.hostname), ("admin_email", &srv.admin_email)] {
+            if v.trim().is_empty() || v.contains(char::is_whitespace) {
+                return Err(format!("server.{what} {v:?}: non-empty, no spaces"));
+            }
+        }
+        if srv.max_clients == 0 {
+            return Err("server.max_clients must be > 0".into());
+        }
+        if let Some(g) = &srv.file_group {
+            if g.is_empty() || !g.bytes().all(|b| b.is_ascii_alphanumeric() || b"_-.".contains(&b)) {
+                return Err(format!("server.file_group {g:?}: a group name (letters, digits, _ - .)"));
+            }
+        }
+        if srv.config_path == ls.script_path {
+            return Err("server.config_path is the Liquidsoap script path".into());
+        }
+        Ok(())
+    }
+
+    /// `host:port` of `admin_url` (port 80 when absent). Refuses anything but
+    /// a bare `http://host[:port][/]`.
+    pub fn authority(&self) -> Result<String, String> {
+        let url = self.admin_url.trim();
+        if url.starts_with("https://") {
+            return Err(format!(
+                "admin_url {url:?}: https not supported — stationd reads Icecast directly, not through the reverse proxy"
+            ));
+        }
+        let rest = url
+            .strip_prefix("http://")
+            .ok_or_else(|| format!("admin_url {url:?} must start with http://"))?;
+        let rest = rest.strip_suffix('/').unwrap_or(rest);
+        if rest.is_empty() || rest.contains(['/', '?', '#', '@', ' ']) {
+            return Err(format!("admin_url {url:?}: expected http://host[:port] (no path, no credentials)"));
+        }
+        let with_port = match rest.rsplit_once(':') {
+            // "host:port" (an IPv6 literal is bracketed: "[::1]:8000").
+            Some((host, port)) if !host.is_empty() && !port.contains(']') => {
+                port.parse::<u16>()
+                    .map_err(|_| format!("admin_url {url:?}: bad port {port:?}"))?;
+                rest.to_string()
+            }
+            _ => format!("{rest}:80"),
+        };
+        Ok(with_port)
+    }
+
+    /// Outputs whose `host:port` differs from `admin_url` (textually): likely
+    /// a different Icecast than the one sampled. Warned at start-up, not
+    /// refused (`localhost` vs `127.0.0.1` is legitimate).
+    pub fn foreign_outputs<'a>(&self, ls: &'a LiquidsoapConfig) -> Vec<&'a IcecastOutput> {
+        let Ok(admin) = self.authority() else { return Vec::new() };
+        ls.outputs
+            .iter()
+            .filter(|o| format!("{}:{}", o.host, o.port) != admin)
+            .collect()
+    }
+}
+
+fn printable_ascii(s: &str) -> bool {
+    s.bytes().all(|b| (0x20..0x7f).contains(&b))
 }
 
 /// `[liquidsoap]` — the generated script and the loopback bridge Liquidsoap
@@ -293,6 +544,8 @@ pub enum ConfigError {
     UnknownTimeZone { name: String },
     #[error("invalid [liquidsoap] section: {0}")]
     Liquidsoap(String),
+    #[error("invalid [icecast] section: {0}")]
+    Icecast(String),
 }
 
 impl Config {
@@ -315,6 +568,9 @@ impl Config {
         })?;
         if let Some(ls) = &config.liquidsoap {
             ls.validate().map_err(ConfigError::Liquidsoap)?;
+        }
+        if let Some(ic) = &config.icecast {
+            ic.validate(config.liquidsoap.as_ref()).map_err(ConfigError::Icecast)?;
         }
         Ok(config)
     }
@@ -451,6 +707,105 @@ mod tests {
         // deny_unknown_fields: a typo is a parse error, never ignored.
         let typo = LS.replace("halted_path", "haltd_path");
         assert!(matches!(load_str(&typo), Err(ConfigError::Parse { .. })));
+    }
+
+    const IC: &str = r#"
+        [icecast]
+        admin_url = "http://127.0.0.1:8000"
+        admin_password = "adm1n"
+    "#;
+
+    #[test]
+    fn icecast_section_is_optional_and_has_defaults() {
+        assert!(load_str(LS).unwrap().icecast.is_none());
+        let c = load_str(&format!("{LS}{IC}")).unwrap();
+        let ic = c.icecast.unwrap();
+        assert_eq!(ic.admin_user, "admin");
+        assert_eq!(ic.poll_interval, 15);
+        assert_eq!(ic.authority().unwrap(), "127.0.0.1:8000");
+        assert!(ic.foreign_outputs(c.liquidsoap.as_ref().unwrap()).is_empty());
+    }
+
+    #[test]
+    fn icecast_requires_liquidsoap_outputs() {
+        assert!(matches!(load_str(IC), Err(ConfigError::Icecast(m)) if m.contains("[liquidsoap]")));
+    }
+
+    #[test]
+    fn icecast_admin_url_forms() {
+        let ic = |url: &str| IcecastConfig {
+            admin_url: url.into(),
+            admin_user: "admin".into(),
+            admin_password: "x".into(),
+            poll_interval: 15,
+            server: None,
+        };
+        assert_eq!(ic("http://icecast.lan/").authority().unwrap(), "icecast.lan:80");
+        assert_eq!(ic("http://[::1]:8000").authority().unwrap(), "[::1]:8000");
+        assert_eq!(ic("http://[::1]").authority().unwrap(), "[::1]:80");
+        let https = ic("https://radio.example").authority().unwrap_err();
+        assert!(https.contains("reverse proxy"), "{https}");
+        for bad in ["127.0.0.1:8000", "http://", "http://h:8000/admin", "http://u:p@h:8000", "http://h:x"] {
+            assert!(ic(bad).authority().is_err(), "{bad:?} must be refused");
+        }
+    }
+
+    #[test]
+    fn icecast_rejects_bad_settings() {
+        let full = format!("{LS}{IC}");
+        let empty_pw = full.replace("\"adm1n\"", "\"\"");
+        assert!(matches!(load_str(&empty_pw), Err(ConfigError::Icecast(m)) if m.contains("admin_password")));
+        let non_ascii = full.replace("\"adm1n\"", "\"adm1n…\"");
+        assert!(matches!(load_str(&non_ascii), Err(ConfigError::Icecast(m)) if m.contains("admin_password")));
+        let colon_user = format!("{full}        admin_user = \"a:b\"\n");
+        assert!(matches!(load_str(&colon_user), Err(ConfigError::Icecast(m)) if m.contains("admin_user")));
+        let fast = format!("{full}        poll_interval = 1\n");
+        assert!(matches!(load_str(&fast), Err(ConfigError::Icecast(m)) if m.contains("poll_interval")));
+        let typo = full.replace("admin_password", "admin_pasword");
+        assert!(matches!(load_str(&typo), Err(ConfigError::Parse { .. })));
+    }
+
+    #[test]
+    fn icecast_flags_outputs_on_another_server() {
+        let c = load_str(&format!("{LS}{IC}").replace("\"http://127.0.0.1:8000\"", "\"http://localhost:8000\"")).unwrap();
+        let foreign = c.icecast.as_ref().unwrap().foreign_outputs(c.liquidsoap.as_ref().unwrap());
+        assert_eq!(foreign.len(), 1);
+        assert_eq!(foreign[0].mount, "/radio.mp3");
+    }
+
+    const SRV: &str = r#"
+        [icecast.server]
+        trusted_proxies = ["192.168.1.94"]
+    "#;
+
+    #[test]
+    fn icecast_server_defaults() {
+        let c = load_str(&format!("{LS}{IC}{SRV}")).unwrap();
+        let srv = c.icecast.unwrap().server.unwrap();
+        assert_eq!(srv.port, 8000);
+        assert_eq!(srv.config_path, PathBuf::from("./data/icecast.xml"));
+        assert_eq!(srv.share_dir, PathBuf::from("/usr/share/icecast2"));
+        assert_eq!(srv.trusted_proxies, vec!["192.168.1.94".to_string()]);
+    }
+
+    #[test]
+    fn icecast_server_rejects_contradictions() {
+        let full = format!("{LS}{IC}{SRV}");
+        let other_port = full.replace("\"http://127.0.0.1:8000\"", "\"http://127.0.0.1:8001\"");
+        assert!(matches!(load_str(&other_port), Err(ConfigError::Icecast(m)) if m.contains("server.port")));
+        let out_port = full.replace("port = 8000", "port = 8002");
+        assert!(matches!(load_str(&out_port), Err(ConfigError::Icecast(m)) if m.contains("for nobody")));
+        let same_pw = full.replace("\"adm1n\"", "\"hackme\"");
+        assert!(matches!(load_str(&same_pw), Err(ConfigError::Icecast(m)) if m.contains("must differ")));
+        let cidr = full.replace("\"192.168.1.94\"", "\"192.168.1.0/24\"");
+        assert!(matches!(load_str(&cidr), Err(ConfigError::Icecast(m)) if m.contains("no CIDR")));
+        let twice = full.replace("[\"192.168.1.94\"]", "[\"192.168.1.94\", \"192.168.1.94\"]");
+        assert!(matches!(load_str(&twice), Err(ConfigError::Icecast(m)) if m.contains("twice")));
+        let typo = format!("{full}        trusted_proxy = []\n");
+        assert!(matches!(load_str(&typo), Err(ConfigError::Parse { .. })));
+        // Without [icecast.server], the same passwords are not stationd's business.
+        let read_only = format!("{LS}{IC}").replace("\"adm1n\"", "\"hackme\"");
+        assert!(load_str(&read_only).is_ok());
     }
 
     #[test]

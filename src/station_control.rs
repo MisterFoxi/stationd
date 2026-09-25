@@ -376,16 +376,26 @@ impl StationControl {
         });
     }
 
-    /// Record an audience sample (Icecast later; test injection today) and
-    /// notify plugins. Never stops anything by itself: a drain completes only
-    /// at a track boundary (`gate`).
+    /// Record an audience sample (the Icecast sampler, or `stationctl debug
+    /// listeners`) and notify plugins. Never stops anything by itself: a drain
+    /// completes only at a track boundary (`gate`).
     pub fn sample_listeners(&self, count: u32) {
         let at = self.now();
         self.lock().listeners = Some((count, at));
         self.emit(PluginEvent::ListenersSampled { count, at: at.0 });
     }
 
-    /// Last listener count, if ever sampled.
+    /// The audience became unknown (Icecast unreachable, one of our mounts has
+    /// no source, unreadable stats): forget the last sample. A draining
+    /// station then keeps playing — a failure is never read as « 0
+    /// listeners ». No event: `ListenersSampled` carries facts, not their
+    /// absence (the error is visible in `stationctl icecast status`).
+    /// Returns `true` when a sample was actually forgotten.
+    pub fn clear_listeners(&self) -> bool {
+        self.lock().listeners.take().is_some()
+    }
+
+    /// Last listener count, if ever sampled (and not forgotten since).
     pub fn listeners(&self) -> Option<u32> {
         self.lock().listeners.map(|(c, _)| c)
     }
@@ -649,6 +659,23 @@ mod tests {
         // …the next track boundary does.
         assert_eq!(c.gate(), Gate::Halt(Stopped));
         assert_eq!(c.state(), Stopped);
+    }
+
+    #[test]
+    fn an_unknown_audience_never_completes_a_drain() {
+        let c = StationControl::new_in_memory();
+        c.apply(ControlAction::StopWhenIdle, "cli").unwrap();
+        c.sample_listeners(0);
+        // Icecast becomes unreachable before the boundary: the stale zero
+        // is forgotten, the station keeps playing.
+        assert!(c.clear_listeners());
+        assert_eq!(c.listeners(), None);
+        assert_eq!(c.gate(), Gate::Play);
+        assert_eq!(c.state(), Draining);
+        assert!(!c.clear_listeners(), "already unknown");
+        // A fresh zero sample completes it again.
+        c.sample_listeners(0);
+        assert_eq!(c.gate(), Gate::Halt(Stopped));
     }
 
     #[test]

@@ -14,6 +14,8 @@ use stationd::broadcast_grpc::broadcast::broadcast_service_server::BroadcastServ
 use stationd::broadcast_grpc::BroadcastGrpc;
 use stationd::ls_grpc::liquidsoap::liquidsoap_service_server::LiquidsoapServiceServer;
 use stationd::ls_grpc::LsGrpc;
+use stationd::icecast_grpc::icecast::icecast_service_server::IcecastServiceServer;
+use stationd::icecast_grpc::IcecastGrpc;
 use stationd::grid_engine::GridEngine;
 use stationd::station_control::StationControl;
 use stationd::library_grpc::LibraryGrpc;
@@ -142,6 +144,69 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    // Icecast (optional `[icecast]`, requires `[liquidsoap]` — checked at
+    // load): sample the audience of our mounts from the admin API. A failed
+    // read makes the audience unknown, never zero (a draining station keeps
+    // playing). `stationctl debug listeners` still injects, until the next
+    // sample overwrites it.
+    let icecast_monitor = stationd::icecast::IcecastMonitor::default();
+    let (icecast_service, icecast_task) = match (&cfg.icecast, &cfg.liquidsoap) {
+        (Some(ic), Some(ls_cfg)) => {
+            for o in ic.foreign_outputs(ls_cfg) {
+                warn!(
+                    mount = %o.mount,
+                    output = %format!("{}:{}", o.host, o.port),
+                    admin_url = %ic.admin_url,
+                    "[icecast] output on another host:port than admin_url: is it the same Icecast?"
+                );
+            }
+            let client = stationd::icecast::IcecastClient::new(ic).map_err(anyhow::Error::msg)?;
+            let mounts: Vec<String> = ls_cfg.outputs.iter().map(|o| o.mount.clone()).collect();
+            info!(icecast = client.authority(), ?mounts, every_s = ic.poll_interval, "Icecast audience sampling");
+            let mut service = IcecastGrpc::new(
+                icecast_monitor.clone(),
+                client.authority().to_string(),
+                ic.poll_interval as u32,
+                mounts.clone(),
+            );
+            // `[icecast.server]`: stationd owns Icecast's config. Written only
+            // when it changed; Icecast runs under its own unit and must be
+            // restarted to pick it up (stationd never launches it).
+            if let Some(srv) = &ic.server {
+                let xml = stationd::icecast_xml::render(ic, srv, ls_cfg, &cfg.station.name);
+                if stationd::icecast_xml::write_if_changed(&srv.config_path, &xml)? {
+                    warn!(path = ?srv.config_path, "Icecast config (re)written: restart Icecast to apply it");
+                } else {
+                    info!(path = ?srv.config_path, "Icecast config unchanged");
+                }
+                // Holds the passwords (0640): Icecast reads it through the
+                // group. Set at every start; failure = no start (Icecast
+                // could not read its own config).
+                if let Some(group) = &srv.file_group {
+                    stationd::icecast_xml::set_group(&srv.config_path, group).map_err(anyhow::Error::msg)?;
+                }
+                let access = stationd::icecast_xml::access(&srv.config_path).map_err(anyhow::Error::msg)?;
+                info!(path = ?srv.config_path, %access, "Icecast config access: Icecast's user must be in this group");
+                if !srv.share_dir.join("web").is_dir() {
+                    warn!(path = ?srv.share_dir, "[icecast.server] share_dir has no web/: is Icecast installed there?");
+                }
+                service = service.with_config(xml, srv.config_path.to_string_lossy().into_owned());
+            }
+            let task = stationd::icecast::spawn_sampler(
+                client,
+                mounts,
+                std::time::Duration::from_secs(ic.poll_interval),
+                control.clone(),
+                icecast_monitor.clone(),
+            );
+            (service, Some(task))
+        }
+        _ => {
+            info!("no [icecast] section: audience never sampled (stationctl debug listeners only)");
+            (IcecastGrpc::disabled(), None)
+        }
+    };
+
     let schedule_service = ScheduleGrpc::new(engine);
 
     // Media library: single owning actor over the `media` view. The heavy scan
@@ -166,7 +231,7 @@ async fn main() -> anyhow::Result<()> {
         shutdown_tx,
     );
 
-    info!(%addr, "gRPC server listening (status, quit, schedule, library, plugin, broadcast, liquidsoap)");
+    info!(%addr, "gRPC server listening (status, quit, schedule, library, plugin, broadcast, liquidsoap, icecast)");
 
     // Three ways to shut down cleanly: via `stationctl quit` (shutdown_rx,
     // triggered by the service's `quit` handler), or via a signal — Ctrl+C
@@ -197,11 +262,15 @@ async fn main() -> anyhow::Result<()> {
         .add_service(PluginServiceServer::new(plugin_service))
         .add_service(BroadcastServiceServer::new(broadcast_service))
         .add_service(LiquidsoapServiceServer::new(ls_service))
+        .add_service(IcecastServiceServer::new(icecast_service))
         .serve_with_shutdown(addr, shutdown_signal)
         .await?;
 
     // The bridge only answers short requests: stop it with the daemon.
     if let Some(task) = ls_task {
+        task.abort();
+    }
+    if let Some(task) = icecast_task {
         task.abort();
     }
 

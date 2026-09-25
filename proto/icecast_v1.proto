@@ -1,0 +1,58 @@
+// icecast_v1.proto
+// ─────────────────────────────────────────────────────────────────────────
+// Icecast vu par stationd : lecture de /admin/stats (échantillonnée toutes
+// les [icecast] poll_interval secondes) — audience et santé des mounts qu'il
+// alimente ([[liquidsoap.output]]) — et, avec [icecast.server], l'icecast.xml
+// qu'il génère. Face CLI : stationctl icecast status | render.
+
+syntax = "proto3";
+
+package webradio.icecast.v1;
+
+service IcecastService {
+  // Dernière lecture : serveur, audience, santé de chacun de nos mounts.
+  rpc GetStatus(GetStatusRequest) returns (IcecastStatus);
+
+  // L'icecast.xml tel que stationd le génère depuis [icecast.server]
+  // (identique à celui écrit au démarrage). failed_precondition sans
+  // [icecast.server].
+  rpc RenderConfig(RenderConfigRequest) returns (RenderConfigResponse);
+}
+
+message RenderConfigRequest {}
+
+message RenderConfigResponse {
+  string xml    = 1;
+  string path   = 2;   // où stationd l'écrit
+  string access = 3;   // droits réels du fichier : "0640, group stationd"
+}
+
+message GetStatusRequest {}
+
+message IcecastStatus {
+  bool   enabled         = 1;   // false = pas de section [icecast]
+  string server          = 2;   // host:port interrogé
+  uint32 poll_interval_s = 3;
+  string server_id       = 4;   // "Icecast 2.5.0" (dernière lecture réussie)
+  int64  last_ok_at      = 5;   // epoch s de la dernière lecture réussie ; 0 = jamais
+  string problem         = 6;   // vide = aucun ; sinon pourquoi l'audience est inconnue
+  int64  problem_at      = 7;
+  optional uint32 audience = 8; // somme de nos mounts ; absent = inconnue
+  repeated MountStatus mounts = 9;  // nos mounts, dans l'ordre de [[liquidsoap.output]]
+}
+
+message MountStatus {
+  string mount          = 1;
+  bool   present        = 2;   // le mount figure dans /admin/stats
+  bool   connected      = 3;   // une source l'alimente (stream_start présent)
+  string stream_start   = 4;   // tel qu'envoyé par Icecast (ISO 8601)
+  string source_ip      = 5;
+  string user_agent     = 6;   // client source (Liquidsoap/…)
+  string bitrate        = 7;   // débit nominal annoncé, kbit/s (tel qu'envoyé)
+  optional double read_kbps = 8;  // débit réel reçu de la source, moyenne glissante (absent : pas encore 30 s de mesure)
+  optional uint32 listeners     = 9;
+  optional uint32 listener_peak = 10;
+  string title          = 11;  // titre vu par les auditeurs (ICY)
+  string content_type   = 12;
+  uint32 read_window_s  = 13;  // fenêtre de la moyenne read_kbps (s)
+}

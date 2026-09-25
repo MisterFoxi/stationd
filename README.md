@@ -237,6 +237,26 @@ under its own service, so restarting stationd never cuts the air.
 
 Details: [`Doc/liquidsoap.md`](Doc/liquidsoap.md).
 
+### Icecast integration
+
+stationd only **reads** Icecast, from its admin API (`/admin/stats`, admin
+credentials in `[icecast]`, plain HTTP straight to Icecast, never through the
+reverse proxy), every `poll_interval` seconds:
+
+- **Audience:** the listeners of the mounts stationd feeds are summed and
+  published as `ListenersSampled`, which drives `stop-when-idle`. A failed
+  read (Icecast down, bad credentials, a mount without source) makes the
+  audience *unknown*, never 0: a draining station keeps playing.
+- **Mount health:** `stationctl icecast status` shows, per mount, whether a
+  source is connected and since when, the announced and the measured bitrate
+  (averaged over a minute; a stalled source reads 0), the listeners and the
+  title Icecast shows.
+- **Icecast's config** (optional, `[icecast.server]`): stationd writes
+  `icecast.xml` like it writes the `.liq` — one mount per output with its own
+  source password and UTF-8 titles, no global source password (only our
+  mounts can be fed), admin credentials, trusted reverse proxies for
+  `X-Forwarded-For` (Icecast 2.5). Icecast runs under its own unit.
+
 ---
 
 ## Getting started
@@ -293,6 +313,13 @@ port     = 8000
 password = "icecast-source-password"
 mount    = "/radio.mp3"
 bitrate  = 192
+
+[icecast]                                    # optional: audience + mount health
+admin_url      = "http://127.0.0.1:8000"     # Icecast itself, not the proxy
+admin_password = "icecast-admin-password"    # admin, not the source password
+
+[icecast.server]                             # optional: stationd writes icecast.xml
+trusted_proxies = ["192.168.1.94"]           # reverse proxy (X-Forwarded-For)
 ```
 
 ### Run
@@ -305,10 +332,13 @@ stationctl library scan
 stationctl playlist sync
 stationctl schedule apply grid.toml
 stationctl ls status
+stationctl icecast status
 ```
 
-The Liquidsoap control socket is created with mode `0660`: the user running
-stationd must be in Liquidsoap's group. After a change to `[liquidsoap]`,
+stationd, Liquidsoap and Icecast share a system group created at install
+(`stationd`): Liquidsoap's control socket (`0660`) and the generated
+`icecast.xml` (`0640`, `file_group`) are readable through it only. No user
+name is assumed (see `Doc/liquidsoap.md`). After a change to `[liquidsoap]`,
 restart stationd (to rewrite the script), then restart Liquidsoap.
 
 ---
@@ -327,8 +357,9 @@ restart stationd (to rewrite the script), then restart Liquidsoap.
 | `queue push` | Feed a `queue` playlist (listener request / DJ injection) |
 | `plugin list` \| `start` \| `stop` \| `restart` \| `reload` | Plugin lifecycle |
 | `ls render` \| `status` | Generated Liquidsoap script; bridge / air status |
+| `icecast status` \| `render` | Audience and health of our mounts; generated `icecast.xml` |
 | `clock set` \| `show` \| `reset` | Freeze the station clock (testing) |
-| `debug listeners <n>` | Inject a listener sample (until Icecast sampling is wired) |
+| `debug listeners <n>` | Inject a listener sample (overwritten by the next Icecast sample) |
 
 `stationctl --addr http://host:port …` targets another daemon.
 
@@ -351,8 +382,10 @@ src/
   ls_script.rs       Liquidsoap script generator
   ls_bridge.rs       loopback HTTP bridge (Liquidsoap → stationd)
   ls_control.rs      control socket (stationd → Liquidsoap)
+  icecast.rs         Icecast admin reader: audience sampling, mount health
+  icecast_xml.rs     icecast.xml generator ([icecast.server])
   *_grpc.rs          thin gRPC translators
-proto/               gRPC contracts (station, schedule, library, playlist, plugin, broadcast, liquidsoap)
+proto/               gRPC contracts (station, schedule, library, playlist, plugin, broadcast, liquidsoap, icecast)
 migrations/          SQLite migrations (embedded with sqlx)
 plugins/             example WASM guest plugins (separate crates)
 Doc/                 architecture and design decisions (mostly in French)
@@ -375,8 +408,9 @@ ETAT.md              development log / hand-over notes (French)
 - exact track counting for `every` rules.
 
 **Icecast:**
-- read the real listener count (Icecast 2.5 admin API), so `stop-when-idle`
-  works without manual injection.
+- `stop-when-idle` without an extra track: drop the prepared track when a
+  zero sample arrives while draining (today the stop comes one track late);
+- listeners per mount in `ListenersSampled`;
 
 **Later:**
 - the public `api` layer (Axum, REST/JSON) and a web admin UI (server-side
