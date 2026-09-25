@@ -413,7 +413,10 @@ stationctl icecast status
 - Files Liquidsoap reads (`fallback_path`, `halted_path`, the media) must be
   readable by `liquidsoap`: through the media group (`MEDIA_GID`) or
   world-readable. A file in `0660 you:you` outside that group fails with
-  *"Infallible source.dynamic … was not able to prepare source"*.
+  *"Infallible source.dynamic … was not able to prepare source"*. stationd
+  refuses to start when `fallback_path` / `halted_path` is missing, empty or
+  unreadable, and warns when it is not world-readable. `api_token` must be
+  printable ASCII.
 - `COPY` carries the directory modes of the build context into the image
   (a restrictive `docker/rootfs/etc` once made `/etc` unreadable for every
   non-root user); the Dockerfile normalises them after the copy.

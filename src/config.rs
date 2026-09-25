@@ -430,6 +430,11 @@ impl LiquidsoapConfig {
         if self.api_token.trim().is_empty() {
             return Err("api_token is empty".into());
         }
+        // Sent by Liquidsoap in an HTTP header: a non-ASCII character (a `…`
+        // pasted from an example) would make every pull a silent 401.
+        if !printable_ascii(&self.api_token) {
+            return Err("api_token: printable ASCII only (it travels in an HTTP header)".into());
+        }
         if !(1..=5).contains(&self.log_level) {
             return Err(format!("log_level {} out of 1..=5", self.log_level));
         }
@@ -465,6 +470,45 @@ impl LiquidsoapConfig {
             }
         }
         Ok(())
+    }
+
+    /// Start-up check of the files Liquidsoap plays on its own (`fallback_path`,
+    /// `halted_path`) — I/O, so kept out of [`Self::validate`]. `Err` (start-up
+    /// refused): missing, not a regular file, empty, or unreadable by stationd.
+    /// `Ok(warnings)`: a file not readable by "others" — Liquidsoap runs as
+    /// another user and stationd cannot check its rights; it then needs read
+    /// access through one of its groups (Docker: the media group `MEDIA_GID`,
+    /// or `stationd`). Relative paths are resolved against the CWD, like the
+    /// script does.
+    pub fn check_air_files(&self) -> Result<Vec<String>, String> {
+        use std::io::Read;
+        use std::os::unix::fs::MetadataExt;
+        let mut warnings = Vec::new();
+        for (what, path) in [("fallback_path", &self.fallback_path), ("halted_path", &self.halted_path)] {
+            let meta = std::fs::metadata(path)
+                .map_err(|e| format!("[liquidsoap] {what} {path:?}: {e} (Liquidsoap cannot start without it)"))?;
+            if !meta.is_file() {
+                return Err(format!("[liquidsoap] {what} {path:?} is not a regular file"));
+            }
+            if meta.len() == 0 {
+                return Err(format!("[liquidsoap] {what} {path:?} is empty"));
+            }
+            let mut byte = [0u8; 1];
+            std::fs::File::open(path)
+                .and_then(|mut f| f.read(&mut byte))
+                .map_err(|e| format!("[liquidsoap] {what} {path:?} is not readable by stationd: {e}"))?;
+            if meta.mode() & 0o004 == 0 {
+                warnings.push(format!(
+                    "[liquidsoap] {what} {path:?} is not readable by others (mode {:o}, uid {}, gid {}): \
+                     Liquidsoap runs as another user and needs read access through one of its groups \
+                     (Docker: MEDIA_GID or stationd), or it stops on a failed fallback",
+                    meta.mode() & 0o7777,
+                    meta.uid(),
+                    meta.gid()
+                ));
+            }
+        }
+        Ok(warnings)
     }
 
     /// The bridge address (validated loopback).
@@ -704,6 +748,11 @@ mod tests {
         assert!(matches!(load_str(&bad_rate), Err(ConfigError::Liquidsoap(m)) if m.contains("bitrate")));
         let empty_token = LS.replace("\"s3cret\"", "\"  \"");
         assert!(matches!(load_str(&empty_token), Err(ConfigError::Liquidsoap(m)) if m.contains("api_token")));
+        // A non-ASCII (or control) character in the token: refused at load.
+        let fancy = LS.replace("\"s3cret\"", "\"s3cret…\"");
+        assert!(matches!(load_str(&fancy), Err(ConfigError::Liquidsoap(m)) if m.contains("printable ASCII")));
+        let tab = LS.replace("\"s3cret\"", "\"s3\\tcret\"");
+        assert!(matches!(load_str(&tab), Err(ConfigError::Liquidsoap(m)) if m.contains("api_token")));
         // deny_unknown_fields: a typo is a parse error, never ignored.
         let typo = LS.replace("halted_path", "haltd_path");
         assert!(matches!(load_str(&typo), Err(ConfigError::Parse { .. })));
@@ -816,5 +865,43 @@ mod tests {
         "#;
         let result: Result<Config, _> = toml::from_str(toml_str);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn air_files_are_checked_at_start_up() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let file = |name: &str, content: &[u8], mode: u32| {
+            let p = dir.path().join(name);
+            std::fs::write(&p, content).unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(mode)).unwrap();
+            p
+        };
+        let good = file("noise.mp3", b"ID3", 0o644);
+        let mut ls = load_str(LS).unwrap().liquidsoap.unwrap();
+        ls.fallback_path = good.clone();
+        ls.halted_path = good.clone();
+        assert_eq!(ls.check_air_files(), Ok(vec![]));
+
+        // Group-only (640 / 660): fine for stationd, a warning for Liquidsoap.
+        ls.fallback_path = file("error.mp3", b"ID3", 0o660);
+        let w = ls.check_air_files().unwrap();
+        assert_eq!(w.len(), 1);
+        assert!(w[0].contains("fallback_path") && w[0].contains("mode 660"), "{w:?}");
+
+        // Refused: missing, a directory, empty.
+        ls.fallback_path = dir.path().join("missing.mp3");
+        assert!(ls.check_air_files().unwrap_err().contains("fallback_path"));
+        ls.fallback_path = good.clone();
+        ls.halted_path = dir.path().to_path_buf();
+        assert!(ls.check_air_files().unwrap_err().contains("not a regular file"));
+        ls.halted_path = file("empty.mp3", b"", 0o644);
+        assert!(ls.check_air_files().unwrap_err().contains("empty"));
+
+        // Unreadable by stationd itself (not testable as root: root reads all).
+        if unsafe { libc::geteuid() } != 0 {
+            ls.halted_path = file("locked.mp3", b"ID3", 0o000);
+            assert!(ls.check_air_files().unwrap_err().contains("not readable by stationd"));
+        }
     }
 }

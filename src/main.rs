@@ -119,10 +119,11 @@ async fn main() -> anyhow::Result<()> {
             } else {
                 info!(path = ?ls_cfg.script_path, "Liquidsoap script unchanged");
             }
-            for (what, p) in [("fallback_path", &ls_cfg.fallback_path), ("halted_path", &ls_cfg.halted_path)] {
-                if !p.exists() {
-                    warn!(path = ?p, "[liquidsoap] {what} does not exist: Liquidsoap will refuse to start");
-                }
+            // The files Liquidsoap plays on its own: missing / unreadable =
+            // start-up refused (it would crash-loop on them); not readable by
+            // others = a loud warning (its user's rights can't be checked here).
+            for w in ls_cfg.check_air_files().map_err(anyhow::Error::msg)? {
+                warn!("{w}");
             }
             let bridge = stationd::ls_bridge::LsBridge::new(engine.clone(), &cfg.media.library_path)?;
             // Control socket: pause/resume follow the broadcast state machine

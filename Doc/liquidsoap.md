@@ -338,6 +338,11 @@ de `stationd` est celui de l'hôte (argument de build `STATIOND_GID`, `.env`).
   $(stat -c %g /mnt/nfs/radio)`). Même chose pour `fallback_path` /
   `halted_path` : lisibles par ce groupe ou par tous, sinon « Infallible
   source.dynamic … was not able to prepare source » et Liquidsoap s'arrête.
+  stationd vérifie au démarrage (`LiquidsoapConfig::check_air_files`) :
+  absent, vide, pas un fichier ou illisible par stationd → **démarrage
+  refusé** ; non lisible par « les autres » → avertissement (mode, uid,
+  gid), stationd ne pouvant pas vérifier les droits de Liquidsoap.
+  `api_token` : ASCII imprimable, refusé au chargement sinon.
 - `icecast.xml` : stationd le donne au groupe `file_group` à chaque
   démarrage (erreur bruyante si le groupe n'existe pas ou si stationd n'en
   est pas membre) ; droits réels journalisés

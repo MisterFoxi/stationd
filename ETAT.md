@@ -135,15 +135,41 @@ Autres, indépendants :
   à Liquidsoap, par le socket, ce qui est à l'antenne et depuis quand.
 - Journaux : stationd en **UTC** (`…Z`), Liquidsoap en heure locale —
   lecture croisée pénible ; journaliser stationd en heure locale (à faire).
-- Petits restes Liquidsoap : validation au chargement plus stricte (jeton
-  ASCII obligatoire, fichier fallback/bruit absent = démarrage refusé — proposé,
-  non tranché ; à étendre à « illisible par Liquidsoap », vu en Docker) ;
-  fondu sur la coupe d'un override hard. (Bloc `[[plugin]]` égaré de
-  `Cargo.toml` : retiré le 2026-09-25.)
+- Petits restes Liquidsoap : fondu sur la coupe d'un override hard.
+  (Validation au démarrage — jeton ASCII, fichiers de secours / bruit :
+  faite le 2026-09-25, voir Fait. Bloc `[[plugin]]` égaré de `Cargo.toml` :
+  retiré le 2026-09-25.)
 
 ---
 
 ## Fait
+
+### — Validation au démarrage : jeton et fichiers de Liquidsoap (2026-09-25) —
+
+Point 7 de la 0.1 (dernier indispensable).
+
+- **`LiquidsoapConfig::validate`** : `api_token` en ASCII imprimable
+  (`printable_ascii`, comme les mots de passe Icecast) — refus au chargement.
+- **`LiquidsoapConfig::check_air_files()`** (E/S, appelé par `main.rs`
+  avant l'écriture du script ; remplace l'avertissement « does not exist ») :
+  `fallback_path` / `halted_path` absent, pas un fichier ordinaire, vide ou
+  illisible par stationd → **démarrage refusé** ; non lisible par « les
+  autres » → avertissement avec mode, uid, gid (Liquidsoap tourne sous un
+  autre utilisateur, stationd ne peut pas vérifier ses droits ; cas du
+  `error.mp3` en `660 foxi:foxi` vu en Docker).
+- En Docker : stationd refusé → jamais « prêt » → Icecast et Liquidsoap ne
+  démarrent pas sur une config bancale ; s6 relance stationd (erreur au
+  journal à chaque tentative).
+- Tests (+2) : jeton `…` et tabulation refusés ; fichiers bon / `660`
+  (avertissement) / absent / dossier / vide / illisible (ce dernier sauté
+  en root).
+
+**Validation** : `cargo test --locked` vert (358).
+
+**La 0.1 « indispensable » est complète** (points 1 à 8). Restent les
+souhaitables : `TrackStarted` / `TrackFinished` aux plugins, compteur
+`Every` exact ; et les notes « plus tard » (pont amnésique au redémarrage,
+journaux en heure locale, TUI).
 
 ### — `day_part` à fin ouverte (2026-09-25) —
 
@@ -1562,9 +1588,12 @@ dans le découpage des modules (`grid_index` = A, `grid_store` = B).
     **relancer Liquidsoap** (log stationd : « script (re)written »).
   - Changement de stationd seul (pont, CLI) : relancer stationd suffit ;
     Liquidsoap retombe sur le fallback le temps du redémarrage.
-  - `api_token` / mots de passe : **ASCII** (un `…` copié d'un exemple → 401
-    sur le pont). `fallback_path` / `halted_path` doivent exister, sinon
-    « That source is fallible » au chargement du script.
+  - `api_token` / mots de passe : **ASCII imprimable**, refusé au chargement
+    sinon (un `…` copié d'un exemple donnait des 401 muets sur le pont).
+    `fallback_path` / `halted_path` : absents, vides, pas des fichiers ou
+    illisibles par stationd → **démarrage refusé** ; non lisibles par « les
+    autres » → avertissement (Liquidsoap doit les lire par un de ses
+    groupes, sinon il s'arrête sur « Infallible source.dynamic … »).
   - Socket de contrôle en **0660** : l'utilisateur de stationd doit être dans
     le groupe de Liquidsoap ; chemin < 108 octets. En Docker :
     `/run/stationd/liquidsoap.sock` (hors du dépôt monté).
