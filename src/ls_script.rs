@@ -10,6 +10,8 @@
 //!                                              # current one (real air time)
 //! pull   = cross(pull)                         # optional crossfade
 //! radio  = fallback(track_sensitive=false, [
+//!            relay          (a `remote` playlist: input.http, once the pull
+//!                            has no track left — soft entry),
 //!            pull,
 //!            halted noise   (while stationd reports paused/stopped),
 //!            blank          (until stationd answered once — start-up),
@@ -39,6 +41,16 @@
 //! unknown, it asks at once. A skip must not wait: it raises `urgent` and
 //! fetches the next track synchronously before skipping (no gap filled by the
 //! safety file).
+//!
+//! A `remote` playlist is relayed, not played as a file: `/next` answers
+//! `relay` + the URL, the script (re)starts `input.http` on it and queues
+//! nothing. The relay takes the air once the current track is over (soft,
+//! like a day-part change) and keeps it while stationd keeps answering
+//! `relay` — the pull, trackless, re-asks every retry delay: that polling IS
+//! the watch on the grid. A `file` answer queues the track: the relay yields
+//! as soon as it is ready, and stops when it starts; `halted` / `none` stop the
+//! relay at once (noise / safety are always ready). A hard insert plays over
+//! the relay, which then resumes live.
 //!
 //! Every user-provided string is emitted through [`liq_string`], which also
 //! neutralises Liquidsoap's `#{…}` interpolation.
@@ -176,6 +188,12 @@ let stationd.urgent = ref(true)
 # Seconds left in the current pull track (-1. = unknown / none). Set once the
 # pull source exists (it is defined after the function that reads this).
 let stationd.remaining = ref(fun () -> -1.)
+# Relay of a `remote` playlist (input.http): started / stopped from the pull
+# replies. The two functions are wired once the relay source exists.
+let stationd.relay_url = ref("")
+let stationd.relaying = ref(false)
+let stationd.relay_on = ref(fun (_) -> ())
+let stationd.relay_off = ref(fun () -> ())
 
 def stationd.post(endpoint, payload) =
   try
@@ -218,14 +236,25 @@ def stationd.fetch_next() =
         kind: string, uri: string, state: string, reason: string
       }}) = null.get(resp)
       if kind == "file" then
+        # A running relay yields once this track is ready, stops when it starts.
         stationd.halted := false
         stationd.transition_log(kind, "")
         request.create(uri)
+      elsif kind == "relay" then
+        stationd.halted := false
+        stationd.transition_log(kind, uri)
+        relay_on = stationd.relay_on()
+        relay_on(uri)
+        null
       elsif kind == "halted" then
+        relay_off = stationd.relay_off()
+        relay_off()
         stationd.halted := true
         stationd.transition_log(kind, "(#{{state}}): halted noise at the end of the current track")
         null
       else
+        relay_off = stationd.relay_off()
+        relay_off()
         stationd.halted := false
         stationd.transition_log(kind, "(#{{reason}}): safety fallback")
         null
@@ -279,7 +308,13 @@ end
     o.push_str(&format!(
         "# ─── air chain ─────────────────────────────────────────────────────────\n\
          pull = request.dynamic(id=\"stationd_pull\", retry_delay={retry}, timeout={rto}, stationd.next)\n\
-         source.methods(pull).on_track(synchronous=false, fun (m) -> stationd.report(m[\"stationd_rid\"], \"\"))\n\
+         # One of our tracks starts: a relay it replaces is over.\n\
+         def stationd.pull_started(m) =\n  \
+           relay_off = stationd.relay_off()\n  \
+           relay_off()\n  \
+           stationd.report(m[\"stationd_rid\"], \"\")\n\
+         end\n\
+         source.methods(pull).on_track(synchronous=false, stationd.pull_started)\n\
          # Skip target: the track source itself, before the crossfade.\n\
          pull_raw = pull\n\
          stationd.remaining := fun () -> pull_raw.remaining()\n",
@@ -305,6 +340,34 @@ end
          halted_noise = single(id=\"stationd_halted\", {halted})\n\
          safety = single(id=\"stationd_fallback\", {fallback})\n\
          startup = blank(id=\"stationd_startup\")\n\n\
+         # Relay of a `remote` playlist: idle until stationd answers `relay`.\n\
+         relay = input.http(id=\"stationd_relay\", start=false, {{stationd.relay_url()}})\n\
+         def stationd.relay_on_fn(url) =\n  \
+           if not stationd.relaying() or stationd.relay_url() != url then\n    \
+             if relay.is_started() then relay.stop() end\n    \
+             stationd.relay_url := url\n    \
+             relay.start()\n    \
+             stationd.relaying := true\n    \
+             log.important(label=\"stationd\", \"relay: #{{url}}\")\n  \
+           end\n\
+         end\n\
+         def stationd.relay_off_fn() =\n  \
+           if stationd.relaying() then\n    \
+             stationd.relaying := false\n    \
+             relay.stop()\n    \
+             log.important(label=\"stationd\", \"relay stopped\")\n  \
+           end\n\
+         end\n\
+         stationd.relay_on := stationd.relay_on_fn\n\
+         stationd.relay_off := stationd.relay_off_fn\n\
+         # While relaying, keep asking stationd (the pull is not read then, so\n\
+         # request.dynamic stops polling on its own): a `file` / `halted` /\n\
+         # `none` answer ends the relay.\n\
+         thread.run(fast=false, every={retry}, fun () ->\n  \
+           if stationd.relaying() and list.length(pull_raw.queue()) == 0 then\n    \
+             ignore(pull_raw.fetch())\n  \
+           end\n\
+         )\n\n\
          # Report Liquidsoap's own sources on every SWITCH to them, not on a track\n\
          # start: a noise loop left mid-way is resumed (no new track), a later stop\n\
          # would go unreported. Off the streaming thread (HTTP call).\n\
@@ -316,12 +379,16 @@ end
            id=\"stationd_air\",\n  \
            track_sensitive=false,\n  \
            transitions=[\n    \
+             fun (_, b) -> stationd.switched_to(\"relay\", b),\n    \
              fun (_, b) -> b,\n    \
              fun (_, b) -> stationd.switched_to(\"halted\", b),\n    \
              fun (_, b) -> b,\n    \
              fun (_, b) -> stationd.switched_to(\"fallback\", b)\n  \
            ],\n  \
            [\n    \
+             # soft entry: only once the pull — crossfade tail included — is\n    \
+             # done (else the tail would be cut, then replayed at the exit)\n    \
+             source.available(relay, {{stationd.relaying() and not stationd.paused() and not pull.is_ready()}}),\n    \
              source.available(pull, {{not stationd.paused()}}),\n    \
              source.available(halted_noise, {{stationd.halted() or stationd.paused()}}),\n    \
              source.available(startup, {{stationd.loading()}}),\n    \
@@ -330,6 +397,7 @@ end
          )\n",
         halted = liq_path(&absolute(&ls.halted_path)),
         fallback = liq_path(&absolute(&ls.fallback_path)),
+        retry = liq_float(PULL_RETRY_S),
     ));
 
     o.push_str(
@@ -559,8 +627,8 @@ mod tests {
         assert!(!s.contains("source.methods(safety).on_track"));
         // one transition per fallback member, in the same order
         let tr = s.find("transitions=[").unwrap();
-        let members = s.find("source.available(pull").unwrap();
-        assert_eq!(s[tr..members].matches("fun (_, b)").count(), 4);
+        let members = s.find("source.available(relay").unwrap();
+        assert_eq!(s[tr..members].matches("fun (_, b)").count(), 5);
         assert!(!s.contains("\"annotate:"), "annotate: makes single() fallible");
         // pull first, halted noise before the safety fallback.
         let pull = s.find("source.available(pull, {not stationd.paused()})").unwrap();
@@ -568,7 +636,7 @@ mod tests {
         let safety = s.find("    safety\n").unwrap();
         assert!(pull < halted && halted < safety);
         // Track starts observed on the pull BEFORE the crossfade.
-        let report = s.find("source.methods(pull).on_track(synchronous=false").unwrap();
+        let report = s.find("source.methods(pull).on_track(synchronous=false, stationd.pull_started)").unwrap();
         assert!(report < s.find("cross(id=").unwrap());
         assert!(s.contains("b=\"192k\""));
         assert!(s.contains("password=\"hack\\\"me\""));
@@ -606,6 +674,35 @@ mod tests {
         assert!(body.find("stationd.urgent := true").unwrap() < fetch);
         assert!(fetch < body.find("source.skip(pull_raw)").unwrap());
         assert!(body.contains("if list.length(pull_raw.queue()) == 0 then"));
+    }
+
+    #[test]
+    fn a_remote_playlist_is_relayed_by_input_http() {
+        let s = render(&cfg(), "R");
+        // An idle relay source, fed with the URL stationd hands out.
+        assert!(s.contains(
+            "relay = input.http(id=\"stationd_relay\", start=false, {stationd.relay_url()})"
+        ));
+        // First in the air chain, but only once the (crossfaded) pull is done:
+        // a soft entry, and no crossfade tail cut then replayed.
+        let relay = s.find("source.available(relay, {stationd.relaying() and not stationd.paused() and not pull.is_ready()})").unwrap();
+        let pull = s.find("source.available(pull, {not stationd.paused()})").unwrap();
+        assert!(relay < pull);
+        assert!(s.contains("fun (_, b) -> stationd.switched_to(\"relay\", b)"));
+        // Replies: `relay` starts it and queues nothing; `halted` / `none`
+        // stop it at once; a `file` lets it yield when the track is ready and
+        // stop when the track starts (pull_started).
+        let relay_branch = s.find("elsif kind == \"relay\" then").unwrap();
+        let halted_branch = s.find("elsif kind == \"halted\" then").unwrap();
+        assert!(s[relay_branch..halted_branch].contains("relay_on(uri)"));
+        assert!(s[relay_branch..halted_branch].contains("null"));
+        let tail = &s[halted_branch..s[halted_branch..].find("catch err do").unwrap() + halted_branch];
+        assert_eq!(tail.matches("relay_off = stationd.relay_off()").count(), 2, "halted and none");
+        let started = s.find("def stationd.pull_started(m) =").unwrap();
+        assert!(s[started..started + 200].contains("relay_off()"));
+        // While relaying, the script keeps asking stationd itself.
+        assert!(s.contains("thread.run(fast=false, every=2., fun () ->"));
+        assert!(s.contains("if stationd.relaying() and list.length(pull_raw.queue()) == 0 then"));
     }
 
     #[test]

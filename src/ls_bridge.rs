@@ -10,7 +10,10 @@
 //!   - `file`   → `uri` = `annotate:stationd_rid="N":/abs/path`;
 //!   - `halted` → `state` = paused|stopped: Liquidsoap airs the halted noise,
 //!     NOT the safety fallback;
-//!   - `none`   → `reason` = fallback|pool_empty|stream_unsupported|error:
+//!   - `relay`  → `uri` = the stream URL of a `remote` playlist: Liquidsoap
+//!     relays it (input.http) once the current track is over, for as long as
+//!     the answer stays `relay` (the script keeps asking while relaying);
+//!   - `none`   → `reason` = fallback|pool_empty|error:
 //!     Liquidsoap airs its safety fallback.
 //! - `POST /ls/v1/track` — `{rid, kind}`: what REALLY started airing (the
 //!   post-crossfade air chain). A known `rid` = one of our tracks: the station
@@ -62,6 +65,9 @@ impl NextReply {
     fn file(uri: String) -> Self {
         Self { kind: "file".into(), uri, state: String::new(), reason: String::new() }
     }
+    fn relay(url: String) -> Self {
+        Self { kind: "relay".into(), uri: url, state: String::new(), reason: String::new() }
+    }
     fn halted(state: &str) -> Self {
         Self { kind: "halted".into(), uri: String::new(), state: state.into(), reason: String::new() }
     }
@@ -98,6 +104,8 @@ pub enum OnAirKind {
     Fallback,
     /// The halted background noise.
     Halted,
+    /// The relay of a `remote` playlist (`media_path` = its URL).
+    Relay,
     /// Something we can't place (unknown rid, source without tag).
     Unknown,
 }
@@ -108,6 +116,7 @@ impl OnAirKind {
             OnAirKind::Track => "track",
             OnAirKind::Fallback => "fallback",
             OnAirKind::Halted => "halted",
+            OnAirKind::Relay => "relay",
             OnAirKind::Unknown => "unknown",
         }
     }
@@ -199,6 +208,9 @@ struct BridgeState {
     /// The track that was on air when the halted noise took over: a resume
     /// from pause continues it (frozen, not restarted), so it is on air again.
     before_halt: Option<OnAir>,
+    /// URL of the relay stationd last asked for (while it keeps answering
+    /// `relay`): what `on air` shows once Liquidsoap switches to it.
+    relay_url: Option<String>,
 }
 
 #[derive(Clone)]
@@ -235,14 +247,19 @@ impl LsBridge {
                 } else {
                     match r.media_path {
                         Some(url) if r.stream => {
-                            // The relay (input.http driven by stationd) is not
-                            // wired yet: say so loudly, air the safety net.
-                            tracing::warn!(
-                                %url,
-                                playlist = r.decision.playlist_ref.as_deref().unwrap_or("-"),
-                                "remote stream resolved but the Liquidsoap relay is not wired yet: fallback"
-                            );
-                            NextReply::none("stream_unsupported")
+                            // A `remote` playlist: Liquidsoap relays it. Asked
+                            // again every few seconds while relaying — log a
+                            // change of URL only.
+                            let mut st = self.lock();
+                            if st.relay_url.as_deref() != Some(url.as_str()) {
+                                tracing::info!(
+                                    %url,
+                                    playlist = r.decision.playlist_ref.as_deref().unwrap_or("-"),
+                                    "remote playlist: relay"
+                                );
+                                st.relay_url = Some(url.clone());
+                            }
+                            NextReply::relay(url)
                         }
                         Some(media) => {
                             let (rid, uri) = self.hand_out(
@@ -272,6 +289,9 @@ impl LsBridge {
             }
         };
         let mut st = self.lock();
+        if reply.kind != "relay" {
+            st.relay_url = None;
+        }
         st.status.pulls += 1;
         st.status.last_pull_at = Some(now.0);
         if reply.kind != "file" {
@@ -309,7 +329,7 @@ impl LsBridge {
         match self.engine.air_override_now(id, now).await {
             Ok(Some(r)) => match r.media_path {
                 Some(url) if r.stream => {
-                    tracing::warn!(id, %url, "hard override resolved to a remote stream: relay not wired yet, not aired");
+                    tracing::warn!(id, %url, "hard override resolved to a remote stream: a stream cannot be cut in (endless insert), not aired");
                     None
                 }
                 Some(media) => {
@@ -337,7 +357,7 @@ impl LsBridge {
         match self.engine.air_at_clock_hard(mark, now).await {
             Ok(Some(r)) => match r.media_path {
                 Some(url) if r.stream => {
-                    tracing::warn!(%url, "AtClock hard resolved to a remote stream: relay not wired yet, not aired");
+                    tracing::warn!(%url, "AtClock hard resolved to a remote stream: a stream cannot be cut in (endless insert), not aired");
                     None
                 }
                 Some(media) => {
@@ -419,6 +439,12 @@ impl LsBridge {
                     }
                     OnAirKind::Halted
                 }
+                "relay" => {
+                    if was != Some(OnAirKind::Relay) {
+                        tracing::info!(url = self.lock().relay_url.as_deref().unwrap_or("-"), "relay on air");
+                    }
+                    OnAirKind::Relay
+                }
                 other => {
                     tracing::warn!(kind = %other, "Liquidsoap reported an untagged track");
                     OnAirKind::Unknown
@@ -444,7 +470,11 @@ impl LsBridge {
                     leaving.extend(Left::of(&track, now));
                 }
             }
-            OnAir::source(kind, now)
+            let mut source = OnAir::source(kind, now);
+            if source.kind == OnAirKind::Relay {
+                source.media_path = st.relay_url.clone();
+            }
+            source
         };
         self.lock().status.on_air = Some(on_air);
         for left in leaving {
@@ -889,6 +919,69 @@ mod tests {
         b.at(1200); // Liquidsoap lost the track: the safety net takes over
         b.source("fallback").await;
         assert!(played(&pool, "pod").await.is_empty());
+    }
+
+    // ----- relay of a `remote` playlist -----------------------------------
+
+    /// `music` on the floor, a `night` remote over 00:00–06:00.
+    async fn relay_bridge() -> (tempfile::TempDir, LsBridge) {
+        let (dir, b) = bridge().await;
+        let pool = b.engine.pool_for_tests();
+        let night = "name = \"night\"\n[selection]\nmode = \"remote\"\nurl = \"http://relay.example/live\"\n";
+        let pl = crate::playlist::Playlist::parse(night).unwrap();
+        crate::store::upsert(&pool, "night", &pl, night, Some("night")).await.unwrap();
+        insert_rule(
+            &pool,
+            &Rule {
+                id: "night".into(),
+                enabled: true,
+                validity: Validity::default(),
+                kind: RuleKind::DayPart {
+                    playlist_ref: "night".into(),
+                    start: crate::resolver::WallClock { hour: 0, minute: 0 },
+                    end: Some(crate::resolver::WallClock { hour: 6, minute: 0 }),
+                },
+            },
+        )
+        .await
+        .unwrap();
+        (dir, b)
+    }
+
+    #[tokio::test]
+    async fn a_remote_playlist_is_relayed_and_shown_on_air() {
+        let (_d, b) = relay_bridge().await;
+        b.engine.set_clock(Some(crate::resolver::Epoch(3600))); // 01:00 UTC
+        let r = b.next().await;
+        assert_eq!(r, NextReply::relay("http://relay.example/live".into()));
+        assert!(b.status().next.is_none(), "nothing queued for a relay");
+        // Liquidsoap switches to the relay: on air, with its URL.
+        b.track_started(&TrackEvent { rid: String::new(), kind: "relay".into() }).await;
+        let on_air = b.status().on_air.unwrap();
+        assert_eq!(on_air.kind, OnAirKind::Relay);
+        assert_eq!(on_air.media_path.as_deref(), Some("http://relay.example/live"));
+        // Asked again while relaying: still the relay.
+        assert_eq!(b.next().await.kind, "relay");
+        // Out of the window: a file ends the relay.
+        b.engine.set_clock(Some(crate::resolver::Epoch(7 * 3600)));
+        let r = b.next().await;
+        assert_eq!(r.kind, "file");
+        b.track_started(&TrackEvent { rid: "1".into(), kind: String::new() }).await;
+        assert_eq!(b.status().on_air.unwrap().kind, OnAirKind::Track);
+    }
+
+    #[tokio::test]
+    async fn a_track_replaced_by_a_relay_is_judged_like_any_other() {
+        let (_d, b, pool) = pod_bridge().await;
+        let night = "name = \"night\"\n[selection]\nmode = \"remote\"\nurl = \"http://relay.example/live\"\n";
+        let pl = crate::playlist::Playlist::parse(night).unwrap();
+        crate::store::upsert(&pool, "night", &pl, night, Some("night")).await.unwrap();
+        b.at(1000);
+        b.next().await; // ep1
+        b.start(1).await;
+        b.at(1600); // played to its end, then the relay takes the air
+        b.source("relay").await;
+        assert_eq!(played(&pool, "pod").await, ["pod/ep1.mp3".to_string()].into());
     }
 
     #[tokio::test]

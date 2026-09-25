@@ -65,14 +65,16 @@ pub async fn load_grid(pool: &SqlitePool) -> Result<Grid, GridLoadError> {
             .into_iter()
             .collect();
 
-    let day_part: HashMap<String, (String, i64, i64, i64, i64)> = sqlx::query_as(
+    // (playlist_ref, start h, start m, end h, end m) — no end = an open day part.
+    type DayPartRow = (String, i64, i64, Option<i64>, Option<i64>);
+    let day_part: HashMap<String, DayPartRow> = sqlx::query_as(
         "SELECT rule_id, playlist_ref, start_hour, start_minute, end_hour, end_minute
          FROM grid_day_part",
     )
     .fetch_all(pool)
     .await?
     .into_iter()
-    .map(|(rid, r, sh, sm, eh, em): (String, String, i64, i64, i64, i64)| {
+    .map(|(rid, r, sh, sm, eh, em): (String, String, i64, i64, Option<i64>, Option<i64>)| {
         (rid, (r, sh, sm, eh, em))
     })
     .collect();
@@ -129,7 +131,7 @@ pub async fn load_grid(pool: &SqlitePool) -> Result<Grid, GridLoadError> {
                 RuleKind::DayPart {
                     playlist_ref: r,
                     start: WallClock { hour: sh as u8, minute: sm as u8 },
-                    end: WallClock { hour: eh as u8, minute: em as u8 },
+                    end: eh.zip(em).map(|(eh, em)| WallClock { hour: eh as u8, minute: em as u8 }),
                 }
             }
             "at_clock" => {
@@ -251,8 +253,8 @@ async fn insert_rule_in_tx(
             .bind(playlist_ref)
             .bind(start.hour as i64)
             .bind(start.minute as i64)
-            .bind(end.hour as i64)
-            .bind(end.minute as i64)
+            .bind(end.map(|e| e.hour as i64))
+            .bind(end.map(|e| e.minute as i64))
             .execute(&mut **tx)
             .await?;
         }
@@ -384,7 +386,7 @@ mod tests {
             RuleKind::DayPart {
                 playlist_ref: "jazz".into(),
                 start: WallClock { hour: 8, minute: 0 },
-                end: WallClock { hour: 10, minute: 0 },
+                end: Some(WallClock { hour: 10, minute: 0 }),
             },
         );
         jazz.validity.days = vec![Weekday::Mon, Weekday::Fri];
@@ -418,7 +420,7 @@ mod tests {
         match &morning.kind {
             RuleKind::DayPart { playlist_ref, start, end } => {
                 assert_eq!(playlist_ref, "jazz");
-                assert_eq!((start.hour, end.hour), (8, 10));
+                assert_eq!((start.hour, end.unwrap().hour), (8, 10));
             }
             _ => panic!("expected DayPart"),
         }
@@ -446,7 +448,7 @@ mod tests {
                 RuleKind::DayPart {
                     playlist_ref: "jazz".into(),
                     start: WallClock { hour: 8, minute: 0 },
-                    end: WallClock { hour: 10, minute: 0 },
+                    end: Some(WallClock { hour: 10, minute: 0 }),
                 },
             ),
         )
@@ -479,4 +481,30 @@ mod tests {
         assert_eq!(grid.rules.len(), 1, "old rules must be gone");
         assert_eq!(grid.rules[0].id, "new");
     }
+    #[tokio::test]
+    async fn an_open_day_part_is_stored_and_loaded_without_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = crate::db::init(&dir.path().join("t.db")).await.unwrap();
+        insert_rule(
+            &pool,
+            &Rule {
+                id: "morning".into(),
+                enabled: true,
+                validity: Validity::default(),
+                kind: RuleKind::DayPart {
+                    playlist_ref: "matin".into(),
+                    start: WallClock { hour: 6, minute: 0 },
+                    end: None,
+                },
+            },
+        )
+        .await
+        .unwrap();
+        let grid = load_grid(&pool).await.unwrap();
+        assert!(matches!(
+            grid.rules[0].kind,
+            RuleKind::DayPart { start: WallClock { hour: 6, minute: 0 }, end: None, .. }
+        ));
+    }
+
 }

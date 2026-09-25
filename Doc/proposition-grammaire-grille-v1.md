@@ -44,12 +44,14 @@ Aucun champ propre. Plusieurs base_rotation = odeur de config ; comportement dé
 4.2 day_part
 Champ	Type	Règle
 start	HH:MM	obligatoire, 00:00–23:59
-end	HH:MM	obligatoire, strictement > start
+end	HH:MM	facultatif ; présent : ≠ start (end < start = passage de minuit)
 Fenêtre [start, end) en minutes locales. end est une borne de validité molle évaluée en frontière de piste, jamais une coupe : la dernière piste déborde, le changement se fait au titre suivant. Cf. resolver.rs.
 
-Cross-minuit interdit en v1 (end ≤ start rejeté) : window_covers ne le modélise pas encore (TODO signalé dans le code). Contourner avec deux règles (22:00→24:00 impossible → à revoir quand le carry de jour sera implémenté).
+Cross-minuit : end < start couvre [start, 24:00) ∪ [00:00, end) (implémenté le 2026-09-22 ; la validité `days` d'une fenêtre explicite s'évalue sur le jour courant).
 
-Chevauchement : la fenêtre la plus étroite gagne (la plus spécifique), égalités départagées par id. Défini, pas ambigu.
+Tranche ouverte (sans end, 2026-09-25) : elle court de son start jusqu'au prochain start d'une AUTRE tranche (ouverte ou non) — grille de programmes, chaque émission dure jusqu'à la suivante. Ses days / dates s'évaluent sur le jour où elle a COMMENCÉ (un samedi 08:00 peut courir jusqu'au lundi 06:00 ; recherche du dernier début sur 7 jours). Une fenêtre explicite qui démarre dedans la termine pour de bon (pas de reprise après). Seule tranche de la grille : elle tourne en permanence une fois commencée. Cf. resolver::open_part_covers.
+
+Chevauchement : la fenêtre la plus étroite gagne (la plus spécifique), égalités départagées par id ; une tranche ouverte compte comme la plus large (une fenêtre explicite déjà commencée l'emporte). Défini, pas ambigu.
 
 4.3 at_clock
 Exactement un ancrage (jamais fusionnés — le piège AzuraCast d'un champ « intervalle » lu de deux façons) :

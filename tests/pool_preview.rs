@@ -337,10 +337,10 @@ members = [{ ref = "jazz", runtime = "20m" }, { ref = "remote", runtime = "5m" }
             r::RuleKind::DayPart {
                 playlist_ref: "show".into(),
                 start: r::WallClock { hour: 9, minute: 0 },
-                end: r::WallClock {
+                end: Some(r::WallClock {
                     hour: 10,
                     minute: 0,
-                },
+                }),
             },
         ),
         rule(

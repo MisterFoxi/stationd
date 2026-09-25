@@ -88,7 +88,7 @@ against the library; a fixed tracklist is just a special case.
 |---|---|
 | `dynamic` | Media matching filters (`path`, `title`, `artist`, `album`, `year`, `duration`, `genre`). |
 | `static` | An explicit list of files. |
-| `remote` | A remote stream URL (relay: see [Roadmap](#roadmap)). |
+| `remote` | A remote stream URL, relayed live for as long as the rule that names it wins (meant for `day_part` / `base_rotation`; inside a group, give it a `runtime`). |
 | `queue` | A runtime buffer filled by listener requests or DJ injection (`stationctl queue push`), FIFO or LIFO. |
 | `group` | Other playlists composed with a strategy: `sequence`, `shuffle`, `weighted`, `rotate`. Groups can nest; cycles are detected. |
 
@@ -140,7 +140,7 @@ rules apply, the highest priority wins:
 | Kind | Meaning |
 |---|---|
 | `base_rotation` | The floor: covers any time nothing else does. |
-| `day_part` | A time window (`start`/`end`, optional `days`). Windows crossing midnight are supported. |
+| `day_part` | A time window (`start`/`end`, optional `days`). Windows crossing midnight are supported. Without `end`, the day part is **open**: it runs until the next start of another day part (a programme grid where each show lasts until the next one); its `days` apply to the day it started. |
 | `at_clock` | A fixed time (`at = "08:00"`, or `every_minutes`). `soft`: at the next track boundary. `hard`: cut in on the second (the current track is interrupted), and outranks everything except overrides; a hard mark that cannot be cut (station paused, more than 10 s late) airs soft instead. Optional `expiry`. |
 | `every` | A cooldown: every N tracks (`min_tracks`) or every elapsed duration. |
 
@@ -476,9 +476,6 @@ ETAT.md              development log / hand-over notes (French)
 ---
 
 ## Roadmap
-
-**Liquidsoap, step 3 — stationd acting on the air on its own:**
-- relay of `remote` streams (`input.http` driven by stationd).
 
 **Liquidsoap, step 4 — end of track:**
 - `TrackStarted` / `TrackFinished` events for plugins;

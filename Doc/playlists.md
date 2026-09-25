@@ -152,6 +152,23 @@ que `mtime` (qu'une copie NFS ou un `rsync` réécrit, réordonnant la série).
   imbriquées), mais imposent une **détection de cycle** côté `stationd`
   (valider le graphe comme un DAG).
 
+## Relais (`mode = "remote"`, `url`)
+
+Une playlist `remote` relaie un flux externe (`input.http` côté Liquidsoap,
+cf. `Doc/liquidsoap.md`) : pas de piste, pas de fin. Le relais prend
+l'antenne à la fin de la piste en cours et la garde **tant que la règle qui
+le désigne gagne** ; il cède dans les ~2 s quand la grille donne autre chose.
+
+- Fait pour une **tranche** : `day_part`, `base_rotation`. En `at_clock` ou
+  `every`, la règle ne gagne qu'un tour (repère consommé, cooldown relancé) :
+  le relais ne durerait qu'une interrogation (~2 s).
+- **Membre de groupe** : lui donner un budget **`runtime`** (durée du
+  relais). Avec `take`, chaque interrogation (~2 s) compterait pour une
+  piste.
+- Pas d'historique anti-répétition, pas d'`unplayed_only` (un flux n'a pas
+  d'identité de fichier). Un override ou un `at_clock` hard ne peut pas
+  insérer un flux (insert sans fin) : refusé, journalisé.
+
 ## Correspondance moteur
 
 Ce qui est du Liquidsoap direct : `queue` → `request.queue`, `scheduled` →

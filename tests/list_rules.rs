@@ -29,7 +29,7 @@ async fn lists_every_variant_and_preserves_playback_state() {
     let rules = vec![
         base,
         rule("b-day", r::RuleKind::DayPart { playlist_ref: "jazz".into(),
-            start: r::WallClock { hour: 8, minute: 15 }, end: r::WallClock { hour: 10, minute: 30 } }),
+            start: r::WallClock { hour: 8, minute: 15 }, end: Some(r::WallClock { hour: 10, minute: 30 }) }),
         rule("c-clock", r::RuleKind::AtClock { playlist_ref: "news".into(),
             anchor: r::ClockAnchor::At(r::WallClock { hour: 9, minute: 0 }), mode: r::Mode::Hard, expiry_secs: Some(30) }),
         rule("d-marks", r::RuleKind::AtClock { playlist_ref: "ids".into(),

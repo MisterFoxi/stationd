@@ -201,15 +201,19 @@ enum Demand {
     Punctual,
 }
 
-/// Kind tag, referenced playlist, and temporal demand of a rule.
-fn classify_rule(kind: &RuleKind) -> (&'static str, String, Demand) {
-    match kind {
+/// Kind tag, referenced playlist, and temporal demand of a rule (`grid` = the
+/// whole grid: an open day part lasts until the next start of another one).
+fn classify_rule(rule: &Rule, grid: &Grid) -> (&'static str, String, Demand) {
+    match &rule.kind {
         RuleKind::BaseRotation { playlist_ref } => {
             // The floor must sustain a full day without forcing repeats.
             ("base_rotation", playlist_ref.clone(), Demand::Duration(86_400))
         }
-        RuleKind::DayPart { playlist_ref, start, end } => {
+        RuleKind::DayPart { playlist_ref, start, end: Some(end) } => {
             ("day_part", playlist_ref.clone(), Demand::Duration(wallclock_window_secs(start, end)))
+        }
+        RuleKind::DayPart { playlist_ref, start, end: None } => {
+            ("day_part", playlist_ref.clone(), Demand::Duration(open_part_nominal_secs(rule, start, grid)))
         }
         RuleKind::AtClock { playlist_ref, .. } => ("at_clock", playlist_ref.clone(), Demand::Punctual),
         RuleKind::Every { playlist_ref, .. } => ("every", playlist_ref.clone(), Demand::Punctual),
@@ -222,6 +226,27 @@ fn wallclock_window_secs(start: &crate::resolver::WallClock, end: &crate::resolv
     let s = start.hour as i64 * 3600 + start.minute as i64 * 60;
     let e = end.hour as i64 * 3600 + end.minute as i64 * 60;
     if e > s { e - s } else { e + 86_400 - s }
+}
+
+/// Nominal length of an OPEN day part, for sizing: from its start to the next
+/// start (on the clock, wrapping past midnight) of another enabled day part.
+/// `days` are ignored — the longest gap on a given day may be longer (e.g. a
+/// show whose successor does not run every day). No other day part: 24 h.
+fn open_part_nominal_secs(rule: &Rule, start: &crate::resolver::WallClock, grid: &Grid) -> i64 {
+    let s = start.hour as i64 * 60 + start.minute as i64;
+    grid.rules
+        .iter()
+        .filter(|r| r.enabled && r.id != rule.id)
+        .filter_map(|r| match &r.kind {
+            RuleKind::DayPart { start: o, .. } => {
+                let o = o.hour as i64 * 60 + o.minute as i64;
+                Some(if o > s { o - s } else { o + 1440 - s })
+            }
+            _ => None,
+        })
+        .min()
+        .unwrap_or(1440)
+        * 60
 }
 
 /// Does the source fill an arbitrary window by looping, or is its playtime
@@ -460,6 +485,12 @@ impl GridEngine {
         self
     }
 
+    /// The database pool (tests of the modules built on the engine).
+    #[cfg(test)]
+    pub(crate) fn pool_for_tests(&self) -> SqlitePool {
+        self.pool.clone()
+    }
+
     pub fn control(&self) -> &StationControl {
         &self.control
     }
@@ -570,14 +601,14 @@ impl GridEngine {
             if !rule.enabled {
                 continue;
             }
-            entries.push(self.coverage_for_rule(rule).await?);
+            entries.push(self.coverage_for_rule(rule, &grid).await?);
         }
         let worst = entries.iter().fold(Verdict::Ok, |acc, e| acc.worst(e.verdict));
         Ok(CoverageReport { entries, worst })
     }
 
-    async fn coverage_for_rule(&self, rule: &Rule) -> Result<CoverageEntry, EngineError> {
-        let (kind, playlist_ref, demand) = classify_rule(&rule.kind);
+    async fn coverage_for_rule(&self, rule: &Rule, grid: &Grid) -> Result<CoverageEntry, EngineError> {
+        let (kind, playlist_ref, demand) = classify_rule(rule, grid);
         let fail = |detail: String| {
             make_entry(
                 rule.id.clone(),
@@ -1646,7 +1677,7 @@ mode = "dynamic""#;
                 RuleKind::DayPart {
                     playlist_ref: "jazz".into(),
                     start: crate::resolver::WallClock { hour: 9, minute: 0 },
-                    end: crate::resolver::WallClock { hour: 10, minute: 0 },
+                    end: Some(crate::resolver::WallClock { hour: 10, minute: 0 }),
                 },
             ),
         )
@@ -1799,7 +1830,7 @@ mode = "dynamic""#;
                 RuleKind::DayPart {
                     playlist_ref: "jazz".into(),
                     start: WallClock { hour: 8, minute: 0 },
-                    end: WallClock { hour: 10, minute: 0 },
+                    end: Some(WallClock { hour: 10, minute: 0 }),
                 },
             ),
         )
@@ -1951,6 +1982,32 @@ mode = "dynamic""#;
             .await
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn an_open_day_part_is_sized_until_the_next_start() {
+        let open = |id: &str, h: u8| {
+            rule(
+                id,
+                RuleKind::DayPart {
+                    playlist_ref: id.into(),
+                    start: crate::resolver::WallClock { hour: h, minute: 0 },
+                    end: None,
+                },
+            )
+        };
+        let grid = Grid { rules: vec![open("morning", 6), open("day", 12), open("night", 20)] };
+        let secs = |id: &str| match classify_rule(grid.rules.iter().find(|r| r.id == id).unwrap(), &grid).2 {
+            Demand::Duration(s) => s,
+            Demand::Punctual => panic!("a day part has a duration"),
+        };
+        assert_eq!(secs("morning"), 6 * 3600);
+        assert_eq!(secs("night"), 10 * 3600, "wraps past midnight to 06:00");
+        let lone = Grid { rules: vec![open("only", 6)] };
+        match classify_rule(&lone.rules[0], &lone).2 {
+            Demand::Duration(s) => assert_eq!(s, 86_400),
+            Demand::Punctual => panic!(),
+        }
     }
 
     #[test]

@@ -109,10 +109,17 @@ pub enum RuleKind {
     /// predicate on `now` (start <= now < end), evaluated at a track boundary
     /// — never a content cut. The last track overruns; the change happens at
     /// the next track (soft boundary).
+    ///
+    /// `end = None` is an **open** day part: it runs from its start until the
+    /// next start of ANY other day part (open or not) — a programme grid where
+    /// each show lasts until the next one. Its `days` / dates are evaluated on
+    /// the day it STARTED (a Saturday 08:00 show can run into Sunday). A day
+    /// part with an explicit window that starts inside it ends it for good
+    /// (it does not resume after). See [`open_part_covers`].
     DayPart {
         playlist_ref: String,
         start: WallClock,
-        end: WallClock,
+        end: Option<WallClock>,
     },
     /// An absolute clock rendez-vous that *punctuates* the base.
     AtClock {
@@ -304,15 +311,23 @@ pub fn resolve_ranked(now: LocalNow, grid: &Grid, state: &PlaybackState) -> Vec<
         }
     }
 
-    // 3. Base: covering DayParts (narrowest first), then the BaseRotation.
+    // 3. Base: covering DayParts (narrowest first — an open one counts as the
+    //    widest), then the BaseRotation.
     let mut dayparts: Vec<(&Rule, &str, u32)> = Vec::new();
     let mut base_rotation: Option<(&Rule, &str)> = None;
     for rule in grid.rules.iter().filter(|r| r.enabled) {
+        // An open day part checks its validity on the day it STARTED.
+        if let RuleKind::DayPart { playlist_ref, end: None, .. } = &rule.kind {
+            if open_part_covers(rule, grid, now) {
+                dayparts.push((rule, playlist_ref, u32::MAX));
+            }
+            continue;
+        }
         if !rule.validity.applies(now) {
             continue;
         }
         match &rule.kind {
-            RuleKind::DayPart { playlist_ref, start, end } => {
+            RuleKind::DayPart { playlist_ref, start, end: Some(end) } => {
                 if let Some(span) = window_covers(*start, *end, now.wall) {
                     dayparts.push((rule, playlist_ref, span));
                 }
@@ -361,21 +376,105 @@ pub fn resolve_next(now: LocalNow, grid: &Grid, state: &PlaybackState) -> GridDe
 impl Validity {
     /// Does this rule apply on `now`'s civil day?
     fn applies(&self, now: LocalNow) -> bool {
-        if !self.days.is_empty() && !self.days.contains(&now.weekday) {
+        self.applies_on(now.date, now.weekday)
+    }
+
+    /// Does this rule apply on the civil day `date` (a `weekday`)?
+    fn applies_on(&self, date: Date, weekday: Weekday) -> bool {
+        if !self.days.is_empty() && !self.days.contains(&weekday) {
             return false;
         }
         if let Some(start) = self.date_start {
-            if now.date < start {
+            if date < start {
                 return false;
             }
         }
         if let Some(end) = self.date_end {
-            if now.date > end {
+            if date > end {
                 return false;
             }
         }
         true
     }
+}
+
+impl Weekday {
+    /// The day before.
+    fn prev(self) -> Weekday {
+        use Weekday::*;
+        match self {
+            Mon => Sun,
+            Tue => Mon,
+            Wed => Tue,
+            Thu => Wed,
+            Fri => Thu,
+            Sat => Fri,
+            Sun => Sat,
+        }
+    }
+}
+
+impl Date {
+    /// The civil day before (proleptic Gregorian calendar).
+    fn prev(self) -> Date {
+        if self.day > 1 {
+            return Date { day: self.day - 1, ..self };
+        }
+        let (year, month) = if self.month > 1 { (self.year, self.month - 1) } else { (self.year - 1, 12) };
+        Date { year, month, day: days_in_month(year, month) }
+    }
+}
+
+fn days_in_month(year: i32, month: u8) -> u8 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        _ => {
+            let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+            if leap { 29 } else { 28 }
+        }
+    }
+}
+
+/// How far back (whole days) the last start of an open day part is looked
+/// for: a weekly show with `days` never started more than a week ago.
+const OPEN_PART_LOOKBACK_DAYS: i64 = 7;
+
+/// Minutes elapsed since the most recent start of a day part (`start`, on a
+/// day its `validity` allows) at or before `now` — its validity evaluated on
+/// the START day. `None` if it did not start within the lookback.
+fn last_start_ago(validity: &Validity, start: WallClock, now: LocalNow) -> Option<i64> {
+    let now_min = now.wall.minutes() as i64;
+    let start_min = start.minutes() as i64;
+    let (mut date, mut weekday) = (now.date, now.weekday);
+    for back in 0..=OPEN_PART_LOOKBACK_DAYS {
+        let ago = back * 1440 + now_min - start_min;
+        if ago >= 0 && validity.applies_on(date, weekday) {
+            return Some(ago);
+        }
+        date = date.prev();
+        weekday = weekday.prev();
+    }
+    None
+}
+
+/// Does the OPEN day part `rule` (no `end`) cover `now`? It started (on a day
+/// its validity allows) and no other enabled day part — open or with an
+/// explicit window — has started since: each show lasts until the next one
+/// starts. Minute granularity, like the windows.
+fn open_part_covers(rule: &Rule, grid: &Grid, now: LocalNow) -> bool {
+    let RuleKind::DayPart { start, end: None, .. } = &rule.kind else {
+        return false;
+    };
+    let Some(ago) = last_start_ago(&rule.validity, *start, now) else {
+        return false;
+    };
+    !grid.rules.iter().filter(|r| r.enabled && r.id != rule.id).any(|other| match &other.kind {
+        RuleKind::DayPart { start: other_start, .. } => {
+            last_start_ago(&other.validity, *other_start, now).is_some_and(|b| b < ago)
+        }
+        _ => false,
+    })
 }
 
 /// If `now` falls in the window (local minutes), return the window width in
@@ -498,9 +597,28 @@ mod tests {
             kind: RuleKind::DayPart {
                 playlist_ref: r.into(),
                 start: WallClock { hour: s.0, minute: s.1 },
-                end: WallClock { hour: e.0, minute: e.1 },
+                end: Some(WallClock { hour: e.0, minute: e.1 }),
             },
         }
+    }
+    fn open_part(id: &str, r: &str, s: (u8, u8)) -> Rule {
+        Rule {
+            id: id.into(),
+            enabled: true,
+            validity: Validity::default(),
+            kind: RuleKind::DayPart {
+                playlist_ref: r.into(),
+                start: WallClock { hour: s.0, minute: s.1 },
+                end: None,
+            },
+        }
+    }
+    /// `now_at` on another civil day.
+    fn on(date: (i32, u8, u8), weekday: Weekday, hour: u8, minute: u8) -> LocalNow {
+        LocalNow { date: Date { year: date.0, month: date.1, day: date.2 }, weekday, ..now_at(hour, minute) }
+    }
+    fn winner(grid: &Grid, now: LocalNow) -> Option<String> {
+        resolve_next(now, grid, &PlaybackState::default()).playlist_ref
     }
     fn at_clock(id: &str, r: &str, n: u32, mode: Mode, expiry: Option<u64>) -> Rule {
         Rule {
@@ -733,4 +851,107 @@ mod tests {
         let refs: Vec<_> = ranked.iter().map(|d| d.playlist_ref.as_deref().unwrap()).collect();
         assert_eq!(refs, vec!["jingle", "jazz", "general"]);
     }
+    // ----- open day parts (no `end`) -------------------------------------
+
+    #[test]
+    fn open_day_parts_each_run_until_the_next_start() {
+        let grid = Grid {
+            rules: vec![
+                base("floor", "general"),
+                open_part("morning", "matin", (6, 0)),
+                open_part("day", "jour", (12, 0)),
+                open_part("night", "nuit", (20, 0)),
+            ],
+        };
+        assert_eq!(winner(&grid, now_at(7, 0)).as_deref(), Some("matin"));
+        assert_eq!(winner(&grid, now_at(11, 59)).as_deref(), Some("matin"));
+        assert_eq!(winner(&grid, now_at(12, 0)).as_deref(), Some("jour"));
+        assert_eq!(winner(&grid, now_at(21, 0)).as_deref(), Some("nuit"));
+        // past midnight: still the night that started yesterday at 20:00
+        assert_eq!(winner(&grid, now_at(3, 0)).as_deref(), Some("nuit"));
+        assert_eq!(winner(&grid, now_at(5, 59)).as_deref(), Some("nuit"));
+        assert_eq!(winner(&grid, now_at(6, 0)).as_deref(), Some("matin"));
+    }
+
+    #[test]
+    fn a_window_starting_inside_an_open_part_ends_it_for_good() {
+        let grid = Grid {
+            rules: vec![
+                base("floor", "general"),
+                open_part("morning", "matin", (6, 0)),
+                daypart("lunch", "midi", (12, 0), (13, 0)),
+            ],
+        };
+        assert_eq!(winner(&grid, now_at(11, 0)).as_deref(), Some("matin"));
+        assert_eq!(winner(&grid, now_at(12, 30)).as_deref(), Some("midi"));
+        // the morning does not resume: back to the floor until 06:00
+        assert_eq!(winner(&grid, now_at(13, 30)).as_deref(), Some("general"));
+        assert_eq!(winner(&grid, now_at(5, 0)).as_deref(), Some("general"));
+    }
+
+    #[test]
+    fn an_explicit_window_already_running_outranks_an_open_part() {
+        // 05:00–09:00 started before the open 06:00: both cover at 07:00,
+        // the explicit (narrower) window wins; after 09:00 the open one airs.
+        let grid = Grid {
+            rules: vec![
+                base("floor", "general"),
+                daypart("early", "tot", (5, 0), (9, 0)),
+                open_part("morning", "matin", (6, 0)),
+            ],
+        };
+        assert_eq!(winner(&grid, now_at(7, 0)).as_deref(), Some("tot"));
+        assert_eq!(winner(&grid, now_at(9, 30)).as_deref(), Some("matin"));
+    }
+
+    #[test]
+    fn an_open_part_keeps_the_days_of_its_start() {
+        // Saturday 08:00 (weekend) runs until Monday 06:00 (weekdays).
+        let mut weekend = open_part("weekend", "we", (8, 0));
+        weekend.validity.days = vec![Weekday::Sat];
+        let mut week = open_part("week", "semaine", (6, 0));
+        week.validity.days = vec![Weekday::Mon, Weekday::Tue, Weekday::Wed, Weekday::Thu, Weekday::Fri];
+        let grid = Grid { rules: vec![base("floor", "general"), weekend, week] };
+        // 2026-09-26 is a Saturday.
+        assert_eq!(winner(&grid, on((2026, 9, 26), Weekday::Sat, 7, 0)).as_deref(), Some("semaine"));
+        assert_eq!(winner(&grid, on((2026, 9, 26), Weekday::Sat, 9, 0)).as_deref(), Some("we"));
+        assert_eq!(winner(&grid, on((2026, 9, 27), Weekday::Sun, 23, 0)).as_deref(), Some("we"));
+        assert_eq!(winner(&grid, on((2026, 9, 28), Weekday::Mon, 5, 59)).as_deref(), Some("we"));
+        assert_eq!(winner(&grid, on((2026, 9, 28), Weekday::Mon, 6, 0)).as_deref(), Some("semaine"));
+        // Friday evening: still the week show that started Friday 06:00.
+        assert_eq!(winner(&grid, on((2026, 10, 2), Weekday::Fri, 22, 0)).as_deref(), Some("semaine"));
+    }
+
+    #[test]
+    fn a_lone_open_part_runs_around_the_clock_once_started() {
+        let grid = Grid { rules: vec![base("floor", "general"), open_part("only", "seule", (6, 0))] };
+        assert_eq!(winner(&grid, now_at(5, 0)).as_deref(), Some("seule"), "yesterday's start");
+        assert_eq!(winner(&grid, now_at(6, 0)).as_deref(), Some("seule"));
+    }
+
+    #[test]
+    fn an_open_part_outside_its_dates_does_not_start() {
+        let mut once = open_part("special", "speciale", (20, 0));
+        once.validity.date_start = Some(Date { year: 2026, month: 12, day: 24 });
+        once.validity.date_end = Some(Date { year: 2026, month: 12, day: 24 });
+        let grid = Grid { rules: vec![base("floor", "general"), once] };
+        assert_eq!(winner(&grid, on((2026, 12, 24), Weekday::Thu, 21, 0)).as_deref(), Some("speciale"));
+        // Christmas night past midnight: started on the 24th, still valid.
+        assert_eq!(winner(&grid, on((2026, 12, 25), Weekday::Fri, 2, 0)).as_deref(), Some("speciale"));
+        assert_eq!(winner(&grid, on((2026, 12, 23), Weekday::Wed, 21, 0)).as_deref(), Some("general"));
+    }
+
+    #[test]
+    fn previous_civil_day() {
+        let d = |y, m, dd| Date { year: y, month: m, day: dd };
+        assert_eq!(d(2026, 3, 15).prev(), d(2026, 3, 14));
+        assert_eq!(d(2024, 3, 1).prev(), d(2024, 2, 29));
+        assert_eq!(d(2026, 3, 1).prev(), d(2026, 2, 28));
+        assert_eq!(d(2000, 3, 1).prev(), d(2000, 2, 29));
+        assert_eq!(d(1900, 3, 1).prev(), d(1900, 2, 28));
+        assert_eq!(d(2026, 1, 1).prev(), d(2025, 12, 31));
+        assert_eq!(d(2026, 5, 1).prev(), d(2026, 4, 30));
+        assert_eq!(Weekday::Mon.prev(), Weekday::Sun);
+    }
+
 }

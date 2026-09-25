@@ -428,7 +428,7 @@ fn map_rule(rule: crate::resolver::Rule) -> Result<schedule::Rule, Status> {
     let kind = match rule.kind {
         RuleKind::BaseRotation { playlist_ref } => Kind::BaseRotation(schedule::BaseRotation { playlist_ref }),
         RuleKind::DayPart { playlist_ref, start, end } => Kind::DayPart(schedule::DayPart {
-            playlist_ref, start: Some(wall(start)), end: Some(wall(end)),
+            playlist_ref, start: Some(wall(start)), end: end.map(wall),
         }),
         RuleKind::AtClock { playlist_ref, anchor, mode, expiry_secs } => {
             let (every_minutes, at) = match anchor {

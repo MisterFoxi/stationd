@@ -83,7 +83,8 @@ Environnement : tout se teste désormais dans le conteneur de dev (README
 
 **Câblage Liquidsoap — étape 3 : tâche de diffusion** (stationd agit sur
 l'antenne sans attendre un pull) :
-- **relais des flux `remote`** : `input.http` piloté par stationd (démarrage /
+- **relais des flux `remote`** : ✅ (2026-09-25, voir Fait). Ancienne note :
+  `input.http` piloté par stationd (démarrage /
   arrêt quand la règle gagnante change) — aujourd'hui `/next` répond
   `none/stream_unsupported` → fallback ;
 - **`AtClock hard`** : ✅ coupe à l'heure pile (2026-09-25, voir Fait) ;
@@ -143,6 +144,70 @@ Autres, indépendants :
 ---
 
 ## Fait
+
+### — `day_part` à fin ouverte (2026-09-25) —
+
+Décisions : `end` facultatif ; une tranche sans `end` court jusqu'au
+prochain début d'une **autre** tranche (ouverte ou non) ; une fenêtre
+explicite qui démarre dedans la termine **pour de bon** (option a, pas de
+reprise) ; ses `days` / dates s'évaluent sur le **jour de son début** ;
+seule dans la grille, elle tourne en permanence (pas d'avertissement à la
+validation — `schedule validate` n'a pas de canal d'avertissement).
+
+- **Résolveur** (pur) : `DayPart.end: Option<WallClock>` ;
+  `open_part_covers` (dernier début ≤ now, 7 jours en arrière, validité du
+  jour de début ; couverte si aucune autre tranche n'a démarré depuis) ;
+  `Validity::applies_on`, `Date::prev` (calendrier grégorien),
+  `Weekday::prev`. Classement : une tranche ouverte compte comme la plus
+  large (une fenêtre explicite déjà commencée l'emporte).
+- **Grammaire** : `end` facultatif, export sans `end` ; **schéma JSON**
+  (`schemas/grid.schema.json`) aligné. **Stockage** : migration **0016**
+  (`grid_day_part` reconstruite, `end_*` NULL ensemble).
+- **Dimensionnement** (`schedule check`) : durée nominale = jusqu'au
+  prochain début d'une autre tranche sur l'horloge (jours ignorés), 24 h
+  si seule.
+- gRPC : `DayPart.end` absent. TUI : affiche `-` (compile, sans autre
+  changement — la TUI est traitée plus tard).
+- Tests (+10) : chaîne de tranches ouvertes (dont minuit), fenêtre
+  explicite qui termine une ouverte, fenêtre déjà commencée prioritaire,
+  jours du début (samedi → lundi), tranche seule, dates, `Date::prev` ;
+  grammaire aller-retour ; stockage NULL ; dimensionnement.
+
+**Validation** : `cargo test --locked` vert (357). Migration 0016 neuve :
+au premier démarrage elle reconstruit `grid_day_part` (la grille reste en
+place).
+
+### — Relais des playlists `remote` (2026-09-25) —
+
+Point 2 de la 0.1. Décisions : `input.http` dans le script généré, piloté
+par les réponses du pull (pas de tâche stationd en plus) ; entrée **soft**
+(fin de la piste en cours) ; le relais tient tant que la grille répond
+`relay` ; sortie dans les ~2 s.
+
+- **Pont** : `NextReply::relay(url)` (au lieu de `none/stream_unsupported`),
+  `OnAirKind::Relay` (`media_path` = URL), URL loguée au changement
+  seulement. Moteur inchangé.
+- **Script** : `input.http(start=false, {stationd.relay_url()})`, premier de
+  la chaîne mais disponible seulement quand le pull croisé n'a plus rien ;
+  `relay_on` / `relay_off` (refs de fonctions) ; `pull_started` arrête le
+  relais ; `thread.run` toutes les 2 s → `pull_raw.fetch()` pendant le
+  relais (constaté : `request.dynamic` ne redemande plus quand il n'est pas
+  lu) ; transition `relay` signalée sur `/track`.
+- Limites documentées (`Doc/playlists.md`) : `remote` en `at_clock` /
+  `every` = une interrogation (~2 s) ; en groupe, `runtime` requis ; skip
+  sans effet pendant un relais.
+- Tests (+4) : pont (relay + URL, rien en file, `on air` relay, retour à une
+  piste) ; piste remplacée par un relais jugée normalement ; script (source,
+  place, garde de disponibilité, branches, veille).
+- **Essai réel Liquidsoap 2.2.4** : entrée à la fin exacte de la piste
+  (traîne du crossfade comprise — la première version la coupait puis la
+  rejouait), veille toutes les 2 s, sortie vers piste / bruit, insert hard
+  par-dessus.
+
+**Validation** : `cargo test --locked` vert (347). À valider sur la 2.4 :
+une règle `day_part` sur une playlist `remote` (URL d'un flux réel) —
+entrée à la fin de la piste, `ls status` `on air: relay …`, sortie à la fin
+de la tranche. Relancer Liquidsoap (nouveau script).
 
 ### — Piste suivante choisie à l'heure réelle de passage (2026-09-25) —
 
@@ -1435,8 +1500,8 @@ dans le découpage des modules (`grid_index` = A, `grid_store` = B).
 - **Sélection** : complète (static / dynamic / remote / queue / group +
   anti-répétition, y compris contraintes de groupe héritées + unplayed_only).
   `limit` standalone : écarté ; marquage `unplayed_only` : auto-câblé
-  (fin de piste déduite par le pont) ; relais remote : à câbler avec
-  Liquidsoap. Contraintes sur une `queue` : non appliquées
+  (fin de piste déduite par le pont) ; relais remote : câblé
+  (`input.http`). Contraintes sur une `queue` : non appliquées
   (préexistant ; la proposition v1 veut « entrée exclue reste, on cherche la
   suivante éligible » — à faire si besoin).
 

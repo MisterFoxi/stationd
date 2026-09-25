@@ -242,12 +242,13 @@ fn to_rule(rd: RuleDoc) -> Result<Rule, String> {
             let start = parse_wallclock(
                 rd.start.as_deref().ok_or("`day_part` requires `start`")?,
             )?;
-            let end =
-                parse_wallclock(rd.end.as_deref().ok_or("`day_part` requires `end`")?)?;
-            if minutes(end) == minutes(start) {
+            // No `end` = an OPEN day part: it runs until the next start of
+            // another day part (resolver::open_part_covers).
+            let end = rd.end.as_deref().map(parse_wallclock).transpose()?;
+            if end.is_some_and(|e| minutes(e) == minutes(start)) {
                 return Err(
                     "`start` and `end` must differ (a zero-length window covers nothing; \
-                     use a base_rotation for 24h)"
+                     use a base_rotation for 24h, or omit `end` for an open day part)"
                         .into(),
                 );
             }
@@ -409,7 +410,7 @@ fn rule_to_doc(r: &Rule) -> RuleDoc {
             d.kind = KindTag::DayPart;
             d.playlist_ref = playlist_ref.clone();
             d.start = Some(wallclock_str(*start));
-            d.end = Some(wallclock_str(*end));
+            d.end = end.map(wallclock_str);
         }
         RuleKind::AtClock { playlist_ref, anchor, mode, expiry_secs } => {
             d.kind = KindTag::AtClock;
@@ -611,7 +612,7 @@ mod tests {
         match &jazz.kind {
             RuleKind::DayPart { playlist_ref, start, end } => {
                 assert_eq!(playlist_ref, "jazz");
-                assert_eq!((start.hour, end.hour), (8, 10));
+                assert_eq!((start.hour, end.unwrap().hour), (8, 10));
             }
             _ => panic!("expected DayPart"),
         }
@@ -735,7 +736,7 @@ mod tests {
         match &rules[0].kind {
             RuleKind::DayPart { start, end, .. } => {
                 assert_eq!((start.hour, start.minute), (22, 0));
-                assert_eq!((end.hour, end.minute), (6, 0));
+                assert_eq!(end.map(|e| (e.hour, e.minute)), Some((6, 0)));
             }
             _ => panic!("expected DayPart"),
         }
@@ -852,4 +853,28 @@ mod tests {
         let t = to_toml(&rules).unwrap();
         assert!(t.contains("enabled = false"));
     }
+    #[test]
+    fn a_day_part_without_end_is_open_and_exports_without_end() {
+        let grid = r#"
+            schema_version = 1
+            [[rule]]
+            id = "morning"
+            kind = "day_part"
+            playlist_ref = "matin"
+            start = "06:00"
+        "#;
+        let rules = parse_grid(grid).expect("an open day part parses");
+        match &rules[0].kind {
+            RuleKind::DayPart { start, end, .. } => {
+                assert_eq!((start.hour, start.minute), (6, 0));
+                assert!(end.is_none());
+            }
+            _ => panic!("expected DayPart"),
+        }
+        let t = to_toml(&rules).unwrap();
+        assert!(t.contains("start = \"06:00\"") && !t.contains("end ="), "{t}");
+        let again = parse_grid(&t).unwrap();
+        assert!(matches!(again[0].kind, RuleKind::DayPart { end: None, .. }));
+    }
+
 }

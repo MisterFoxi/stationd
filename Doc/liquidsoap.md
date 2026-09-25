@@ -35,7 +35,8 @@ radio  → normalize/compress (option) → %include custom → output.icecast
 `kind` de `/next` :
 - `file` → `uri = annotate:stationd_rid="N":/chemin/absolu` ;
 - `halted` → `state = paused|stopped` : **bruit de fond**, jamais le fallback ;
-- `none` → `reason = fallback|pool_empty|stream_unsupported|error` : fallback sécu.
+- `relay` → `uri` = l'URL d'une playlist `remote` : relayée (voir « Relais »).
+- `none` → `reason = fallback|pool_empty|error` : fallback sécu.
 
 `/track` : `rid` connu = une de nos pistes démarre réellement → compteur de
 pistes station (`Every` au compteur) ; `kind = halted|fallback` = une source
@@ -69,6 +70,36 @@ piste, ou durée restante inconnue (-1) : demande immédiate.
   crossfade 3 s) : `/next` 7 s avant chaque début de piste (au lieu de 17 s) ;
   skip → piste suivante immédiate, pas de fallback ; interrupt → pull
   redemandé à la coupe, piste jouée après l'insert. À confirmer sur la 2.4.
+
+### Relais d'une playlist `remote` (2026-09-25)
+
+`/next` répond `relay` + URL : le script mémorise l'URL, (re)démarre
+`relay = input.http(id="stationd_relay", start=false, {stationd.relay_url()})`
+et ne met aucune piste en file. Dans la chaîne, le relais est **premier**
+mais n'est disponible que si `relaying`, pas en pause, et **le pull
+(crossfade compris) n'a plus rien** : entrée **soft**, la piste en cours va
+au bout — traîne du crossfade comprise (sinon coupée à l'entrée puis
+rejouée à la sortie, vu en réel).
+
+- **Veille de la grille** : pendant le relais le pull n'est pas lu et
+  `request.dynamic` cesse de redemander (vu en réel) ; un `thread.run`
+  toutes les 2 s appelle `pull_raw.fetch()` tant que `relaying` et file
+  vide → stationd est interrogé à ce rythme.
+- **Sortie** : `file` → la piste se prépare, le relais cède dès qu'elle est
+  prête et s'arrête à son début (`stationd.pull_started`) ; `halted` /
+  `none` → arrêt immédiat (bruit / secours toujours prêts). Pause → bruit,
+  puis relais repris en direct. Insert hard → par-dessus, puis relais repris.
+- **Signalement** : bascule vers le relais → `/track` `kind = relay` →
+  `ls status` : `on air: relay <url>`. La piste qu'il remplace est jugée
+  « jouée en entier » normalement.
+- Flux injoignable : `input.http` réessaie seul ; en attendant, fichier de
+  secours.
+- Validé contre Liquidsoap **2.2.4** (serveur local d'un flux mp3 sans fin,
+  faux stationd) : entrée à la fin exacte de la piste (20 s pleines), veille
+  toutes les 2 s, sortie vers une piste en ~0,1 s après la réponse `file`,
+  sortie vers le bruit sur `halted` dans la seconde, insert hard par-dessus
+  puis piste suivante. À confirmer sur la 2.4 (`input.http` : `start`,
+  `stop`, `is_started`, URL en fonction).
 
 ### `AtClock` hard : coupe à l'heure pile (2026-09-25)
 
@@ -331,8 +362,11 @@ de systemd = groupe ou utilisateur de l'unité inexistant.
   une piste plus tard (pour l'heure pile : `hard`). Un `flush` qui tombe
   après la demande de fin de piste jette encore une piste déjà résolue
   (effets de bord gardés) — rare désormais.
-- **Remote** : non relayé (`none/stream_unsupported`, warn) → étape 3
-  (`input.http` piloté par une tâche stationd).
+- **Relais** : un `remote` en `at_clock` / `every` ne dure qu'une
+  interrogation (~2 s) ; dans un groupe, il lui faut un `runtime`
+  (cf. `Doc/playlists.md`). Un `skip` pendant un relais ne fait rien (il n'y
+  a pas de piste à sauter ; la grille reprend quand elle ne désigne plus le
+  flux).
 - **Coupe sèche** d'un override hard ou d'un `AtClock` hard (pas de fondu
   sur la piste coupée).
 - **Compteur `Every` au compteur** : avancé à chaque démarrage réel de piste ;

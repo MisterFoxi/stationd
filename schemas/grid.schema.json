@@ -96,7 +96,7 @@
         },
         "end": {
           "type": "string",
-          "description": "Heure locale, normalement HH:MM (00:00 à 23:59). Les formes numériques acceptées par le parseur Rust sont également admises.",
+          "description": "Heure locale, normalement HH:MM (00:00 à 23:59). Les formes numériques acceptées par le parseur Rust sont également admises. Facultatif pour day_part : absent = tranche ouverte, jusqu'au prochain début d'une autre tranche.",
           "pattern": "^\\+?0*(?:[0-9]|1[0-9]|2[0-3]):\\+?0*(?:[0-9]|[1-5][0-9])$(?![\\s\\S])",
           "examples": [
             "08:00",
@@ -161,7 +161,7 @@
         "kind",
         "playlist_ref"
       ],
-      "description": "Règle de programmation. Les champs autorisés dépendent de kind. Pour day_part, stationd impose end > start ; pas de passage de minuit.",
+      "description": "Règle de programmation. Les champs autorisés dépendent de kind. Pour day_part : end facultatif — absent, la tranche court jusqu'au prochain début d'une autre tranche ; présent, end ≠ start (end < start = passage de minuit).",
       "oneOf": [
         {
           "properties": {
@@ -229,8 +229,7 @@
           },
           "required": [
             "kind",
-            "start",
-            "end"
+            "start"
           ],
           "not": {
             "anyOf": [
