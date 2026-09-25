@@ -1,0 +1,95 @@
+# syntax=docker/dockerfile:1
+#
+# Image d'EXPLOITATION de stationd : aucune toolchain. Les binaires et les
+# .wasm sont compilés sur la machine de dev (docker/package.sh, dans le
+# conteneur de dev → même Ubuntu, même glibc) puis copiés ici.
+#
+# Contexte de build = dist/stage/ préparé par docker/package.sh :
+#   bin/stationd, bin/stationctl   binaires --release
+#   plugins/*.wasm                 plugins WASM (cible wasm32-unknown-unknown)
+#   rootfs/                        copie de docker/rootfs (services s6, partagés avec le dev)
+#
+# Identités (UID/GID de stationd, groupe des médias) : fournies à l'exécution
+# par compose (.env du nœud), appliquées par init-perms — une seule image
+# pour tous les nœuds.
+
+# --- s6-overlay, récupéré à part : ni curl ni xz dans l'image finale --------
+FROM ubuntu:26.04 AS s6
+# À vérifier / mettre à jour (releases just-containers/s6-overlay) — même
+# version que docker/Dockerfile.dev.
+ARG S6_OVERLAY_VERSION=3.2.0.2
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates curl xz-utils \
+ && rm -rf /var/lib/apt/lists/*
+RUN set -eu; \
+    base="https://github.com/just-containers/s6-overlay/releases/download/v${S6_OVERLAY_VERSION}"; \
+    mkdir -p /s6root; cd /tmp; \
+    for f in s6-overlay-noarch.tar.xz s6-overlay-x86_64.tar.xz; do \
+      curl -fsSLO "$base/$f"; curl -fsSLO "$base/$f.sha256"; \
+      sha256sum -c "$f.sha256"; \
+      tar -C /s6root -Jxpf "$f"; \
+    done
+
+# --- image finale -----------------------------------------------------------
+FROM ubuntu:26.04
+
+# Versions épinglées = celles de docker/Dockerfile.dev (validées sur devstationd).
+ARG ICECAST_VERSION=2.5.0-1
+ARG LIQUIDSOAP_VERSION=
+# Renseignés par docker/package.sh.
+ARG VERSION=unknown
+ARG REVISION=unknown
+
+LABEL org.opencontainers.image.title="stationd" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.revision="${REVISION}"
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    LANG=C.UTF-8 \
+    PATH=/command:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    STATIOND_ROOT=/var/lib/stationd \
+    STATIOND_BIN=/usr/local/bin \
+    STATIOND_USER=stationd \
+    S6_CMD_WAIT_FOR_SERVICES_MAXTIME=0
+
+# tzdata : jiff résout [station] timezone dans /usr/share/zoneinfo.
+# ca-certificates : flux `remote` en https relayés par Liquidsoap.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      ca-certificates tzdata \
+      "icecast2=${ICECAST_VERSION}" \
+      "liquidsoap${LIQUIDSOAP_VERSION:+=${LIQUIDSOAP_VERSION}}" \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY --from=s6 /s6root/ /
+
+# Utilisateurs — modèle du groupe partagé (Doc/liquidsoap.md) :
+#   stationd   = groupe principal stationd  → lance stationd, écrit /var/lib/stationd
+#   icecast2   = + stationd                 → lit icecast.xml (0640)
+#   liquidsoap = groupe principal stationd  → socket de contrôle 0660, lit data/ et radio/
+#                (+ groupe des médias, ajouté par init-perms selon MEDIA_GID)
+# UID/GID réels : alignés sur l'hôte au démarrage (init-perms). `ubuntu`
+# (UID/GID 1000) retiré pour ne pas bloquer cet alignement.
+RUN set -eu; \
+    userdel -r ubuntu 2>/dev/null || true; \
+    groupadd --system stationd; \
+    useradd --system -g stationd -d /var/lib/stationd -M -s /usr/sbin/nologin stationd; \
+    usermod -aG stationd icecast2; \
+    if id liquidsoap >/dev/null 2>&1; then usermod -g stationd liquidsoap; \
+    else useradd --system -g stationd -d /var/lib/liquidsoap -m -s /usr/sbin/nologin liquidsoap; fi; \
+    mkdir -p /var/lib/stationd
+
+COPY --chmod=0755 bin/ /usr/local/bin/
+COPY --chmod=0644 plugins/ /usr/lib/stationd/plugins/
+COPY rootfs/ /
+# Droits du partage W: (Samba) non fiables : COPY les reporte jusque sur /etc.
+# Même normalisation que l'image de dev.
+RUN chmod 0755 /etc /usr/lib/stationd/plugins \
+ && find /etc/s6-overlay -type d -exec chmod 0755 {} + \
+ && find /etc/s6-overlay -type f -exec chmod 0644 {} + \
+ && chmod 0755 /etc/s6-overlay/scripts/* \
+      /etc/s6-overlay/s6-rc.d/*/run \
+      /etc/s6-overlay/s6-rc.d/stationd/data/check
+
+WORKDIR /var/lib/stationd
+ENTRYPOINT ["/init"]

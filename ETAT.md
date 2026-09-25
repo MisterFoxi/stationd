@@ -47,6 +47,16 @@ reste l'étape 3 (tâche de diffusion) et 4 (fins de piste). Référence :
 conteneur de dev (s6-overlay, dépôt monté dans `/src`, réseau de l'hôte) —
 remplace l'installation systemd. README « Run (Docker) »,
 `Doc/liquidsoap.md` « Déploiement ».
+**Packaging d'exploitation (2026-09-25, à valider sur devstationd).**
+`docker/package.sh` compile en `--release --locked` dans le conteneur de dev
+(stationd, stationctl, plugins wasm32), construit l'image sans toolchain
+`docker/Dockerfile.prod` (`stationd:<version>-<rev>`), la vérifie et produit
+`dist/stationd-<tag>.tar` (image + `docker/prod/compose.yaml` +
+`docker/prod/install.sh` + exemple de config + SHA256SUMS). Sur le nœud :
+`install.sh` → `/opt/stationd` (compose, `.env`), état dans `/srv/stationd`
+(monté en `/var/lib/stationd`), utilisateur hôte `stationd`. UID/GID de
+stationd et groupe des médias appliqués au démarrage par `init-perms`
+(une image pour tous les nœuds). README « Package & deploy ».
 
 La **grille est pilotable de bout en bout en CLI**, projection comprise :
 `grid.toml` (4 familles) → `stationctl schedule validate|apply|export|list|next|preview|check`
@@ -1673,6 +1683,20 @@ dans le découpage des modules (`grid_index` = A, `grid_store` = B).
   - Après une modification de `docker/` ou de `.env` : `docker compose build`
     puis `docker compose up -d --force-recreate` (sinon l'ancienne image
     tourne).
+- **Docker (exploitation)** :
+  - Services s6 **partagés** dev/exploitation (`docker/rootfs`) : ce qui
+    diffère passe par l'environnement (`STATIOND_USER`, `STATIOND_ROOT`,
+    `STATIOND_BIN` ; `STATIOND_UID`/`STATIOND_GID`/`MEDIA_GID` seulement en
+    exploitation). Toute modif de `rootfs/` touche les deux images.
+  - Binaires compilés dans le conteneur de dev (Ubuntu 26.04) → image
+    d'exploitation sur la **même** base, sinon risque de glibc trop récente.
+    `package.sh` vérifie `ldd` dans l'image.
+  - `target/` du crate principal = volume nommé du conteneur de dev :
+    `package.sh` le récupère par `docker compose cp`, pas depuis le dépôt.
+  - Chemins des plugins WASM sur un nœud : `/usr/lib/stationd/plugins/<crate>.wasm`
+    (le `stationd.toml` de dev pointe vers `plugins/*/target/…`).
+  - `install.sh` ne réécrit jamais `stationd.toml` ni `.env` (sauf la ligne
+    `STATIOND_VERSION`) ; retour arrière = ancienne version dans `.env` + `up -d`.
 
 ---
 
@@ -1714,6 +1738,8 @@ dans le découpage des modules (`grid_index` = A, `grid_store` = B).
 | `Doc/liquidsoap.md` | Câblage Liquidsoap : chaîne, contrat du pont, socket, déploiement Docker, limites (référence durable) |
 | `compose.yaml` / `docker/Dockerfile.dev` | Conteneur de dev : dépôt monté, stationd + Icecast + Liquidsoap sous s6-overlay |
 | `docker/rootfs/etc/s6-overlay/` | Services s6 (`init-perms`, `stationd`, `icecast`, `liquidsoap`) et leur ordre |
+| `docker/Dockerfile.prod` / `docker/package.sh` | Image d'exploitation (sans toolchain) et packager (compile en dev → `dist/stationd-<tag>.tar`) |
+| `docker/prod/` | Fichiers du nœud : `compose.yaml` (exploitation), `install.sh` |
 | `plugins/stop-when-idle-wasm/` | Guest WASM démo A2 : host function `station_control` |
 | `plugins/{require-title,blacklist}-wasm/` | Crates guest WASM de démo (séparés, cible wasm32) : `filter_pool` |
 | `src/grpc.rs` | Service `Station` (status/quit/playlist*) |

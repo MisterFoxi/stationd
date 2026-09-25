@@ -1,11 +1,46 @@
 #!/command/with-contenv sh
-# Oneshot, root, avant stationd. Un volume nommé neuf peut arriver vide et
-# possédé par root : on le rend à `dev` (target/ et registre cargo).
+# Oneshot, root, avant stationd. Partagé par l'image de dev et celle
+# d'exploitation.
 set -eu
-mkdir -p "$STATIOND_ROOT/target" "$CARGO_HOME/registry"
-chown dev:dev "$STATIOND_ROOT/target" "$CARGO_HOME/registry"
 
-# Répertoire d'exécution partagé (tmpfs, hors du dépôt monté) : socket de
+fail() { echo "[init-perms] $*" >&2; exit 1; }
+
+# --- Exploitation : identités alignées sur l'hôte ---------------------------
+# STATIOND_UID / STATIOND_GID / MEDIA_GID viennent du .env du nœud (compose →
+# environnement). Absents en dev : là, les GID sont figés au build.
+if [ -n "${STATIOND_GID:-}" ]; then
+  cur="$(getent group stationd | cut -d: -f3)"
+  if [ "$cur" != "$STATIOND_GID" ]; then
+    other="$(getent group "$STATIOND_GID" | cut -d: -f1)"
+    [ -z "$other" ] || fail "GID $STATIOND_GID (stationd) déjà pris dans l'image par le groupe $other"
+    groupmod -g "$STATIOND_GID" stationd
+  fi
+fi
+if [ -n "${STATIOND_UID:-}" ]; then
+  cur="$(id -u stationd)"
+  if [ "$cur" != "$STATIOND_UID" ]; then
+    other="$(getent passwd "$STATIOND_UID" | cut -d: -f1)"
+    [ -z "$other" ] || fail "UID $STATIOND_UID (stationd) déjà pris dans l'image par $other"
+    usermod -u "$STATIOND_UID" stationd
+  fi
+fi
+if [ -n "${MEDIA_GID:-}" ]; then
+  # Liquidsoap lit lui-même les pistes : il rejoint le groupe propriétaire
+  # de la médiathèque (existant dans l'image, sinon créé sous le nom `media`).
+  g="$(getent group "$MEDIA_GID" | cut -d: -f1)"
+  [ -n "$g" ] || { groupadd -g "$MEDIA_GID" media; g=media; }
+  usermod -aG "$g" liquidsoap
+fi
+
+# --- Dev : volumes nommés -----------------------------------------------------
+# Un volume neuf peut arriver vide et possédé par root : on le rend à `dev`
+# (target/ et registre cargo).
+if id dev >/dev/null 2>&1; then
+  mkdir -p "$STATIOND_ROOT/target" "$CARGO_HOME/registry"
+  chown dev:dev "$STATIOND_ROOT/target" "$CARGO_HOME/registry"
+fi
+
+# Répertoire d'exécution partagé (tmpfs, hors des montages) : socket de
 # contrôle Liquidsoap ([liquidsoap] control_socket). Groupe stationd, setgid :
 # ce qui y est créé hérite du groupe.
 install -d -m 2770 -o root -g stationd /run/stationd

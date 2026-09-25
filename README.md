@@ -420,8 +420,65 @@ stationctl icecast status
 - `COPY` carries the directory modes of the build context into the image
   (a restrictive `docker/rootfs/etc` once made `/etc` unreadable for every
   non-root user); the Dockerfile normalises them after the copy.
-- The image is for development (toolchain included); a slim multi-stage
-  production image is still to come.
+- The development image carries the toolchain; nodes run the production
+  image below.
+
+### Package & deploy
+
+Production binaries are **compiled on the development machine** (inside the
+development container: same Ubuntu, same glibc) and shipped in a runtime-only
+image — no toolchain on the nodes. `docker/Dockerfile.prod`: Ubuntu 26.04 +
+Icecast 2.5 + Liquidsoap + s6-overlay + `stationd` / `stationctl` + the WASM
+plugins (`/usr/lib/stationd/plugins/`). Same s6 services as the development
+image (`docker/rootfs`).
+
+**Package** (on the development machine, development container running):
+
+```sh
+docker/package.sh                 # clean git tree required; --allow-dirty otherwise
+# → dist/stationd-<version>-<rev>.tar
+#   (image + compose.yaml + install.sh + stationd.example.toml + SHA256SUMS)
+```
+
+It builds `stationd` / `stationctl` (`--release --locked`) and every
+`plugins/*` crate (`wasm32-unknown-unknown`), builds the image
+`stationd:<version>-<rev>`, checks it (shared libraries, Liquidsoap, Icecast,
+plugins) and saves it.
+
+**Deploy** (node: Docker from `docker-ce` + compose plugin, media mounted):
+
+```sh
+scp dist/stationd-<tag>.tar <node>:/tmp/
+ssh <node>
+cd /tmp && tar xf stationd-<tag>.tar
+sudo stationd-<tag>/install.sh --media /mnt/nfs/radio   # --media: first install only
+```
+
+`install.sh` loads the image, creates the host user/group `stationd`,
+`/srv/stationd/{data,playlist,radio}` and `/opt/stationd/{compose.yaml,.env}`
+(`.env`: image tag, `stationd` UID/GID, media path and its group). It never
+touches `/srv/stationd/stationd.toml` or the data. First install: write
+`stationd.toml` from `/srv/stationd/stationd.example.toml`, put the fallback
+and noise files in `/srv/stationd/radio/`, then
+`docker compose -f /opt/stationd/compose.yaml up -d`. Update: same commands
+with the new bundle (the tag in `.env` is bumped, the container recreated).
+Roll back: set the previous `STATIOND_VERSION` in `/opt/stationd/.env` and
+`up -d` again (older images stay loaded).
+
+| Node | Container | Content |
+|---|---|---|
+| `/srv/stationd` | `/var/lib/stationd` (stationd's working dir) | `stationd.toml`, `grid.toml`, `playlist/`, `radio/`, `data/` (database, `station.liq`, `icecast.xml`) |
+| `MEDIA_PATH` | same path | media library (`[media] library_path`) |
+
+Differences from the development `stationd.toml`: WASM plugins are
+`wasm = "/usr/lib/stationd/plugins/<crate>.wasm"`; relative paths resolve
+against `/srv/stationd`. The UID/GID of `stationd` and the media group are
+applied at start-up (`init-perms`, from `.env`): one image for every node.
+
+```sh
+alias stationctl='docker compose -f /opt/stationd/compose.yaml exec -u stationd station stationctl'
+docker compose -f /opt/stationd/compose.yaml logs -f station
+```
 
 ---
 
@@ -470,7 +527,8 @@ src/
 proto/               gRPC contracts (station, schedule, library, playlist, plugin, broadcast, liquidsoap, icecast)
 migrations/          SQLite migrations (embedded with sqlx)
 plugins/             example WASM guest plugins (separate crates)
-docker/              development image (Dockerfile.dev) and s6-overlay services (rootfs/)
+docker/              images (Dockerfile.dev, Dockerfile.prod), s6-overlay services (rootfs/),
+                     packager (package.sh) and node files (prod/: compose.yaml, install.sh)
 compose.yaml         development container (repository mounted at /src)
 Doc/                 architecture and design decisions (mostly in French)
 ETAT.md              development log / hand-over notes (French)

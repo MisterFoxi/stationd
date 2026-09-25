@@ -1,0 +1,26 @@
+# Exploitation d'un nœud stationd (VM de test / prod). Installé dans
+# /opt/stationd par install.sh ; variables dans /opt/stationd/.env (générées
+# par install.sh à la première installation).
+#
+#   /srv/stationd (hôte) → /var/lib/stationd : stationd.toml, grid.toml,
+#   playlist/, radio/ (fallback, bruit), data/ (base, .liq, icecast.xml).
+name: stationd
+services:
+  station:
+    image: stationd:${STATIOND_VERSION:?STATIOND_VERSION manquant (.env)}
+    # Réseau de l'hôte : Icecast voit la vraie IP du reverse proxy
+    # (trusted_proxies) ; ports 8000 (Icecast), 127.0.0.1:50051 (gRPC),
+    # 127.0.0.1:8081 (pont Liquidsoap).
+    network_mode: host
+    environment:
+      TZ: ${TZ:-UTC}
+      # Identités appliquées au démarrage par init-perms.
+      STATIOND_UID: ${STATIOND_UID:?STATIOND_UID manquant (.env)}
+      STATIOND_GID: ${STATIOND_GID:?STATIOND_GID manquant (.env)}
+      MEDIA_GID: ${MEDIA_GID:?MEDIA_GID manquant (.env)}
+    volumes:
+      - /srv/stationd:/var/lib/stationd
+      # Même chemin que [media] library_path de stationd.toml.
+      - ${MEDIA_PATH:?MEDIA_PATH manquant (.env)}:${MEDIA_PATH}
+    restart: unless-stopped
+    stop_grace_period: 15s
