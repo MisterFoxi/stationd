@@ -93,8 +93,8 @@ l'antenne sans attendre un pull) :
   (changement de `DayPart`, `AtClock` soft, `Every` décalés d'une piste).
 
 Puis **étape 4 — fins de piste** : `unplayed_only` marqué automatiquement
-(la décision doit porter la playlist feuille, pas le groupe),
-`TrackStarted`/`TrackFinished` aux plugins, compteur `Every` exact.
+✅ (2026-09-25, voir Fait) ; restent `TrackStarted`/`TrackFinished` aux
+plugins, compteur `Every` exact.
 Côté Icecast (échantillonnage livré, voir Fait) :
 - **stop-when-idle sans piste de trop** : aujourd'hui le passage
   `draining → stopped` se fait au pull, et la piste déjà préparée passe
@@ -133,6 +133,40 @@ Autres, indépendants :
 ---
 
 ## Fait
+
+### — `unplayed_only` : marquage automatique en fin de piste (2026-09-25) —
+
+Point 3 de la 0.1. Décisions : la fin de piste est **déduite côté stationd**
+(Liquidsoap ne signale que les débuts ; script `.liq` inchangé) ; « jouée en
+entier » = **temps réellement à l'antenne** (pauses exclues) `+ 15 s ≥`
+durée indexée ; la marque porte la **playlist feuille**.
+
+- **`selection::Resolved::File { path, leaf }`** : la feuille (statique /
+  dynamique / queue) qui a produit le fichier, clé canonique ; `None` pour
+  un override média. → `ResolvedDecision::leaf_ref` → `Pending` / `OnAir`
+  du pont.
+- **Pont** (`ls_bridge`) : `OnAir` compte `aired_s` + `counting_since` ;
+  une piste quitte l'antenne quand autre chose démarre (piste, `rid`
+  inconnu, fallback, bruit de fond hors pause) ; bruit de fond **en état
+  `paused`** = gel (`before_halt`), `resume` relance le compteur ; gelée
+  puis abandonnée = sortie avec le temps gelé. Appels moteur hors verrou.
+- **`GridEngine::on_track_left(media, leaf, aired_s, now)`** +
+  `played_to_end` (pur, `PLAYED_TO_END_TOLERANCE_S = 15`) →
+  `on_episode_finished` (existant) ; `media_index::duration_ms_of`.
+- `ls_control` : le « retour de pause » est aussi reconnu depuis `stopped`
+  (stop poussé pendant une pause : la piste gelée reprend au `resume`).
+- Comportement changé : le bruit de fond ne gèle la piste que si l'état est
+  `paused` (avant : toujours) ; après un `stop`, la piste est terminée.
+  Test `resume_from_pause_…` ajusté (pause appliquée d'abord).
+- Tests (+9) : feuille portée à travers un groupe (sélection) ;
+  `played_to_end` ; `on_track_left` (coupée / override / inconnue /
+  entière) ; pont : jouée en entier via un groupe → marque sur la feuille,
+  skip, pause puis abandon, pause puis reprise jusqu'au bout, stop, fallback.
+
+**Validation** : `cargo test --locked` vert (336 dont 317 dans la lib), aucun nouvel
+avertissement clippy dans le code touché. À valider en réel : un épisode
+d'une playlist `unplayed_only` joué en entier n'est plus resélectionné ;
+sauté, il l'est.
 
 ### — Environnement Docker de dev : stationd + Icecast + Liquidsoap sous s6 (2026-09-25) —
 
@@ -1327,8 +1361,9 @@ dans le découpage des modules (`grid_index` = A, `grid_store` = B).
   mémoire invalidée à l'apply, mutations par mpsc (gabarit `library_actor`).
 - **Sélection** : complète (static / dynamic / remote / queue / group +
   anti-répétition, y compris contraintes de groupe héritées + unplayed_only).
-  `limit` standalone : écarté ; marquage `unplayed_only` et relais remote :
-  auto-câblés avec Liquidsoap. Contraintes sur une `queue` : non appliquées
+  `limit` standalone : écarté ; marquage `unplayed_only` : auto-câblé
+  (fin de piste déduite par le pont) ; relais remote : à câbler avec
+  Liquidsoap. Contraintes sur une `queue` : non appliquées
   (préexistant ; la proposition v1 veut « entrée exclue reste, on cherche la
   suivante éligible » — à faire si besoin).
 

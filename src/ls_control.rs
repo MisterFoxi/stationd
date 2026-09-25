@@ -214,7 +214,12 @@ pub fn spawn_air_sync(
                     Ok(_) => {
                         tracing::info!(cmd, "Liquidsoap control: applied");
                         if let Push::State { t: Some(t), .. } = push {
-                            if t.from == BroadcastState::Paused && t.to == BroadcastState::Running {
+                            // From a pause — or from a stop pushed during
+                            // a pause, which leaves the track frozen: the
+                            // frozen track plays on. (No frozen track → no-op.)
+                            if matches!(t.from, BroadcastState::Paused | BroadcastState::Stopped)
+                                && t.to == BroadcastState::Running
+                            {
                                 bridge.resumed_from_pause();
                             }
                         }

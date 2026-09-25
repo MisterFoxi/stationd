@@ -66,9 +66,14 @@ pub enum SelectionError {
 /// media (`rel_path` under the media root) or a remote stream URL (a `remote`
 /// playlist, relayed by Liquidsoap via `input.http`). Kept distinct so the
 /// engine never runs the on-disk existence check on a stream URL.
+///
+/// A file carries the canonical key of the LEAF playlist that produced it
+/// (static / dynamic / queue) — not the grid's ref, which may be a group:
+/// per-playlist state such as `unplayed_only` (`episode_play`) is keyed by the
+/// leaf. `None` only for a file that no playlist produced (a media override).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Resolved {
-    File(String),
+    File { path: String, leaf: Option<String> },
     Stream(String),
 }
 
@@ -77,7 +82,7 @@ impl Resolved {
     /// file/stream distinction. Used by the plain `resolve_ref` helpers.
     pub fn into_token(self) -> String {
         match self {
-            Resolved::File(s) | Resolved::Stream(s) => s,
+            Resolved::File { path: s, .. } | Resolved::Stream(s) => s,
         }
     }
 }
@@ -169,7 +174,7 @@ async fn resolve_media(
     match sel.mode {
         Mode::Static | Mode::Dynamic => resolve_leaf(pool, plugins, now, reference, sel, &scope)
             .await
-            .map(Resolved::File),
+            .map(|path| Resolved::File { path, leaf: Some(reference.to_string()) }),
         Mode::Group => match sel.strategy {
             Some(Strategy::Sequence) => {
                 resolve_group_rotation(pool, plugins, now, reference, sel, false, depth, &scope)
@@ -206,7 +211,7 @@ async fn resolve_media(
             // per turn (FIFO/LIFO), consuming it. Empty → PoolEmpty → fallthrough.
             let lifo = matches!(sel.order, Some(Order::Lifo));
             match crate::queue_state::pop(pool, reference, lifo).await? {
-                Some(path) => Ok(Resolved::File(path)),
+                Some(path) => Ok(Resolved::File { path, leaf: Some(reference.to_string()) }),
                 None => Err(SelectionError::PoolEmpty),
             }
         }
@@ -605,7 +610,7 @@ async fn resolve_member(
             scope.extend(playlist.broadcast.as_ref().and_then(|b| b.constraints.as_ref()));
             resolve_leaf(pool, plugins, now, member_key, &playlist.selection, &scope)
                 .await
-                .map(Resolved::File)
+                .map(|path| Resolved::File { path, leaf: Some(member_key.to_string()) })
         }
         Mode::Group => {
             if depth >= MAX_GROUP_DEPTH {
@@ -635,7 +640,7 @@ async fn resolve_member(
         Mode::Queue => {
             let lifo = matches!(playlist.selection.order, Some(Order::Lifo));
             match crate::queue_state::pop(pool, member_key, lifo).await? {
-                Some(path) => Ok(Resolved::File(path)),
+                Some(path) => Ok(Resolved::File { path, leaf: Some(member_key.to_string()) }),
                 None => Err(SelectionError::PoolEmpty),
             }
         }
@@ -1780,6 +1785,39 @@ mod tests {
         assert_eq!(resolve_ref(&pool, "rot").await.unwrap(), "b/x.mp3");
         assert_eq!(resolve_ref(&pool, "rot").await.unwrap(), "c/x.mp3");
         assert_eq!(resolve_ref(&pool, "rot").await.unwrap(), "a/x.mp3");
+    }
+
+    #[tokio::test]
+    async fn a_file_carries_the_leaf_that_produced_it_not_the_group() {
+        let (_d, pool) = fresh_db().await;
+        media_index::replace_library(
+            &pool,
+            &[media("a/x.mp3", "", 0, &[]), media("b/x.mp3", "", 0, &[])],
+            1000,
+        )
+        .await
+        .unwrap();
+        add_letter_leaves(&pool, &["a", "b"]).await;
+        add_playlist(
+            &pool,
+            "rot",
+            r#"
+                name = "Rot"
+                [selection]
+                mode = "group"
+                strategy = "rotate"
+                members = [{ ref = "a" }, { ref = "b" }]
+            "#,
+        )
+        .await;
+        // Through the group: the leaf is the member, never the group's ref.
+        let first = resolve_ref_with_plugins(&pool, None, 0, "rot").await.unwrap();
+        assert_eq!(first, Resolved::File { path: "a/x.mp3".into(), leaf: Some("a".into()) });
+        let second = resolve_ref_with_plugins(&pool, None, 0, "rot").await.unwrap();
+        assert_eq!(second, Resolved::File { path: "b/x.mp3".into(), leaf: Some("b".into()) });
+        // A leaf referenced directly (any spelling) is its own canonical key.
+        let direct = resolve_ref_with_plugins(&pool, None, 0, "A").await.unwrap();
+        assert_eq!(direct, Resolved::File { path: "a/x.mp3".into(), leaf: Some("a".into()) });
     }
 
     #[tokio::test]
@@ -2930,7 +2968,7 @@ mod tests {
         // The engine path exposes the typed Stream, distinct from a File.
         match resolve_ref_with_plugins(&pool, None, 0, "night").await.unwrap() {
             Resolved::Stream(u) => assert_eq!(u, "http://nightmusic.live/stream"),
-            Resolved::File(f) => panic!("expected a stream, got file {f}"),
+            Resolved::File { path: f, .. } => panic!("expected a stream, got file {f}"),
         }
     }
 

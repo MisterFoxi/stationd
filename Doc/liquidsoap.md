@@ -43,6 +43,23 @@ propre à Liquidsoap. Visible dans `stationctl ls status` : `on air` (en cours)
 et `next` (la piste préchargée — Liquidsoap en demande une d'avance, au
 démarrage de la courante).
 
+### Fin de piste (déduite, 2026-09-25)
+
+Liquidsoap ne signale que les **débuts**. Une de nos pistes **quitte
+l'antenne** quand autre chose démarre : piste suivante (ou `rid` inconnu),
+bruit de fond après un `stop`, fallback. Le pont compte le **temps réellement
+passé à l'antenne** : une pause le gèle (bruit de fond pendant que l'état est
+`paused`), le `resume` le relance ; une piste gelée puis abandonnée (skip en
+pause) quitte l'antenne avec son temps gelé. À la sortie,
+`GridEngine::on_track_left` compare ce temps à la durée indexée :
+**jouée en entier** si `temps + 15 s ≥ durée` (la marge couvre le crossfade
+et la seconde du pont) → marque `unplayed_only` (`episode_play`) de la
+**playlist feuille** qui a produit le fichier (membre du groupe, jamais le
+groupe : `Resolved::File` porte la feuille jusqu'au pont). Skip, override
+hard, fallback, redémarrage de Liquidsoap : temps trop court, pas de marque.
+Override média (fichier direct) ou durée inconnue : jamais de marque.
+L'horloge est celle de la station (`clock set` fige le décompte).
+
 ## Socket de contrôle (stationd → Liquidsoap)
 
 `[liquidsoap] control_socket` (défaut `./data/liquidsoap.sock` ; en Docker
@@ -266,8 +283,6 @@ de systemd = groupe ou utilisateur de l'unité inexistant.
 - **Remote** : non relayé (`none/stream_unsupported`, warn) → étape 3
   (`input.http` piloté par une tâche stationd).
 - **Coupe sèche** d'un override hard (pas de fondu sur la piste coupée).
-- **`unplayed_only`** : marquage auto pas encore câblé (la ref de la décision
-  est celle du groupe, pas de la feuille) → étape 4.
 - **Compteur `Every` au compteur** : avancé à chaque démarrage réel de piste ;
   avec le préchargement, la piste `Every` elle-même peut compter pour 1.
 - Encodage : mp3 seulement.

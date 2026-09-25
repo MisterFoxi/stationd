@@ -281,6 +281,17 @@ pub async fn artist_of(pool: &SqlitePool, rel_path: &str) -> Result<Option<Strin
     Ok(row.and_then(|(a,)| a))
 }
 
+/// The indexed duration of a media row in milliseconds (`None` = path
+/// unknown). Used to decide whether a track that left the air played to its
+/// end.
+pub async fn duration_ms_of(pool: &SqlitePool, rel_path: &str) -> Result<Option<i64>, sqlx::Error> {
+    let row: Option<(i64,)> = sqlx::query_as("SELECT duration_ms FROM media WHERE rel_path = ?1")
+        .bind(rel_path)
+        .fetch_optional(pool)
+        .await?;
+    Ok(row.map(|(d,)| d))
+}
+
 /// The `(size_bytes, mtime_ns)` of a media row, or `None` if the path is
 /// unknown. Captured at episode completion as the `unplayed_only` play-once
 /// guard (a later file change invalidates the mark).

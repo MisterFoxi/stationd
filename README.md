@@ -483,7 +483,6 @@ ETAT.md              development log / hand-over notes (French)
   one track ahead).
 
 **Liquidsoap, step 4 — end of track:**
-- automatic `unplayed_only` marking;
 - `TrackStarted` / `TrackFinished` events for plugins;
 - exact track counting for `every` rules.
 

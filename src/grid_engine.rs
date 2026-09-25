@@ -124,6 +124,11 @@ pub struct ResolvedDecision {
     /// This media came from the override queue, pushed by this source (a
     /// plugin name or `cli`); the grid was bypassed for this pull.
     pub override_source: Option<String>,
+    /// Canonical key of the LEAF playlist that produced `media_path` (the
+    /// member of a group, not the group). `None` for a stream, a fallback, a
+    /// halt, or a media override. Carried to the end of the track so the
+    /// `unplayed_only` mark lands on the right playlist.
+    pub leaf_ref: Option<String>,
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -647,9 +652,9 @@ impl GridEngine {
     /// B, infinite-expiry). Called by the track-COMPLETION path — never on
     /// start: an interrupted or failed episode must stay eligible. No-op unless
     /// the playlist actually declares `unplayed_only` (keeps the history scoped)
-    /// and the media is known (its size/mtime are the play-once guard). The
-    /// live wiring (Liquidsoap end-of-track) is not in place yet, so today this
-    /// is driven by the CLI / tests.
+    /// and the media is known (its size/mtime are the play-once guard). Driven
+    /// live by [`GridEngine::on_track_left`] (Liquidsoap bridge, a track that
+    /// played to its end).
     pub async fn on_episode_finished(
         &self,
         playlist_ref: &str,
@@ -673,6 +678,36 @@ impl GridEngine {
         };
         crate::episode_play::mark(&self.pool, &key, media, size, mtime, now).await?;
         Ok(())
+    }
+
+    /// A track left the air after `aired_s` seconds really on air (pauses
+    /// excluded) — reported by the Liquidsoap bridge whatever ended it (its
+    /// natural end, a skip, a hard override, a Liquidsoap restart). If it
+    /// played to the end ([`played_to_end`] against the indexed duration), the
+    /// `unplayed_only` mark of its LEAF playlist is recorded; a cut track, a
+    /// media override (no leaf) or an unknown duration never marks. Returns
+    /// whether the track counted as played to the end.
+    pub async fn on_track_left(
+        &self,
+        media: &str,
+        leaf_ref: Option<&str>,
+        aired_s: i64,
+        now: Epoch,
+    ) -> Result<bool, EngineError> {
+        let duration_ms = crate::media_index::duration_ms_of(&self.pool, media).await?;
+        let Some(duration_ms) = duration_ms.filter(|d| *d > 0) else {
+            tracing::info!(%media, aired_s, "track left the air; duration unknown: not counted as played to the end");
+            return Ok(false);
+        };
+        if !played_to_end(aired_s, duration_ms) {
+            tracing::info!(%media, aired_s, duration_ms, "track cut short: not counted as played to the end");
+            return Ok(false);
+        }
+        tracing::debug!(%media, aired_s, duration_ms, "track played to the end");
+        if let Some(leaf) = leaf_ref {
+            self.on_episode_finished(leaf, media, now).await?;
+        }
+        Ok(true)
     }
 
     /// Enqueue a media into a `queue` playlist's runtime buffer (audience
@@ -953,6 +988,7 @@ impl GridEngine {
                 stream: false,
                 halted: Some(state),
                 override_source: None,
+                leaf_ref: None,
             });
         }
         if let Some(resolved) = self.next_override(now).await? {
@@ -989,11 +1025,11 @@ impl GridEngine {
                         produced = Some(stream);
                         break;
                     }
-                    Ok(crate::selection::Resolved::File(media)) if self.media_exists(&media) => {
-                        produced = Some(crate::selection::Resolved::File(media));
+                    Ok(crate::selection::Resolved::File { path, leaf }) if self.media_exists(&path) => {
+                        produced = Some(crate::selection::Resolved::File { path, leaf });
                         break;
                     }
-                    Ok(crate::selection::Resolved::File(missing)) => {
+                    Ok(crate::selection::Resolved::File { path: missing, .. }) => {
                         tracing::warn!(
                             media = %missing,
                             "resolved media missing on disk; marking unavailable and re-picking"
@@ -1011,7 +1047,7 @@ impl GridEngine {
             if let Some(resolved) = produced {
                 // Persist effects only now that this source actually produced.
                 self.persist_effects(&decision, now).await?;
-                let (media_path, stream) = self.log_start(resolved, now).await?;
+                let (media_path, stream, leaf_ref) = self.log_start(resolved, now).await?;
                 self.emit_resolved(&decision, Some(&media_path), format!("{:?}", decision.origin));
                 return Ok(ResolvedDecision {
                     decision,
@@ -1019,6 +1055,7 @@ impl GridEngine {
                     stream,
                     halted: None,
                     override_source: None,
+                    leaf_ref,
                 });
             }
 
@@ -1052,6 +1089,7 @@ impl GridEngine {
             stream: false,
             halted: None,
             override_source: None,
+            leaf_ref: None,
         })
     }
 
@@ -1097,7 +1135,8 @@ impl GridEngine {
         let produced: Result<Resolved, String> = match &entry.content {
             OverrideContent::Media(path) => {
                 if self.media_exists(path) {
-                    Ok(Resolved::File(path.clone()))
+                    // No playlist produced it: no leaf, never an unplayed_only mark.
+                    Ok(Resolved::File { path: path.clone(), leaf: None })
                 } else {
                     Err(format!("media `{path}` not found under the media root"))
                 }
@@ -1111,7 +1150,7 @@ impl GridEngine {
                 )
                 .await
                 {
-                    Ok(Resolved::File(media)) if !self.media_exists(&media) => {
+                    Ok(Resolved::File { path: media, .. }) if !self.media_exists(&media) => {
                         crate::media_index::mark_unavailable(&self.pool, &media).await?;
                         Err(format!("resolved media `{media}` missing on disk"))
                     }
@@ -1138,7 +1177,7 @@ impl GridEngine {
                     playlist_ref,
                     mark_taken: None,
                 };
-                let (media_path, stream) = self.log_start(resolved, now).await?;
+                let (media_path, stream, leaf_ref) = self.log_start(resolved, now).await?;
                 self.emit_resolved(&decision, Some(&media_path), "Override".to_string());
                 Ok(Some(ResolvedDecision {
                     decision,
@@ -1146,6 +1185,7 @@ impl GridEngine {
                     stream,
                     halted: None,
                     override_source: Some(entry.source.clone()),
+                    leaf_ref,
                 }))
             }
         }
@@ -1154,19 +1194,19 @@ impl GridEngine {
     /// Log a track START into the station history (family B) so the
     /// anti-repetition constraints see it on the next pull (artist from the
     /// media index, `None` = untagged). A stream has no file identity / artist
-    /// → no play history. Returns (media_path, is_stream).
+    /// → no play history. Returns (media_path, is_stream, leaf playlist key).
     async fn log_start(
         &self,
         resolved: crate::selection::Resolved,
         now: Epoch,
-    ) -> Result<(String, bool), EngineError> {
+    ) -> Result<(String, bool, Option<String>), EngineError> {
         Ok(match resolved {
-            crate::selection::Resolved::File(media) => {
+            crate::selection::Resolved::File { path: media, leaf } => {
                 let artist = crate::media_index::artist_of(&self.pool, &media).await?;
                 crate::broadcast_log::record(&self.pool, &media, artist.as_deref(), now).await?;
-                (media, false)
+                (media, false, leaf)
             }
-            crate::selection::Resolved::Stream(url) => (url, true),
+            crate::selection::Resolved::Stream(url) => (url, true, None),
         })
     }
 
@@ -1201,6 +1241,18 @@ impl GridEngine {
             });
         }
     }
+}
+
+/// Slack between the time a track really spent on air and its indexed
+/// duration for it to count as played to the end: covers the crossfade (the
+/// next track starts before this one ends — 3 s by default) and the
+/// one-second granularity of the bridge's clock.
+pub const PLAYED_TO_END_TOLERANCE_S: i64 = 15;
+
+/// Did a track that spent `aired_s` seconds on air play to its end, given its
+/// indexed duration? (`aired + tolerance >= duration`.)
+pub fn played_to_end(aired_s: i64, duration_ms: i64) -> bool {
+    aired_s.saturating_add(PLAYED_TO_END_TOLERANCE_S).saturating_mul(1000) >= duration_ms
 }
 
 fn real_now() -> Epoch {
@@ -1671,6 +1723,58 @@ mode = "dynamic""#;
             .await
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn played_to_end_allows_the_crossfade_but_not_a_cut() {
+        assert!(played_to_end(600, 600_000));
+        assert!(played_to_end(597, 600_000), "the next track starts during the crossfade");
+        assert!(played_to_end(585, 600_000), "15 s of slack");
+        assert!(!played_to_end(584, 600_000));
+        assert!(!played_to_end(100, 600_000));
+        assert!(played_to_end(0, 10_000), "a sting shorter than the slack");
+    }
+
+    #[tokio::test]
+    async fn on_track_left_marks_only_a_full_play_of_a_leaf() {
+        let (_dir, eng) = engine().await;
+        crate::media_index::replace_library(
+            &eng.pool,
+            &[crate::media::ScannedMedia {
+                rel_path: "pod/ep1.mp3".into(),
+                title: None,
+                artist: None,
+                album: None,
+                year: None,
+                genres: vec![],
+                duration_ms: 600_000,
+                size_bytes: 1,
+                mtime_ns: 0,
+            }],
+            1000,
+        )
+        .await
+        .unwrap();
+        let feu = "name = \"F\"\n[selection]\nmode = \"dynamic\"\norder = \"oldest\"\n\
+                   order_by = \"filename\"\nunplayed_only = true\n[[selection.filter]]\n\
+                   field = \"path\"\nop = \"prefix\"\nvalue = \"pod/\"\n";
+        let pl = crate::playlist::Playlist::parse(feu).unwrap();
+        crate::store::upsert(&eng.pool, "feu", &pl, feu, Some("feu")).await.unwrap();
+        let played = || async {
+            crate::episode_play::played_matching(&eng.pool, "feu").await.unwrap()
+        };
+
+        // Cut short: not a full play, nothing marked.
+        assert!(!eng.on_track_left("pod/ep1.mp3", Some("feu"), 100, Epoch(5000)).await.unwrap());
+        assert!(played().await.is_empty());
+        // A media override (no leaf): played to the end, but nothing to mark.
+        assert!(eng.on_track_left("pod/ep1.mp3", None, 600, Epoch(5000)).await.unwrap());
+        assert!(played().await.is_empty());
+        // Unknown media: no duration, never counted.
+        assert!(!eng.on_track_left("ghost.mp3", Some("feu"), 9999, Epoch(5000)).await.unwrap());
+        // A full play of the leaf: marked.
+        assert!(eng.on_track_left("pod/ep1.mp3", Some("feu"), 598, Epoch(5000)).await.unwrap());
+        assert!(played().await.contains("pod/ep1.mp3"));
     }
 
     #[tokio::test]

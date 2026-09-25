@@ -17,6 +17,15 @@
 //!   track counter (`Every` by tracks) advances. `kind` = fallback|halted for
 //!   Liquidsoap's own sources.
 //!
+//! Liquidsoap only reports STARTS. The end of a track is inferred here: a
+//! track leaves the air when something else starts (next track, halted
+//! noise after a stop, fallback, unknown). The bridge counts the time each of
+//! our tracks really spent on air — a pause freezes the count, a resume
+//! restarts it — and hands it to the engine when the track leaves
+//! (`GridEngine::on_track_left`: played to the end → `unplayed_only` mark of
+//! its leaf playlist). A skip, a hard override or a Liquidsoap restart leave
+//! a short count: never marked.
+//!
 //! The bridge itself holds no business logic: resolution is the engine's; the
 //! bridge only numbers requests, keeps what is on air for `stationctl ls
 //! status`, and forwards the track-start signal.
@@ -76,6 +85,8 @@ struct Pending {
     rid: u64,
     media_path: String,
     playlist_ref: Option<String>,
+    /// Leaf playlist that produced it (see `ResolvedDecision::leaf_ref`).
+    leaf_ref: Option<String>,
 }
 
 /// What Liquidsoap last reported as starting on air.
@@ -107,7 +118,53 @@ pub struct OnAir {
     pub kind: OnAirKind,
     pub media_path: Option<String>,
     pub playlist_ref: Option<String>,
+    /// When this airing began (display; unchanged by a pause / resume).
     pub since: i64,
+    /// Leaf playlist of our track (`None` for Liquidsoap's own sources or a
+    /// media override).
+    pub leaf_ref: Option<String>,
+    /// Seconds really on air before `counting_since` (earlier stretches, a
+    /// pause in between).
+    pub aired_s: i64,
+    /// Start of the current on-air stretch; `None` while frozen by a pause.
+    pub counting_since: Option<i64>,
+}
+
+impl OnAir {
+    fn source(kind: OnAirKind, now: i64) -> Self {
+        OnAir {
+            kind,
+            media_path: None,
+            playlist_ref: None,
+            since: now,
+            leaf_ref: None,
+            aired_s: 0,
+            counting_since: None,
+        }
+    }
+
+    /// Seconds really on air at `now` (pauses excluded).
+    pub fn aired_at(&self, now: i64) -> i64 {
+        self.aired_s + self.counting_since.map_or(0, |t| (now - t).max(0))
+    }
+}
+
+/// One of our tracks leaving the air, judged outside the lock.
+#[derive(Debug)]
+struct Left {
+    media: String,
+    leaf: Option<String>,
+    aired_s: i64,
+}
+
+impl Left {
+    /// `Some` for one of our tracks (a file we handed out), else `None`.
+    fn of(a: &OnAir, now: i64) -> Option<Left> {
+        if a.kind != OnAirKind::Track {
+            return None;
+        }
+        Some(Left { media: a.media_path.clone()?, leaf: a.leaf_ref.clone(), aired_s: a.aired_at(now) })
+    }
 }
 
 /// The track handed to Liquidsoap and not started yet ("à suivre").
@@ -188,7 +245,11 @@ impl LsBridge {
                             NextReply::none("stream_unsupported")
                         }
                         Some(media) => {
-                            let (rid, uri) = self.hand_out(&media, r.decision.playlist_ref.clone());
+                            let (rid, uri) = self.hand_out(
+                                &media,
+                                r.decision.playlist_ref.clone(),
+                                r.leaf_ref.clone(),
+                            );
                             self.lock().status.next = Some(NextUp {
                                 rid,
                                 media_path: media,
@@ -222,13 +283,18 @@ impl LsBridge {
 
     /// Number a track handed to Liquidsoap and remember it until it starts:
     /// returns (rid, annotated absolute uri).
-    fn hand_out(&self, media: &str, playlist_ref: Option<String>) -> (u64, String) {
+    fn hand_out(
+        &self,
+        media: &str,
+        playlist_ref: Option<String>,
+        leaf_ref: Option<String>,
+    ) -> (u64, String) {
         let mut st = self.lock();
         let rid = st.next_rid;
         st.next_rid += 1;
         let abs = self.media_root.join(media);
         let uri = format!("annotate:stationd_rid=\"{rid}\":{}", abs.to_string_lossy());
-        st.pending.push_back(Pending { rid, media_path: media.to_string(), playlist_ref });
+        st.pending.push_back(Pending { rid, media_path: media.to_string(), playlist_ref, leaf_ref });
         while st.pending.len() > PENDING_CAP {
             st.pending.pop_front();
         }
@@ -246,7 +312,9 @@ impl LsBridge {
                     tracing::warn!(id, %url, "hard override resolved to a remote stream: relay not wired yet, not aired");
                     None
                 }
-                Some(media) => Some(self.hand_out(&media, r.decision.playlist_ref.clone()).1),
+                Some(media) => {
+                    Some(self.hand_out(&media, r.decision.playlist_ref.clone(), r.leaf_ref.clone()).1)
+                }
                 None => None,
             },
             Ok(None) => {
@@ -260,15 +328,26 @@ impl LsBridge {
         }
     }
 
-    /// Liquidsoap reports a track starting on air.
+    /// Liquidsoap reports a track starting on air. Whatever was on air before
+    /// leaves it (except a track frozen by a pause, which waits for its
+    /// resume): each of our tracks that leaves is judged by the engine
+    /// (`on_track_left`) with the time it really spent on air.
     pub async fn track_started(&self, ev: &TrackEvent) {
         let now = self.engine.effective_now(None).0;
+        let mut leaving: Vec<Left> = Vec::new();
         let on_air = if !ev.rid.is_empty() {
             let found = ev.rid.parse::<u64>().ok().and_then(|rid| {
                 let mut st = self.lock();
                 let idx = st.pending.iter().position(|p| p.rid == rid)?;
                 st.pending.remove(idx)
             });
+            {
+                // Something new starts: the track on air (if ours) left, and
+                // a track frozen by a pause was abandoned (skip while paused).
+                let mut st = self.lock();
+                leaving.extend(st.status.on_air.as_ref().and_then(|a| Left::of(a, now)));
+                leaving.extend(st.before_halt.take().as_ref().and_then(|a| Left::of(a, now)));
+            }
             match found {
                 Some(p) => {
                     tracing::info!(media = %p.media_path, rid = p.rid, "on air");
@@ -278,7 +357,6 @@ impl LsBridge {
                     }
                     {
                         let mut st = self.lock();
-                        st.before_halt = None;
                         st.status.tracks_started += 1;
                         if st.status.next.as_ref().is_some_and(|n| n.rid == p.rid) {
                             st.status.next = None;
@@ -289,11 +367,14 @@ impl LsBridge {
                         media_path: Some(p.media_path),
                         playlist_ref: p.playlist_ref,
                         since: now,
+                        leaf_ref: p.leaf_ref,
+                        aired_s: 0,
+                        counting_since: Some(now),
                     }
                 }
                 None => {
                     tracing::warn!(rid = %ev.rid, "Liquidsoap reported an unknown request id");
-                    OnAir { kind: OnAirKind::Unknown, media_path: None, playlist_ref: None, since: now }
+                    OnAir::source(OnAirKind::Unknown, now)
                 }
             }
         } else {
@@ -321,25 +402,46 @@ impl LsBridge {
             if was.as_ref() == Some(&kind) {
                 return; // same loop continuing: keep `since` = when it began
             }
-            if kind == OnAirKind::Halted {
-                let mut st = self.lock();
-                if st.status.on_air.as_ref().is_some_and(|a| a.kind == OnAirKind::Track) {
-                    st.before_halt = st.status.on_air.clone();
+            let paused = self.engine.control().state()
+                == crate::station_control::BroadcastState::Paused;
+            let mut st = self.lock();
+            if let Some(track) = st.status.on_air.clone().filter(|a| a.kind == OnAirKind::Track) {
+                if kind == OnAirKind::Halted && paused {
+                    // A pause freezes the track (a resume continues it): stop
+                    // counting, keep it aside.
+                    st.before_halt = Some(OnAir {
+                        aired_s: track.aired_at(now),
+                        counting_since: None,
+                        ..track
+                    });
+                } else {
+                    // Its end (noise after a stop), or cut (fallback, unknown).
+                    leaving.extend(Left::of(&track, now));
                 }
             }
-            OnAir { kind, media_path: None, playlist_ref: None, since: now }
+            OnAir::source(kind, now)
         };
         self.lock().status.on_air = Some(on_air);
+        for left in leaving {
+            let at = crate::resolver::Epoch(now);
+            if let Err(e) =
+                self.engine.on_track_left(&left.media, left.leaf.as_deref(), left.aired_s, at).await
+            {
+                tracing::error!(media = %left.media, error = %e, "could not record the end of a track");
+            }
+        }
     }
 
     /// Liquidsoap acknowledged a resume from pause: the frozen track plays on
     /// (no new track start will be reported for it) — put it back on air.
     pub fn resumed_from_pause(&self) {
+        let now = self.engine.effective_now(None).0;
         let mut st = self.lock();
         let halted = st.status.on_air.as_ref().is_some_and(|a| a.kind == OnAirKind::Halted);
         if halted {
-            if let Some(track) = st.before_halt.take() {
+            if let Some(mut track) = st.before_halt.take() {
                 tracing::info!(media = track.media_path.as_deref().unwrap_or("-"), "resumed: back on air");
+                track.counting_since = Some(now); // on-air time counts again
                 st.status.on_air = Some(track);
             }
         }
@@ -546,8 +648,12 @@ mod tests {
         b.next().await;
         b.track_started(&TrackEvent { rid: "1".into(), kind: String::new() }).await;
         let before = b.status().on_air.unwrap();
+        // The noise takes over BECAUSE of a pause (the state is Paused first):
+        // only then is the track frozen rather than ended.
+        b.engine.control().apply(ControlAction::Pause, "cli").unwrap();
         b.track_started(&TrackEvent { rid: String::new(), kind: "halted".into() }).await;
         assert_eq!(b.status().on_air.unwrap().kind, OnAirKind::Halted);
+        b.engine.control().apply(ControlAction::Resume, "cli").unwrap();
         b.resumed_from_pause();
         let after = b.status().on_air.unwrap();
         assert_eq!(after.kind, OnAirKind::Track);
@@ -611,6 +717,153 @@ mod tests {
         assert_eq!(b.status().on_air.unwrap().since, first.since);
         b.track_started(&TrackEvent { rid: String::new(), kind: "fallback".into() }).await;
         assert_eq!(b.status().on_air.unwrap().kind, OnAirKind::Fallback);
+    }
+
+    // ----- end of track: time really on air → unplayed_only mark ---------
+
+    /// Three 10-min episodes under `pod` (dynamic, oldest, unplayed_only),
+    /// aired THROUGH a group `show` (rotate [pod]) on the floor: the mark must
+    /// land on the leaf `pod`, never on the group.
+    async fn pod_bridge() -> (tempfile::TempDir, LsBridge, sqlx::SqlitePool) {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = db::init(&dir.path().join("t.db")).await.unwrap();
+        let ep = |n: u32| crate::media::ScannedMedia {
+            rel_path: format!("pod/ep{n}.mp3"),
+            title: None,
+            artist: None,
+            album: None,
+            year: None,
+            genres: vec![],
+            duration_ms: 600_000,
+            size_bytes: 1,
+            mtime_ns: 0,
+        };
+        crate::media_index::replace_library(&pool, &[ep(1), ep(2), ep(3)], 1000).await.unwrap();
+        let pod = "name = \"pod\"\n[selection]\nmode = \"dynamic\"\norder = \"oldest\"\n\
+                   order_by = \"filename\"\nunplayed_only = true\n[[selection.filter]]\n\
+                   field = \"path\"\nop = \"prefix\"\nvalue = \"pod/\"\n";
+        let pl = crate::playlist::Playlist::parse(pod).unwrap();
+        crate::store::upsert(&pool, "pod", &pl, pod, Some("pod")).await.unwrap();
+        let show = "name = \"show\"\n[selection]\nmode = \"group\"\nstrategy = \"rotate\"\n\
+                    members = [{ ref = \"pod\" }]\n";
+        let pl = crate::playlist::Playlist::parse(show).unwrap();
+        crate::store::upsert(&pool, "show", &pl, show, Some("show")).await.unwrap();
+        insert_rule(
+            &pool,
+            &Rule {
+                id: "floor".into(),
+                enabled: true,
+                validity: Validity::default(),
+                kind: RuleKind::BaseRotation { playlist_ref: "show".into() },
+            },
+        )
+        .await
+        .unwrap();
+        let eng = GridEngine::new(pool.clone(), "UTC");
+        (dir, LsBridge::new(eng, Path::new("/srv/media")).unwrap(), pool)
+    }
+
+    async fn played(pool: &sqlx::SqlitePool, playlist: &str) -> std::collections::HashSet<String> {
+        crate::episode_play::played_matching(pool, playlist).await.unwrap()
+    }
+
+    impl LsBridge {
+        fn at(&self, t: i64) {
+            self.engine.set_clock(Some(crate::resolver::Epoch(t)));
+        }
+        async fn start(&self, rid: u64) {
+            self.track_started(&TrackEvent { rid: rid.to_string(), kind: String::new() }).await;
+        }
+        async fn source(&self, kind: &str) {
+            self.track_started(&TrackEvent { rid: String::new(), kind: kind.into() }).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn a_track_played_to_the_end_marks_its_leaf_not_the_group() {
+        let (_d, b, pool) = pod_bridge().await;
+        b.at(1000);
+        b.next().await; // rid 1 = ep1
+        b.start(1).await;
+        assert_eq!(b.status().on_air.unwrap().leaf_ref.as_deref(), Some("pod"));
+        b.at(1597); // 597 s on air: the next one starts 3 s early (crossfade)
+        b.next().await; // rid 2
+        b.start(2).await;
+        assert_eq!(played(&pool, "pod").await, ["pod/ep1.mp3".to_string()].into());
+        assert!(played(&pool, "show").await.is_empty(), "never keyed by the group");
+    }
+
+    #[tokio::test]
+    async fn a_skipped_track_is_not_marked() {
+        let (_d, b, pool) = pod_bridge().await;
+        b.at(1000);
+        b.next().await;
+        b.start(1).await;
+        b.at(1100); // skipped after 100 s
+        b.next().await;
+        b.start(2).await;
+        assert!(played(&pool, "pod").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_pause_does_not_count_as_air_time() {
+        let (_d, b, pool) = pod_bridge().await;
+        // Paused after 100 s, left frozen far longer than the episode, then
+        // abandoned (a new track starts): 100 s on air → not marked.
+        b.at(1000);
+        b.next().await;
+        b.start(1).await;
+        b.at(1100);
+        b.engine.control().apply(ControlAction::Pause, "cli").unwrap();
+        b.source("halted").await;
+        b.at(5000);
+        b.engine.control().apply(ControlAction::Resume, "cli").unwrap();
+        b.next().await;
+        b.start(2).await;
+        assert!(played(&pool, "pod").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_paused_then_resumed_track_played_to_the_end_is_marked() {
+        let (_d, b, pool) = pod_bridge().await;
+        b.at(1000);
+        b.next().await;
+        b.start(1).await;
+        b.at(1300); // 300 s on air
+        b.engine.control().apply(ControlAction::Pause, "cli").unwrap();
+        b.source("halted").await;
+        b.at(9000); // a long pause: not air time
+        b.engine.control().apply(ControlAction::Resume, "cli").unwrap();
+        b.resumed_from_pause();
+        let back = b.status().on_air.unwrap();
+        assert_eq!((back.kind, back.since), (OnAirKind::Track, 1000), "same airing");
+        b.at(9300); // 300 s more: 600 s in all
+        b.next().await;
+        b.start(2).await;
+        assert_eq!(played(&pool, "pod").await, ["pod/ep1.mp3".to_string()].into());
+    }
+
+    #[tokio::test]
+    async fn a_stop_lets_the_track_end_and_it_is_marked() {
+        let (_d, b, pool) = pod_bridge().await;
+        b.at(1000);
+        b.next().await;
+        b.start(1).await;
+        b.engine.control().apply(ControlAction::Stop, "cli").unwrap();
+        b.at(1600); // plays to its end, then the halted noise
+        b.source("halted").await;
+        assert_eq!(played(&pool, "pod").await, ["pod/ep1.mp3".to_string()].into());
+    }
+
+    #[tokio::test]
+    async fn a_track_cut_by_the_fallback_is_not_marked() {
+        let (_d, b, pool) = pod_bridge().await;
+        b.at(1000);
+        b.next().await;
+        b.start(1).await;
+        b.at(1200); // Liquidsoap lost the track: the safety net takes over
+        b.source("fallback").await;
+        assert!(played(&pool, "pod").await.is_empty());
     }
 
     #[tokio::test]
