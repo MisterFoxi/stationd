@@ -55,8 +55,11 @@ level = "info"
 #                                           # the stationd user must be in Liquidsoap's
 #                                           # group. /run/stationd: created by the Docker
 #                                           # image (init-perms); default ./data/liquidsoap.sock
-# fallback_path = "/srv/radio/error.mp3"    # safety net: nothing to air / stationd down
-# halted_path   = "/srv/radio/noise.mp3"    # looped while paused/stopped
+# fallback_path = "./radio/error.mp3"       # safety net: nothing to air / stationd down
+#                                           # default: /usr/share/stationd/error.mp3
+#                                           # (production image only)
+# halted_path   = "./radio/bruit.mp3"       # looped while paused/stopped
+#                                           # default: /usr/share/stationd/bruit.mp3
 # normalize     = false                     # normalize + compress on the air chain
 # custom_include = "/etc/stationd/custom.liq"  # sees `radio`, may reassign it
 # log_level     = 3
@@ -71,7 +74,6 @@ level = "info"
 # password = "hackme"
 # mount    = "/radio.mp3"
 # bitrate  = 192                            # mp3 (format = "mp3", the only one for now)
-# name     = "My Radio"                     # default: [station] name
 # description = ""
 # genre    = ""
 # public   = false
@@ -119,6 +121,8 @@ level = "info"
 # Optional: stationd generates Icecast's own config (icecast.xml) — one mount
 # per [[liquidsoap.output]] with its source password, UTF-8 titles, only our
 # mounts can be fed (no global source password), trusted reverse proxies.
+# Names come from [station] name; public listen URLs belong to the reverse
+# proxy (Icecast's hostname stays localhost).
 # Written at start-up when it changed (mode 0640, holds the passwords):
 # Icecast reads it through `file_group`, the group shared by stationd and
 # Icecast created at install (cf. Doc/liquidsoap.md). Restart Icecast to
@@ -128,8 +132,6 @@ level = "info"
 # file_group      = "stationd"              # stationd must be a member; default: its own group
 # port            = 8000
 # bind_address    = "0.0.0.0"               # default: all interfaces
-# hostname        = "radio.example"         # public host name
-# location        = "Earth"                 # default: [station] name
 # admin_email     = "icemaster@localhost"
 # max_clients     = 100
 # trusted_proxies = ["192.168.1.94"]        # X-Forwarded-For (Icecast 2.5), exact IPs

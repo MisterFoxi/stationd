@@ -165,12 +165,6 @@ pub struct IcecastServerConfig {
     /// Optional bind address (default: all interfaces).
     #[serde(default)]
     pub bind_address: Option<String>,
-    /// Public host name (listen URLs, directory listings).
-    #[serde(default = "default_icecast_hostname")]
-    pub hostname: String,
-    /// `<location>` shown by Icecast. Default: the station name.
-    #[serde(default)]
-    pub location: Option<String>,
     #[serde(default = "default_icecast_admin_email")]
     pub admin_email: String,
     /// Maximum simultaneous clients (listeners + sources + admin).
@@ -198,9 +192,6 @@ fn default_icecast_config_path() -> PathBuf {
 }
 fn default_icecast_port() -> u16 {
     8000
-}
-fn default_icecast_hostname() -> String {
-    "localhost".to_string()
 }
 fn default_icecast_admin_email() -> String {
     "icemaster@localhost".to_string()
@@ -308,10 +299,9 @@ impl IcecastConfig {
                 return Err(format!("server.trusted_proxies: {p} listed twice"));
             }
         }
-        for (what, v) in [("hostname", &srv.hostname), ("admin_email", &srv.admin_email)] {
-            if v.trim().is_empty() || v.contains(char::is_whitespace) {
-                return Err(format!("server.{what} {v:?}: non-empty, no spaces"));
-            }
+        let v = &srv.admin_email;
+        if v.trim().is_empty() || v.contains(char::is_whitespace) {
+            return Err(format!("server.admin_email {v:?}: non-empty, no spaces"));
         }
         if srv.max_clients == 0 {
             return Err("server.max_clients must be > 0".into());
@@ -393,10 +383,14 @@ pub struct LiquidsoapConfig {
     /// Shared secret Liquidsoap sends in the `X-Stationd-Token` header.
     pub api_token: String,
     /// Safety fallback, looped when stationd has nothing to air (no rule
-    /// covers now, every pool empty, stationd unreachable).
+    /// covers now, every pool empty, stationd unreachable). Default: the file
+    /// shipped in the production image ([`DEFAULT_FALLBACK_PATH`]).
+    #[serde(default = "default_ls_fallback_path")]
     pub fallback_path: PathBuf,
     /// Background noise looped while the station is halted (paused/stopped):
-    /// keeps the stream occupied. Distinct from the safety fallback.
+    /// keeps the stream occupied. Distinct from the safety fallback. Default:
+    /// the file shipped in the production image ([`DEFAULT_HALTED_PATH`]).
+    #[serde(default = "default_ls_halted_path")]
     pub halted_path: PathBuf,
     #[serde(default)]
     pub crossfade: CrossfadeConfig,
@@ -475,6 +469,20 @@ pub struct IcecastOutput {
 pub enum OutputFormat {
     #[default]
     Mp3,
+}
+
+/// Safety fallback shipped in the production image (docker/package.sh copies
+/// `radio/error.mp3` there). Absent elsewhere (dev image, native): set
+/// `fallback_path` — the start-up check refuses a missing file.
+pub const DEFAULT_FALLBACK_PATH: &str = "/usr/share/stationd/error.mp3";
+/// Background noise shipped in the production image (`radio/bruit.mp3`).
+pub const DEFAULT_HALTED_PATH: &str = "/usr/share/stationd/bruit.mp3";
+
+fn default_ls_fallback_path() -> PathBuf {
+    PathBuf::from(DEFAULT_FALLBACK_PATH)
+}
+fn default_ls_halted_path() -> PathBuf {
+    PathBuf::from(DEFAULT_HALTED_PATH)
 }
 
 fn default_ls_http_bind() -> String {
@@ -837,6 +845,12 @@ mod tests {
         assert_eq!(ls.outputs.len(), 1);
         assert_eq!(ls.outputs[0].bitrate, 192);
         assert_eq!(ls.outputs[0].format, OutputFormat::Mp3);
+        // Air files: explicit here; absent = the files of the production image.
+        assert_eq!(ls.fallback_path, PathBuf::from("/srv/error.mp3"));
+        let bare = LS.replace("fallback_path = \"/srv/error.mp3\"", "").replace("halted_path = \"/srv/noise.mp3\"", "");
+        let ls = load_str(&bare).unwrap().liquidsoap.unwrap();
+        assert_eq!(ls.fallback_path, PathBuf::from(DEFAULT_FALLBACK_PATH));
+        assert_eq!(ls.halted_path, PathBuf::from(DEFAULT_HALTED_PATH));
     }
 
     #[test]
@@ -863,6 +877,16 @@ mod tests {
         // deny_unknown_fields: a typo is a parse error, never ignored.
         let typo = LS.replace("halted_path", "haltd_path");
         assert!(matches!(load_str(&typo), Err(ConfigError::Parse { .. })));
+    }
+
+    #[test]
+    fn icecast_server_names_come_from_the_station() {
+        // hostname / location removed: the station name is the only name, the
+        // public URLs belong to the reverse proxy. An old config fails loudly.
+        for old in ["hostname = \"radio.lan\"", "location = \"Earth\""] {
+            let cfg = format!("{LS}{IC}        [icecast.server]\n        {old}\n");
+            assert!(matches!(load_str(&cfg), Err(ConfigError::Parse { .. })), "{old}");
+        }
     }
 
     const IC: &str = r#"

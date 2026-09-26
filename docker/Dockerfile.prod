@@ -7,6 +7,8 @@
 # Contexte de build = dist/stage/ préparé par docker/package.sh :
 #   bin/stationd, bin/stationctl   binaires --release
 #   plugins/*.wasm                 plugins WASM (cible wasm32-unknown-unknown)
+#   share/error.mp3, share/bruit.mp3  fallback + bruit de fond (radio/ du dépôt),
+#                                  défauts de fallback_path / halted_path
 #   rootfs/                        copie de docker/rootfs (services s6, partagés avec le dev)
 #
 # Identités (UID/GID de stationd, groupe des médias) : fournies à l'exécution
@@ -82,10 +84,11 @@ RUN set -eu; \
 
 COPY --chmod=0755 bin/ /usr/local/bin/
 COPY --chmod=0644 plugins/ /usr/lib/stationd/plugins/
+COPY --chmod=0644 share/ /usr/share/stationd/
 COPY rootfs/ /
 # Droits du partage W: (Samba) non fiables : COPY les reporte jusque sur /etc.
 # Même normalisation que l'image de dev.
-RUN chmod 0755 /etc /usr/lib/stationd/plugins \
+RUN chmod 0755 /etc /usr/lib/stationd/plugins /usr/share/stationd \
  && find /etc/s6-overlay -type d -exec chmod 0755 {} + \
  && find /etc/s6-overlay -type f -exec chmod 0644 {} + \
  && chmod 0755 /etc/s6-overlay/scripts/* \

@@ -61,7 +61,7 @@ done
 # --- 2. Contexte de build ---------------------------------------------------
 stage="$root/dist/stage"
 rm -rf "$stage"
-mkdir -p "$stage/bin" "$stage/plugins"
+mkdir -p "$stage/bin" "$stage/plugins" "$stage/share"
 
 # target/ du crate principal = volume nommé du conteneur, invisible de l'hôte.
 for b in stationd stationctl; do
@@ -76,6 +76,12 @@ for dir in "${plugins[@]}"; do
     n=$((n + 1))
   done
   [ "$n" = 1 ] || die "$dir : $n fichier(s) .wasm au lieu d'un"
+done
+# Fallback et bruit de fond livrés dans l'image : défauts de fallback_path /
+# halted_path (config.rs, DEFAULT_FALLBACK_PATH / DEFAULT_HALTED_PATH).
+for f in error.mp3 bruit.mp3; do
+  [ -s "radio/$f" ] || die "radio/$f absent ou vide"
+  cp "radio/$f" "$stage/share/$f"
 done
 cp -r docker/rootfs "$stage/rootfs"
 
@@ -93,6 +99,7 @@ docker run --rm --entrypoint /bin/sh "stationd:$tag" -euc '
   liquidsoap --version | head -n1
   icecast2 -v
   ls /usr/lib/stationd/plugins
+  test -s /usr/share/stationd/error.mp3 && test -s /usr/share/stationd/bruit.mp3
   test -d /usr/share/zoneinfo/Europe
 '
 

@@ -405,7 +405,9 @@ de `stationd` est celui de l'hôte (argument de build `STATIOND_GID`, `.env`).
   devstationd est en `070 foxi:foxi` (accès par le groupe seulement) →
   `liquidsoap` rejoint le groupe propriétaire (`MEDIA_GID =
   $(stat -c %g /mnt/nfs/radio)`). Même chose pour `fallback_path` /
-  `halted_path` : lisibles par ce groupe ou par tous, sinon « Infallible
+  `halted_path` (par défaut les fichiers livrés dans l'image d'exploitation,
+  `/usr/share/stationd/error.mp3` et `bruit.mp3`, en 0644) : lisibles par ce
+  groupe ou par tous, sinon « Infallible
   source.dynamic … was not able to prepare source » et Liquidsoap s'arrête.
   stationd vérifie au démarrage (`LiquidsoapConfig::check_air_files`) :
   absent, vide, pas un fichier ou illisible par stationd → **démarrage

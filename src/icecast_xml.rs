@@ -54,10 +54,11 @@ pub fn render(ic: &IcecastConfig, srv: &IcecastServerConfig, ls: &LiquidsoapConf
         env!("CARGO_PKG_VERSION")
     ));
     o.push_str("<icecast>\n");
-    let location = srv.location.as_deref().unwrap_or(station_name);
-    o.push_str(&format!("    <location>{}</location>\n", esc(location)));
+    // <location> = the station name (the only name in the config). <hostname>
+    // stays Icecast's default: public listen URLs belong to the reverse proxy.
+    o.push_str(&format!("    <location>{}</location>\n", esc(station_name)));
     o.push_str(&format!("    <admin>{}</admin>\n", esc(&srv.admin_email)));
-    o.push_str(&format!("    <hostname>{}</hostname>\n", esc(&srv.hostname)));
+    o.push_str("    <hostname>localhost</hostname>\n");
 
     o.push_str("    <limits>\n");
     o.push_str(&format!("        <clients>{}</clients>\n", srv.max_clients));
@@ -283,7 +284,6 @@ mod tests {
         admin_url = "http://127.0.0.1:8000"
         admin_password = "adm&n"
         [icecast.server]
-        hostname = "radio.lan"
         trusted_proxies = ["192.168.1.94", "10.0.0.2"]
     "#;
 
@@ -313,8 +313,8 @@ mod tests {
             }
             nodes.iter().map(|n| n.text().unwrap_or("").to_string()).collect()
         };
-        assert_eq!(text(&["location"]), ["Ma Radio & Co"], "escaped, default = station name");
-        assert_eq!(text(&["hostname"]), ["radio.lan"]);
+        assert_eq!(text(&["location"]), ["Ma Radio & Co"], "escaped station name");
+        assert_eq!(text(&["hostname"]), ["localhost"], "public URLs: the reverse proxy");
         assert_eq!(text(&["limits", "sources"]), ["2"], "only our outputs can feed it");
         assert_eq!(text(&["authentication", "admin-password"]), ["adm&n"]);
         assert!(text(&["authentication", "source-password"]).is_empty(), "no global: only our mounts");

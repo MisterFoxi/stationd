@@ -321,8 +321,8 @@ path = "./playlist"
 script_path    = "./data/station.liq"
 api_token      = "change-me"                 # ASCII shared secret
 control_socket = "/run/stationd/liquidsoap.sock"  # created by the image
-fallback_path  = "/srv/radio/error.mp3"      # safety net
-halted_path    = "/srv/radio/noise.mp3"      # looped while paused/stopped
+fallback_path  = "./radio/error.mp3"         # safety net (default: the production image's)
+halted_path    = "./radio/bruit.mp3"         # looped while paused/stopped (idem)
 
 [[liquidsoap.output]]
 host     = "127.0.0.1"
@@ -485,7 +485,7 @@ sudo stationd-<tag>/install.sh            # [--dir /opt/stationd] [--media /mnt/
   compose.yaml  .env               installed by install.sh
   stationd.example.toml            installed by install.sh (reference)
   stationd.toml  grid.toml …       yours — never touched by install.sh
-  playlist/  radio/                playlists; fallback and noise files
+  playlist/  radio/                playlists; your own fallback / noise files (optional)
   data/                            written by stationd (database, station.liq, icecast.xml)
 ```
 
@@ -503,11 +503,16 @@ group creates and deletes nothing there). `install.sh` re-applies these
 permissions on every run.
 
 First install: write `stationd.toml` from `stationd.example.toml` — relative
-paths resolve against the directory (`./radio/error.mp3`,
-`./playlist`…), `[media] library_path` = the `--media` path, WASM plugins at
+paths resolve against the directory (`./playlist`…), `[media] library_path`
+= the `--media` path, WASM plugins at
 `wasm = "/usr/lib/stationd/plugins/<crate>.wasm"`,
 `control_socket = "/run/stationd/liquidsoap.sock"` — then
-`cd /opt/stationd && docker compose up -d`.
+`cd /opt/stationd && docker compose up -d`. The fallback and the background
+noise ship in the image (`/usr/share/stationd/error.mp3`, `bruit.mp3`, from
+the repository's `radio/`): leave `fallback_path` / `halted_path` out, or
+point them at your own files in `radio/`. The only name to set is
+`[station] name` (Icecast's `<location>`, default stream name); public
+listen URLs are the reverse proxy's.
 
 Update: same three commands with the new bundle (only `STATIOND_VERSION`
 changes in `.env`). Roll back: put the previous version back in `.env`, then

@@ -58,6 +58,14 @@ remplace l'installation systemd. README « Run (Docker) »,
 utilisateur hôte `stationd`. UID/GID de
 stationd et groupe des médias appliqués au démarrage par `init-perms`
 (une image pour tous les nœuds). README « Package & deploy ».
+**Retours VM de test (2026-09-26).** Un seul nom à renseigner :
+`[icecast.server] hostname` et `location` supprimés (`<location>` = `[station]
+name`, `<hostname>` = `localhost` — les URL publiques sont celles de
+Traefik) ; un ancien `stationd.toml` qui les contient est refusé au
+chargement. Fallback et bruit de fond livrés dans l'image
+(`/usr/share/stationd/{error,bruit}.mp3`, copiés de `radio/` par
+`package.sh`) = défauts de `fallback_path` / `halted_path` (image de dev :
+toujours explicites, `./radio/…`).
 
 La **grille est pilotable de bout en bout en CLI**, projection comprise :
 `grid.toml` (4 familles) → `stationctl schedule validate|apply|export|list|next|preview|check`
@@ -455,8 +463,9 @@ comme avant ; **mot de passe source par mount** (celui de chaque
 un socket virtuel par adresse.
 
 - **Config** `[icecast.server]` (`deny_unknown_fields`) : `config_path`
-  (`./data/icecast.xml`), `port` (8000), `bind_address`, `hostname`,
-  `location` (défaut : nom de station), `admin_email`, `max_clients`,
+  (`./data/icecast.xml`), `port` (8000), `bind_address`, `admin_email`,
+  `max_clients`, [`hostname` / `location` supprimés le 2026-09-26 : nom de
+  station, URL publiques = proxy],
   `trusted_proxies` (IP exactes, pas de CIDR, doublon refusé), `share_dir`
   (`/usr/share/icecast2`), `log_dir` (`/var/log/icecast2`). Refusé au
   chargement : `admin_url` ou une sortie hors de `port`, mot de passe admin
