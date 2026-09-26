@@ -26,6 +26,103 @@ pub struct Config {
     /// the watched mounts are its `[[liquidsoap.output]]` mounts.
     #[serde(default)]
     pub icecast: Option<IcecastConfig>,
+    /// Live DJs (optional): a harbor input in the generated script, DJ
+    /// credentials in a separate file, connection windows from the grid's
+    /// `live` rules. Absent = no harbor, and a `live` rule is refused at
+    /// `schedule apply`. Requires `[liquidsoap]`.
+    #[serde(default)]
+    pub live: Option<LiveConfig>,
+}
+
+/// `[live]` — live DJ input (Liquidsoap harbor). Who may connect lives in
+/// `djs_path` (DJ ids + argon2 password hashes, re-read at each connection
+/// attempt); when, in the grid (`kind = "live"`). stationd decides every
+/// connection (Liquidsoap asks it through the loopback bridge) and ends the
+/// live on disconnection or on `silence_timeout` seconds of silence.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LiveConfig {
+    /// The DJ file (`schema_version = 1` + `[[dj]]`). Kept apart from
+    /// stationd.toml: it holds credentials (hashed).
+    pub djs_path: PathBuf,
+    /// Harbor port the DJs' software connects to (Icecast source protocol).
+    /// Exposed to the DJs: open it in the firewall / NAT, and nothing else.
+    #[serde(default = "default_live_port")]
+    pub harbor_port: u16,
+    /// Harbor mount point, e.g. "/live".
+    #[serde(default = "default_live_mount")]
+    pub mount: String,
+    /// Short fade, seconds, when the live takes the air and when it gives it
+    /// back.
+    #[serde(default = "default_live_fade")]
+    pub fade: f64,
+    /// Seconds of silence after which the live ends (the DJ is disconnected
+    /// and refused until the end of the slot).
+    #[serde(default = "default_live_silence")]
+    pub silence_timeout: u32,
+    /// Level (dBFS) under which the live input counts as silent.
+    #[serde(default = "default_live_threshold")]
+    pub silence_threshold: f64,
+    /// Seconds of the DJ stream buffered before it airs (network jitter).
+    #[serde(default = "default_live_buffer")]
+    pub buffer: f64,
+}
+
+fn default_live_port() -> u16 {
+    8005
+}
+fn default_live_mount() -> String {
+    "/live".into()
+}
+fn default_live_fade() -> f64 {
+    1.5
+}
+fn default_live_silence() -> u32 {
+    30
+}
+fn default_live_threshold() -> f64 {
+    -40.0
+}
+fn default_live_buffer() -> f64 {
+    5.0
+}
+
+impl LiveConfig {
+    /// Loud checks at load. `ls` = `[liquidsoap]` (required: the harbor lives
+    /// in its script), `icecast_ports` = the ports Icecast listens on (the
+    /// harbor must not collide with them).
+    pub fn validate(&self, ls: Option<&LiquidsoapConfig>, icecast_ports: &[u16]) -> Result<(), String> {
+        if ls.is_none() {
+            return Err("[live] needs [liquidsoap]: the harbor is part of the generated script".into());
+        }
+        if self.harbor_port == 0 {
+            return Err("harbor_port must not be 0".into());
+        }
+        if icecast_ports.contains(&self.harbor_port) {
+            return Err(format!("harbor_port {} is Icecast's port", self.harbor_port));
+        }
+        let m = &self.mount;
+        if !m.starts_with('/') || m.len() < 2 || !m[1..].bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b)) {
+            return Err(format!("mount {m:?}: '/' then letters, digits, '-', '_', '.' only"));
+        }
+        if !(self.fade.is_finite() && (0.0..=10.0).contains(&self.fade)) {
+            return Err(format!("fade {} out of 0..=10 s", self.fade));
+        }
+        if !(5..=3600).contains(&self.silence_timeout) {
+            return Err(format!("silence_timeout {} out of 5..=3600 s", self.silence_timeout));
+        }
+        if !(self.silence_threshold.is_finite() && (-90.0..=0.0).contains(&self.silence_threshold)) {
+            return Err(format!("silence_threshold {} out of -90..=0 dB", self.silence_threshold));
+        }
+        if !(self.buffer.is_finite() && (0.5..=30.0).contains(&self.buffer)) {
+            return Err(format!("buffer {} out of 0.5..=30 s", self.buffer));
+        }
+        let p = self.djs_path.to_string_lossy();
+        if p.trim().is_empty() {
+            return Err("djs_path is empty".into());
+        }
+        Ok(())
+    }
 }
 
 /// `[icecast]` — read-only access to Icecast's admin API (`/admin/stats`),
@@ -590,6 +687,8 @@ pub enum ConfigError {
     Liquidsoap(String),
     #[error("invalid [icecast] section: {0}")]
     Icecast(String),
+    #[error("invalid [live] section: {0}")]
+    Live(String),
 }
 
 impl Config {
@@ -615,6 +714,14 @@ impl Config {
         }
         if let Some(ic) = &config.icecast {
             ic.validate(config.liquidsoap.as_ref()).map_err(ConfigError::Icecast)?;
+        }
+        if let Some(live) = &config.live {
+            let mut ports: Vec<u16> =
+                config.liquidsoap.iter().flat_map(|ls| ls.outputs.iter().map(|o| o.port)).collect();
+            if let Some(srv) = config.icecast.as_ref().and_then(|i| i.server.as_ref()) {
+                ports.push(srv.port);
+            }
+            live.validate(config.liquidsoap.as_ref(), &ports).map_err(ConfigError::Live)?;
         }
         Ok(config)
     }
@@ -855,6 +962,43 @@ mod tests {
         // Without [icecast.server], the same passwords are not stationd's business.
         let read_only = format!("{LS}{IC}").replace("\"adm1n\"", "\"hackme\"");
         assert!(load_str(&read_only).is_ok());
+    }
+
+    const LIVE: &str = r#"
+        [live]
+        djs_path = "./djs.toml"
+    "#;
+
+    #[test]
+    fn live_section_defaults() {
+        assert!(load_str(LS).unwrap().live.is_none());
+        let live = load_str(&format!("{LS}{LIVE}")).unwrap().live.unwrap();
+        assert_eq!(live.djs_path, PathBuf::from("./djs.toml"));
+        assert_eq!(live.harbor_port, 8005);
+        assert_eq!(live.mount, "/live");
+        assert_eq!(live.fade, 1.5);
+        assert_eq!(live.silence_timeout, 30);
+        assert_eq!(live.silence_threshold, -40.0);
+        assert_eq!(live.buffer, 5.0);
+    }
+
+    #[test]
+    fn live_rejects_bad_settings() {
+        let full = format!("{LS}{LIVE}");
+        let live_err = |extra: &str, want: &str| {
+            let r = load_str(&format!("{full}        {extra}\n"));
+            assert!(matches!(&r, Err(ConfigError::Live(m)) if m.contains(want)), "{extra}: {r:?}");
+        };
+        live_err("harbor_port = 8000", "Icecast's port");
+        live_err("mount = \"live\"", "mount");
+        live_err("mount = \"/li ve\"", "mount");
+        live_err("fade = 20.0", "fade");
+        live_err("silence_timeout = 2", "silence_timeout");
+        live_err("silence_threshold = 3.0", "silence_threshold");
+        live_err("buffer = 0.0", "buffer");
+        assert!(matches!(load_str(&format!("{full}        harbor = 1\n")), Err(ConfigError::Parse { .. })));
+        // the harbor lives in the generated script
+        assert!(matches!(load_str(LIVE), Err(ConfigError::Live(m)) if m.contains("[liquidsoap]")));
     }
 
     #[test]

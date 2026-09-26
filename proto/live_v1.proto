@@ -1,0 +1,75 @@
+// live_v1.proto
+// ─────────────────────────────────────────────────────────────────────────
+// DJ live (harbor, section [live]) : qui est à l'antenne, fin d'un live,
+// empreinte d'un mot de passe pour le fichier des DJ. Face CLI :
+// stationctl live status | kick, stationctl dj hash.
+//
+// Les connexions elles-mêmes passent par le pont loopback de Liquidsoap
+// (/ls/v1/live/*) : stationd décide de chaque login (fichier des DJ + créneau
+// `live` de la grille).
+
+syntax = "proto3";
+
+package webradio.live.v1;
+
+service LiveService {
+  rpc GetStatus(GetStatusRequest) returns (LiveStatus);
+
+  // Termine le live en cours : le DJ est déconnecté et refusé jusqu'à la fin
+  // de son créneau. failed_precondition : pas de [live] ou personne à
+  // l'antenne ; unavailable si Liquidsoap n'est pas câblé.
+  rpc Kick(KickRequest) returns (KickResponse);
+
+  // Empreinte argon2id (chaîne PHC) d'un mot de passe, à coller dans le
+  // fichier des DJ (`password_hash`). Le calcul reste dans stationd.
+  rpc HashPassword(HashPasswordRequest) returns (HashPasswordResponse);
+}
+
+message GetStatusRequest {}
+
+message LiveSession {
+  string dj         = 1;
+  string rule_id    = 2;   // règle `live` dont la fenêtre l'a laissé entrer
+  string occurrence = 3;   // rule_id@YYYY-MM-DDTHH:MM
+  string address    = 4;   // adresse du client (vue par le harbor)
+  int64  since      = 5;   // epoch s
+}
+
+message Refused {
+  string dj         = 1;
+  string occurrence = 2;
+}
+
+message LiveStatus {
+  bool   enabled       = 1;   // false = pas de section [live]
+  string djs_path      = 2;
+  uint32 harbor_port   = 3;
+  string mount         = 4;
+  uint32 silence_timeout_s = 5;
+  LiveSession on_air   = 6;   // absent = personne à l'antenne
+  LiveSession last     = 7;   // dernier live terminé
+  string last_reason   = 8;   // disconnected | silence | kicked
+  int64  last_ended_at = 9;   // epoch s
+  // DJ refusés jusqu'à la fin du créneau (coupés pour silence ou kick).
+  repeated Refused refused = 10;
+  // Dernier login refusé : DJ tel qu'envoyé, raison, quand.
+  string last_refusal_dj     = 11;
+  string last_refusal_reason = 12;
+  int64  last_refusal_at     = 13;
+  // Le fichier des DJ se lit-il ? Vide = oui ; sinon l'erreur (tout login
+  // est alors refusé).
+  string djs_error = 14;
+  uint32 djs_count = 15;
+}
+
+message KickRequest {}
+message KickResponse {
+  string dj = 1;
+}
+
+message HashPasswordRequest {
+  string password = 1;
+}
+message HashPasswordResponse {
+  string hash = 1;
+}

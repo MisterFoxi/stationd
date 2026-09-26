@@ -49,6 +49,7 @@ bytes = "1"
 base64 = "0.22"        # en-tête Basic auth
 roxmltree = "0.20"     # lecture de /admin/stats (XML)
 libc = "0.2"           # groupe du fichier icecast.xml (getgrnam_r / getgrgid_r) ; déjà dans l'arbre
+argon2 = "0.5"         # empreintes des mots de passe DJ (fichier des DJ, [live])
 
 [build-dependencies]
 tonic-build = "0.12"

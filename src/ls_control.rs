@@ -17,6 +17,8 @@
 //!   now and cut in with `stationd.interrupt <uri>`;
 //! - `BroadcastService.Skip` (`stationctl station next`) sends `stationd.skip`
 //!   and reports the outcome to the caller.
+//! - the end of a live (silence, `stationctl live kick`) sends
+//!   `stationd.live_kick`: the DJ is disconnected from the harbor.
 //!
 //! A `stop` stays graceful — the current track plays to its end — but the
 //! track Liquidsoap already prepared is dropped (`stationd.flush`): the next
@@ -278,6 +280,14 @@ pub fn spawn_air_sync(
                 }
                 Some(Some(AirEvent::HardMark { at })) => {
                     cut_in_at_clock(&ls, &bridge, at).await;
+                }
+                Some(Some(AirEvent::LiveKick)) => {
+                    // Not retried: the harbor's disconnection hook reports
+                    // the end; a failure leaves the DJ on air, loudly.
+                    match ls.command("stationd.live_kick").await {
+                        Ok(_) => tracing::info!("live: DJ disconnected from the harbor"),
+                        Err(e) => tracing::error!(error = %e, "live: could NOT disconnect the DJ (Liquidsoap unreachable)"),
+                    }
                 }
             }
         }

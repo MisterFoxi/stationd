@@ -108,6 +108,14 @@ pub async fn load_grid(pool: &SqlitePool) -> Result<Grid, GridLoadError> {
             .map(|(rid, r, e, t): (String, String, Option<i64>, Option<i64>)| (rid, (r, e, t)))
             .collect();
 
+    let live: HashMap<String, (String, i64, i64)> =
+        sqlx::query_as("SELECT rule_id, dj, start_hour, start_minute FROM grid_live")
+            .fetch_all(pool)
+            .await?
+            .into_iter()
+            .map(|(rid, dj, h, m): (String, String, i64, i64)| (rid, (dj, h, m)))
+            .collect();
+
     let mut rules = Vec::with_capacity(base.len());
     for (id, enabled, kind, date_start, date_end) in base {
         let validity = Validity {
@@ -161,6 +169,10 @@ pub async fn load_grid(pool: &SqlitePool) -> Result<Grid, GridLoadError> {
                 };
                 RuleKind::Every { playlist_ref: r, cadence }
             }
+            "live" => {
+                let (dj, h, m) = live.get(&id).ok_or_else(missing)?.clone();
+                RuleKind::Live { dj, start: WallClock { hour: h as u8, minute: m as u8 } }
+            }
             _ => return Err(missing()),
         };
 
@@ -195,6 +207,7 @@ pub async fn replace_grid(pool: &SqlitePool, rules: &[Rule]) -> Result<(), sqlx:
         "grid_day_part",
         "grid_at_clock",
         "grid_every",
+        "grid_live",
         "grid_rule",
     ] {
         sqlx::query(&format!("DELETE FROM {table}"))
@@ -217,6 +230,7 @@ async fn insert_rule_in_tx(
         RuleKind::DayPart { .. } => "day_part",
         RuleKind::AtClock { .. } => "at_clock",
         RuleKind::Every { .. } => "every",
+        RuleKind::Live { .. } => "live",
     };
     sqlx::query("INSERT INTO grid_rule (id, enabled, kind, date_start, date_end) VALUES (?1,?2,?3,?4,?5)")
         .bind(&rule.id)
@@ -291,6 +305,17 @@ async fn insert_rule_in_tx(
             .bind(playlist_ref)
             .bind(elapsed)
             .bind(tracks)
+            .execute(&mut **tx)
+            .await?;
+        }
+        RuleKind::Live { dj, start } => {
+            sqlx::query(
+                "INSERT INTO grid_live (rule_id, dj, start_hour, start_minute) VALUES (?1,?2,?3,?4)",
+            )
+            .bind(&rule.id)
+            .bind(dj)
+            .bind(start.hour as i64)
+            .bind(start.minute as i64)
             .execute(&mut **tx)
             .await?;
         }
@@ -480,6 +505,23 @@ mod tests {
         let grid = load_grid(&pool).await.unwrap();
         assert_eq!(grid.rules.len(), 1, "old rules must be gone");
         assert_eq!(grid.rules[0].id, "new");
+    }
+
+    #[tokio::test]
+    async fn a_live_rule_is_stored_loaded_and_replaced() {
+        let (_dir, pool) = fresh_db().await;
+        let mut r = rule("marc-live", RuleKind::Live { dj: "marc".into(), start: WallClock { hour: 20, minute: 30 } });
+        r.validity.days = vec![Weekday::Fri];
+        insert_rule(&pool, &r).await.unwrap();
+        let grid = load_grid(&pool).await.unwrap();
+        match &grid.rules[0].kind {
+            RuleKind::Live { dj, start } => assert_eq!((dj.as_str(), start.hour, start.minute), ("marc", 20, 30)),
+            k => panic!("expected Live, got {k:?}"),
+        }
+        assert_eq!(grid.rules[0].validity.days, vec![Weekday::Fri]);
+        replace_grid(&pool, &[rule("floor", RuleKind::BaseRotation { playlist_ref: "a".into() })]).await.unwrap();
+        let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM grid_live").fetch_one(&pool).await.unwrap();
+        assert_eq!(left, 0, "the live detail row is cleared by an apply");
     }
     #[tokio::test]
     async fn an_open_day_part_is_stored_and_loaded_without_end() {

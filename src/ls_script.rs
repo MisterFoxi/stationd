@@ -52,12 +52,21 @@
 //! relay at once (noise / safety are always ready). A hard insert plays over
 //! the relay, which then resumes live.
 //!
+//! A live DJ (`[live]`) connects to a harbor input placed above everything
+//! (hard inserts included), with a short fade in and out. Every login is
+//! decided by stationd (`/ls/v1/live/auth`); connection, disconnection and
+//! silence are reported to it (`/ls/v1/live/connect|disconnect|silence`), and
+//! it ends a live through the control socket (`stationd.live_kick`). While
+//! the DJ is on air the programme underneath is not read (the current track
+//! is frozen); when the DJ leaves, that track is dropped and a new one is
+//! asked for at once (like a skip): the grid is resolved at the return time.
+//!
 //! Every user-provided string is emitted through [`liq_string`], which also
 //! neutralises Liquidsoap's `#{…}` interpolation.
 
 use std::path::Path;
 
-use crate::config::{CrossfadeMode, IcecastOutput, LiquidsoapConfig, OutputFormat};
+use crate::config::{CrossfadeMode, IcecastOutput, LiquidsoapConfig, LiveConfig, OutputFormat};
 
 /// Header name Liquidsoap sends the shared token in (lower-case: HTTP header
 /// names are case-insensitive, axum normalises them).
@@ -129,8 +138,9 @@ fn liq_path(p: &Path) -> String {
     liq_string(&p.to_string_lossy())
 }
 
-/// Render the whole script. `station_name` is the default Icecast stream name.
-pub fn render(ls: &LiquidsoapConfig, station_name: &str) -> String {
+/// Render the whole script. `station_name` is the default Icecast stream name;
+/// `live` = the `[live]` section (harbor input), if any.
+pub fn render(ls: &LiquidsoapConfig, live: Option<&LiveConfig>, station_name: &str) -> String {
     let mut o = String::new();
     let api_url = format!("http://{}/ls/v1", ls.http_bind);
 
@@ -194,6 +204,10 @@ let stationd.relay_url = ref("")
 let stationd.relaying = ref(false)
 let stationd.relay_on = ref(fun (_) -> ())
 let stationd.relay_off = ref(fun () -> ())
+# Set when a live gives the air back: the track the live froze is dropped
+# without a crossfade (else its buffered tail would be mixed into the return
+# track). Consumed by the next crossfade transition.
+let stationd.no_cross = ref(false)
 
 def stationd.post(endpoint, payload) =
   try
@@ -326,7 +340,12 @@ end
         CrossfadeMode::None => o.push_str("# crossfade: none (hard cut)\n"),
         CrossfadeMode::Simple => o.push_str(&format!(
             "def stationd.transition(a, b) =\n  \
-               cross.simple(a.source, b.source, fade_in={fade}, fade_out={fade})\n\
+               if stationd.no_cross() then\n    \
+                 stationd.no_cross := false\n    \
+                 b.source\n  \
+               else\n    \
+                 cross.simple(a.source, b.source, fade_in={fade}, fade_out={fade})\n  \
+               end\n\
              end\n\
              pull = cross(id=\"stationd_cross\", duration={dur}, stationd.transition, pull)\n",
             fade = liq_float(ls.crossfade.fade),
@@ -470,6 +489,10 @@ server.register(namespace="stationd", usage="state", description="Bridge flags."
 "##,
     );
 
+    if let Some(live) = live {
+        o.push_str(&render_live(live));
+    }
+
     if ls.normalize {
         o.push_str(
             "\n# Normalisation + compression\n\
@@ -492,6 +515,146 @@ server.register(namespace="stationd", usage="state", description="Bridge flags."
         o.push_str(&render_output(i + 1, out, station_name));
     }
     o
+}
+
+/// The harbor input and its hooks, laid over the whole air chain (`radio`).
+fn render_live(live: &LiveConfig) -> String {
+    let fade = liq_float(live.fade);
+    // A fade shorter than a frame is no fade: plain switches.
+    let transitions = if live.fade >= 0.05 {
+        format!(
+            "def stationd.fade_switch(a, b) =\n  \
+               add(normalize=false, [fade.in(duration={fade}, b), fade.out(duration={fade}, a)])\n\
+             end\n\
+             def stationd.to_live(a, b) =\n  \
+               thread.run(fast=false, {{stationd.report(\"\", \"live\")}})\n  \
+               stationd.fade_switch(a, b)\n\
+             end\n"
+        )
+    } else {
+        "def stationd.fade_switch(_, b) = b end\n\
+         def stationd.to_live(_, b) =\n  \
+           thread.run(fast=false, {stationd.report(\"\", \"live\")})\n  \
+           b\n\
+         end\n"
+            .to_string()
+    };
+    format!(
+        r##"
+# ─── live DJ (harbor, [live]) ───────────────────────────────────────────
+# stationd decides every login (DJ file, grid slot); Liquidsoap only asks and
+# reports. The live lays over everything (hard inserts included).
+def stationd.live_auth(login) =
+  j = json()
+  j.add("user", login.user)
+  j.add("password", login.password)
+  j.add("address", login.address)
+  resp = stationd.post("live/auth", json.stringify(compact=true, j))
+  if null.defined(resp) then
+    try
+      let json.parse ({{allow}} : {{allow: bool}}) = null.get(resp)
+      allow
+    catch err do
+      log.severe(label="stationd", "live/auth: bad reply: #{{error.kind(err)}}: #{{error.message(err)}}")
+      false
+    end
+  else
+    # stationd unreachable: nobody gets in.
+    false
+  end
+end
+
+# A DJ is connected. Guards the disconnection hook: after a `stop()` (kick)
+# the harbor calls it again when its feeding thread ends (seen on 2.2.4) —
+# a second return would skip the return track.
+let stationd.live_on = ref(false)
+
+def stationd.live_connected(_) =
+  stationd.live_on := true
+  log.important(label="stationd", "live: DJ connected")
+  thread.run(fast=false, {{ignore(stationd.post("live/connect", "{{}}"))}})
+end
+
+def stationd.live_return() =
+  thread.run(fast=false, fun () -> begin
+    resp = stationd.post("live/disconnect", "{{}}")
+    flush =
+      if null.defined(resp) then
+        try
+          let json.parse ({{flush}} : {{flush: bool}}) = null.get(resp)
+          flush
+        catch _ do
+          true
+        end
+      else
+        true
+      end
+    if flush then pull_raw.set_queue([]) end
+    if not stationd.paused() then
+      # the frozen track (if any) goes without a crossfade
+      if pull_raw.is_ready() then stationd.no_cross := true end
+      if list.length(pull_raw.queue()) == 0 then
+        stationd.urgent := true
+        stationd.next_not_before := 0.
+        ignore(pull_raw.fetch())
+      end
+      source.skip(pull_raw)
+    end
+  end)
+end
+
+# The DJ left (or was disconnected): drop the track the live froze and ask
+# for a new one now, chosen at the return time (like a skip). The prepared
+# track is dropped too unless stationd says it is an override.
+def stationd.live_disconnected() =
+  if stationd.live_on() then
+    stationd.live_on := false
+    log.important(label="stationd", "live: DJ disconnected, back to the programme")
+    stationd.live_return()
+  end
+end
+
+live_raw = input.harbor(
+  id="stationd_live",
+  port={port},
+  buffer={buffer},
+  max={max},
+  auth=stationd.live_auth,
+  on_connect=stationd.live_connected,
+  on_disconnect=stationd.live_disconnected,
+  {mount}
+)
+# {silence_s} s of silence ends the live (stationd disconnects the DJ).
+def stationd.live_silence() =
+  log.important(label="stationd", "live: silence")
+  thread.run(fast=false, {{ignore(stationd.post("live/silence", "{{}}"))}})
+end
+live = blank.detect(id="stationd_live_blank", max_blank={silence}, threshold={threshold}, stationd.live_silence, live_raw)
+
+{transitions}radio = fallback(
+  id="stationd_live_air",
+  track_sensitive=false,
+  transition_length={fade_len},
+  transitions=[stationd.to_live, stationd.fade_switch],
+  [live, radio]
+)
+
+def stationd.cmd_live_kick(_) =
+  live_raw.stop()
+  log.important(label="stationd", "live: DJ disconnected by stationd")
+  "OK"
+end
+server.register(namespace="stationd", usage="live_kick", description="Disconnect the live DJ.", "live_kick", stationd.cmd_live_kick)
+"##,
+        port = live.harbor_port,
+        buffer = liq_float(live.buffer),
+        max = liq_float(live.buffer + 10.0),
+        mount = liq_string(live.mount.trim_start_matches('/')),
+        silence = liq_float(live.silence_timeout as f64),
+        silence_s = live.silence_timeout,
+        threshold = liq_float(live.silence_threshold),
+        fade_len = liq_float(live.fade.max(0.1)),
+    )
 }
 
 fn render_output(n: usize, out: &IcecastOutput, station_name: &str) -> String {
@@ -596,7 +759,7 @@ mod tests {
 
     #[test]
     fn renders_the_bridge_chain_and_outputs() {
-        let s = render(&cfg(), "Ma Radio");
+        let s = render(&cfg(), None, "Ma Radio");
         assert!(s.contains("let stationd.api_url = \"http://127.0.0.1:8081/ls/v1\""));
         assert!(s.contains("let stationd.api_token = \"tok\""));
         assert!(s.contains("request.dynamic(id=\"stationd_pull\""));
@@ -655,7 +818,7 @@ mod tests {
         none.crossfade.mode = CrossfadeMode::None;
         assert_eq!(pull_lead_s(&none), 4.0);
 
-        let s = render(&cfg(), "R");
+        let s = render(&cfg(), None, "R");
         assert!(s.contains("let stationd.lead = 7."));
         assert!(s.contains("let stationd.urgent = ref(true)"));
         // The gate: too early → nothing asked (no HTTP call), unless urgent.
@@ -678,7 +841,7 @@ mod tests {
 
     #[test]
     fn a_remote_playlist_is_relayed_by_input_http() {
-        let s = render(&cfg(), "R");
+        let s = render(&cfg(), None, "R");
         // An idle relay source, fed with the URL stationd hands out.
         assert!(s.contains(
             "relay = input.http(id=\"stationd_relay\", start=false, {stationd.relay_url()})"
@@ -712,7 +875,7 @@ mod tests {
         c.normalize = true;
         c.custom_include = Some(PathBuf::from("/etc/stationd/custom.liq"));
         c.outputs.push(IcecastOutput { mount: "/low.mp3".into(), bitrate: 64, ..c.outputs[0].clone() });
-        let s = render(&c, "R");
+        let s = render(&c, None, "R");
         assert!(!s.contains("cross("));
         assert!(s.contains("compress.exponential"));
         assert!(s.contains("%include \"/etc/stationd/custom.liq\""));
@@ -720,6 +883,67 @@ mod tests {
         assert!(s.find("%include").unwrap() < s.find("output.icecast").unwrap());
         assert!(s.contains("id=\"stationd_out_2\""));
         assert!(s.contains("b=\"64k\""));
+    }
+
+    fn live_cfg() -> LiveConfig {
+        LiveConfig {
+            djs_path: PathBuf::from("/srv/djs.toml"),
+            harbor_port: 8005,
+            mount: "/live".into(),
+            fade: 1.5,
+            silence_timeout: 30,
+            silence_threshold: -40.0,
+            buffer: 5.0,
+        }
+    }
+
+    #[test]
+    fn a_live_harbor_lays_over_the_whole_air_chain() {
+        let s = render(&cfg(), Some(&live_cfg()), "R");
+        if let Ok(dump) = std::env::var("STATIOND_DUMP_LIQ") {
+            std::fs::write(dump, &s).unwrap();
+        }
+        // stationd decides the login; the hooks report to it
+        assert!(s.contains("auth=stationd.live_auth"));
+        assert!(s.contains("resp = stationd.post(\"live/auth\""));
+        assert!(s.contains("on_connect=stationd.live_connected"));
+        assert!(s.contains("on_disconnect=stationd.live_disconnected"));
+        assert!(s.contains("port=8005,") && s.contains("buffer=5.,") && s.contains("  \"live\"\n)"));
+        // silence reported after the configured time
+        assert!(s.contains("blank.detect(id=\"stationd_live_blank\", max_blank=30., threshold=-40., stationd.live_silence, live_raw)"));
+        // above the hard cut, before the outputs, with a short fade
+        let live_air = s.find("id=\"stationd_live_air\"").unwrap();
+        assert!(live_air > s.find("id=\"stationd_cut\"").unwrap());
+        assert!(live_air < s.find("output.icecast").unwrap());
+        assert!(s.contains("[live, radio]"));
+        assert!(s.contains("transition_length=1.5,"));
+        assert!(s.contains("fade.in(duration=1.5, b), fade.out(duration=1.5, a)"));
+        assert!(s.contains("transitions=[stationd.to_live, stationd.fade_switch]"));
+        assert!(s.contains("stationd.report(\"\", \"live\")"));
+        // the return drops the frozen track and asks for a new one now
+        let back = s.find("def stationd.live_return() =").unwrap();
+        assert!(back < s.find("def stationd.live_disconnected() =").unwrap(), "defined before use");
+        let body = &s[back..];
+        let fetch = body.find("ignore(pull_raw.fetch())").unwrap();
+        assert!(body.find("resp = stationd.post(\"live/disconnect\"").unwrap() < fetch);
+        assert!(fetch < body.find("source.skip(pull_raw)").unwrap());
+        // ... and drops the frozen track without mixing its tail in
+        assert!(body.find("stationd.no_cross := true").unwrap() < body.find("source.skip(pull_raw)").unwrap());
+        assert!(s.contains("if stationd.no_cross() then\n    stationd.no_cross := false\n    b.source\n"));
+        // a second disconnection callback (after a kick) returns only once
+        assert!(s.contains("  if stationd.live_on() then\n    stationd.live_on := false\n"));
+        assert!(s.contains("  stationd.live_on := true\n"));
+        // stationd ends a live through the socket
+        assert!(s.contains("usage=\"live_kick\""));
+        assert!(s.contains("live_raw.stop()"));
+        // no [live]: no harbor
+        let none = render(&cfg(), None, "R");
+        assert!(!none.contains("input.harbor") && !none.contains("live_kick"));
+        // no fade: plain switches
+        let mut hard = live_cfg();
+        hard.fade = 0.0;
+        let h = render(&cfg(), Some(&hard), "R");
+        assert!(h.contains("def stationd.fade_switch(_, b) = b end") && !h.contains("fade.in("));
     }
 
     #[test]

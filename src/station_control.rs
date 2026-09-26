@@ -116,6 +116,10 @@ pub enum AirEvent {
     /// An `AtClock` hard rendez-vous is due at `at` (sent by the ticker,
     /// `ls_control::spawn_at_clock_ticker`): cut it in now if it still must.
     HardMark { at: Epoch },
+    /// End the live: disconnect the DJ from the harbor (silence, or
+    /// `stationctl live kick`). The return to the programme follows through
+    /// the harbor's own disconnection hook.
+    LiveKick,
 }
 
 /// What `next_media` may do at a track boundary.
@@ -203,6 +207,9 @@ struct Inner {
     next_id: u64,
     /// Manual clock override (testing). Shared with `GridEngine`.
     clock: Option<Epoch>,
+    /// DJ on air (harbor), if any: the live holds the air above everything,
+    /// so no hard cut can happen meanwhile (`live::LiveHub` sets it).
+    live: Option<String>,
 }
 
 /// Cheap, clonable handle. One per station; shared by the grid engine, the
@@ -237,6 +244,7 @@ impl StationControl {
                 overrides: VecDeque::new(),
                 next_id: 1,
                 clock: None,
+                live: None,
             })),
             plugins: Arc::new(OnceLock::new()),
             air: Arc::new(OnceLock::new()),
@@ -295,6 +303,28 @@ impl StationControl {
         if let Some(tx) = self.air.get() {
             let _ = tx.send(ev);
         }
+    }
+
+    /// Emit a plugin event (best-effort; nothing when no plugin is wired).
+    pub fn emit_event(&self, event: PluginEvent) {
+        self.emit(event);
+    }
+
+    /// Forward an air event (nothing when Liquidsoap is not wired).
+    pub fn send_air(&self, ev: AirEvent) {
+        self.to_air(ev);
+    }
+
+    // ----- live -----------------------------------------------------------
+
+    /// A DJ took the air (`Some`) or gave it back (`None`).
+    pub fn set_live(&self, dj: Option<String>) {
+        self.lock().live = dj;
+    }
+
+    /// The DJ on air, if any.
+    pub fn live_dj(&self) -> Option<String> {
+        self.lock().live.clone()
     }
 
     fn emit(&self, event: PluginEvent) {
@@ -462,9 +492,11 @@ impl StationControl {
             }
         };
         // A hard cut needs the air wired AND a station on air: a halted
-        // station keeps it queued; it plays as soft once resumed.
+        // station keeps it queued; it plays as soft once resumed. A live DJ
+        // holds the air above any cut: soft too, after the live.
         let air_live = self.air.get().is_some()
-            && matches!(self.state(), BroadcastState::Running | BroadcastState::Draining);
+            && matches!(self.state(), BroadcastState::Running | BroadcastState::Draining)
+            && self.live_dj().is_none();
         let degraded = req.mode == OverrideMode::Hard && !air_live;
         let outcome = {
             let mut g = self.lock();
@@ -490,7 +522,7 @@ impl StationControl {
             tracing::warn!(
                 id = outcome.id,
                 source,
-                "hard override without a live air (no Liquidsoap, or station halted): degraded to soft"
+                "hard override without a live air (no Liquidsoap, station halted, or a DJ on air): degraded to soft"
             );
         } else {
             tracing::info!(id = outcome.id, source, mode = ?req.mode, "override queued");

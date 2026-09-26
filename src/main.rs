@@ -16,6 +16,8 @@ use stationd::ls_grpc::liquidsoap::liquidsoap_service_server::LiquidsoapServiceS
 use stationd::ls_grpc::LsGrpc;
 use stationd::icecast_grpc::icecast::icecast_service_server::IcecastServiceServer;
 use stationd::icecast_grpc::IcecastGrpc;
+use stationd::live_grpc::live::live_service_server::LiveServiceServer;
+use stationd::live_grpc::LiveGrpc;
 use stationd::grid_engine::GridEngine;
 use stationd::station_control::StationControl;
 use stationd::library_grpc::LibraryGrpc;
@@ -100,7 +102,34 @@ async fn main() -> anyhow::Result<()> {
         .with_control(control.clone())
         .with_plugins(plugins.clone())
         .with_media_root(cfg.media.library_path.clone());
+    let engine = match &cfg.live {
+        Some(live) => engine.with_live_djs(live.djs_path.clone()),
+        None => engine,
+    };
     engine.sync_grid().await?;
+
+    // Live DJs (optional `[live]`): the harbor hooks decide every login from
+    // the DJ file (re-read at each attempt) and the grid's `live` slots. A bad
+    // DJ file does not stop the station — every login is refused, loudly.
+    let live_hub = cfg.live.as_ref().map(|live| {
+        match stationd::live::load_djs(&live.djs_path) {
+            Ok(djs) => info!(
+                djs = djs.len(),
+                path = ?live.djs_path,
+                port = live.harbor_port,
+                mount = %live.mount,
+                "live DJs: harbor enabled"
+            ),
+            Err(e) => tracing::error!(error = %e, "live DJs: DJ file unusable, every login will be refused"),
+        }
+        {
+            use std::os::unix::fs::MetadataExt;
+            if std::fs::metadata(&live.djs_path).is_ok_and(|m| m.mode() & 0o004 != 0) {
+                warn!(path = ?live.djs_path, "DJ file readable by everyone: it holds password hashes, make it 0640");
+            }
+        }
+        stationd::live::LiveHub::new(live.djs_path.clone(), engine.clone())
+    });
 
     // Liquidsoap wiring (optional `[liquidsoap]`): write the generated script
     // (only when it changed — Liquidsoap runs under its own unit and must be
@@ -113,7 +142,7 @@ async fn main() -> anyhow::Result<()> {
             (LsGrpc::disabled(), None)
         }
         Some(ls_cfg) => {
-            let script = stationd::ls_script::render(ls_cfg, &cfg.station.name);
+            let script = stationd::ls_script::render(ls_cfg, cfg.live.as_ref(), &cfg.station.name);
             if stationd::ls_script::write_if_changed(&ls_cfg.script_path, &script)? {
                 warn!(path = ?ls_cfg.script_path, "Liquidsoap script (re)written: restart Liquidsoap to apply it");
             } else {
@@ -135,7 +164,7 @@ async fn main() -> anyhow::Result<()> {
             // AtClock hard: a timer cuts the rendez-vous in at the mark.
             stationd::ls_control::spawn_at_clock_ticker(engine.clone(), air_tx);
             broadcast_service = broadcast_service.with_liquidsoap(ls_control.clone());
-            let router = stationd::ls_bridge::router(bridge.clone(), &ls_cfg.api_token);
+            let router = stationd::ls_bridge::router(bridge.clone(), &ls_cfg.api_token, live_hub.clone());
             let listener = tokio::net::TcpListener::bind(ls_cfg.http_addr()).await?;
             info!(addr = %ls_cfg.http_bind, "Liquidsoap bridge listening (loopback)");
             let task = tokio::spawn(async move {
@@ -210,6 +239,11 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    let live_service = match (&cfg.live, &live_hub) {
+        (Some(live), Some(hub)) => LiveGrpc::new(hub.clone(), live.clone(), cfg.liquidsoap.is_some()),
+        _ => LiveGrpc::disabled(),
+    };
+
     let schedule_service = ScheduleGrpc::new(engine);
 
     // Media library: single owning actor over the `media` view. The heavy scan
@@ -234,7 +268,7 @@ async fn main() -> anyhow::Result<()> {
         shutdown_tx,
     );
 
-    info!(%addr, "gRPC server listening (status, quit, schedule, library, plugin, broadcast, liquidsoap, icecast)");
+    info!(%addr, "gRPC server listening (status, quit, schedule, library, plugin, broadcast, liquidsoap, icecast, live)");
 
     // Three ways to shut down cleanly: via `stationctl quit` (shutdown_rx,
     // triggered by the service's `quit` handler), or via a signal — Ctrl+C
@@ -266,6 +300,7 @@ async fn main() -> anyhow::Result<()> {
         .add_service(BroadcastServiceServer::new(broadcast_service))
         .add_service(LiquidsoapServiceServer::new(ls_service))
         .add_service(IcecastServiceServer::new(icecast_service))
+        .add_service(LiveServiceServer::new(live_service))
         .serve_with_shutdown(addr, shutdown_signal)
         .await?;
 

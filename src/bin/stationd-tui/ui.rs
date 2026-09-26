@@ -41,6 +41,7 @@ fn rule_summary(rule: &schedule::Rule) -> (&str, &str) {
         Some(Kind::DayPart(r)) => ("DayPart", &r.playlist_ref),
         Some(Kind::AtClock(r)) => ("AtClock", &r.playlist_ref),
         Some(Kind::Every(r)) => ("Every", &r.playlist_ref),
+        Some(Kind::Live(r)) => ("Live (DJ)", &r.dj),
         None => ("Unknown", "-"),
     }
 }

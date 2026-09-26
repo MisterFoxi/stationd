@@ -26,6 +26,8 @@ pub mod icecast_grpc;
 pub mod icecast_xml;
 pub mod library_actor;
 pub mod library_grpc;
+pub mod live;
+pub mod live_grpc;
 pub mod ls_bridge;
 pub mod ls_control;
 pub mod ls_grpc;

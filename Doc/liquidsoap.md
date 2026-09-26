@@ -22,6 +22,7 @@ radio  = fallback(track_sensitive=false, [
            blank           (tant que stationd n'a jamais répondu — démarrage),
            fallback sécu   (rien à diffuser / stationd injoignable) ])
 radio  = fallback(track_sensitive=false, [interrupt, radio])   ← overrides hard (coupe)
+radio  = fallback(track_sensitive=false, [live, radio])        ← DJ live ([live], fondu court)
 radio  → normalize/compress (option) → %include custom → output.icecast
 ```
 
@@ -31,6 +32,10 @@ radio  → normalize/compress (option) → %include custom → output.icecast
 |---|---|---|
 | `POST /ls/v1/next` | `{}` | `{kind, uri, state, reason}` — les 4 champs toujours présents |
 | `POST /ls/v1/track` | `{rid, kind}` | 200 |
+| `POST /ls/v1/live/auth` | `{user, password, address}` | `{allow}` |
+| `POST /ls/v1/live/connect` | `{}` | 200 |
+| `POST /ls/v1/live/disconnect` | `{}` | `{flush}` |
+| `POST /ls/v1/live/silence` | `{}` | 200 |
 
 `kind` de `/next` :
 - `file` → `uri = annotate:stationd_rid="N":/chemin/absolu` ;
@@ -140,6 +145,69 @@ hard, fallback, redémarrage de Liquidsoap : temps trop court, pas de marque.
 Override média (fichier direct) ou durée inconnue : jamais de marque.
 L'horloge est celle de la station (`clock set` fige le décompte).
 
+### DJ live (harbor, `[live]`, 2026-09-26)
+
+Un DJ se connecte avec un client source Icecast (butt, Mixxx…) sur
+`input.harbor` (`harbor_port` 8005, `mount` `/live` par défaut), posé
+**au-dessus de toute la chaîne** (inserts hard compris). Liquidsoap ne décide
+rien : chaque login passe par `/live/auth`, et stationd l'accepte seulement si
+
+- le DJ est dans le **fichier des DJ** (`[live] djs_path`, hors de
+  `stationd.toml` : `schema_version = 1` + `[[dj]] id, name?, password_hash,
+  enabled?`), actif, et que le mot de passe correspond à son empreinte
+  argon2 (`stationctl dj hash`, calculée par stationd). Le fichier est relu
+  à chaque tentative : ajout d'un DJ ou changement de mot de passe sans
+  redémarrage. Illisible → tout login refusé, bruyamment (le démarrage ne
+  l'est pas : la station continue de diffuser) ;
+- sa **fenêtre** est ouverte : une règle `live` de la grille (`dj`, `start`,
+  `days`…), ouverte jusqu'au prochain début d'un autre `day_part` ou `live`
+  (`resolver::live_window`) ;
+- personne n'est déjà à l'antenne, et il n'a pas été coupé (silence ou kick)
+  plus tôt dans la même occurrence du créneau.
+
+Logiciel sans nom d'utilisateur : utilisateur `source`, mot de passe
+`dj,motdepasse`. **Pas de `:`** : le harbor coupe le mot de passe au premier
+`:` (vu sur 2.2.4, authentification Basic) — un mot de passe DJ ne contient
+donc ni `:` ni `,` (refusé par `dj hash`).
+
+- **Prise d'antenne** : après `buffer` s de tampon (5 s), fondu croisé de
+  `fade` s (1,5 s ; 0 = bascule sèche). La transition signale `/track`
+  `kind = live` → `ls status` : `on air: live DJ <id>`, état `live`. La
+  programmation dessous n'est plus lue : la piste en cours est **gelée**
+  (quitte l'antenne pour le pont : jamais marquée jouée).
+- **Pendant le live** : `StationControl::set_live` — un override hard est
+  dégradé en soft, un `AtClock` hard ne coupe pas (il passe soft après le
+  live, dans son `expiry`). Pause / stop agissent sur la programmation
+  dessous, pas sur le DJ.
+- **Silence** : `blank.detect` (`silence_timeout` s sous `silence_threshold`
+  dB) → `/live/silence` → stationd refuse ce DJ pour le reste de
+  l'occurrence et envoie `stationd.live_kick` (socket) → `live_raw.stop()`.
+  `stationctl live kick` fait la même chose.
+- **Retour** (déconnexion, quelle qu'en soit la cause) : `/live/disconnect`
+  (fin de session, `LiveEnded`) répond `flush` — faux si la piste préparée
+  est un override (consommé, elle doit passer). Puis, hors pause : piste
+  préparée vidée (si `flush`), demande urgente de la suivante et `skip` de
+  la piste gelée, **sans crossfade** (`stationd.no_cross` : sinon la traîne
+  tamponnée par `cross` se mêle à la piste de retour, vu en réel). La grille
+  est donc résolue à l'heure du retour ; fondu d'entrée de `fade` s. En
+  pause : rien n'est sauté, le bruit de fond reste, `resume` reprend la
+  piste gelée.
+- **Double déconnexion** : après `stop()`, le harbor rappelle
+  `on_disconnect` quand son fil d'alimentation s'arrête (~6 s plus tard, vu
+  sur 2.2.4) — un second retour sauterait la piste de retour. Gardé par
+  `stationd.live_on`.
+- `stationctl live status` : DJ à l'antenne (depuis, créneau, adresse),
+  dernier live et sa fin (`disconnected | silence | kicked`), DJ refusés,
+  dernier login refusé et sa raison, état du fichier des DJ.
+
+Validé contre Liquidsoap **2.2.4** (script généré, syntaxe `null()` et
+`on_track` adaptées pour l'essai ; sortie fichier analysée) : mauvais mot de
+passe → 401 ; hors créneau → refusé ; entrée en fondu 1,5 s ; déconnexion →
+nouvelle piste en fondu, sans trace de la piste gelée ; silence 6 s → coupé,
+reconnexion refusée ; override hard pendant le live → joué au retour ;
+`station next` après le retour garde son crossfade. **À confirmer sur la
+2.4.**
+
 ## Socket de contrôle (stationd → Liquidsoap)
 
 `[liquidsoap] control_socket` (défaut `./data/liquidsoap.sock` ; en Docker
@@ -155,6 +223,7 @@ Liquidsoap, qui doit être le groupe partagé `stationd`) et y enregistre :
 | `stationd.flush` | vide la piste déjà préparée (préchargée) : le pull redemande à stationd |
 | `stationd.interrupt <uri>` | override hard : la file `interrupt` coupe l'antenne maintenant ; la piste coupée est abandonnée (skip) ; à la fin de l'insert, la piste préparée démarre |
 | `stationd.state` | diagnostic : `paused= halted= loading=` |
+| `stationd.live_kick` | déconnecte le DJ du harbor (`[live]` seulement) ; le retour suit par le hook de déconnexion |
 
 Qui envoie quoi :
 - pause / resume suivent **la machine d'états de diffusion** (`StationControl`) :
@@ -378,3 +447,11 @@ de systemd = groupe ou utilisateur de l'unité inexistant.
   la piste suivante étant résolue avant le démarrage de la courante (de
   quelques secondes), la piste `Every` elle-même peut compter pour 1.
 - Encodage : mp3 seulement.
+- **DJ live** : métadonnées envoyées par le DJ non transmises à Icecast,
+  pas d'enregistrement du live (plus tard). Les refus « jusqu'à la fin du
+  créneau » sont en mémoire (perdus au redémarrage de stationd) ; un DJ
+  encore connecté pendant un redémarrage reste à l'antenne mais n'est plus
+  connu de stationd jusqu'à son départ. Pause pendant un live : au
+  `resume`, `ls status` affiche encore `halted` alors que la piste gelée
+  joue (affichage seulement). Fin d'un live par kick : pas de fondu de
+  sortie sur la voix du DJ (sa source s'arrête).

@@ -40,6 +40,7 @@ message Rule {
     DayPart      day_part      = 11;
     AtClock      at_clock      = 12;
     Every        every         = 13;
+    Live         live          = 14;
   }
 }
 
@@ -104,6 +105,15 @@ message Every {
     google.protobuf.Duration elapsed = 2;   // temps écoulé depuis last_played_at
     uint32                   tracks  = 3;    // pistes station depuis le dernier passage
   }
+}
+
+// ── Créneau DJ live : ouvre la fenêtre de CONNEXION du DJ (harbor) ─────────
+// Ne sélectionne aucune playlist. Ouverte à `start` jusqu'au prochain début
+// d'une autre tranche (day_part ou live). Une fois connecté, le DJ reste à
+// l'antenne jusqu'à sa déconnexion ou un silence prolongé (`[live]`).
+message Live {
+  string    dj    = 1;              // id du fichier des DJ (`[live] djs_path`)
+  WallClock start = 2;              // heure civile locale, pas de fin
 }
 
 // Heure civile locale (fuseau = config station, pas répété ici).

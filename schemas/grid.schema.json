@@ -4,7 +4,7 @@
   "description": "Grammaire et validations locales de grid_toml.rs. Restent vérifiés par stationd : unicité des id après trim, au plus une base_rotation (même désactivée), ordre des heures/dates, dépassement u64 des durées, normalisation et résolution des références.",
   "x-source": {
     "file": "grid_toml.rs",
-    "sha256": "56a985ca245281cc5b6cd78b7bf78ad3ca2f1157d3fa82ba0c9d09489959e704"
+    "sha256": "2e3a30e8d7c2d356730ce36aac4cbe789b61902b3db2aecec29ec0e1f329a41e"
   },
   "type": "object",
   "additionalProperties": false,
@@ -49,13 +49,19 @@
             "base_rotation",
             "day_part",
             "at_clock",
-            "every"
+            "every",
+            "live"
           ]
         },
         "playlist_ref": {
           "type": "string",
-          "description": "Référence relative à une playlist, extension .toml facultative. Normalisation et existence vérifiées par stationd.",
+          "description": "Référence relative à une playlist, extension .toml facultative. Normalisation et existence vérifiées par stationd. Obligatoire pour toutes les familles sauf live (interdite).",
           "pattern": "\\S"
+        },
+        "dj": {
+          "type": "string",
+          "pattern": "\\S",
+          "description": "live uniquement : id d'un DJ du fichier des DJ ([live] djs_path). Existence vérifiée par stationd."
         },
         "days": {
           "type": "array",
@@ -158,10 +164,9 @@
       },
       "required": [
         "id",
-        "kind",
-        "playlist_ref"
+        "kind"
       ],
-      "description": "Règle de programmation. Les champs autorisés dépendent de kind. Pour day_part : end facultatif — absent, la tranche court jusqu'au prochain début d'une autre tranche ; présent, end ≠ start (end < start = passage de minuit).",
+      "description": "Règle de programmation. Les champs autorisés dépendent de kind. Pour day_part : end facultatif — absent, la tranche court jusqu'au prochain début d'une autre tranche ; présent, end ≠ start (end < start = passage de minuit). Pour live : dj + start, sans end ni playlist_ref — la fenêtre de connexion du DJ court jusqu'au prochain début d'une autre tranche (day_part ou live).",
       "oneOf": [
         {
           "properties": {
@@ -172,7 +177,8 @@
             }
           },
           "required": [
-            "kind"
+            "kind",
+            "playlist_ref"
           ],
           "not": {
             "anyOf": [
@@ -214,6 +220,11 @@
               {
                 "required": [
                   "min_elapsed"
+                ]
+              },
+              {
+                "required": [
+                  "dj"
                 ]
               }
             ]
@@ -229,7 +240,8 @@
           },
           "required": [
             "kind",
-            "start"
+            "start",
+            "playlist_ref"
           ],
           "not": {
             "anyOf": [
@@ -262,6 +274,11 @@
                 "required": [
                   "min_elapsed"
                 ]
+              },
+              {
+                "required": [
+                  "dj"
+                ]
               }
             ]
           }
@@ -275,7 +292,8 @@
             }
           },
           "required": [
-            "kind"
+            "kind",
+            "playlist_ref"
           ],
           "not": {
             "anyOf": [
@@ -297,6 +315,11 @@
               {
                 "required": [
                   "min_elapsed"
+                ]
+              },
+              {
+                "required": [
+                  "dj"
                 ]
               }
             ]
@@ -323,7 +346,8 @@
             }
           },
           "required": [
-            "kind"
+            "kind",
+            "playlist_ref"
           ],
           "not": {
             "anyOf": [
@@ -356,6 +380,11 @@
                 "required": [
                   "expiry"
                 ]
+              },
+              {
+                "required": [
+                  "dj"
+                ]
               }
             ]
           },
@@ -371,6 +400,64 @@
               ]
             }
           ]
+        },
+        {
+          "properties": {
+            "kind": {
+              "enum": [
+                "live"
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "dj",
+            "start"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "playlist_ref"
+                ]
+              },
+              {
+                "required": [
+                  "end"
+                ]
+              },
+              {
+                "required": [
+                  "every_minutes"
+                ]
+              },
+              {
+                "required": [
+                  "at"
+                ]
+              },
+              {
+                "required": [
+                  "mode"
+                ]
+              },
+              {
+                "required": [
+                  "expiry"
+                ]
+              },
+              {
+                "required": [
+                  "min_tracks"
+                ]
+              },
+              {
+                "required": [
+                  "min_elapsed"
+                ]
+              }
+            ]
+          }
         }
       ],
       "x-taplo": {

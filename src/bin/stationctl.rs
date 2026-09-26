@@ -5,7 +5,7 @@
 
 use clap::{Parser, Subcommand};
 
-use stationd::proto::{broadcast, icecast, library, liquidsoap, plugin, schedule, station};
+use stationd::proto::{broadcast, icecast, library, liquidsoap, live, plugin, schedule, station};
 
 use station::station_client::StationClient;
 use station::{PlaylistAddRequest, PlaylistListRequest, PlaylistSyncRequest, QuitRequest, StatusRequest};
@@ -20,6 +20,8 @@ use liquidsoap::liquidsoap_service_client::LiquidsoapServiceClient;
 use liquidsoap::{GetStatusRequest as LsStatusRequest, RenderScriptRequest};
 use icecast::icecast_service_client::IcecastServiceClient;
 use icecast::{GetStatusRequest as IcecastStatusRequest, RenderConfigRequest as IcecastRenderRequest};
+use live::live_service_client::LiveServiceClient;
+use live::{GetStatusRequest as LiveStatusRequest, HashPasswordRequest, KickRequest};
 use broadcast::{
     control_request::Action as BroadcastAction, push_override_request, ClearOverridesRequest,
     ControlRequest, GetStateRequest, ListOverridesRequest, PushOverrideRequest,
@@ -78,6 +80,27 @@ enum Command {
     /// Icecast as stationd reads it: audience, health of our mounts
     #[command(subcommand)]
     Icecast(IcecastCommand),
+    /// Live DJ (harbor, [live]): who is on air, end a live
+    #[command(subcommand)]
+    Live(LiveCommand),
+    /// DJ file helpers ([live] djs_path)
+    #[command(subcommand)]
+    Dj(DjCommand),
+}
+
+#[derive(Subcommand, Debug)]
+enum LiveCommand {
+    /// The DJ on air, the last live, DJs refused until the end of their slot
+    Status,
+    /// End the live now: the DJ is disconnected and refused until the end of its slot
+    Kick,
+}
+
+#[derive(Subcommand, Debug)]
+enum DjCommand {
+    /// Hash a password for the DJ file (`password_hash`). The password is read
+    /// from standard input (not echoed on a terminal), never from the command line.
+    Hash,
 }
 
 #[derive(Subcommand, Debug)]
@@ -893,6 +916,22 @@ async fn main() -> anyhow::Result<()> {
             eprintln!("# written to {} ({}) — Icecast's user must be in this group", r.path, r.access);
             print!("{}", r.xml);
         }
+        Command::Live(LiveCommand::Status) => {
+            let mut lv = LiveServiceClient::connect(args.addr.clone()).await?;
+            let s = lv.get_status(LiveStatusRequest {}).await?.into_inner();
+            print_live_status(&s);
+        }
+        Command::Live(LiveCommand::Kick) => {
+            let mut lv = LiveServiceClient::connect(args.addr.clone()).await?;
+            let r = lv.kick(KickRequest {}).await?.into_inner();
+            println!("live ended: {} disconnected, refused until the end of its slot", r.dj);
+        }
+        Command::Dj(DjCommand::Hash) => {
+            let password = read_password("DJ password: ")?;
+            let mut lv = LiveServiceClient::connect(args.addr.clone()).await?;
+            let r = lv.hash_password(HashPasswordRequest { password }).await?.into_inner();
+            println!("password_hash = \"{}\"", r.hash);
+        }
         Command::Icecast(IcecastCommand::Status) => {
             let mut ic = IcecastServiceClient::connect(args.addr.clone()).await?;
             let s = ic.get_status(IcecastStatusRequest {}).await?.into_inner();
@@ -958,6 +997,7 @@ fn print_ls_status(s: &liquidsoap::LiquidsoapStatus) {
     } else {
         let what = match s.on_air_kind.as_str() {
             "track" => with_playlist(&s.on_air_media, &s.on_air_playlist),
+            "live" => format!("live DJ {}", if s.on_air_media.is_empty() { "?" } else { &s.on_air_media }),
             other => other.to_string(),
         };
         println!("on air:     {what} — since {}", when(s.on_air_since));
@@ -1000,6 +1040,76 @@ fn ago(t: i64) -> String {
         format!("{:02}:{:02}:{:02}", ago / 3600, ago % 3600 / 60, ago % 60)
     };
     format!("{ago} ago (epoch {t})")
+}
+
+/// Read one line from standard input, without echo on a terminal.
+fn read_password(prompt: &str) -> anyhow::Result<String> {
+    use std::io::{BufRead, IsTerminal, Write};
+    let stdin = std::io::stdin();
+    let tty = stdin.is_terminal();
+    let mut saved: Option<libc::termios> = None;
+    if tty {
+        eprint!("{prompt}");
+        std::io::stderr().flush()?;
+        // SAFETY: plain termios calls on fd 0, restored below.
+        unsafe {
+            let mut t: libc::termios = std::mem::zeroed();
+            if libc::tcgetattr(0, &mut t) == 0 {
+                saved = Some(t);
+                t.c_lflag &= !libc::ECHO;
+                libc::tcsetattr(0, libc::TCSANOW, &t);
+            }
+        }
+    }
+    let mut line = String::new();
+    let read = stdin.lock().read_line(&mut line);
+    if let Some(t) = saved {
+        unsafe {
+            libc::tcsetattr(0, libc::TCSANOW, &t);
+        }
+        eprintln!();
+    }
+    read?;
+    let pw = line.trim_end_matches(['\n', '\r']).to_string();
+    anyhow::ensure!(!pw.is_empty(), "empty password");
+    Ok(pw)
+}
+
+fn print_live_status(s: &live::LiveStatus) {
+    if !s.enabled {
+        println!("live:      not configured (no [live] section) — no harbor");
+        return;
+    }
+    println!("harbor:    port {} mount {} — silence cut after {} s", s.harbor_port, s.mount, s.silence_timeout_s);
+    if s.djs_error.is_empty() {
+        println!("DJ file:   {} ({} DJ)", s.djs_path, s.djs_count);
+    } else {
+        println!("DJ file:   UNUSABLE — every login refused: {}", s.djs_error);
+    }
+    match &s.on_air {
+        Some(a) => println!(
+            "on air:    {} — since {} — slot {} — from {}",
+            a.dj,
+            ago(a.since),
+            if a.rule_id.is_empty() { "?" } else { &a.rule_id },
+            if a.address.is_empty() { "?" } else { &a.address }
+        ),
+        None => println!("on air:    nobody (the programme airs)"),
+    }
+    if let Some(l) = &s.last {
+        println!("last live: {} — ended {} ({})", l.dj, ago(s.last_ended_at), s.last_reason);
+    }
+    for r in &s.refused {
+        println!("refused:   {} until the end of {}", r.dj, r.occurrence);
+    }
+    if !s.last_refusal_dj.is_empty() {
+        println!(
+            "last refusal: {} — {} ({})",
+            s.last_refusal_dj,
+            s.last_refusal_reason,
+            ago(s.last_refusal_at)
+        );
+    }
 }
 
 fn print_icecast_status(s: &icecast::IcecastStatus) {

@@ -52,9 +52,15 @@ pub struct RuleDoc {
     #[serde(default = "default_enabled", skip_serializing_if = "is_true")]
     pub enabled: bool,
     pub kind: KindTag,
+    /// Every kind but `live` (which selects no playlist).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub playlist_ref: String,
 
-    // --- day_part ---
+    // --- live ---
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dj: Option<String>,
+
+    // --- day_part (and live: `start` only) ---
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -92,6 +98,7 @@ pub enum KindTag {
     DayPart,
     AtClock,
     Every,
+    Live,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -192,8 +199,17 @@ fn to_rule(rd: RuleDoc) -> Result<Rule, String> {
     if id.is_empty() {
         return Err("`id` must not be blank".into());
     }
-    if rd.playlist_ref.trim().is_empty() {
-        return Err("`playlist_ref` must not be blank".into());
+    if rd.kind == KindTag::Live {
+        if !rd.playlist_ref.is_empty() {
+            return Err("`live` takes no `playlist_ref` (a live slot selects no playlist)".into());
+        }
+    } else {
+        if rd.playlist_ref.trim().is_empty() {
+            return Err("`playlist_ref` is required and must not be blank".into());
+        }
+        if rd.dj.is_some() {
+            return Err("`dj` belongs to a `live` rule".into());
+        }
     }
 
     // Validity (shared by every kind).
@@ -325,6 +341,22 @@ fn to_rule(rd: RuleDoc) -> Result<Rule, String> {
                 cadence,
             }
         }
+        KindTag::Live => {
+            if rd.end.is_some() {
+                return Err("`live` takes no `end`: the slot lasts until the next one starts, \
+                     the DJ stays on air until disconnection or silence"
+                    .into());
+            }
+            if has_ac || has_ev {
+                return Err("`live` only takes `dj` and `start` besides validity".into());
+            }
+            let dj = rd.dj.as_deref().map(str::trim).unwrap_or_default();
+            if dj.is_empty() {
+                return Err("`live` requires `dj` (an id of the DJ file)".into());
+            }
+            let start = parse_wallclock(rd.start.as_deref().ok_or("`live` requires `start`")?)?;
+            RuleKind::Live { dj: dj.to_string(), start }
+        }
     };
 
     Ok(Rule {
@@ -342,7 +374,9 @@ fn to_rule(rd: RuleDoc) -> Result<Rule, String> {
 pub fn validate_refs(rules: &[Rule], known: &HashSet<String>) -> Vec<String> {
     let mut errors = Vec::new();
     for r in rules {
-        let raw = playlist_ref_of(r);
+        let Some(raw) = playlist_ref_of(r) else {
+            continue; // a live slot: its `dj` is checked by `validate_djs`
+        };
         match crate::playlist::normalize_ref(raw) {
             Ok(key) => {
                 if !known.contains(&key) {
@@ -358,13 +392,35 @@ pub fn validate_refs(rules: &[Rule], known: &HashSet<String>) -> Vec<String> {
     errors
 }
 
-fn playlist_ref_of(r: &Rule) -> &str {
+fn playlist_ref_of(r: &Rule) -> Option<&str> {
     match &r.kind {
-        RuleKind::BaseRotation { playlist_ref } => playlist_ref,
-        RuleKind::DayPart { playlist_ref, .. } => playlist_ref,
-        RuleKind::AtClock { playlist_ref, .. } => playlist_ref,
-        RuleKind::Every { playlist_ref, .. } => playlist_ref,
+        RuleKind::BaseRotation { playlist_ref } => Some(playlist_ref),
+        RuleKind::DayPart { playlist_ref, .. } => Some(playlist_ref),
+        RuleKind::AtClock { playlist_ref, .. } => Some(playlist_ref),
+        RuleKind::Every { playlist_ref, .. } => Some(playlist_ref),
+        RuleKind::Live { .. } => None,
     }
+}
+
+/// Check that every `live` rule names a known DJ. `known` = the DJ ids of the
+/// DJ file, `None` when no `[live]` section is configured (then any `live`
+/// rule is an error: nobody could ever connect). Collects all problems.
+pub fn validate_djs(rules: &[Rule], known: Option<&HashSet<String>>) -> Vec<String> {
+    let mut errors = Vec::new();
+    for r in rules {
+        let RuleKind::Live { dj, .. } = &r.kind else { continue };
+        match known {
+            None => errors.push(format!(
+                "rule {:?}: a `live` rule needs the `[live]` section in stationd.toml (no harbor)",
+                r.id
+            )),
+            Some(k) if !k.contains(dj) => {
+                errors.push(format!("rule {:?}: dj `{dj}` is not in the DJ file", r.id))
+            }
+            Some(_) => {}
+        }
+    }
+    errors
 }
 
 // ---------------------------------------------------------------------------
@@ -389,6 +445,7 @@ fn rule_to_doc(r: &Rule) -> RuleDoc {
         enabled: r.enabled,
         kind: KindTag::BaseRotation, // placeholder, overwritten below
         playlist_ref: String::new(),
+        dj: None,
         start: None,
         end: None,
         every_minutes: None,
@@ -432,6 +489,11 @@ fn rule_to_doc(r: &Rule) -> RuleDoc {
                 Cadence::Tracks(n) => d.min_tracks = Some(*n),
                 Cadence::Elapsed(s) => d.min_elapsed = Some(fmt_duration(*s)),
             }
+        }
+        RuleKind::Live { dj, start } => {
+            d.kind = KindTag::Live;
+            d.dj = Some(dj.clone());
+            d.start = Some(wallclock_str(*start));
         }
     }
     d
@@ -877,4 +939,69 @@ mod tests {
         assert!(matches!(again[0].kind, RuleKind::DayPart { end: None, .. }));
     }
 
+    const LIVE: &str = r#"
+        schema_version = 1
+        [[rule]]
+        id = "marc-live"
+        kind = "live"
+        dj = "marc"
+        start = "20:00"
+        days = ["fri"]
+    "#;
+
+    #[test]
+    fn a_live_rule_parses_and_round_trips() {
+        let rules = parse_grid(LIVE).expect("a live rule parses");
+        match &rules[0].kind {
+            RuleKind::Live { dj, start } => {
+                assert_eq!(dj, "marc");
+                assert_eq!((start.hour, start.minute), (20, 0));
+            }
+            k => panic!("expected Live, got {k:?}"),
+        }
+        assert_eq!(rules[0].validity.days, vec![Weekday::Fri]);
+        let t = to_toml(&rules).unwrap();
+        assert!(t.contains("kind = \"live\"") && t.contains("dj = \"marc\""), "{t}");
+        assert!(!t.contains("playlist_ref"), "a live rule has no playlist: {t}");
+        assert_eq!(to_toml(&parse_grid(&t).unwrap()).unwrap(), t);
+        // no playlist ref to check
+        assert!(validate_refs(&rules, &HashSet::new()).is_empty());
+    }
+
+    #[test]
+    fn a_live_rule_rejects_what_it_does_not_take() {
+        let with = |extra: &str| format!("{LIVE}{extra}\n");
+        for (extra, want) in [
+            ("end = \"22:00\"", "no `end`"),
+            ("playlist_ref = \"x\"", "no `playlist_ref`"),
+            ("mode = \"hard\"", "only takes `dj` and `start`"),
+        ] {
+            let err = parse_grid(&with(extra)).unwrap_err().to_string();
+            assert!(err.contains(want), "{extra}: {err}");
+        }
+        let no_dj = LIVE.replace("dj = \"marc\"", "");
+        assert!(parse_grid(&no_dj).unwrap_err().to_string().contains("requires `dj`"));
+        let no_start = LIVE.replace("start = \"20:00\"", "");
+        assert!(parse_grid(&no_start).unwrap_err().to_string().contains("requires `start`"));
+        // `dj` on another kind, and a playlist rule without playlist_ref
+        let stray = "schema_version = 1\n[[rule]]\nid = \"f\"\nkind = \"base_rotation\"\nplaylist_ref = \"g\"\ndj = \"marc\"\n";
+        assert!(parse_grid(stray).unwrap_err().to_string().contains("`dj` belongs to a `live` rule"));
+        let bare = "schema_version = 1\n[[rule]]\nid = \"f\"\nkind = \"base_rotation\"\n";
+        assert!(parse_grid(bare).unwrap_err().to_string().contains("`playlist_ref` is required"));
+    }
+
+    #[test]
+    fn validate_djs_needs_the_live_section_and_known_djs() {
+        let rules = parse_grid(LIVE).unwrap();
+        let none = validate_djs(&rules, None);
+        assert_eq!(none.len(), 1);
+        assert!(none[0].contains("[live]"), "{none:?}");
+        let known: HashSet<String> = ["julie".to_string()].into();
+        let unknown = validate_djs(&rules, Some(&known));
+        assert!(unknown[0].contains("dj `marc` is not in the DJ file"), "{unknown:?}");
+        let known: HashSet<String> = ["marc".to_string()].into();
+        assert!(validate_djs(&rules, Some(&known)).is_empty());
+        // a grid without live rule needs nothing
+        assert!(validate_djs(&parse_grid(GRID).unwrap(), None).is_empty());
+    }
 }

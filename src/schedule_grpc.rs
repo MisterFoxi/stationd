@@ -449,6 +449,7 @@ fn map_rule(rule: crate::resolver::Rule) -> Result<schedule::Rule, Status> {
                 Cadence::Elapsed(s) => schedule::every::Cadence::Elapsed(duration(s)?),
             }),
         }),
+        RuleKind::Live { dj, start } => Kind::Live(schedule::Live { dj, start: Some(wall(start)) }),
     };
     Ok(schedule::Rule { id: rule.id, enabled: rule.enabled, validity: Some(validity), kind: Some(kind) })
 }

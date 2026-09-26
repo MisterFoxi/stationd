@@ -71,6 +71,9 @@ pub struct GridEngine {
     /// resolution), the override queue (consulted before the grid) and the
     /// manual clock. Shared with the plugin host surface and gRPC.
     control: StationControl,
+    /// `[live] djs_path`: the DJ file `live` rules are checked against at
+    /// validate/apply. `None` = no `[live]` section: a `live` rule is refused.
+    live_djs: Option<PathBuf>,
 }
 
 /// One entry of a grid projection ([`GridEngine::preview`]): the instant a
@@ -217,6 +220,8 @@ fn classify_rule(rule: &Rule, grid: &Grid) -> (&'static str, String, Demand) {
         }
         RuleKind::AtClock { playlist_ref, .. } => ("at_clock", playlist_ref.clone(), Demand::Punctual),
         RuleKind::Every { playlist_ref, .. } => ("every", playlist_ref.clone(), Demand::Punctual),
+        // Not sized (no playlist): `check_coverage` skips live slots.
+        RuleKind::Live { dj, .. } => ("live", dj.clone(), Demand::Punctual),
     }
 }
 
@@ -475,7 +480,26 @@ impl GridEngine {
             plugins: None,
             media_root: None,
             control: StationControl::new_in_memory(),
+            live_djs: None,
         }
+    }
+
+    /// Enable `live` rules: their `dj` must be in this DJ file (`[live]`).
+    pub fn with_live_djs(mut self, djs_path: impl Into<PathBuf>) -> Self {
+        self.live_djs = Some(djs_path.into());
+        self
+    }
+
+    /// The connection window of DJ `dj` open at `now`, if any (the grid's
+    /// `live` rules, in the station timezone — `resolver::live_window`).
+    pub async fn live_window(
+        &self,
+        dj: &str,
+        now: Epoch,
+    ) -> Result<Option<crate::resolver::LiveWindow>, EngineError> {
+        let local = clock::to_local_now(now, &self.tz)?;
+        let grid = grid_index::load_grid(&self.pool).await?;
+        Ok(crate::resolver::live_window(&grid, dj, local))
     }
 
     /// Share the station control (broadcast state, overrides, manual clock)
@@ -598,7 +622,8 @@ impl GridEngine {
                 }
             }
             // A disabled rule is not in play — it can't cause a gap, skip it.
-            if !rule.enabled {
+            // A live slot selects no playlist: nothing to size.
+            if !rule.enabled || matches!(rule.kind, RuleKind::Live { .. }) {
                 continue;
             }
             entries.push(self.coverage_for_rule(rule, &grid).await?);
@@ -801,19 +826,34 @@ impl GridEngine {
         Ok(store::list(&self.pool).await?.into_iter().filter_map(|r| r.rel_path).collect())
     }
 
+    /// Playlist refs, then the DJs of `live` rules (the DJ file is read only
+    /// when the grid has a `live` rule). Every problem at once.
+    async fn check_refs(&self, rules: &[Rule]) -> Result<(), GridOpError> {
+        let known = self.known_playlist_keys().await?;
+        let mut errors = grid_toml::validate_refs(rules, &known);
+        if rules.iter().any(|r| matches!(r.kind, RuleKind::Live { .. })) {
+            match &self.live_djs {
+                None => errors.extend(grid_toml::validate_djs(rules, None)),
+                Some(path) => match crate::live::load_djs(path) {
+                    Ok(djs) => {
+                        let ids: HashSet<String> = djs.into_iter().map(|d| d.id).collect();
+                        errors.extend(grid_toml::validate_djs(rules, Some(&ids)));
+                    }
+                    Err(e) => errors.push(format!("live rules cannot be checked: {e}")),
+                },
+            }
+        }
+        if errors.is_empty() { Ok(()) } else { Err(GridOpError::Invalid(errors)) }
+    }
+
     pub async fn validate_grid(&self, files: &[(String, String)]) -> Result<(), GridOpError> {
         let rules = Self::parse_all(files).map_err(GridOpError::Invalid)?;
-        let known = self.known_playlist_keys().await?;
-        let ref_errors = grid_toml::validate_refs(&rules, &known);
-        if !ref_errors.is_empty() { return Err(GridOpError::Invalid(ref_errors)); }
-        Ok(())
+        self.check_refs(&rules).await
     }
 
     pub async fn apply_grid(&self, files: &[(String, String)]) -> Result<Vec<String>, GridOpError> {
         let rules = Self::parse_all(files).map_err(GridOpError::Invalid)?;
-        let known = self.known_playlist_keys().await?;
-        let ref_errors = grid_toml::validate_refs(&rules, &known);
-        if !ref_errors.is_empty() { return Err(GridOpError::Invalid(ref_errors)); }
+        self.check_refs(&rules).await?;
         grid_index::replace_grid(&self.pool, &rules).await.map_err(EngineError::from)?;
         self.sync_grid().await?;
         Ok(rules.iter().map(|r| r.id.clone()).collect())
@@ -1195,6 +1235,10 @@ impl GridEngine {
         }
         if let Gate::Halt(state) = self.control.gate() {
             tracing::info!(state = state.as_str(), "AtClock hard: station halted, no cut (soft once it airs again)");
+            return Ok(None);
+        }
+        if let Some(dj) = self.control.live_dj() {
+            tracing::info!(%dj, "AtClock hard: a DJ is on air, no cut (soft after the live, within its expiry)");
             return Ok(None);
         }
         let local = clock::to_local_now(now, &self.tz)?;

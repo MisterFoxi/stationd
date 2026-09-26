@@ -138,6 +138,15 @@ pub enum RuleKind {
         playlist_ref: String,
         cadence: Cadence,
     },
+    /// A live DJ slot: from `start`, DJ `dj` may connect (harbor). It selects
+    /// no playlist and never takes part in [`resolve_ranked`]: it only opens a
+    /// CONNECTION window, which lasts until the next start of another day part
+    /// or live slot (same rule as an open day part, [`live_window`]). Once
+    /// connected, the DJ stays on air until disconnection or silence,
+    /// whatever the window. Its `days` / dates are evaluated on the day it
+    /// started. A live slot does not end an open day part (it lays over the
+    /// programme, it does not replace it).
+    Live { dj: String, start: WallClock },
 }
 
 /// Where an AtClock's rendez-vous falls within the hour.
@@ -444,18 +453,66 @@ const OPEN_PART_LOOKBACK_DAYS: i64 = 7;
 /// day its `validity` allows) at or before `now` — its validity evaluated on
 /// the START day. `None` if it did not start within the lookback.
 fn last_start_ago(validity: &Validity, start: WallClock, now: LocalNow) -> Option<i64> {
+    last_start(validity, start, now).map(|(ago, _)| ago)
+}
+
+/// [`last_start_ago`], plus the civil date of that start.
+fn last_start(validity: &Validity, start: WallClock, now: LocalNow) -> Option<(i64, Date)> {
     let now_min = now.wall.minutes() as i64;
     let start_min = start.minutes() as i64;
     let (mut date, mut weekday) = (now.date, now.weekday);
     for back in 0..=OPEN_PART_LOOKBACK_DAYS {
         let ago = back * 1440 + now_min - start_min;
         if ago >= 0 && validity.applies_on(date, weekday) {
-            return Some(ago);
+            return Some((ago, date));
         }
         date = date.prev();
         weekday = weekday.prev();
     }
     None
+}
+
+/// An open live connection window ([`live_window`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveWindow {
+    pub rule_id: String,
+    /// Identifies this occurrence of the slot: `rule_id@YYYY-MM-DDTHH:MM`
+    /// (the civil date and time it opened). A DJ cut for silence is refused
+    /// for the rest of the occurrence, not for the next one.
+    pub occurrence: String,
+    /// Minutes since it opened.
+    pub opened_ago_min: i64,
+}
+
+/// Is a live window of DJ `dj` open at `now`? A `Live` rule opens at its
+/// `start` (on a day its validity allows, evaluated on that day) and stays
+/// open until another enabled day part or live slot starts — "until the next
+/// slot", like an open day part. Several open for the same DJ: the most
+/// recent one. Pure, minute granularity.
+pub fn live_window(grid: &Grid, dj: &str, now: LocalNow) -> Option<LiveWindow> {
+    grid.rules
+        .iter()
+        .filter(|r| r.enabled)
+        .filter_map(|r| match &r.kind {
+            RuleKind::Live { dj: d, start } if d == dj => {
+                let (ago, date) = last_start(&r.validity, *start, now)?;
+                let superseded = grid.rules.iter().filter(|o| o.enabled && o.id != r.id).any(|o| {
+                    match &o.kind {
+                        RuleKind::DayPart { start: s, .. } | RuleKind::Live { start: s, .. } => {
+                            last_start_ago(&o.validity, *s, now).is_some_and(|b| b < ago)
+                        }
+                        _ => false,
+                    }
+                });
+                (!superseded).then(|| LiveWindow {
+                    rule_id: r.id.clone(),
+                    occurrence: occurrence_token(&r.id, date, *start),
+                    opened_ago_min: ago,
+                })
+            }
+            _ => None,
+        })
+        .min_by(|a, b| a.opened_ago_min.cmp(&b.opened_ago_min).then_with(|| a.rule_id.cmp(&b.rule_id)))
 }
 
 /// Does the OPEN day part `rule` (no `end`) cover `now`? It started (on a day
@@ -954,4 +1011,73 @@ mod tests {
         assert_eq!(Weekday::Mon.prev(), Weekday::Sun);
     }
 
+    // ----- live slots ------------------------------------------------------
+
+    fn live(id: &str, dj: &str, s: (u8, u8)) -> Rule {
+        Rule {
+            id: id.into(),
+            enabled: true,
+            validity: Validity::default(),
+            kind: RuleKind::Live { dj: dj.into(), start: WallClock { hour: s.0, minute: s.1 } },
+        }
+    }
+
+    #[test]
+    fn a_live_slot_is_open_until_the_next_slot_starts() {
+        let grid = Grid {
+            rules: vec![
+                base("floor", "general"),
+                open_part("day", "jour", (12, 0)),
+                live("marc-live", "marc", (20, 0)),
+                open_part("night", "nuit", (23, 0)),
+            ],
+        };
+        let w = |h, m| live_window(&grid, "marc", now_at(h, m));
+        assert_eq!(w(19, 59), None);
+        let open = w(20, 0).unwrap();
+        assert_eq!(open.rule_id, "marc-live");
+        assert_eq!(open.occurrence, "marc-live@2026-03-15T20:00");
+        assert_eq!(open.opened_ago_min, 0);
+        assert_eq!(w(22, 59).unwrap().opened_ago_min, 179);
+        assert_eq!(w(23, 0), None, "the night slot closes it");
+        assert_eq!(w(3, 0), None);
+        // another DJ has no window here
+        assert_eq!(live_window(&grid, "julie", now_at(21, 0)), None);
+        // a live slot never selects a source: the programme underneath goes on
+        assert_eq!(winner(&grid, now_at(21, 0)).as_deref(), Some("jour"));
+    }
+
+    #[test]
+    fn a_live_slot_does_not_end_an_open_day_part_but_another_live_ends_it() {
+        let grid = Grid {
+            rules: vec![
+                open_part("day", "jour", (12, 0)),
+                live("a", "marc", (18, 0)),
+                live("b", "julie", (20, 0)),
+            ],
+        };
+        assert_eq!(winner(&grid, now_at(19, 0)).as_deref(), Some("jour"));
+        assert!(live_window(&grid, "marc", now_at(19, 59)).is_some());
+        assert_eq!(live_window(&grid, "marc", now_at(20, 0)), None, "julie's slot starts");
+        // alone in the grid, julie's window stays open around the clock
+        assert!(live_window(&grid, "julie", now_at(11, 0)).is_some());
+        assert_eq!(live_window(&grid, "julie", now_at(11, 0)).unwrap().occurrence, "b@2026-03-14T20:00");
+    }
+
+    #[test]
+    fn a_live_slot_keeps_the_days_of_its_start_and_can_be_disabled() {
+        let mut fri = live("fri", "marc", (22, 0));
+        fri.validity.days = vec![Weekday::Fri];
+        let grid = Grid { rules: vec![fri.clone(), open_part("morning", "matin", (6, 0))] };
+        // Friday 2026-10-02 22:00 → Saturday 05:59
+        assert!(live_window(&grid, "marc", on((2026, 10, 2), Weekday::Fri, 21, 59)).is_none());
+        assert!(live_window(&grid, "marc", on((2026, 10, 2), Weekday::Fri, 22, 0)).is_some());
+        let sat = live_window(&grid, "marc", on((2026, 10, 3), Weekday::Sat, 5, 59)).unwrap();
+        assert_eq!(sat.occurrence, "fri@2026-10-02T22:00");
+        assert!(live_window(&grid, "marc", on((2026, 10, 3), Weekday::Sat, 6, 0)).is_none());
+        assert!(live_window(&grid, "marc", on((2026, 10, 3), Weekday::Sat, 22, 30)).is_none());
+        fri.enabled = false;
+        let off = Grid { rules: vec![fri] };
+        assert!(live_window(&off, "marc", on((2026, 10, 2), Weekday::Fri, 22, 30)).is_none());
+    }
 }

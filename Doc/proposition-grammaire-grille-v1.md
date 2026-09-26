@@ -21,8 +21,8 @@ Pas de fuseau à la racine (config station). Une option facultative n'accepte pa
 Champ	Type	Obligatoire	Défaut / règle
 id	chaîne	oui	stable, unique, non blanc. Clé de l'état famille B (compteurs Every, tokens AtClock) → un renommage réinitialise la cadence : à traiter comme un changement d'identité, pas un simple libellé
 enabled	booléen	non	true
-kind	chaîne	oui	base_rotation | day_part | at_clock | every
-playlist_ref	chaîne	oui	cf. §1.4
+kind	chaîne	oui	base_rotation | day_part | at_clock | every | live
+playlist_ref	chaîne	oui sauf live	cf. §1.4 ; interdit pour live
 days	tableau mon..sun	non	vide = tous les jours ; sans doublon
 date_start	date YYYY-MM-DD	non	inclusive
 date_end	date YYYY-MM-DD	non	inclusive, ≥ date_start
@@ -36,6 +36,7 @@ base_rotation	aucun	—	le plancher : toujours résolvable, priorité la plus ba
 day_part	plage horaire	start, end	sélectionne la base active sur un créneau
 at_clock	horloge murale	every_minutes | at, mode, expiry	rendez-vous absolu qui ponctue la base
 every	dernier passage	min_tracks | min_elapsed	cooldown glissant qui ponctue la base
+live	heure de début	dj, start	ouvre la fenêtre de connexion d'un DJ (harbor) ; ne sélectionne rien
 Sélection vs injection. base_rotation et day_part résolvent la base (« quel plancher maintenant »). at_clock et every n'écrasent pas la base, ils l'injectent ponctuellement ; la base reprend derrière.
 
 4.1 base_rotation
@@ -75,6 +76,14 @@ min_tracks	entier ≥ 1	au moins N pistes station depuis la dernière diffusion 
 min_elapsed	durée	au moins cette durée écoulée depuis la dernière diffusion
 every est par nature soft (évalué en frontière de piste) — pas de mode.
 
+4.5 live (créneau DJ, 2026-09-26)
+Champ	Type	Règle
+dj	chaîne	obligatoire ; id d'un DJ du fichier des DJ ([live] djs_path), vérifié à validate/apply
+start	HH:MM	obligatoire
+Ni end, ni playlist_ref, ni champs d'un autre kind. Refusé à validate/apply si [live] est absent de stationd.toml, ou si le DJ n'est pas dans le fichier des DJ.
+
+La règle ouvre une fenêtre de CONNEXION : de start jusqu'au prochain start d'un autre day_part ou d'un autre live (même sémantique qu'une tranche ouverte ; days / dates évalués sur le jour de début). Elle ne sélectionne aucune source et n'entre pas dans l'ordre de résolution : la programmation continue dessous tant que le DJ n'est pas connecté, et une règle live ne termine pas une tranche ouverte. Une fois connecté, le DJ reste à l'antenne jusqu'à sa déconnexion ou un silence de [live] silence_timeout, fenêtre fermée ou non. Occurrence = rule_id@date+heure de début : un DJ coupé pour silence (ou kick) est refusé jusqu'à la fin de cette occurrence. Cf. resolver::live_window, Doc/liquidsoap.md « DJ live ».
+
 5. Formats
 Heure civile : HH:MM, 00:00–23:59.
 Date : YYYY-MM-DD, date civile valide.
@@ -83,7 +92,9 @@ every_minutes : entier, pas une durée (colonne dédiée every_minutes).
 6. Ordre de résolution (collisions)
 Fixe et documenté, priorité décroissante :
 
-AtClock hard  >  AtClock soft  >  Every  >  base (DayPart → BaseRotation)  >  fallback
+(live DJ connecté)  >  AtClock hard  >  AtClock soft  >  Every  >  base (DayPart → BaseRotation)  >  fallback
+
+Le live n'est pas résolu : il se pose au-dessus de toute la chaîne d'antenne côté Liquidsoap ; pendant qu'il tient l'antenne, un AtClock hard ne coupe pas (il passe soft après, dans son expiry) et un override hard est dégradé en soft.
 
 Le plus prioritaire actif gagne. Pas de priority: i32 explicite en v1 : l'ordre fixe suffit et se raisonne (cf. modele-programmation.md) ; un champ de finesse pourra s'ajouter plus tard sans casser le contrat.
 

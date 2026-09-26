@@ -29,6 +29,12 @@
 //! its leaf playlist). A skip, a hard override or a Liquidsoap restart leave
 //! a short count: never marked.
 //!
+//! Live DJs (`[live]`, harbor): four more routes, answered by `live::LiveHub`
+//! — `POST /ls/v1/live/auth` `{user, password, address}` → `{allow}`;
+//! `/live/connect`; `/live/disconnect` → `{flush}` (drop the prepared track
+//! before asking for the return track, unless it is an override);
+//! `/live/silence`. Without `[live]`, every login is refused.
+//!
 //! The bridge itself holds no business logic: resolution is the engine's; the
 //! bridge only numbers requests, keeps what is on air for `stationctl ls
 //! status`, and forwards the track-start signal.
@@ -106,6 +112,8 @@ pub enum OnAirKind {
     Halted,
     /// The relay of a `remote` playlist (`media_path` = its URL).
     Relay,
+    /// A live DJ on the harbor (`media_path` = the DJ id).
+    Live,
     /// Something we can't place (unknown rid, source without tag).
     Unknown,
 }
@@ -117,6 +125,7 @@ impl OnAirKind {
             OnAirKind::Fallback => "fallback",
             OnAirKind::Halted => "halted",
             OnAirKind::Relay => "relay",
+            OnAirKind::Live => "live",
             OnAirKind::Unknown => "unknown",
         }
     }
@@ -445,6 +454,10 @@ impl LsBridge {
                     }
                     OnAirKind::Relay
                 }
+                "live" => {
+                    tracing::info!(dj = self.engine.control().live_dj().as_deref().unwrap_or("?"), "live DJ on air");
+                    OnAirKind::Live
+                }
                 other => {
                     tracing::warn!(kind = %other, "Liquidsoap reported an untagged track");
                     OnAirKind::Unknown
@@ -473,6 +486,9 @@ impl LsBridge {
             let mut source = OnAir::source(kind, now);
             if source.kind == OnAirKind::Relay {
                 source.media_path = st.relay_url.clone();
+            }
+            if source.kind == OnAirKind::Live {
+                source.media_path = self.engine.control().live_dj();
             }
             source
         };
@@ -508,6 +524,9 @@ impl LsBridge {
     /// `stopped` (halted noise on air).
     pub fn air_state(&self) -> &'static str {
         use crate::station_control::BroadcastState::*;
+        if self.engine.control().live_dj().is_some() {
+            return "live";
+        }
         match self.engine.control().state() {
             Running => "playing",
             Paused => "paused",
@@ -548,6 +567,8 @@ impl LsBridge {
 struct AppState {
     bridge: LsBridge,
     token: Arc<str>,
+    /// `[live]`: the harbor hooks. `None` = no live, every login refused.
+    live: Option<crate::live::LiveHub>,
 }
 
 fn authorized(state: &AppState, headers: &HeaderMap) -> bool {
@@ -581,12 +602,91 @@ async fn track_handler(
     StatusCode::OK
 }
 
-/// The bridge routes, behind the shared token.
-pub fn router(bridge: LsBridge, token: &str) -> Router {
+/// Body of `POST /live/auth` (the harbor login).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct LiveLogin {
+    #[serde(default)]
+    pub user: String,
+    #[serde(default)]
+    pub password: String,
+    #[serde(default)]
+    pub address: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LiveAuthReply {
+    pub allow: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LiveDisconnectReply {
+    /// Drop the prepared track before asking for the return track — false
+    /// when it is an override (consumed when handed out: it must air).
+    pub flush: bool,
+}
+
+async fn live_auth_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(login): Json<LiveLogin>,
+) -> Result<Json<LiveAuthReply>, StatusCode> {
+    if !authorized(&state, &headers) {
+        tracing::warn!("Liquidsoap bridge: /live/auth refused (bad or missing token)");
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    let allow = match &state.live {
+        Some(hub) => hub.auth(&login.user, &login.password, &login.address).await.allowed(),
+        None => {
+            tracing::warn!(address = %login.address, "live login refused: no [live] section");
+            false
+        }
+    };
+    Ok(Json(LiveAuthReply { allow }))
+}
+
+async fn live_connect_handler(State(state): State<AppState>, headers: HeaderMap) -> StatusCode {
+    if !authorized(&state, &headers) {
+        return StatusCode::UNAUTHORIZED;
+    }
+    if let Some(hub) = &state.live {
+        hub.connected();
+    }
+    StatusCode::OK
+}
+
+async fn live_disconnect_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<LiveDisconnectReply>, StatusCode> {
+    if !authorized(&state, &headers) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    if let Some(hub) = &state.live {
+        hub.disconnected();
+    }
+    Ok(Json(LiveDisconnectReply { flush: !state.bridge.prepared_is_override() }))
+}
+
+async fn live_silence_handler(State(state): State<AppState>, headers: HeaderMap) -> StatusCode {
+    if !authorized(&state, &headers) {
+        return StatusCode::UNAUTHORIZED;
+    }
+    if let Some(hub) = &state.live {
+        hub.silence();
+    }
+    StatusCode::OK
+}
+
+/// The bridge routes, behind the shared token. `live` = the `[live]` hub.
+pub fn router(bridge: LsBridge, token: &str, live: Option<crate::live::LiveHub>) -> Router {
     Router::new()
         .route("/ls/v1/next", post(next_handler))
         .route("/ls/v1/track", post(track_handler))
-        .with_state(AppState { bridge, token: Arc::from(token) })
+        .route("/ls/v1/live/auth", post(live_auth_handler))
+        .route("/ls/v1/live/connect", post(live_connect_handler))
+        .route("/ls/v1/live/disconnect", post(live_disconnect_handler))
+        .route("/ls/v1/live/silence", post(live_silence_handler))
+        .with_state(AppState { bridge, token: Arc::from(token), live })
 }
 
 #[cfg(test)]
@@ -984,10 +1084,80 @@ mod tests {
         assert_eq!(played(&pool, "pod").await, ["pod/ep1.mp3".to_string()].into());
     }
 
+    // ----- live DJ -----------------------------------------------------------
+
+    async fn post_json(app: &Router, path: &str, body: &str) -> (StatusCode, serde_json::Value) {
+        let req = Request::post(path)
+            .header("content-type", "application/json")
+            .header("X-Stationd-Token", "tok")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let res = app.clone().oneshot(req).await.unwrap();
+        let status = res.status();
+        let bytes = axum::body::to_bytes(res.into_body(), 1 << 16).await.unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null))
+    }
+
+    #[tokio::test]
+    async fn without_live_every_login_is_refused() {
+        let (_d, b) = bridge().await;
+        let app = router(b, "tok", None);
+        let (st, body) = post_json(&app, "/ls/v1/live/auth", r#"{"user":"marc","password":"x","address":"1.2.3.4"}"#).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(body["allow"], false);
+    }
+
+    #[tokio::test]
+    async fn a_live_dj_goes_through_the_bridge_and_the_cut_track_is_not_marked() {
+        let (dir, b, pool) = pod_bridge().await;
+        let hash = crate::live::hash_password("pw").unwrap();
+        let djs = dir.path().join("djs.toml");
+        std::fs::write(&djs, format!("schema_version = 1\n[[dj]]\nid = \"marc\"\npassword_hash = \"{hash}\"\n")).unwrap();
+        insert_rule(
+            &pool,
+            &Rule {
+                id: "marc-live".into(),
+                enabled: true,
+                validity: Validity::default(),
+                kind: RuleKind::Live { dj: "marc".into(), start: crate::resolver::WallClock { hour: 0, minute: 0 } },
+            },
+        )
+        .await
+        .unwrap();
+        let hub = crate::live::LiveHub::new(&djs, b.engine.clone());
+        let app = router(b.clone(), "tok", Some(hub.clone()));
+
+        b.at(1000);
+        b.next().await; // ep1 on air
+        b.start(1).await;
+        let (_, body) = post_json(&app, "/ls/v1/live/auth", r#"{"user":"marc","password":"bad","address":"1.2.3.4"}"#).await;
+        assert_eq!(body["allow"], false);
+        let (_, body) = post_json(&app, "/ls/v1/live/auth", r#"{"user":"source","password":"marc,pw","address":"1.2.3.4"}"#).await;
+        assert_eq!(body["allow"], true);
+        assert_eq!(post_json(&app, "/ls/v1/live/connect", "{}").await.0, StatusCode::OK);
+        assert_eq!(b.air_state(), "live");
+        // the fallback switches to the live: shown on air, the frozen track left
+        b.at(1100);
+        b.source("live").await;
+        let on_air = b.status().on_air.unwrap();
+        assert_eq!((on_air.kind, on_air.media_path.as_deref()), (OnAirKind::Live, Some("marc")));
+        b.at(5000);
+        let (_, body) = post_json(&app, "/ls/v1/live/disconnect", "{}").await;
+        assert_eq!(body["flush"], true);
+        assert_eq!(b.air_state(), "playing");
+        assert_eq!(hub.status().last.unwrap().reason, crate::live::EndReason::Disconnected);
+        // the return track: chosen now, the frozen one was never marked played
+        b.next().await;
+        b.start(2).await;
+        assert!(played(&pool, "pod").await.is_empty());
+        // silence route with nothing on air is harmless
+        assert_eq!(post_json(&app, "/ls/v1/live/silence", "{}").await.0, StatusCode::OK);
+    }
+
     #[tokio::test]
     async fn http_routes_require_the_token() {
         let (_d, b) = bridge().await;
-        let app = router(b, "tok");
+        let app = router(b, "tok", None);
         let req = |tok: Option<&str>| {
             let mut r = Request::post("/ls/v1/next").header("content-type", "application/json");
             if let Some(t) = tok {
@@ -1008,6 +1178,14 @@ mod tests {
         let raw: serde_json::Value = serde_json::from_slice(&body).unwrap();
         for k in ["kind", "uri", "state", "reason"] {
             assert!(raw.get(k).is_some(), "missing {k}");
+        }
+
+        for route in ["/ls/v1/live/auth", "/ls/v1/live/connect", "/ls/v1/live/disconnect", "/ls/v1/live/silence"] {
+            let r = Request::post(route)
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap();
+            assert_eq!(app.clone().oneshot(r).await.unwrap().status(), StatusCode::UNAUTHORIZED, "{route}");
         }
 
         let track = Request::post("/ls/v1/track")

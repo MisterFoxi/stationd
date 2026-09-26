@@ -5,7 +5,7 @@ sans reconstruire le contexte. À distinguer des docs de `Doc/` (décisions
 d'architecture durables) : ce fichier-ci est volatil, à mettre à jour à
 chaque session.
 
-Dernière mise à jour : 2026-09-25.
+Dernière mise à jour : 2026-09-26.
 
 
 ## Ajout : TUI d'administration (correctif préparé, compilation à confirmer)
@@ -83,6 +83,13 @@ Contrats figés dans `Doc/plugin-{events,hooks,host}.md`.
 inférieure jusqu'au plancher (fini le dead-air par sélection vide) ; groupe
 `sequence` avec `on_member_unavailable = abort|skip`. **Config→guest wasm** :
 `[plugin.config]` traverse jusqu'au `.wasm` (plugin `blacklist` wasm configurable).
+**DJ live (2026-09-26).** Harbor Liquidsoap (`[live]`), identifiants dans
+un fichier des DJ séparé (argon2, `stationctl dj hash`), créneaux par une
+règle de grille `kind = "live"` (ouverte jusqu'à la tranche suivante), prise
+d'antenne en fondu court, retour sur déconnexion ou silence (30 s) avec une
+piste choisie au retour. `stationctl live status|kick`. Validé sur
+Liquidsoap 2.2.4 (conteneur de préparation), **à valider sur devstationd
+(2.4)**. Référence : `Doc/liquidsoap.md` « DJ live ».
 
 ---
 
@@ -90,6 +97,11 @@ inférieure jusqu'au plancher (fini le dead-air par sélection vide) ; groupe
 
 Environnement : tout se teste désormais dans le conteneur de dev (README
 « Run (Docker) ») ; plus d'unités systemd sur devstationd.
+
+**DJ live — validation sur devstationd (Liquidsoap 2.4)** : `cargo test
+--locked` (378 attendus), `liquidsoap --check` du script généré avec
+`[live]`, puis un vrai client (butt / Mixxx) : login, hors créneau, fondu,
+déconnexion, silence, `live kick`. Ouvrir `harbor_port` (8005) aux DJ.
 
 **Câblage Liquidsoap — étape 3 : tâche de diffusion** (stationd agit sur
 l'antenne sans attendre un pull) :
@@ -153,6 +165,59 @@ Autres, indépendants :
 ---
 
 ## Fait
+
+### — DJ live : harbor, fichier des DJ, créneaux `live` (2026-09-26) —
+
+Décisions (utilisateur) : identifiants dans un TOML séparé ; prise
+d'antenne en fondu court ; créneau déclaré dans `grid.toml`, sans fin — la
+fenêtre de connexion court jusqu'à la tranche suivante ; retour à la
+normale sur déconnexion ou silence > 30 s, avec une **nouvelle piste**
+(celle que le live a interrompue est abandonnée). Métadonnées DJ →
+Icecast et enregistrement : plus tard.
+
+- **Grille** : `RuleKind::Live { dj, start }` ; `resolver::live_window`
+  (pur : dernier début, validité du jour de début, fermée par le début
+  d'un autre `day_part` ou `live`, occurrence `rule@date+heure`). Le live
+  n'entre pas dans `resolve_ranked` et ne termine pas une tranche ouverte.
+  Grammaire (`dj` + `start`, ni `end` ni `playlist_ref`), `validate_djs`
+  (DJ connu ; refus sans `[live]`), migration **0017** (`grid_rule`
+  reconstruite pour le CHECK de `kind`, détail mis de côté puis remis —
+  clés étrangères actives ; + `grid_live`), `schedule_v1.proto` (`Live`),
+  schéma JSON, `schedule check` ignore les créneaux live.
+- **`src/live.rs`** : fichier des DJ strict (`schema_version = 1`,
+  `[[dj]] id, name?, password_hash, enabled?`, empreinte argon2 PHC
+  obligatoire), relu à chaque login ; `LiveHub` : décision de login
+  (identifiants, DJ actif, personne à l'antenne, fenêtre ouverte, pas coupé
+  dans cette occurrence), session, fin (`disconnected|silence|kicked`),
+  refus jusqu'à la fin de l'occurrence après silence / kick (en mémoire).
+  Login sans utilisateur : `source` + `dj,motdepasse` (le harbor coupe au
+  `:`).
+- **`[live]`** (`config.rs`) : `djs_path`, `harbor_port` 8005, `mount`
+  `/live`, `fade` 1,5, `silence_timeout` 30, `silence_threshold` -40,
+  `buffer` 5 ; exige `[liquidsoap]`, port ≠ Icecast.
+- **Script** : `input.harbor` au-dessus de tout (fondu `fade`),
+  `blank.detect`, hooks → `/ls/v1/live/auth|connect|disconnect|silence`,
+  commande socket `stationd.live_kick`. Retour : piste préparée vidée (sauf
+  override), demande urgente + `skip` **sans crossfade** (`no_cross`),
+  garde `live_on` contre le double `on_disconnect` après `stop()`.
+- **Pendant le live** : `StationControl::set_live` → override hard dégradé
+  en soft, `AtClock` hard sans coupe (soft après). Pont : `OnAirKind::Live`,
+  état d'antenne `live`. Événements plugins `LiveStarted` / `LiveEnded`.
+- **CLI** : `stationctl live status|kick`, `stationctl dj hash` (mot de
+  passe lu sur stdin sans écho). Service `live_v1.proto`.
+- Tests (+20) : fenêtres (tranche suivante, jours du début, désactivée),
+  grammaire, stockage, fichier des DJ, login (mauvais mot de passe, hors
+  créneau, désactivé, déjà à l'antenne, fichier illisible), silence / kick
+  et refus jusqu'au créneau suivant, dégradation des overrides hard, routes
+  du pont, rendu du script, config.
+
+**Validation** : `cargo test --locked` vert (378) ; essai réel sur
+Liquidsoap **2.2.4** (sortie fichier analysée) — voir `Doc/liquidsoap.md`.
+Défauts trouvés et corrigés pendant l'essai : séparateur `,` (le `:` est
+coupé par le harbor), traîne de la piste gelée mêlée au retour (`no_cross`),
+second `on_disconnect` après un kick qui sautait la piste de retour
+(`live_on`). Connu : pause pendant un live → au `resume`, `ls status`
+affiche `halted` alors que la piste gelée joue (affichage seulement).
 
 ### — Validation au démarrage : jeton et fichiers de Liquidsoap (2026-09-25) —
 
@@ -1553,8 +1618,9 @@ dans le découpage des modules (`grid_index` = A, `grid_store` = B).
 
 ### Hors périmètre (chantiers suivants)
 - Liquidsoap : étapes 3 (tâche de diffusion) et 4 (fins de piste) — voir
-  tâche d'entrée. Reportés : DJ live (harbor), cue/fade/loudness par piste,
-  formats autres que mp3.
+  tâche d'entrée. Reportés : cue/fade/loudness par piste, formats autres
+  que mp3 ; DJ live : métadonnées du DJ vers Icecast, enregistrement du
+  live, refus persistés.
 - Rôles/permissions (différés). mTLS gRPC (reporté). Couche `api` (Axum BFF)
   + UI web.
 - Maintenance : `apalis` (scan, retry NFS) — `Doc/modele-programmation.md`.
@@ -1751,6 +1817,7 @@ dans le découpage des modules (`grid_index` = A, `grid_store` = B).
 | `proto/library_v1.proto` | Contrat `LibraryService` (compilé/servi ; Scan + ListMedia) |
 | `proto/plugin_v1.proto` | Contrat `PluginService` (compilé/servi ; List + Control) |
 | `Doc/plugin-{events,hooks,host}.md` | Contrats du système de plugins (référence durable) |
+| `src/live.rs` | DJ live : fichier des DJ, décision de login, session |
 | `Doc/proposition-grammaire-grille-v1.md` | Contrat grammaire `grid.toml` (référence durable) |
 | `proto/playlist_v1.proto` | Contrat playlist v1 (⚠ pas encore compilé/servi) |
 | `migrations/0001→0010` | Schéma (0005 état grille, 0006 règles, 0007 biblio, 0008 curseur, 0009 groupe, 0010 runtime/shuffle groupe ; ⚠ 0004 absent) |

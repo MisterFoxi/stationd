@@ -136,8 +136,9 @@ pub trait Plugin: Send {
 /// Facts the core notifies plugins about. `#[non_exhaustive]`: a plugin must
 /// `_ => {}` on unknown variants, so adding events never breaks a plugin.
 ///
-/// Emitted today: `TrackResolved` (grid engine), `ListenersSampled` (test
-/// injection until Icecast), `BroadcastStateChanged` (station control). Others
+/// Emitted today: `TrackResolved` (grid engine), `ListenersSampled` (Icecast
+/// sampler), `BroadcastStateChanged` (station control), `LiveStarted` /
+/// `LiveEnded` (live DJs, `live::LiveHub`). Others
 /// from `Doc/plugin-events.md` (`TrackSkipped`, `LibraryScanned`, `GridApplied`,
 /// …) are added as their sources come online.
 #[non_exhaustive]
@@ -158,6 +159,13 @@ pub enum PluginEvent {
     /// names the emitter: a plugin, `cli`, or `stop-when-idle` for a drain
     /// completed by the core at a track boundary.
     BroadcastStateChanged { from: String, to: String, by: String },
+    /// A DJ took the air (harbor): `dj` = its id in the DJ file, `rule_id` =
+    /// the grid `live` rule whose window let it in. `at` = epoch seconds.
+    LiveStarted { dj: String, rule_id: String, at: i64 },
+    /// The live ended: `reason` = `disconnected` (the DJ left), `silence`
+    /// (cut after `[live] silence_timeout`) or `kicked` (`stationctl live
+    /// kick`). The programme resumes with a track chosen at that instant.
+    LiveEnded { dj: String, reason: String, at: i64 },
 }
 
 // ---------------------------------------------------------------------------
@@ -795,6 +803,12 @@ impl Plugin for LoggerPlugin {
             }
             PluginEvent::BroadcastStateChanged { from, to, by } => {
                 tracing::info!(%from, %to, %by, "[logger] broadcast state changed");
+            }
+            PluginEvent::LiveStarted { dj, rule_id, at } => {
+                tracing::info!(%dj, %rule_id, at, "[logger] live started");
+            }
+            PluginEvent::LiveEnded { dj, reason, at } => {
+                tracing::info!(%dj, %reason, at, "[logger] live ended");
             }
             // Required for real (downstream/WASM) plugins: PluginEvent is
             // #[non_exhaustive], so new variants must be ignored gracefully.

@@ -131,8 +131,8 @@ members = [
 
 ### The grid (scheduler)
 
-`grid.toml` says what plays when, using four kinds of rules. When several
-rules apply, the highest priority wins:
+`grid.toml` says what plays when, using four kinds of rules — plus `live`
+slots for DJs. When several rules apply, the highest priority wins:
 
 **override › `at_clock` hard › `at_clock` soft › `every` › `day_part` ›
 `base_rotation` › fallback**
@@ -143,6 +143,7 @@ rules apply, the highest priority wins:
 | `day_part` | A time window (`start`/`end`, optional `days`). Windows crossing midnight are supported. Without `end`, the day part is **open**: it runs until the next start of another day part (a programme grid where each show lasts until the next one); its `days` apply to the day it started. |
 | `at_clock` | A fixed time (`at = "08:00"`, or `every_minutes`). `soft`: at the next track boundary. `hard`: cut in on the second (the current track is interrupted), and outranks everything except overrides; a hard mark that cannot be cut (station paused, more than 10 s late) airs soft instead. Optional `expiry`. |
 | `every` | A cooldown: every N tracks (`min_tracks`) or every elapsed duration. |
+| `live` | A DJ slot (`dj`, `start`, optional `days`; no `end`, no playlist): the DJ may connect from `start` until the next `day_part` or `live` starts. It selects nothing: the programme underneath goes on until the DJ connects. See *Live DJ*. |
 
 Most boundaries are *soft*: stationd never cuts a track; it changes what
 comes next. A source whose pool is empty falls through to the next priority,
@@ -198,6 +199,29 @@ waiting for the clock, in UTC and in local time (useful across DST changes).
   - `soft` airs at the next track boundary.
   - `hard` cuts the current track now.
 
+### Live DJ
+
+A DJ streams to a harbor input of Liquidsoap (`[live]`, port 8005, mount
+`/live` by default) with any Icecast source client (butt, Mixxx…).
+
+- **Who:** the DJ file (`[live] djs_path`, kept apart from `stationd.toml`)
+  lists the DJs with an argon2 hash of their password
+  (`stationctl dj hash`). It is re-read at every login: no restart needed.
+  A software that cannot set a user name logs in as `source` with
+  `dj,password` as the password. A DJ password contains neither `:` nor `,`.
+- **When:** a `live` rule of the grid. Outside the window, the login is
+  refused.
+- **On air:** stationd decides every login; the live takes the air with a
+  short fade (`fade`, 1.5 s), above everything — hard overrides and hard
+  `at_clock` marks are held and air soft after the live.
+- **Back to the programme:** when the DJ disconnects, or after
+  `silence_timeout` seconds of silence (30 s). A new track is chosen at that
+  moment (the one the live interrupted is dropped). A DJ cut for silence —
+  or by `stationctl live kick` — is refused until the end of the slot.
+- `stationctl live status` shows who is on air, the last live, the refused
+  DJs and the last refused login. Plugins receive `LiveStarted` /
+  `LiveEnded`.
+
 ### Plugins
 
 Plugins add features; they do not process audio.
@@ -232,7 +256,8 @@ under its own service, so restarting stationd never cuts the air.
   `interrupt` to Liquidsoap for immediate actions.
 - **Air chain:** stationd's tracks, then background noise while the station
   is halted, then a safety fallback file when there is nothing to air (or
-  stationd is unreachable). A queue for hard overrides sits on top.
+  stationd is unreachable). A queue for hard overrides sits on top, and the
+  live DJ harbor (`[live]`) above everything.
 - **Watching the air:** `stationctl ls status` shows what is on air, what is
   queued next, the state of the air and the health of the control socket.
 
@@ -497,6 +522,8 @@ docker compose -f /opt/stationd/compose.yaml logs -f station
 | `plugin list` \| `start` \| `stop` \| `restart` \| `reload` | Plugin lifecycle |
 | `ls render` \| `status` | Generated Liquidsoap script; bridge / air status |
 | `icecast status` \| `render` | Audience and health of our mounts; generated `icecast.xml` |
+| `live status` \| `kick` | Live DJ on air, last live, refused DJs; end the live now |
+| `dj hash` | Hash a DJ password for the DJ file (read from stdin, not echoed) |
 | `clock set` \| `show` \| `reset` | Freeze the station clock (testing) |
 | `debug listeners <n>` | Inject a listener sample (overwritten by the next Icecast sample) |
 
@@ -510,7 +537,7 @@ docker compose -f /opt/stationd/compose.yaml logs -f station
 src/
   main.rs            daemon: config, gRPC server, Liquidsoap bridge, shutdown
   bin/stationctl.rs  the CLI
-  resolver.rs        pure grid resolver (4 rule kinds, priorities)
+  resolver.rs        pure grid resolver (rule kinds, priorities, live windows)
   clock.rs           epoch ↔ civil time, DST (jiff)
   grid_*.rs          grid grammar, index (family A), playback state (family B), engine
   playlist.rs        playlist model, parsing, validation
@@ -521,10 +548,11 @@ src/
   ls_script.rs       Liquidsoap script generator
   ls_bridge.rs       loopback HTTP bridge (Liquidsoap → stationd)
   ls_control.rs      control socket (stationd → Liquidsoap)
+  live.rs            live DJs: DJ file, login decision, live session
   icecast.rs         Icecast admin reader: audience sampling, mount health
   icecast_xml.rs     icecast.xml generator ([icecast.server])
   *_grpc.rs          thin gRPC translators
-proto/               gRPC contracts (station, schedule, library, playlist, plugin, broadcast, liquidsoap, icecast)
+proto/               gRPC contracts (station, schedule, library, playlist, plugin, broadcast, liquidsoap, icecast, live)
 migrations/          SQLite migrations (embedded with sqlx)
 plugins/             example WASM guest plugins (separate crates)
 docker/              images (Dockerfile.dev, Dockerfile.prod), s6-overlay services (rootfs/),
@@ -550,7 +578,7 @@ ETAT.md              development log / hand-over notes (French)
   templates + htmx);
 - roles and permissions (a fixed set per station);
 - mTLS on the internal gRPC channel;
-- live DJ input;
+- live DJ: metadata sent by the DJ to Icecast, recording of the live;
 - per-track cue points and loudness normalisation.
 
 ## License

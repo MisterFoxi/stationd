@@ -14,7 +14,8 @@ services:
     image: stationd-dev
     # Réseau de l'hôte : Icecast voit la vraie IP du reverse proxy
     # (trusted_proxies) ; ports 8000 (Icecast), 127.0.0.1:50051 (gRPC),
-    # 127.0.0.1:8081 (pont Liquidsoap) comme en natif.
+    # 127.0.0.1:8081 (pont Liquidsoap), 8005 (harbor DJ, si [live]) comme
+    # en natif.
     network_mode: host
     environment:
       TZ: Europe/Paris
