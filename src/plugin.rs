@@ -29,7 +29,7 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-use extism::{host_fn, Function, Manifest, Plugin as ExtismPlugin, UserData, Wasm, PTR};
+use extism::{host_fn, Function, Manifest, Plugin as ExtismPlugin, PluginBuilder, UserData, Wasm, PTR};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
 
@@ -1052,8 +1052,17 @@ impl WasmPlugin {
                 push_override,
             ),
         ];
-        let plugin =
-            ExtismPlugin::new(&manifest, functions, false).map_err(|e| e.to_string())?;
+        // No wasmtime disk cache: by default it lives in `$HOME/.cache/wasmtime`,
+        // and in the production image stationd runs as `stationd` with root's
+        // HOME — every WASM plugin then failed to load. The cache only speeds
+        // up start-up compilation (our plugins are small); stationd writes
+        // nothing outside its own directories.
+        let plugin = PluginBuilder::new(&manifest)
+            .with_wasi(false)
+            .with_functions(functions)
+            .with_cache_disabled()
+            .build()
+            .map_err(|e| e.to_string())?;
         let has_filter = plugin.function_exists("filter_pool");
         let has_event = plugin.function_exists("on_event");
         let has_scan = plugin.function_exists("on_scan");
@@ -1124,6 +1133,33 @@ impl Plugin for WasmPlugin {
 
 #[cfg(test)]
 mod tests {
+    /// Loading a WASM plugin must not depend on `$HOME`: in the production
+    /// image stationd runs as `stationd` with root's HOME (s6-setuidgid keeps
+    /// the environment), and wasmtime's default compilation cache
+    /// (`$HOME/.cache/wasmtime`) made every WASM plugin fail to load. HOME
+    /// points at a regular FILE here, so no cache directory can ever be
+    /// created under it — even as root.
+    #[test]
+    fn wasm_plugin_loads_without_a_usable_home() {
+        let dir = tempfile::tempdir().unwrap();
+        let wasm = dir.path().join("empty.wasm");
+        std::fs::write(&wasm, b"\0asm\x01\0\0\0").unwrap(); // empty module
+        let not_a_dir = dir.path().join("home-is-a-file");
+        std::fs::write(&not_a_dir, b"").unwrap();
+        let saved: Vec<_> = ["HOME", "XDG_CACHE_HOME"].iter().map(|k| (*k, std::env::var_os(k))).collect();
+        std::env::set_var("HOME", &not_a_dir);
+        std::env::set_var("XDG_CACHE_HOME", not_a_dir.join("cache"));
+        let host = Host::new("t", &[], None);
+        let loaded = WasmPlugin::new("t".into(), wasm.to_str().unwrap(), &toml::Table::new(), &host);
+        for (k, v) in saved {
+            match v {
+                Some(v) => std::env::set_var(k, v),
+                None => std::env::remove_var(k),
+            }
+        }
+        assert!(loaded.is_ok(), "{}", loaded.err().unwrap_or_default());
+    }
+
     use super::*;
 
     fn decl(name: &str, enabled: bool, config: toml::Table) -> PluginDecl {

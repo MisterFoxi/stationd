@@ -1,0 +1,6 @@
+# Relais d'un flux extérieur (une autre webradio, un Icecast distant).
+name = "Relais"
+
+[selection]
+mode = "remote"
+url  = "https://flux.exemple.org/direct.mp3"

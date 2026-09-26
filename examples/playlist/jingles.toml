@@ -1,0 +1,11 @@
+# Jingles d'identification : liste fixe de fichiers, tirés au hasard.
+name = "Jingles"
+
+[selection]
+mode  = "static"
+order = "shuffle"                # ou "sequential" : dans l'ordre de la liste
+files = [
+  "Jingles/id-01.mp3",
+  "Jingles/id-02.mp3",
+  "Jingles/id-03.mp3",
+]

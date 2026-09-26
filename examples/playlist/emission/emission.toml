@@ -1,0 +1,17 @@
+# Émission : générique, le dernier épisode du podcast, 20 minutes de musique,
+# générique de fin. `./x` = relatif au dossier du groupe (emission/),
+# sinon relatif à playlist/.
+name = "Émission du soir"
+
+[selection]
+mode     = "group"
+strategy = "sequence"
+# Membre sans média (plus d'épisode inédit…) : abort = tout le groupe cède
+# la place à la règle inférieure de la grille ; skip = on passe au suivant.
+on_member_unavailable = "skip"
+members  = [
+  { ref = "./intro",  take = 1 },
+  { ref = "podcast",  take = 1 },
+  { ref = "musique",  runtime = "20m" },
+  { ref = "./outro",  take = 1 },
+]

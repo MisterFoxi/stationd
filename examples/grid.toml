@@ -1,0 +1,83 @@
+# La grille : quoi diffuser à chaque instant. Une [[rule]] par règle, `kind`
+# dit quels champs sont permis. Quand plusieurs règles s'appliquent :
+#   at_clock hard > at_clock soft > every > day_part > base_rotation > fallback
+# Heures dans le fuseau de [station] timezone. Jours : mon … sun.
+schema_version = 1
+
+# Plancher : ce qui passe quand rien d'autre ne s'applique (une seule).
+[[rule]]
+id           = "plancher"
+kind         = "base_rotation"
+playlist_ref = "mix"
+
+# Tranche de nuit, à cheval sur minuit.
+[[rule]]
+id           = "nuit"
+kind         = "day_part"
+playlist_ref = "nuit"
+start        = "22:00"
+end          = "06:00"
+
+# Relais d'un flux extérieur le midi en semaine.
+[[rule]]
+id           = "relais-midi"
+kind         = "day_part"
+playlist_ref = "relais"
+start        = "12:00"
+end          = "13:00"
+days         = ["mon", "tue", "wed", "thu", "fri"]
+
+# L'émission du soir, en semaine. Sans `end`, une tranche reste ouverte
+# jusqu'au début de la suivante.
+[[rule]]
+id           = "emission"
+kind         = "day_part"
+playlist_ref = "emission/emission"
+start        = "19:00"
+end          = "20:00"
+days         = ["mon", "tue", "wed", "thu", "fri"]
+
+# Un jingle toutes les 4 pistes au plus (compteur depuis le dernier passage).
+[[rule]]
+id           = "jingle"
+kind         = "every"
+playlist_ref = "jingles"
+min_tracks   = 4                 # ou min_elapsed = "15m"
+
+# Les dédicaces en attente, au plus toutes les 30 minutes (file vide = rien).
+[[rule]]
+id           = "dedicaces"
+kind         = "every"
+playlist_ref = "dedicaces"
+min_elapsed  = "30m"
+
+# Top horaire : un jingle en début d'heure, à la fin de la piste en cours
+# (soft) ; abandonné s'il n'a pas pu passer dans les 5 minutes.
+[[rule]]
+id            = "top-horaire"
+kind          = "at_clock"
+playlist_ref  = "jingles"
+every_minutes = 60
+mode          = "soft"
+expiry        = "5m"
+
+# Rendez-vous à l'heure pile : coupe la piste en cours (hard), sur une
+# période donnée.
+[[rule]]
+id           = "flash-8h"
+kind         = "at_clock"
+playlist_ref = "jingles"
+at           = "08:00"
+mode         = "hard"
+days         = ["mon", "tue", "wed", "thu", "fri"]
+date_start   = "2026-10-01"
+date_end     = "2026-12-31"
+
+# Créneau DJ (exige [live] dans stationd.toml et le DJ dans le fichier des DJ) :
+# le DJ peut se connecter de `start` jusqu'au début de la tranche suivante.
+# [[rule]]
+# id    = "dj-samedi"
+# kind  = "live"
+# dj    = "alice"
+# start = "21:00"
+# days  = ["sat"]

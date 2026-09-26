@@ -1,0 +1,22 @@
+# Rotation musicale : toute la musique taggée, tirée au hasard, sans répéter
+# un artiste dans l'heure ni un titre dans les 6 heures.
+name = "Musique"
+
+[selection]
+mode  = "dynamic"
+order = "shuffle"
+match = "all"                    # all = ET entre les filtres, any = OU
+
+[[selection.filter]]
+field = "path"
+op    = "prefix"
+value = "Musique/"               # sous-dossier de la médiathèque
+
+[[selection.filter]]
+field = "genre"
+op    = "has_none"
+value = ["talks", "jingle"]      # genres : tags du fichier (et plugin custom-tags)
+
+[broadcast.constraints]
+no_same_artist_within = "1h"
+no_same_track_within  = "6h"

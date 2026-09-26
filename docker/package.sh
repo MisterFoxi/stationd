@@ -9,7 +9,7 @@
 # 2. construit l'image d'exploitation (docker/Dockerfile.prod, sans toolchain) ;
 # 3. vérifie l'image (bibliothèques, Liquidsoap, Icecast, plugins) ;
 # 4. produit dist/stationd-<version>-<rev>.tar : image + compose.yaml +
-#    install.sh + stationd.example.toml + SHA256SUMS.
+#    install.sh + stationd.example.toml + examples/ + SHA256SUMS.
 #
 # Sur le nœud :
 #   scp dist/stationd-<tag>.tar <vm>:/tmp/
@@ -110,9 +110,11 @@ mkdir -p "$out"
 step "export de l'image"
 docker save "stationd:$tag" | gzip > "$out/stationd-$tag.image.tar.gz"
 cp docker/prod/compose.yaml stationd.example.toml "$out/"
+cp -r examples "$out/examples"
 install -m 0755 docker/prod/install.sh "$out/install.sh"
 echo "$tag" > "$out/VERSION"
-(cd "$out" && sha256sum -- * > SHA256SUMS)
+(cd "$out" && find . -type f -printf '%P\0' | sort -z | xargs -0 sha256sum -- > "$root/dist/SHA256SUMS.tmp")
+mv "$root/dist/SHA256SUMS.tmp" "$out/SHA256SUMS"
 tar -C "$root/dist" -cf "$out.tar" "stationd-$tag"
 rm -rf "$out" "$stage"
 

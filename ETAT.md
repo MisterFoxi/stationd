@@ -66,6 +66,13 @@ chargement. Fallback et bruit de fond livrés dans l'image
 (`/usr/share/stationd/{error,bruit}.mp3`, copiés de `radio/` par
 `package.sh`) = défauts de `fallback_path` / `halted_path` (image de dev :
 toujours explicites, `./radio/…`).
+**Exemples (2026-09-26).** `examples/` : une playlist par mode (dynamic
+filtrée + contraintes, static, podcast `newest`+`unplayed_only`, queue,
+remote, groupes `weighted` et `sequence` avec refs `./`) et un `grid.toml`
+des 4 familles (nuit à cheval sur minuit, `at_clock` soft/hard, `every`,
+créneau `live` commenté). `tests/examples.rs` les passe par le vrai `sync`
+et `parse_grid`/`validate_refs` : un exemple qui dérive casse `cargo test`.
+Livrés dans le paquet → `/opt/stationd/examples/` (hors `playlist/`).
 
 La **grille est pilotable de bout en bout en CLI**, projection comprise :
 `grid.toml` (4 familles) → `stationctl schedule validate|apply|export|list|next|preview|check`

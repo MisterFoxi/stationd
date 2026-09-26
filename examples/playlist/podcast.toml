@@ -1,0 +1,14 @@
+# Série de podcasts : le plus récent épisode pas encore diffusé.
+# unplayed_only : chaque épisode ne passe qu'une fois (exige newest/oldest).
+name = "Podcast"
+
+[selection]
+mode          = "dynamic"
+order         = "newest"
+order_by      = "filename"       # filename | mtime | published
+unplayed_only = true
+
+[[selection.filter]]
+field = "path"
+op    = "prefix"
+value = "Podcast/Episodes/"

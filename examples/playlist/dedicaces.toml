@@ -1,0 +1,8 @@
+# File d'attente : rien par elle-même, on y ajoute des titres à la main
+# (stationctl queue push) ; ils passent dans l'ordre d'arrivée.
+name = "Dédicaces"
+
+[selection]
+mode    = "queue"
+order   = "fifo"                 # ou "lifo" : le dernier ajouté d'abord
+max_len = 50

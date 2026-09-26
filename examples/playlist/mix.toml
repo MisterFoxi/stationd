@@ -1,0 +1,11 @@
+# Groupe pondéré : à chaque piste, Musique 3 fois sur 4, Nuit 1 fois sur 4.
+# Sert de plancher dans la grille (base_rotation).
+name = "Mix"
+
+[selection]
+mode     = "group"
+strategy = "weighted"            # weighted | rotate | sequence | shuffle
+members  = [
+  { ref = "musique", weight = 3 },
+  { ref = "nuit",    weight = 1 },
+]

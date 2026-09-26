@@ -462,7 +462,7 @@ image (`docker/rootfs`).
 ```sh
 docker/package.sh                 # clean git tree required; --allow-dirty otherwise
 # → dist/stationd-<version>-<rev>.tar
-#   (image + compose.yaml + install.sh + stationd.example.toml + SHA256SUMS)
+#   (image + compose.yaml + install.sh + stationd.example.toml + examples/ + SHA256SUMS)
 ```
 
 It builds `stationd` / `stationctl` (`--release --locked`) and every
@@ -484,6 +484,7 @@ sudo stationd-<tag>/install.sh            # [--dir /opt/stationd] [--media /mnt/
 /opt/stationd/                     mounted as /var/lib/stationd (stationd's working dir)
   compose.yaml  .env               installed by install.sh
   stationd.example.toml            installed by install.sh (reference)
+  examples/                        installed by install.sh: sample playlists + grid (refreshed each run)
   stationd.toml  grid.toml …       yours — never touched by install.sh
   playlist/  radio/                playlists; your own fallback / noise files (optional)
   data/                            written by stationd (database, station.liq, icecast.xml)
@@ -577,6 +578,7 @@ plugins/             example WASM guest plugins (separate crates)
 docker/              images (Dockerfile.dev, Dockerfile.prod), s6-overlay services (rootfs/),
                      packager (package.sh) and node files (prod/: compose.yaml, install.sh)
 compose.yaml         development container (repository mounted at /src)
+examples/            sample playlists (one per mode) and grid, checked by tests/examples.rs
 Doc/                 architecture and design decisions (mostly in French)
 ETAT.md              development log / hand-over notes (French)
 ```

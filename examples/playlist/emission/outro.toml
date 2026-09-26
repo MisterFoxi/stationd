@@ -1,0 +1,5 @@
+name = "Émission — générique de fin"
+
+[selection]
+mode  = "static"
+files = ["Emission/generique-fin.mp3"]

@@ -1,0 +1,20 @@
+# Programme de nuit : musique calme, morceaux de plus de 3 minutes.
+name = "Nuit"
+
+[selection]
+mode  = "dynamic"
+order = "shuffle"
+match = "all"
+
+[[selection.filter]]
+field = "genre"
+op    = "has_any"
+value = ["ambient", "jazz", "classique"]
+
+[[selection.filter]]
+field = "duration"
+op    = ">="
+value = 180                      # secondes
+
+[broadcast.constraints]
+no_same_track_within = "12h"

@@ -7,8 +7,9 @@
 #   --media  médiathèque montée sur l'hôte (défaut /mnt/nfs/radio) ;
 #            lu seulement à la création du .env
 #
-# Le script installe compose.yaml, stationd.example.toml et, la première
-# fois, .env. Il ne modifie jamais le contenu de stationd.toml, grid.toml,
+# Le script installe compose.yaml, stationd.example.toml, examples/
+# (playlists et grille d'exemple, remplacés à chaque passage) et, la
+# première fois, .env. Il ne modifie jamais le contenu de stationd.toml, grid.toml,
 # playlist/, radio/ ni data/ ; il (ré)applique seulement les droits.
 # Le compte qui lance sudo rejoint le groupe stationd : config, grille,
 # playlists et radio/ s'éditent sans sudo ; data/ reste le répertoire de
@@ -65,6 +66,13 @@ if [ -n "$admin" ] && [ "$admin" != root ] \
 fi
 install -m 0644 "$here/compose.yaml" "$dir/compose.yaml"
 install -m 0660 -o stationd -g stationd "$here/stationd.example.toml" "$dir/stationd.example.toml"
+# Exemples : hors de playlist/ (stationd ne les charge pas), rafraîchis à
+# chaque installation — ne rien y modifier, copier ce qu'on garde.
+rm -rf "$dir/examples"
+cp -r "$here/examples" "$dir/examples"
+chown -R stationd:stationd "$dir/examples"
+find "$dir/examples" -type d -exec chmod 2770 {} +
+find "$dir/examples" -type f -exec chmod 0660 {} +
 
 if [ -f "$dir/.env" ]; then
   sed -i "s/^STATIOND_VERSION=.*/STATIOND_VERSION=$tag/" "$dir/.env"
