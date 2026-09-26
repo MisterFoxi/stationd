@@ -53,8 +53,9 @@ remplace l'installation systemd. README « Run (Docker) »,
 `docker/Dockerfile.prod` (`stationd:<version>-<rev>`), la vérifie et produit
 `dist/stationd-<tag>.tar` (image + `docker/prod/compose.yaml` +
 `docker/prod/install.sh` + exemple de config + SHA256SUMS). Sur le nœud :
-`install.sh` → `/opt/stationd` (compose, `.env`), état dans `/srv/stationd`
-(monté en `/var/lib/stationd`), utilisateur hôte `stationd`. UID/GID de
+`install.sh` → **un seul répertoire** (`/opt/stationd` par défaut) : compose,
+`.env`, config, playlists, radio, data, monté en `/var/lib/stationd` ;
+utilisateur hôte `stationd`. UID/GID de
 stationd et groupe des médias appliqués au démarrage par `init-perms`
 (une image pour tous les nœuds). README « Package & deploy ».
 

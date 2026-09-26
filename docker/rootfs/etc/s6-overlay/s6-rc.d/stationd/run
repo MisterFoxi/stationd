@@ -1,7 +1,7 @@
 #!/command/with-contenv sh
 # stationd, cwd = $STATIOND_ROOT (chemins relatifs de stationd.toml) :
 #   dev          → utilisateur `dev`, racine du dépôt monté (/src)
-#   exploitation → utilisateur `stationd`, /var/lib/stationd (= /srv/stationd de l'hôte)
+#   exploitation → utilisateur `stationd`, /var/lib/stationd (= répertoire d'installation de l'hôte)
 # Prêt = répond en gRPC (data/check) : à ce stade station.liq et icecast.xml
 # sont écrits (main.rs les écrit avant d'ouvrir le port) → Icecast et
 # Liquidsoap peuvent démarrer.

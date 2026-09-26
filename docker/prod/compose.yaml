@@ -1,9 +1,11 @@
-# Exploitation d'un nœud stationd (VM de test / prod). Installé dans
-# /opt/stationd par install.sh ; variables dans /opt/stationd/.env (générées
-# par install.sh à la première installation).
+# Exploitation d'un nœud stationd. Tout est dans le répertoire de ce fichier
+# (/opt/stationd par défaut, cf. install.sh), monté tel quel dans le
+# conteneur en /var/lib/stationd (répertoire de travail de stationd) :
 #
-#   /srv/stationd (hôte) → /var/lib/stationd : stationd.toml, grid.toml,
-#   playlist/, radio/ (fallback, bruit), data/ (base, .liq, icecast.xml).
+#   compose.yaml  .env              installés par install.sh
+#   stationd.toml grid.toml …       à vous (config, fichier des DJ…)
+#   playlist/  radio/               playlists, fallback + bruit de fond
+#   data/                           écrit par stationd (base, .liq, icecast.xml)
 name: stationd
 services:
   station:
@@ -20,7 +22,7 @@ services:
       STATIOND_GID: ${STATIOND_GID:?STATIOND_GID manquant (.env)}
       MEDIA_GID: ${MEDIA_GID:?MEDIA_GID manquant (.env)}
     volumes:
-      - /srv/stationd:/var/lib/stationd
+      - .:/var/lib/stationd
       # Même chemin que [media] library_path de stationd.toml.
       - ${MEDIA_PATH:?MEDIA_PATH manquant (.env)}:${MEDIA_PATH}
     restart: unless-stopped

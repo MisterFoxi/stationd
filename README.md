@@ -470,39 +470,45 @@ It builds `stationd` / `stationctl` (`--release --locked`) and every
 `stationd:<version>-<rev>`, checks it (shared libraries, Liquidsoap, Icecast,
 plugins) and saves it.
 
-**Deploy** (node: Docker from `docker-ce` + compose plugin, media mounted):
+**Deploy** (node: Docker from `docker-ce` + compose plugin, media mounted).
+Everything lives in **one directory**, `/opt/stationd` by default:
 
 ```sh
 scp dist/stationd-<tag>.tar <node>:/tmp/
 ssh <node>
 cd /tmp && tar xf stationd-<tag>.tar
-sudo stationd-<tag>/install.sh --media /mnt/nfs/radio   # --media: first install only
+sudo stationd-<tag>/install.sh            # [--dir /opt/stationd] [--media /mnt/nfs/radio]
 ```
 
-`install.sh` loads the image, creates the host user/group `stationd`,
-`/srv/stationd/{data,playlist,radio}` and `/opt/stationd/{compose.yaml,.env}`
-(`.env`: image tag, `stationd` UID/GID, media path and its group). It never
-touches `/srv/stationd/stationd.toml` or the data. First install: write
-`stationd.toml` from `/srv/stationd/stationd.example.toml`, put the fallback
-and noise files in `/srv/stationd/radio/`, then
-`docker compose -f /opt/stationd/compose.yaml up -d`. Update: same commands
-with the new bundle (the tag in `.env` is bumped, the container recreated).
-Roll back: set the previous `STATIOND_VERSION` in `/opt/stationd/.env` and
-`up -d` again (older images stay loaded).
+```
+/opt/stationd/                     mounted as /var/lib/stationd (stationd's working dir)
+  compose.yaml  .env               installed by install.sh
+  stationd.example.toml            installed by install.sh (reference)
+  stationd.toml  grid.toml …       yours — never touched by install.sh
+  playlist/  radio/                playlists; fallback and noise files
+  data/                            written by stationd (database, station.liq, icecast.xml)
+```
 
-| Node | Container | Content |
-|---|---|---|
-| `/srv/stationd` | `/var/lib/stationd` (stationd's working dir) | `stationd.toml`, `grid.toml`, `playlist/`, `radio/`, `data/` (database, `station.liq`, `icecast.xml`) |
-| `MEDIA_PATH` | same path | media library (`[media] library_path`) |
+`install.sh` loads the image, creates the system user `stationd` (owner of
+the directory) and, the first time, `.env` (image tag, `stationd` UID/GID,
+media path and its group — applied in the container at start-up). It starts
+the station when `stationd.toml` exists; otherwise it stops there.
 
-Differences from the development `stationd.toml`: WASM plugins are
-`wasm = "/usr/lib/stationd/plugins/<crate>.wasm"`; relative paths resolve
-against `/srv/stationd`. The UID/GID of `stationd` and the media group are
-applied at start-up (`init-perms`, from `.env`): one image for every node.
+First install: write `stationd.toml` from `stationd.example.toml` — relative
+paths resolve against the directory (`./radio/error.mp3`,
+`./playlist`…), `[media] library_path` = the `--media` path, WASM plugins at
+`wasm = "/usr/lib/stationd/plugins/<crate>.wasm"`,
+`control_socket = "/run/stationd/liquidsoap.sock"` — then
+`cd /opt/stationd && docker compose up -d`.
+
+Update: same three commands with the new bundle (only `STATIOND_VERSION`
+changes in `.env`). Roll back: put the previous version back in `.env`, then
+`docker compose up -d` (older images stay loaded).
 
 ```sh
-alias stationctl='docker compose -f /opt/stationd/compose.yaml exec -u stationd station stationctl'
-docker compose -f /opt/stationd/compose.yaml logs -f station
+cd /opt/stationd
+docker compose logs -f
+docker compose exec -u stationd station stationctl status
 ```
 
 ---
