@@ -16,6 +16,10 @@ if [ ! -f "$STATIOND_ROOT/stationd.toml" ]; then
   sleep 5
   exit 1
 fi
+# Exploitation : umask 007 (STATIOND_UMASK) — ce que stationd écrit
+# (playlist add…) reste modifiable par le groupe stationd, donc par
+# l'administrateur du nœud. Dev : 022 (défaut), rien ne change.
+umask "${STATIOND_UMASK:-022}"
 exec s6-notifyoncheck -d -n 0 -s 500 -w 1000 -t 3000 \
   s6-setuidgid "${STATIOND_USER:-dev}" \
   sh -c 'cd "$STATIOND_ROOT" && exec "$STATIOND_BIN/stationd" --config stationd.toml'

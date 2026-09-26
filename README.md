@@ -494,6 +494,14 @@ the directory) and, the first time, `.env` (image tag, `stationd` UID/GID,
 media path and its group — applied in the container at start-up). It starts
 the station when `stationd.toml` exists; otherwise it stops there.
 
+Permissions: the account running `sudo` joins the group `stationd` (log in
+again once): `stationd.toml`, `grid.toml`, `playlist/` and `radio/` are edited
+without `sudo`. The shared directories are `2770 stationd:stationd` (setgid:
+what you create belongs to the group) and stationd writes with `umask 007`,
+so the files it writes stay editable by the group; `data/` is `0750` (the
+group creates and deletes nothing there). `install.sh` re-applies these
+permissions on every run.
+
 First install: write `stationd.toml` from `stationd.example.toml` — relative
 paths resolve against the directory (`./radio/error.mp3`,
 `./playlist`…), `[media] library_path` = the `--media` path, WASM plugins at

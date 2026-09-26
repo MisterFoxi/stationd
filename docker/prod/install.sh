@@ -8,10 +8,14 @@
 #            lu seulement à la création du .env
 #
 # Le script installe compose.yaml, stationd.example.toml et, la première
-# fois, .env. Il ne touche jamais à stationd.toml, grid.toml, playlist/,
-# radio/ ni data/. Mise à jour : seule la ligne STATIOND_VERSION du .env
-# change ; l'ancienne image reste chargée (retour arrière = remettre
-# l'ancienne version dans .env, puis docker compose up -d).
+# fois, .env. Il ne modifie jamais le contenu de stationd.toml, grid.toml,
+# playlist/, radio/ ni data/ ; il (ré)applique seulement les droits.
+# Le compte qui lance sudo rejoint le groupe stationd : config, grille,
+# playlists et radio/ s'éditent sans sudo ; data/ reste le répertoire de
+# stationd (le groupe n'y crée ni n'y supprime rien).
+# Mise à jour : seule la ligne STATIOND_VERSION du .env change ; l'ancienne
+# image reste chargée (retour arrière = remettre l'ancienne version dans
+# .env, puis docker compose up -d).
 set -euo pipefail
 
 dir=/opt/stationd
@@ -42,9 +46,25 @@ getent group stationd >/dev/null || groupadd --system stationd
 id stationd >/dev/null 2>&1 \
   || useradd --system -g stationd -d "$dir" -M -s /usr/sbin/nologin stationd
 
-install -d -m 0750 -o stationd -g stationd "$dir" "$dir/data" "$dir/playlist" "$dir/radio"
+# Droits (réappliqués à chaque passage) : répertoires partagés en 2770 — le
+# setgid donne au groupe stationd ce que l'administrateur y crée ; data/ :
+# répertoire en 0750 (le groupe n'y crée ni n'y supprime rien).
+install -d -m 2770 -o stationd -g stationd "$dir" "$dir/playlist" "$dir/radio"
+install -d -m 0750 -o stationd -g stationd "$dir/data"
+find "$dir/playlist" "$dir/radio" -mindepth 1 -type d -exec chmod 2770 {} +
+chgrp -R stationd "$dir/playlist" "$dir/radio"
+chmod -R g+rwX "$dir/playlist" "$dir/radio"
+find "$dir" -maxdepth 1 -name '*.toml' -exec chgrp stationd {} + -exec chmod g+rw {} +
+
+admin="${SUDO_USER:-}"
+relog=""
+if [ -n "$admin" ] && [ "$admin" != root ] \
+   && ! id -nG "$admin" | tr ' ' '\n' | grep -qx stationd; then
+  usermod -aG stationd "$admin"
+  relog="$admin ajouté au groupe stationd : se reconnecter pour éditer $dir sans sudo."
+fi
 install -m 0644 "$here/compose.yaml" "$dir/compose.yaml"
-install -m 0640 -o stationd -g stationd "$here/stationd.example.toml" "$dir/stationd.example.toml"
+install -m 0660 -o stationd -g stationd "$here/stationd.example.toml" "$dir/stationd.example.toml"
 
 if [ -f "$dir/.env" ]; then
   sed -i "s/^STATIOND_VERSION=.*/STATIOND_VERSION=$tag/" "$dir/.env"
@@ -59,6 +79,8 @@ MEDIA_GID=$(stat -c %g "$media")
 TZ=$(cat /etc/timezone 2>/dev/null || echo UTC)
 EOF
 fi
+
+[ -z "$relog" ] || { echo; echo "$relog"; }
 
 if [ ! -f "$dir/stationd.toml" ]; then
   echo

@@ -50,6 +50,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     STATIOND_ROOT=/var/lib/stationd \
     STATIOND_BIN=/usr/local/bin \
     STATIOND_USER=stationd \
+    STATIOND_UMASK=007 \
     S6_CMD_WAIT_FOR_SERVICES_MAXTIME=0
 
 # tzdata : jiff résout [station] timezone dans /usr/share/zoneinfo.

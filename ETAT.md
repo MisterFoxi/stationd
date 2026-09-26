@@ -1762,6 +1762,11 @@ dans le découpage des modules (`grid_index` = A, `grid_store` = B).
     `package.sh` le récupère par `docker compose cp`, pas depuis le dépôt.
   - Chemins des plugins WASM sur un nœud : `/usr/lib/stationd/plugins/<crate>.wasm`
     (le `stationd.toml` de dev pointe vers `plugins/*/target/…`).
+  - Droits sur le nœud : le compte qui lance `sudo install.sh` rejoint le
+    groupe `stationd` (se reconnecter) ; répertoire, `playlist/`, `radio/` en
+    `2770` (setgid), `data/` en `0750` ; stationd écrit en `umask 007`
+    (`STATIOND_UMASK` de `Dockerfile.prod`, dev inchangé en 022). Droits
+    réappliqués à chaque passage d'`install.sh`.
   - `install.sh` ne réécrit jamais `stationd.toml` ni `.env` (sauf la ligne
     `STATIOND_VERSION`) ; retour arrière = ancienne version dans `.env` + `up -d`.
 
