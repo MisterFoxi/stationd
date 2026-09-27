@@ -30,3 +30,7 @@ pub mod icecast {
 pub mod live {
     tonic::include_proto!("webradio.live.v1");
 }
+
+pub mod stats {
+    tonic::include_proto!("webradio.stats.v1");
+}

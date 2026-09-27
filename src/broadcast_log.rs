@@ -1,7 +1,9 @@
 //! Family (B) — station-wide broadcast history, against the `broadcast_log`
 //! table of migration 0011. The SQL pendant of "a track started at T".
 //!
-//! Written at each track start by the grid engine (`next_media`); read by the
+//! Written when the grid engine chooses a track (`next_media`, overrides,
+//! hard rendez-vous), with its provenance (rule, origin, playlist, leaf) and
+//! stamped `aired_at` when Liquidsoap really starts it (migration 0020); read by the
 //! selection stage (`apply_constraints`) to drop candidates that played within
 //! an anti-repetition window (`no_same_track_within` / `no_same_artist_within`).
 //!
@@ -16,21 +18,123 @@ use sqlx::SqlitePool;
 
 use crate::resolver::Epoch;
 
-/// Record that a track STARTED at `played_at`. `artist` is the media's artist
-/// tag (`None` = untagged — it will never match an artist window).
+/// Where a logged track came from (migration 0020). `origin` is the short
+/// label: `AtClockHard`, `AtClockSoft`, `Every`, `DayPart`, `BaseRotation`,
+/// `Override`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Provenance<'a> {
+    pub rule_id: Option<&'a str>,
+    pub origin: Option<&'a str>,
+    pub playlist_ref: Option<&'a str>,
+    pub leaf_ref: Option<&'a str>,
+}
+
+/// Record that a track was CHOSEN to start at `played_at` (the anti-repetition
+/// windows count it from then). `artist` is the media's artist tag (`None` =
+/// untagged — it will never match an artist window). Returns the row id, to
+/// stamp the real air start later (`mark_aired`).
 pub async fn record(
     pool: &SqlitePool,
     rel_path: &str,
     artist: Option<&str>,
     played_at: Epoch,
-) -> Result<(), sqlx::Error> {
-    sqlx::query("INSERT INTO broadcast_log (rel_path, artist, played_at) VALUES (?1, ?2, ?3)")
-        .bind(rel_path)
-        .bind(artist)
-        .bind(played_at.0)
+    from: Provenance<'_>,
+) -> Result<i64, sqlx::Error> {
+    let r = sqlx::query(
+        "INSERT INTO broadcast_log (rel_path, artist, played_at, rule_id, origin, playlist_ref, leaf_ref)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+    )
+    .bind(rel_path)
+    .bind(artist)
+    .bind(played_at.0)
+    .bind(from.rule_id)
+    .bind(from.origin)
+    .bind(from.playlist_ref)
+    .bind(from.leaf_ref)
+    .execute(pool)
+    .await?;
+    Ok(r.last_insert_rowid())
+}
+
+/// Liquidsoap really started the track logged as `id` at `at`.
+pub async fn mark_aired(pool: &SqlitePool, id: i64, at: Epoch) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE broadcast_log SET aired_at = ?2 WHERE id = ?1 AND aired_at IS NULL")
+        .bind(id)
+        .bind(at.0)
         .execute(pool)
         .await?;
     Ok(())
+}
+
+/// What `plays` groups the history by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlaysBy {
+    /// The rule's / override's playlist (a group counts as the group).
+    Playlist,
+    /// The leaf playlist that produced the file (a group's member).
+    Leaf,
+    Rule,
+    Origin,
+    Media,
+    Artist,
+}
+
+impl PlaysBy {
+    fn column(self) -> &'static str {
+        match self {
+            PlaysBy::Playlist => "playlist_ref",
+            PlaysBy::Leaf => "leaf_ref",
+            PlaysBy::Rule => "rule_id",
+            PlaysBy::Origin => "origin",
+            PlaysBy::Media => "rel_path",
+            PlaysBy::Artist => "artist",
+        }
+    }
+}
+
+/// One line of `plays`: `key` `None` = unknown (rows older than migration
+/// 0020, an override without a rule, an untagged artist…).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlaysRow {
+    pub key: Option<String>,
+    /// Chosen by stationd (every logged row).
+    pub picked: u64,
+    /// Really started by Liquidsoap (`aired_at` set).
+    pub aired: u64,
+    /// Last choice (epoch UTC).
+    pub last_at: i64,
+}
+
+/// Plays since `cutoff` (epoch UTC), grouped `by`, most aired first (then
+/// most picked, then key); at most `limit` lines (0 = all).
+pub async fn plays(
+    pool: &SqlitePool,
+    cutoff: i64,
+    by: PlaysBy,
+    limit: u32,
+) -> Result<Vec<PlaysRow>, sqlx::Error> {
+    let col = by.column();
+    let limit = if limit == 0 { -1 } else { i64::from(limit) };
+    let rows: Vec<(Option<String>, i64, i64, i64)> = sqlx::query_as(&format!(
+        "SELECT {col}, count(*), count(aired_at), max(played_at)
+         FROM broadcast_log WHERE played_at >= ?1
+         GROUP BY {col}
+         ORDER BY count(aired_at) DESC, count(*) DESC, {col}
+         LIMIT ?2"
+    ))
+    .bind(cutoff)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(key, picked, aired, last_at)| PlaysRow {
+            key,
+            picked: picked as u64,
+            aired: aired as u64,
+            last_at,
+        })
+        .collect())
 }
 
 /// Distinct `rel_path`s that started at or after `cutoff` (epoch UTC) — the set
@@ -71,8 +175,8 @@ mod tests {
     #[tokio::test]
     async fn records_and_windows_by_time() {
         let (_d, pool) = fresh_db().await;
-        record(&pool, "a.mp3", Some("X"), Epoch(1_000)).await.unwrap();
-        record(&pool, "b.mp3", None, Epoch(2_000)).await.unwrap();
+        record(&pool, "a.mp3", Some("X"), Epoch(1_000), Provenance::default()).await.unwrap();
+        record(&pool, "b.mp3", None, Epoch(2_000), Provenance::default()).await.unwrap();
 
         // cutoff 1_500 → only b.mp3 (played at 2_000) is "recent".
         let tracks = tracks_since(&pool, 1_500).await.unwrap();
@@ -86,10 +190,55 @@ mod tests {
     #[tokio::test]
     async fn artists_ignore_untagged_plays() {
         let (_d, pool) = fresh_db().await;
-        record(&pool, "a.mp3", Some("X"), Epoch(1_000)).await.unwrap();
-        record(&pool, "b.mp3", None, Epoch(1_000)).await.unwrap(); // untagged
+        record(&pool, "a.mp3", Some("X"), Epoch(1_000), Provenance::default()).await.unwrap();
+        record(&pool, "b.mp3", None, Epoch(1_000), Provenance::default()).await.unwrap(); // untagged
         let artists = artists_since(&pool, 0).await.unwrap();
         assert_eq!(artists.len(), 1, "NULL artist is not a constraint");
         assert!(artists.contains("X"));
+    }
+
+    #[tokio::test]
+    async fn plays_group_by_provenance_and_count_aired_apart() {
+        let (_d, pool) = fresh_db().await;
+        let from = |rule, origin, pl, leaf| Provenance {
+            rule_id: rule,
+            origin: Some(origin),
+            playlist_ref: Some(pl),
+            leaf_ref: Some(leaf),
+        };
+        let a = record(&pool, "j.mp3", None, Epoch(1_000), from(Some("OneHit"), "Every", "one_hit", "onehit/jingleshit"))
+            .await
+            .unwrap();
+        let b = record(&pool, "h.mp3", Some("X"), Epoch(1_010), from(Some("OneHit"), "Every", "one_hit", "onehit/hit"))
+            .await
+            .unwrap();
+        record(&pool, "m.mp3", Some("X"), Epoch(1_020), from(Some("floor"), "BaseRotation", "rotation", "rotation"))
+            .await
+            .unwrap();
+        record(&pool, "old.mp3", None, Epoch(1_030), Provenance::default()).await.unwrap();
+        mark_aired(&pool, a, Epoch(1_001)).await.unwrap();
+        mark_aired(&pool, b, Epoch(1_011)).await.unwrap();
+        mark_aired(&pool, b, Epoch(9_999)).await.unwrap(); // first stamp wins
+
+        let by_pl = plays(&pool, 0, PlaysBy::Playlist, 0).await.unwrap();
+        assert_eq!(
+            by_pl,
+            vec![
+                PlaysRow { key: Some("one_hit".into()), picked: 2, aired: 2, last_at: 1_010 },
+                PlaysRow { key: None, picked: 1, aired: 0, last_at: 1_030 },
+                PlaysRow { key: Some("rotation".into()), picked: 1, aired: 0, last_at: 1_020 },
+            ]
+        );
+        let by_leaf = plays(&pool, 0, PlaysBy::Leaf, 0).await.unwrap();
+        assert_eq!(by_leaf.iter().filter(|r| r.key.as_deref().is_some_and(|k| k.starts_with("onehit/"))).count(), 2);
+        let by_rule = plays(&pool, 1_015, PlaysBy::Rule, 0).await.unwrap();
+        assert_eq!(by_rule.len(), 2, "window: floor + unknown only");
+        assert_eq!(plays(&pool, 0, PlaysBy::Artist, 1).await.unwrap().len(), 1, "limit");
+        let aired_at: Option<i64> = sqlx::query_scalar("SELECT aired_at FROM broadcast_log WHERE id = ?1")
+            .bind(b)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(aired_at, Some(1_011));
     }
 }

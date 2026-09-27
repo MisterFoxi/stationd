@@ -5,7 +5,7 @@
 
 use clap::{Parser, Subcommand};
 
-use stationd::proto::{broadcast, icecast, library, liquidsoap, live, plugin, schedule, station};
+use stationd::proto::{broadcast, icecast, library, liquidsoap, live, plugin, schedule, station, stats};
 
 use station::station_client::StationClient;
 use station::{PlaylistAddRequest, PlaylistListRequest, PlaylistSyncRequest, QuitRequest, StatusRequest};
@@ -25,6 +25,8 @@ use liquidsoap::{GetStatusRequest as LsStatusRequest, RenderScriptRequest};
 use icecast::icecast_service_client::IcecastServiceClient;
 use icecast::{GetStatusRequest as IcecastStatusRequest, RenderConfigRequest as IcecastRenderRequest};
 use live::live_service_client::LiveServiceClient;
+use stats::stats_service_client::StatsServiceClient;
+use stats::{plays_request::By as PlaysBy, PlaysRequest};
 use live::{CloseRequest as LiveCloseRequest, GetStatusRequest as LiveStatusRequest, HashPasswordRequest, KickRequest, OpenRequest as LiveOpenRequest};
 use broadcast::{
     control_request::Action as BroadcastAction, push_override_request, ClearOverridesRequest,
@@ -90,6 +92,33 @@ enum Command {
     /// DJ file helpers ([live] djs_path)
     #[command(subcommand)]
     Dj(DjCommand),
+    /// Broadcast statistics: plays grouped by playlist, rule, media…
+    /// (`aired` = really started by Liquidsoap, `picked` = chosen by stationd)
+    Stats {
+        /// Window up to now: 30m, 24h, 7d…
+        #[arg(long, default_value = "24h")]
+        since: String,
+        /// Grouping
+        #[arg(long, value_enum, default_value = "playlist")]
+        by: StatsBy,
+        /// Max lines (0 = all)
+        #[arg(long, default_value_t = 20)]
+        limit: u32,
+    },
+}
+
+#[derive(clap::ValueEnum, Clone, Copy, Debug)]
+enum StatsBy {
+    /// The rule's / override's playlist (a group counts as the group)
+    Playlist,
+    /// The leaf playlist that produced the file (a group's member)
+    Leaf,
+    /// Grid rule
+    Rule,
+    /// AtClockHard, Every, BaseRotation, Override…
+    Origin,
+    Media,
+    Artist,
 }
 
 #[derive(Subcommand, Debug)]
@@ -1064,6 +1093,42 @@ async fn main() -> anyhow::Result<()> {
             let r = lv.close(LiveCloseRequest { dj }).await?.into_inner();
             if let Some(o) = r.opening {
                 println!("opening of {} closed (opened {})", o.dj, ago(o.opened_at));
+            }
+        }
+        Command::Stats { since, by, limit } => {
+            let by = match by {
+                StatsBy::Playlist => PlaysBy::Playlist,
+                StatsBy::Leaf => PlaysBy::Leaf,
+                StatsBy::Rule => PlaysBy::Rule,
+                StatsBy::Origin => PlaysBy::Origin,
+                StatsBy::Media => PlaysBy::Media,
+                StatsBy::Artist => PlaysBy::Artist,
+            };
+            let mut cli = StatsServiceClient::connect(args.addr.clone()).await?;
+            let r = cli
+                .plays(PlaysRequest { since: since.clone(), by: by as i32, limit })
+                .await?
+                .into_inner();
+            let local = |t: i64| {
+                jiff::Timestamp::from_second(t)
+                    .map(|ts| ts.to_zoned(jiff::tz::TimeZone::system()).strftime("%d/%m %H:%M").to_string())
+                    .unwrap_or_else(|_| t.to_string())
+            };
+            println!(
+                "{} → {}  ({} aired / {} picked)",
+                local(r.from),
+                local(r.to),
+                r.total_aired,
+                r.total_picked
+            );
+            if r.rows.is_empty() {
+                println!("(nothing played in this window)");
+            }
+            let width = r.rows.iter().map(|x| x.key.chars().count().max(9)).max().unwrap_or(9);
+            println!("{:>6} {:>7}  {:<width$}  last", "aired", "picked", "");
+            for x in &r.rows {
+                let key = if x.key.is_empty() { "(unknown)" } else { x.key.as_str() };
+                println!("{:>6} {:>7}  {:<width$}  {}", x.aired, x.picked, key, local(x.last_at));
             }
         }
         Command::Dj(DjCommand::Hash) => {

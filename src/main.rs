@@ -17,6 +17,7 @@ use stationd::ls_grpc::LsGrpc;
 use stationd::icecast_grpc::icecast::icecast_service_server::IcecastServiceServer;
 use stationd::icecast_grpc::IcecastGrpc;
 use stationd::live_grpc::live::live_service_server::LiveServiceServer;
+use stationd::stats_grpc::{stats::stats_service_server::StatsServiceServer, StatsGrpc};
 use stationd::live_grpc::LiveGrpc;
 use stationd::grid_engine::GridEngine;
 use stationd::station_control::StationControl;
@@ -283,7 +284,7 @@ async fn main() -> anyhow::Result<()> {
         shutdown_tx,
     );
 
-    info!(%addr, "gRPC server listening (status, quit, schedule, library, plugin, broadcast, liquidsoap, icecast, live)");
+    info!(%addr, "gRPC server listening (status, quit, schedule, library, plugin, broadcast, liquidsoap, icecast, live, stats)");
 
     // Three ways to shut down cleanly: via `stationctl quit` (shutdown_rx,
     // triggered by the service's `quit` handler), or via a signal — Ctrl+C
@@ -316,6 +317,7 @@ async fn main() -> anyhow::Result<()> {
         .add_service(LiquidsoapServiceServer::new(ls_service))
         .add_service(IcecastServiceServer::new(icecast_service))
         .add_service(LiveServiceServer::new(live_service))
+        .add_service(StatsServiceServer::new(StatsGrpc::new(db_pool.clone())))
         .serve_with_shutdown(addr, shutdown_signal)
         .await?;
 

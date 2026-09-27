@@ -188,6 +188,72 @@ Autres, indépendants :
 
 ## Fait
 
+### — Statistiques de diffusion : provenance dans `broadcast_log`, `stationctl stats` (2026-09-27) —
+
+Décision (utilisateur) : dans le core (voie 1), un plugin complémentaire
+restant possible plus tard.
+
+- **Migration 0020** : `broadcast_log` + `rule_id`, `origin`, `playlist_ref`
+  (la playlist de la règle / de l'override — un groupe reste le groupe),
+  `leaf_ref` (la feuille qui a produit le fichier), `aired_at`. Historique
+  antérieur : provenance NULL.
+- Rappel (le commentaire de 0011 le dit mal, migration figée) : une ligne est
+  écrite quand stationd **choisit** la piste (`log_start`, y compris
+  overrides et coupures hard), pas quand elle part. `aired_at` est posé par le
+  pont quand Liquidsoap la démarre réellement (`track_started` → `Pending.log_id`
+  → `GridEngine::mark_aired`) ; une piste préparée puis vidée reste `NULL`.
+  L'anti-répétition compte toujours à partir du choix.
+- `broadcast_log::{Provenance, record → id, mark_aired, plays(by)}` ;
+  `ResolvedDecision.log_id`.
+- **Contrat / CLI** : `stats_v1.proto` (`StatsService.Plays`), `src/stats_grpc.rs` ;
+  `stationctl stats [--since 24h] [--by playlist|leaf|rule|origin|media|artist]
+  [--limit 20]` → `aired` / `picked` / dernier passage (heure locale).
+- Tests (+3) : regroupements, `aired` à part (1ᵉʳ tampon gagnant), fenêtre,
+  limite ; provenance d'un groupe tenu (groupe / feuille / règle) ; pont :
+  piste démarrée tamponnée, piste préparée non.
+- Plugin complémentaire (plus tard) : il lui faudrait un événement « piste
+  réellement partie » (`TrackStarted`, déjà dans les souhaitables) plutôt que
+  `TrackResolved`.
+
+**Validation** : `cargo test --locked` vert (426). Migration 0020 essayée sur
+une copie de la base de devstationd (89 lignes, colonnes ajoutées).
+
+### — Grille : un groupe lancé par `every` / `at_clock` garde l'antenne (2026-09-27) —
+
+Bug constaté en réel : `one_hit` (groupe `sequence` jingle → hit, règle
+`every` 45 min) ne jouait que le jingle. L'`every` était remis à zéro dès la
+1ʳᵉ piste, la rotation reprenait la main au tour suivant et le hit restait en
+attente dans `group_state`. Décision (utilisateur) : le groupe garde l'antenne
+jusqu'à la fin de son cycle, `on_member_unavailable` s'applique.
+
+- **Migration 0019** `grid_hold` (famille B, une ligne) ; `grid_store::{get,set,
+  clear}_hold`.
+- **`selection::resolve_turn`** : un tour + `holds` (groupe `sequence` /
+  `shuffle` au cycle inachevé). En continuation, jamais de nouveau cycle :
+  fin de cycle (ou membres restants vides sous `skip`) → `CycleComplete`,
+  état du groupe remis en tête. `rotate` / `weighted` : une piste par
+  activation, comme avant.
+- **`GridEngine::next_media`** : le groupe tenu est placé juste après les
+  `at_clock hard` (override au-dessus) ; effets de la règle (`every`, jeton)
+  persistés au 1er morceau seulement ; fin de cycle → hold levé ; membre vide
+  sous `abort` → hold levé + groupe remis en tête ; règle disparue /
+  désactivée / autre playlist → hold abandonné (loggué). `air_at_clock_hard`
+  pose aussi un hold si son groupe en a besoin (et remplace un autre hold,
+  dont le groupe repart du début). Survit au redémarrage. Logs : `group holds
+  the air…`, `held group: cycle complete`, `…hold released`.
+- Tests (+6) : cycle complet puis rotation, redémarrage, `skip` sans 2ᵉ
+  jingle, `abort`, coupure hard puis reprise du groupe, règle désactivée.
+
+- **Complément (utilisateur, 2026-09-27)** : le groupe **repart du début
+  sur sa règle** (`selection::TurnStart::Fresh` quand `every` / `at_clock` le
+  déclenche ; `Resume` en day part / base / override ; `Continue` quand il est
+  tenu). Constaté avant : un curseur resté sur le hit (activation interrompue)
+  faisait jouer le hit seul. Test +1.
+
+**Validation** : `cargo test --locked` vert (424, puis 427). Connu : un `at_clock soft`
+dû pendant un groupe tenu attend la fin du groupe (peut expirer) ; le hold
+n'est visible que dans les logs (pas encore de commande CLI).
+
 ### — Plugins : capacité `db`, base SQLite propre à chaque plugin (2026-09-27) —
 
 Décisions (utilisateur) : du vrai SQL scopé plutôt qu'un clé/valeur ;

@@ -47,5 +47,6 @@ pub mod resolver;
 pub mod schedule_grpc;
 pub mod selection;
 pub mod station_control;
+pub mod stats_grpc;
 pub mod store;
 pub mod sync;

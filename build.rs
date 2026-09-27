@@ -26,6 +26,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .compile_protos(&["proto/icecast_v1.proto"], &["proto"])?;
     // The live DJ service (status, kick, password hash — stationctl live / dj).
     tonic_build::compile_protos("proto/live_v1.proto")?;
+    // Broadcast statistics (plays by playlist / rule / media — stationctl stats).
+    tonic_build::compile_protos("proto/stats_v1.proto")?;
 
     // Force a rebuild whenever a migration file is added, changed, or
     // removed. `sqlx::migrate!` embeds the migrations into the binary at
@@ -45,6 +47,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-changed=proto/liquidsoap_v1.proto");
     println!("cargo:rerun-if-changed=proto/icecast_v1.proto");
     println!("cargo:rerun-if-changed=proto/live_v1.proto");
+    println!("cargo:rerun-if-changed=proto/stats_v1.proto");
 
     Ok(())
 }

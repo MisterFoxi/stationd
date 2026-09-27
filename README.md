@@ -557,6 +557,7 @@ docker compose exec -u stationd station stationctl status
 | `queue push` | Feed a `queue` playlist (listener request / DJ injection) |
 | `plugin list` \| `start` \| `stop` \| `restart` \| `reload` | Plugin lifecycle |
 | `plugin db <name> info` \| `query "<SELECT>"` \| `reset --yes` | A plugin's own database (read-only query; reset only when stopped) |
+| `stats [--since 24h] [--by playlist\|leaf\|rule\|origin\|media\|artist] [--limit 20]` | Plays per playlist / rule / media… (`aired` = really started by Liquidsoap, `picked` = chosen) |
 | `ls render` \| `status` | Generated Liquidsoap script; bridge / air status |
 | `icecast status` \| `render` | Audience and health of our mounts; generated `icecast.xml` |
 | `live status` \| `kick` \| `open` \| `close` | Live DJ on air, openings, urgent rights, refused DJs; end the live now; ad-hoc opening (`open <dj> --for 2h`) and its early end |

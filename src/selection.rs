@@ -139,19 +139,32 @@ pub struct Turn {
     pub holds: bool,
 }
 
-/// Resolve one turn (see [`Turn`]). With `continuing`, the group is being
-/// held: it never starts a new cycle — a finished cycle, or one whose
-/// remaining members are all unavailable under `on_member_unavailable =
-/// "skip"`, answers [`SelectionError::CycleComplete`] (the group state is
-/// reset to the top for its next activation). `abort` answers `PoolEmpty`
-/// as usual.
+/// How a `sequence` / `shuffle` group takes this turn (other sources ignore
+/// it, except `Continue`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnStart {
+    /// Carry on where the group's cycle stands (a day part, the base
+    /// rotation, an override).
+    Resume,
+    /// Its rule (`every` / `at_clock`) triggers it: the cycle restarts from
+    /// the top, whatever an interrupted activation left (a shuffle re-draws).
+    Fresh,
+    /// The group holds the air: next track of the SAME cycle, never a new
+    /// one — a finished cycle, or remaining members all unavailable under
+    /// `skip`, answers [`SelectionError::CycleComplete`] (state back to the
+    /// top). `abort` answers `PoolEmpty` as usual.
+    Continue,
+}
+
+/// Resolve one turn (see [`Turn`] and [`TurnStart`]).
 pub async fn resolve_turn(
     pool: &SqlitePool,
     plugins: Option<&PluginHandle>,
     now: i64,
     playlist_ref: &str,
-    continuing: bool,
+    start: TurnStart,
 ) -> Result<Turn, SelectionError> {
+    let continuing = start == TurnStart::Continue;
     let key = crate::playlist::normalize_ref(playlist_ref)
         .map_err(|_| SelectionError::PlaylistNotFound(playlist_ref.to_string()))?;
     let toml = store::playlist_toml_by_ref(pool, &key)
@@ -173,6 +186,9 @@ pub async fn resolve_turn(
     };
     let scope: Vec<&Constraints> =
         playlist.broadcast.as_ref().and_then(|b| b.constraints.as_ref()).into_iter().collect();
+    if start == TurnStart::Fresh {
+        crate::group_state::set(pool, &key, &crate::group_state::GroupState::default()).await?;
+    }
     let resolved =
         resolve_group_rotation(pool, plugins, now, &key, sel, shuffle, 0, &scope, continuing).await?;
     let st = crate::group_state::get(pool, &key).await?;
@@ -2570,7 +2586,7 @@ mod tests {
         let now = 1_000_000;
         // Played 30 min ago (inside the 1h window) → the only track is excluded
         // → PoolEmpty (never relaxed); the grid would fall through.
-        crate::broadcast_log::record(&pool, "a.mp3", Some("X"), crate::resolver::Epoch(now - 1800))
+        crate::broadcast_log::record(&pool, "a.mp3", Some("X"), crate::resolver::Epoch(now - 1800), Default::default())
             .await
             .unwrap();
         assert!(matches!(
@@ -2600,7 +2616,7 @@ mod tests {
         add_playlist(&pool, "rot", toml).await;
         let now = 1_000_000;
         // Played 2h ago (outside the 1h window) → eligible again.
-        crate::broadcast_log::record(&pool, "a.mp3", Some("X"), crate::resolver::Epoch(now - 7200))
+        crate::broadcast_log::record(&pool, "a.mp3", Some("X"), crate::resolver::Epoch(now - 7200), Default::default())
             .await
             .unwrap();
         assert_eq!(resolve_ref_at(&pool, now, "rot").await.unwrap(), "a.mp3");
@@ -2631,7 +2647,7 @@ mod tests {
         add_playlist(&pool, "rot", toml).await;
         let now = 1_000_000;
         // Artist X aired 30 min ago → a.mp3 (artist X) barred, only b (Y) plays.
-        crate::broadcast_log::record(&pool, "a.mp3", Some("X"), crate::resolver::Epoch(now - 1800))
+        crate::broadcast_log::record(&pool, "a.mp3", Some("X"), crate::resolver::Epoch(now - 1800), Default::default())
             .await
             .unwrap();
         assert_eq!(resolve_ref_at(&pool, now, "rot").await.unwrap(), "b.mp3");
@@ -2660,7 +2676,7 @@ mod tests {
         let now = 1_000_000;
         // Some artist aired recently, but a.mp3 is untagged → nothing to match
         // → it stays eligible.
-        crate::broadcast_log::record(&pool, "other.mp3", Some("X"), crate::resolver::Epoch(now - 1800))
+        crate::broadcast_log::record(&pool, "other.mp3", Some("X"), crate::resolver::Epoch(now - 1800), Default::default())
             .await
             .unwrap();
         assert_eq!(resolve_ref_at(&pool, now, "rot").await.unwrap(), "a.mp3");
@@ -2705,7 +2721,7 @@ mod tests {
         )
         .await;
         let now = 1_000_000;
-        crate::broadcast_log::record(&pool, "a.mp3", Some("X"), crate::resolver::Epoch(now - 1800))
+        crate::broadcast_log::record(&pool, "a.mp3", Some("X"), crate::resolver::Epoch(now - 1800), Default::default())
             .await
             .unwrap();
         // Sequential would start at a.mp3; the group's window bars it.
@@ -2740,7 +2756,7 @@ mod tests {
         )
         .await;
         let now = 1_000_000;
-        crate::broadcast_log::record(&pool, "a.mp3", Some("X"), crate::resolver::Epoch(now - 1800))
+        crate::broadcast_log::record(&pool, "a.mp3", Some("X"), crate::resolver::Epoch(now - 1800), Default::default())
             .await
             .unwrap();
         assert_eq!(resolve_ref_at(&pool, now, "outer").await.unwrap(), "b.mp3");
@@ -2783,11 +2799,11 @@ mod tests {
         .await;
         let now = 1_000_000;
         // a.mp3 logged untagged → only the (group) TRACK window can bar it.
-        crate::broadcast_log::record(&pool, "a.mp3", None, crate::resolver::Epoch(now - 1800))
+        crate::broadcast_log::record(&pool, "a.mp3", None, crate::resolver::Epoch(now - 1800), Default::default())
             .await
             .unwrap();
         // Artist Y aired via another file → only the (member) ARTIST window bars b.
-        crate::broadcast_log::record(&pool, "other.mp3", Some("Y"), crate::resolver::Epoch(now - 1800))
+        crate::broadcast_log::record(&pool, "other.mp3", Some("Y"), crate::resolver::Epoch(now - 1800), Default::default())
             .await
             .unwrap();
         assert_eq!(resolve_ref_at(&pool, now, "grp").await.unwrap(), "c.mp3");
@@ -2815,7 +2831,7 @@ mod tests {
         )
         .await;
         let now = 1_000_000;
-        crate::broadcast_log::record(&pool, "a.mp3", Some("X"), crate::resolver::Epoch(now - 1800))
+        crate::broadcast_log::record(&pool, "a.mp3", Some("X"), crate::resolver::Epoch(now - 1800), Default::default())
             .await
             .unwrap();
         // Never relaxed: no forced repeat, PoolEmpty → the grid falls through.

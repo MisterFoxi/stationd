@@ -23,6 +23,7 @@ use crate::clock::{self, ClockError};
 use crate::grid_index::{self, GridLoadError};
 use crate::grid_store;
 use crate::grid_toml;
+use crate::selection::TurnStart;
 use crate::resolver::{
     resolve_next, resolve_ranked, Cadence, Epoch, EveryState, Grid, GridDecision, LocalNow,
     Origin, PlaybackState, Rule, RuleKind,
@@ -132,6 +133,9 @@ pub struct ResolvedDecision {
     /// halt, or a media override. Carried to the end of the track so the
     /// `unplayed_only` mark lands on the right playlist.
     pub leaf_ref: Option<String>,
+    /// Row of this track in `broadcast_log`, to stamp its real air start
+    /// (`mark_aired`). `None` when nothing was logged (stream, halt, fallback).
+    pub log_id: Option<i64>,
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -1060,6 +1064,7 @@ impl GridEngine {
                 halted: Some(state),
                 override_source: None,
                 leaf_ref: None,
+                log_id: None,
             });
         }
         if let Some(resolved) = self.next_override(now).await? {
@@ -1103,7 +1108,14 @@ impl GridEngine {
                 continue;
             };
             let held = held_at == Some(i);
-            let produced = self.produce(&playlist_ref, now, held).await?;
+            let start = if held {
+                TurnStart::Continue
+            } else if matches!(decision.origin, Origin::Every | Origin::AtClockHard | Origin::AtClockSoft) {
+                TurnStart::Fresh
+            } else {
+                TurnStart::Resume
+            };
+            let produced = self.produce(&playlist_ref, now, start).await?;
 
             if let Some(turn) = produced {
                 if held {
@@ -1117,8 +1129,10 @@ impl GridEngine {
                     self.persist_effects(&decision, now).await?;
                     self.start_hold_if_group(&decision, turn.holds, now).await?;
                 }
-                let (media_path, stream, leaf_ref) = self.log_start(turn.resolved, now).await?;
-                self.emit_resolved(&decision, Some(&media_path), format!("{:?}", decision.origin));
+                let origin = format!("{:?}", decision.origin);
+                let (media_path, stream, leaf_ref, log_id) =
+                    self.log_start(turn.resolved, now, &decision, &origin).await?;
+                self.emit_resolved(&decision, Some(&media_path), origin);
                 return Ok(ResolvedDecision {
                     decision,
                     media_path: Some(media_path),
@@ -1126,6 +1140,7 @@ impl GridEngine {
                     halted: None,
                     override_source: None,
                     leaf_ref,
+                    log_id,
                 });
             }
 
@@ -1167,6 +1182,7 @@ impl GridEngine {
             halted: None,
             override_source: None,
             leaf_ref: None,
+            log_id: None,
         })
     }
 
@@ -1175,13 +1191,14 @@ impl GridEngine {
     /// disk (flipped unavailable in the index). `None` = the source produced
     /// nothing usable (empty pool) — the caller falls through. A config error
     /// (unknown ref, unsupported order/mode, bad filter) is surfaced.
-    /// `continuing` = the source is the group holding the air: `None` also
-    /// when its cycle is over (it is never restarted from here).
+    /// `start`: how a group takes the turn (`Fresh` when its rule triggers
+    /// it, `Continue` when it holds the air — `None` then also when its cycle
+    /// is over; see `selection::TurnStart`).
     async fn produce(
         &self,
         playlist_ref: &str,
         now: Epoch,
-        continuing: bool,
+        start: crate::selection::TurnStart,
     ) -> Result<Option<crate::selection::Turn>, EngineError> {
         use crate::selection::{Resolved, SelectionError, Turn};
         // Capped so a pool of dead entries can't spin.
@@ -1192,7 +1209,7 @@ impl GridEngine {
                 self.plugins.as_ref(),
                 now.0,
                 playlist_ref,
-                continuing,
+                start,
             )
             .await
             {
@@ -1392,7 +1409,7 @@ impl GridEngine {
         let Some(playlist_ref) = decision.playlist_ref.clone() else {
             return Ok(None);
         };
-        let Some(turn) = self.produce(&playlist_ref, now, false).await? else {
+        let Some(turn) = self.produce(&playlist_ref, now, TurnStart::Fresh).await? else {
             tracing::warn!(
                 rule = decision.rule_id.as_deref().unwrap_or("-"),
                 playlist = %playlist_ref,
@@ -1402,8 +1419,10 @@ impl GridEngine {
         };
         self.persist_effects(&decision, now).await?;
         self.start_hold_if_group(&decision, turn.holds, now).await?;
-        let (media_path, stream, leaf_ref) = self.log_start(turn.resolved, now).await?;
-        self.emit_resolved(&decision, Some(&media_path), format!("{:?}", decision.origin));
+        let origin = format!("{:?}", decision.origin);
+        let (media_path, stream, leaf_ref, log_id) =
+            self.log_start(turn.resolved, now, &decision, &origin).await?;
+        self.emit_resolved(&decision, Some(&media_path), origin);
         Ok(Some(ResolvedDecision {
             decision,
             media_path: Some(media_path),
@@ -1411,6 +1430,7 @@ impl GridEngine {
             halted: None,
             override_source: None,
             leaf_ref,
+            log_id,
         }))
     }
 
@@ -1498,7 +1518,8 @@ impl GridEngine {
                     playlist_ref,
                     mark_taken: None,
                 };
-                let (media_path, stream, leaf_ref) = self.log_start(resolved, now).await?;
+                let (media_path, stream, leaf_ref, log_id) =
+                    self.log_start(resolved, now, &decision, "Override").await?;
                 self.emit_resolved(&decision, Some(&media_path), "Override".to_string());
                 Ok(Some(ResolvedDecision {
                     decision,
@@ -1507,6 +1528,7 @@ impl GridEngine {
                     halted: None,
                     override_source: Some(entry.source.clone()),
                     leaf_ref,
+                    log_id,
                 }))
             }
         }
@@ -1520,15 +1542,31 @@ impl GridEngine {
         &self,
         resolved: crate::selection::Resolved,
         now: Epoch,
-    ) -> Result<(String, bool, Option<String>), EngineError> {
+        decision: &GridDecision,
+        origin: &str,
+    ) -> Result<(String, bool, Option<String>, Option<i64>), EngineError> {
         Ok(match resolved {
             crate::selection::Resolved::File { path: media, leaf } => {
                 let artist = crate::media_index::artist_of(&self.pool, &media).await?;
-                crate::broadcast_log::record(&self.pool, &media, artist.as_deref(), now).await?;
-                (media, false, leaf)
+                let from = crate::broadcast_log::Provenance {
+                    rule_id: decision.rule_id.as_deref(),
+                    origin: Some(origin),
+                    playlist_ref: decision.playlist_ref.as_deref(),
+                    leaf_ref: leaf.as_deref(),
+                };
+                let id =
+                    crate::broadcast_log::record(&self.pool, &media, artist.as_deref(), now, from).await?;
+                (media, false, leaf, Some(id))
             }
-            crate::selection::Resolved::Stream(url) => (url, true, None),
+            crate::selection::Resolved::Stream(url) => (url, true, None, None),
         })
+    }
+
+    /// Liquidsoap really started the track logged as `log_id` (stats: aired
+    /// vs merely chosen).
+    pub async fn mark_aired(&self, log_id: i64, at: Epoch) -> Result<(), EngineError> {
+        crate::broadcast_log::mark_aired(&self.pool, log_id, at).await?;
+        Ok(())
     }
 
     /// Persist a decision's side effects — a consumed AtClock occurrence and an
@@ -1804,11 +1842,34 @@ mod tests {
         // The rule is no longer due (reset at the first track): the group
         // keeps the air all the same.
         assert_eq!(media_at(&eng, at(9, 11)).await, ("hit/h.mp3".into(), Origin::Every));
+        // Provenance logged for the stats: the group, its leaf, the rule.
+        let rows: Vec<(String, Option<String>, Option<String>, Option<String>, Option<String>)> =
+            sqlx::query_as("SELECT rel_path, rule_id, origin, playlist_ref, leaf_ref FROM broadcast_log ORDER BY id")
+                .fetch_all(&eng.pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                ("jhit/j.mp3".into(), Some("OneHit".into()), Some("Every".into()), Some("onehit".into()), Some("jhit".into())),
+                ("hit/h.mp3".into(), Some("OneHit".into()), Some("Every".into()), Some("onehit".into()), Some("hit".into())),
+            ]
+        );
         // Cycle complete: hold released, back to the floor.
         assert!(grid_store::get_hold(&eng.pool).await.unwrap().is_none());
         assert_eq!(media_at(&eng, at(9, 15)).await.1, Origin::BaseRotation);
         // Next activation starts from the top.
         assert_eq!(media_at(&eng, at(9, 56)).await, ("jhit/j.mp3".into(), Origin::Every));
+    }
+
+    #[tokio::test]
+    async fn its_rule_restarts_the_group_from_the_top() {
+        let (_d, eng) = hold_fixture("hit/", "skip").await;
+        // An interrupted activation left the cursor on the second member.
+        let mid = crate::group_state::GroupState { member_idx: 1, ..Default::default() };
+        crate::group_state::set(&eng.pool, "onehit", &mid).await.unwrap();
+        assert_eq!(media_at(&eng, at(9, 10)).await, ("jhit/j.mp3".into(), Origin::Every));
+        assert_eq!(media_at(&eng, at(9, 11)).await, ("hit/h.mp3".into(), Origin::Every));
     }
 
     #[tokio::test]

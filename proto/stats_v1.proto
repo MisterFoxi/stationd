@@ -1,0 +1,51 @@
+// stats_v1.proto
+// ─────────────────────────────────────────────────────────────────────────
+// Statistiques de diffusion (CLI-first) : lecture de l'historique de diffusion
+// (`broadcast_log`, famille B) groupé par playlist, playlist feuille, règle de
+// grille, origine, média ou artiste. Lecture seule.
+//
+// Deux compteurs par ligne : `picked` = choisie par stationd ; `aired` =
+// réellement démarrée par Liquidsoap. L'écart = pistes préparées puis jamais
+// parties (vidées par une coupure, arrêt…), ou pas de Liquidsoap branché.
+// Historique antérieur à la migration 0020 : provenance inconnue (clé vide),
+// jamais comptée `aired`.
+
+syntax = "proto3";
+
+package webradio.stats.v1;
+
+service StatsService {
+  rpc Plays(PlaysRequest) returns (PlaysResponse);
+}
+
+message PlaysRequest {
+  // Fenêtre jusqu'à maintenant : 30m, 24h, 7d… (vide = 24h).
+  string since = 1;
+  By     by    = 2;
+  // Nombre max de lignes (0 = toutes).
+  uint32 limit = 3;
+
+  enum By {
+    PLAYLIST = 0;   // playlist de la règle / de l'override (un groupe = le groupe)
+    LEAF     = 1;   // playlist feuille qui a produit le fichier (membre d'un groupe)
+    RULE     = 2;   // règle de grille (vide : override)
+    ORIGIN   = 3;   // AtClockHard | AtClockSoft | Every | DayPart | BaseRotation | Override
+    MEDIA    = 4;
+    ARTIST   = 5;
+  }
+}
+
+message PlaysResponse {
+  int64 from = 1;              // début de la fenêtre (epoch UTC)
+  int64 to   = 2;              // fin (maintenant)
+  repeated PlaysRow rows = 3;
+  uint64 total_picked = 4;
+  uint64 total_aired  = 5;
+}
+
+message PlaysRow {
+  string key     = 1;   // vide = inconnu (ancien historique, override sans règle…)
+  uint64 picked  = 2;
+  uint64 aired   = 3;
+  int64  last_at = 4;   // dernier choix (epoch UTC)
+}

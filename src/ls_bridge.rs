@@ -99,6 +99,8 @@ struct Pending {
     playlist_ref: Option<String>,
     /// Leaf playlist that produced it (see `ResolvedDecision::leaf_ref`).
     leaf_ref: Option<String>,
+    /// Its `broadcast_log` row, stamped `aired_at` when it really starts.
+    log_id: Option<i64>,
 }
 
 /// What Liquidsoap last reported as starting on air.
@@ -275,6 +277,7 @@ impl LsBridge {
                                 &media,
                                 r.decision.playlist_ref.clone(),
                                 r.leaf_ref.clone(),
+                                r.log_id,
                             );
                             self.lock().status.next = Some(NextUp {
                                 rid,
@@ -317,13 +320,14 @@ impl LsBridge {
         media: &str,
         playlist_ref: Option<String>,
         leaf_ref: Option<String>,
+        log_id: Option<i64>,
     ) -> (u64, String) {
         let mut st = self.lock();
         let rid = st.next_rid;
         st.next_rid += 1;
         let abs = self.media_root.join(media);
         let uri = format!("annotate:stationd_rid=\"{rid}\":{}", abs.to_string_lossy());
-        st.pending.push_back(Pending { rid, media_path: media.to_string(), playlist_ref, leaf_ref });
+        st.pending.push_back(Pending { rid, media_path: media.to_string(), playlist_ref, leaf_ref, log_id });
         while st.pending.len() > PENDING_CAP {
             st.pending.pop_front();
         }
@@ -342,7 +346,7 @@ impl LsBridge {
                     None
                 }
                 Some(media) => {
-                    Some(self.hand_out(&media, r.decision.playlist_ref.clone(), r.leaf_ref.clone()).1)
+                    Some(self.hand_out(&media, r.decision.playlist_ref.clone(), r.leaf_ref.clone(), r.log_id).1)
                 }
                 None => None,
             },
@@ -370,7 +374,7 @@ impl LsBridge {
                     None
                 }
                 Some(media) => {
-                    Some(self.hand_out(&media, r.decision.playlist_ref.clone(), r.leaf_ref.clone()).1)
+                    Some(self.hand_out(&media, r.decision.playlist_ref.clone(), r.leaf_ref.clone(), r.log_id).1)
                 }
                 None => None,
             },
@@ -405,6 +409,11 @@ impl LsBridge {
             match found {
                 Some(p) => {
                     tracing::info!(media = %p.media_path, rid = p.rid, "on air");
+                    if let Some(id) = p.log_id {
+                        if let Err(e) = self.engine.mark_aired(id, crate::resolver::Epoch(now)).await {
+                            tracing::error!(error = %e, "could not stamp the track as aired");
+                        }
+                    }
                     // One station track: advances the `Every` track counters.
                     if let Err(e) = self.engine.on_track_completed().await {
                         tracing::error!(error = %e, "could not advance the track counters");
@@ -779,6 +788,20 @@ mod tests {
         let st = b.status();
         assert_eq!(st.on_air.unwrap().kind, OnAirKind::Unknown);
         assert_eq!(st.tracks_started, 1);
+    }
+
+    #[tokio::test]
+    async fn a_started_track_is_stamped_aired_a_merely_prepared_one_is_not() {
+        let (d, b) = bridge().await;
+        b.next().await; // rid 1
+        b.track_started(&TrackEvent { rid: "1".into(), kind: String::new() }).await;
+        b.next().await; // rid 2: prepared, never started
+        let pool = db::init(&d.path().join("t.db")).await.unwrap();
+        let rows = crate::broadcast_log::plays(&pool, 0, crate::broadcast_log::PlaysBy::Rule, 0)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!((rows[0].key.as_deref(), rows[0].picked, rows[0].aired), (Some("floor"), 2, 1));
     }
 
     #[tokio::test]
