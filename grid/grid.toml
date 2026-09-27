@@ -16,3 +16,22 @@ id = "floor"
 kind = "base_rotation"
 playlist_ref = "rotation"
 
+[[rule]]
+id            = "toph"
+kind          = "at_clock"
+playlist_ref  = "toph"
+every_minutes = 60
+mode          = "soft"
+expiry        = "5m"
+
+[[rule]]
+id           = "jingle"
+kind         = "every"
+playlist_ref = "homestone_jingles"
+min_tracks   = 15
+
+[[rule]]
+id="OneHit"
+kind="every"
+min_elapsed="45m"
+playlist_ref="one_hit"
