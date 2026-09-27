@@ -39,6 +39,7 @@ pub mod playlist;
 pub mod playlist_cursor;
 pub mod pool_inspection;
 pub mod plugin;
+pub mod plugin_db;
 pub mod plugin_grpc;
 pub mod proto;
 pub mod queue_state;

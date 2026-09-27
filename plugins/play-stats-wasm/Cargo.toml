@@ -1,0 +1,17 @@
+# Plugin WASM de démo `play-stats` : capacité `db` (base SQLite propre au plugin).
+# Crate SÉPARÉ ([workspace] vide), compilé à la main pour la cible wasm :
+#   cargo build --release --target wasm32-unknown-unknown
+# → target/wasm32-unknown-unknown/release/play_stats_wasm.wasm
+[package]
+name = "play-stats-wasm"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+extism-pdk = "1"
+serde_json = "1"

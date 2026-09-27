@@ -708,6 +708,8 @@ pub enum ConfigError {
     Icecast(String),
     #[error("invalid [live] section: {0}")]
     Live(String),
+    #[error("invalid [[plugin]] declaration: {0}")]
+    Plugin(String),
 }
 
 impl Config {
@@ -742,6 +744,7 @@ impl Config {
             }
             live.validate(config.liquidsoap.as_ref(), &ports).map_err(ConfigError::Live)?;
         }
+        crate::plugin::validate_decls(&config.plugins).map_err(ConfigError::Plugin)?;
         Ok(config)
     }
 }
@@ -836,6 +839,43 @@ mod tests {
         let p = dir.path().join("c.toml");
         std::fs::write(&p, format!("{BASE}{extra}")).unwrap();
         Config::load(&p)
+    }
+
+    #[test]
+    fn plugin_db_section_parses_with_defaults() {
+        let c = load_str(
+            "[[plugin]]\nname = \"stats\"\ncapabilities = [\"db\"]\n[plugin.db]\nmax_rows = 5\n",
+        )
+        .unwrap();
+        let limits = c.plugins[0].db.unwrap();
+        assert_eq!(limits.max_rows, 5);
+        assert_eq!(limits.max_size_mb, 64);
+        assert_eq!(limits.query_timeout_ms, 200);
+    }
+
+    #[test]
+    fn plugin_declarations_are_checked() {
+        let cases = [
+            // duplicate name
+            "[[plugin]]\nname = \"a\"\n[[plugin]]\nname = \"a\"\n",
+            // [plugin.db] without the capability
+            "[[plugin]]\nname = \"a\"\n[plugin.db]\nmax_rows = 5\n",
+            // database file name must be safe
+            "[[plugin]]\nname = \"a.b\"\ncapabilities = [\"db\"]\n",
+            // zero bound
+            "[[plugin]]\nname = \"a\"\ncapabilities = [\"db\"]\n[plugin.db]\nquery_timeout_ms = 0\n",
+        ];
+        for extra in cases {
+            assert!(
+                matches!(load_str(extra), Err(ConfigError::Plugin(_))),
+                "should be refused: {extra}"
+            );
+        }
+        // Unknown key in [plugin.db] is a parse error.
+        assert!(matches!(
+            load_str("[[plugin]]\nname = \"a\"\ncapabilities = [\"db\"]\n[plugin.db]\nmax = 1\n"),
+            Err(ConfigError::Parse { .. })
+        ));
     }
 
     #[test]

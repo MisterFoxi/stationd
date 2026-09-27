@@ -5,7 +5,7 @@ sans reconstruire le contexte. À distinguer des docs de `Doc/` (décisions
 d'architecture durables) : ce fichier-ci est volatil, à mettre à jour à
 chaque session.
 
-Dernière mise à jour : 2026-09-26.
+Dernière mise à jour : 2026-09-27.
 
 
 ## Ajout : TUI d'administration (correctif préparé, compilation à confirmer)
@@ -94,6 +94,9 @@ grille → groupe intro / épisode le plus récent / outro → fichiers réels.
 choix) + **runtime WASM (WASM-1)** — un `.wasm` externe (extism) implémente le
 trait via JSON. `stationctl plugin list|start|stop|restart|reload`, plugins
 `logger`/`blacklist` (natifs) et `require-title` (wasm) validés en réel.
+**Base propre par plugin (capacité `db`, 2026-09-27)** : un fichier SQLite par
+plugin, schéma livré en migrations, `db_query`/`db_exec`/`db_batch`, confiné ;
+`stationctl plugin db <name> info|query|reset`.
 Contrats figés dans `Doc/plugin-{events,hooks,host}.md`.
 **Fallthrough grille** : une source au pool vide retombe sur la priorité
 inférieure jusqu'au plancher (fini le dead-air par sélection vide) ; groupe
@@ -146,8 +149,11 @@ Côté Icecast (échantillonnage livré, voir Fait) :
 Voir la section Fait ci-dessous et `Doc/preview-pools.md`.
 
 **Plugins A2 — surface hôte : livré et validé (2026-09-23).** Voir Fait.
-Reste de la surface hôte : **`db_*`** (base SQLite par plugin, ouverte par le
-core pour son compte : `db_get`/`db_put`/`db_query`).
+**Capacité `db` (base SQLite par plugin) : livrée, tests verts (2026-09-27),
+à valider sur devstationd** : `cargo test --locked` (418 attendus), compiler
+`plugins/play-stats-wasm` (wasm32), le déclarer (`capabilities = ["db"]`),
+vérifier `stationctl plugin db play-stats info` puis `query "SELECT * FROM
+play_count ORDER BY plays DESC LIMIT 20"` après quelques pistes. Voir Fait.
 
 Autres, indépendants :
 - **`on_scan`** : câblé (2026-09-24). Le scan collecte les tags personnalisés
@@ -181,6 +187,51 @@ Autres, indépendants :
 ---
 
 ## Fait
+
+### — Plugins : capacité `db`, base SQLite propre à chaque plugin (2026-09-27) —
+
+Décisions (utilisateur) : du vrai SQL scopé plutôt qu'un clé/valeur ;
+`db_batch` (tout ou rien) à la place de `db_get`/`db_put` et de transactions
+exposées. Contrat : `Doc/plugin-host.md` § `db`.
+
+- **`src/plugin_db.rs`** (rusqlite 0.30, synchrone — même `libsqlite3-sys`
+  0.27 que sqlx, une seule copie de SQLite liée) : `PluginDb::open`
+  (`<dossier de database.path>/plugins/<name>.db`), `query` (lecture seule),
+  `exec` (une instruction), `batch` (transaction du core, rollback + index de
+  l'instruction fautive), `migrate` (version = rang + 1, SQL complet gardé
+  dans `_stationd_migrations`, migration modifiée / plus livrée → erreur).
+  Confinement : autorisation SQLite (pas d'`ATTACH`/`DETACH`, `PRAGMA` hors
+  introspection, `load_extension`, `BEGIN`/`SAVEPOINT`, écriture `_stationd*`),
+  `SQLITE_LIMIT_ATTACHED = 0`, `VACUUM` refusé, mode défensif ; bornes
+  `[plugin.db]` `max_size_mb` 64 / `query_timeout_ms` 200 / `max_rows` 10 000
+  (dépassement = erreur, jamais troncature). Côté admin : `inspect`,
+  `query_file` (connexion séparée en lecture seule, 10 s), `remove`.
+- **`src/plugin.rs`** : `Capability::Db`, `Host::db()`, `HostError::{NoDatabase,
+  Db}` ; `PluginDecl.db` (`[plugin.db]`) ; trait `db_migrations` ; `Slot::start`
+  = ouvrir la base → construire → migrer (échec → `failed` phase `Migrate`,
+  `on_load` pas appelé) → `on_load`. `PluginEnv { control, db_dir }` +
+  `spawn_env` (`spawn_with` inchangé, sans base). Fonctions hôte WASM
+  `db_query`/`db_exec`/`db_batch`, export guest `db_migrations`. Messages
+  acteur `DbLocate`/`DbReset` ; `PluginHandle::db_info|db_query|db_reset`.
+  `validate_decls` au chargement de la config : noms uniques, nom de fichier
+  sûr pour `db`, `[plugin.db]` sans la capacité refusé.
+- **Contrat / CLI** : `plugin_v1.proto` `DbInfo`/`DbQuery`/`DbReset` ;
+  `stationctl plugin db <name> info|query "<SELECT>"|reset --yes` (reset refusé
+  tant que le plugin est chargé).
+- **Guest** `plugins/play-stats-wasm/` : compte les `TrackResolved` par média
+  (UPSERT via `db_exec`). Vérifié en `cargo check` natif uniquement (cible
+  wasm32 indisponible dans l'env de préparation).
+- Tests (+23) : isolation entre deux plugins, refus (`ATTACH`, `PRAGMA`,
+  `VACUUM INTO`, transactions, tables réservées), lecture seule, une
+  instruction par appel, paramètres tous liés, batch tout ou rien, migrations
+  (une fois, modifiée, plus livrée, échec annulé), délai, plafond de lignes et
+  de taille, blobs, connexion admin, migration avant `on_load`, capacité non
+  déclarée, JSON des fonctions hôte, `info`/`query`/`reset` par l'acteur,
+  validation de config.
+
+**Validation** : `cargo test --locked` vert (418) ; essai réel du daemon
+(`logger` avec `capabilities = ["db"]`) : `plugin db info|query|reset`,
+dépassement de `max_rows`, `ATTACH` refusé, reset refusé tant que chargé.
 
 ### — DJ live : harbor, fichier des DJ, créneaux `live` (2026-09-26) —
 
@@ -1810,6 +1861,7 @@ dans le découpage des modules (`grid_index` = A, `grid_store` = B).
 | `src/library_actor.rs` | Acteur biblio possédant (mpsc, spawn_blocking) — gabarit refacto |
 | `src/library_grpc.rs` | Transport gRPC biblio (traducteur mince acteur↔proto) |
 | `src/plugin.rs` | Système de plugins : trait, acteur à état, quarantaine, `filter_pool`, `WasmPlugin` (extism), natifs logger/blacklist |
+| `src/plugin_db.rs` | Base SQLite propre à chaque plugin (capacité `db`) : migrations, `query`/`exec`/`batch`, confinement, lectures admin |
 | `src/plugin_grpc.rs` | Transport gRPC plugins (list + control) |
 | `src/station_control.rs` | État de diffusion + file d'override + horloge manuelle (mécanisme de la surface hôte A2) |
 | `src/broadcast_grpc.rs` | Transport gRPC `BroadcastService` (état, control, overrides, injection auditeurs) |
@@ -1830,6 +1882,7 @@ dans le découpage des modules (`grid_index` = A, `grid_store` = B).
 | `docker/prod/` | Fichiers du nœud : `compose.yaml` (exploitation), `install.sh` |
 | `plugins/stop-when-idle-wasm/` | Guest WASM démo A2 : host function `station_control` |
 | `plugins/{require-title,blacklist}-wasm/` | Crates guest WASM de démo (séparés, cible wasm32) : `filter_pool` |
+| `plugins/play-stats-wasm/` | Guest WASM démo de la capacité `db` : `db_migrations` + `db_exec` |
 | `src/grpc.rs` | Service `Station` (status/quit/playlist*) |
 | `src/db.rs` | Init pool SQLite + migrations |
 | `src/main.rs` | Daemon : démarrage, 7 services gRPC, pont Liquidsoap (écrit le `.liq`, sert `/ls/v1`, air sync), échantillonneur Icecast, shutdown |

@@ -19,6 +19,16 @@ service PluginService {
 
   // Applique une action de cycle de vie à un plugin et renvoie son nouvel état.
   rpc Control(PluginControlRequest) returns (PluginControlResponse);
+
+  // Base propre d'un plugin (capacité `db`, cf. Doc/plugin-host.md). Lectures
+  // sur une connexion séparée en lecture seule ; le plugin n'est pas touché.
+  // Plugin inconnu → NOT_FOUND ; pas de base (capacité absente) ou reset d'un
+  // plugin chargé → FAILED_PRECONDITION ; requête refusée → INVALID_ARGUMENT.
+  rpc DbInfo(PluginDbInfoRequest) returns (PluginDbInfoResponse);
+  rpc DbQuery(PluginDbQueryRequest) returns (PluginDbQueryResponse);
+  // Supprime le fichier. Refusé tant que le plugin est chargé ; le prochain
+  // démarrage recrée la base et rejoue ses migrations.
+  rpc DbReset(PluginDbResetRequest) returns (PluginDbResetResponse);
 }
 
 message PluginListRequest {}
@@ -34,7 +44,7 @@ message PluginInfo {
   string state    = 4;   // loaded | disabled | failed | quarantined
   string reason   = 5;   // raison si failed/quarantined, sinon vide
   uint32 failures = 6;   // échecs récents (fenêtre glissante)
-  // Capacités DÉCLARÉES (surface hôte autorisée) : control, push_override.
+  // Capacités DÉCLARÉES (surface hôte autorisée) : control, push_override, db.
   repeated string capabilities = 7;
 }
 
@@ -52,4 +62,57 @@ message PluginControlRequest {
 
 message PluginControlResponse {
   PluginInfo plugin = 1;
+}
+
+message PluginDbInfoRequest {
+  string name = 1;
+}
+
+message PluginDbInfoResponse {
+  string path             = 1;   // fichier de la base (côté daemon)
+  bool   exists           = 2;   // false = jamais démarré (ou reset)
+  uint64 size_bytes       = 3;
+  uint64 schema_version   = 4;   // migrations appliquées
+  repeated PluginDbTable tables = 5;   // tables du plugin (hors _stationd*)
+  // Bornes effectives ([plugin.db]).
+  uint32 max_size_mb      = 6;
+  uint32 query_timeout_ms = 7;
+  uint32 max_rows         = 8;
+}
+
+message PluginDbTable {
+  string name = 1;
+  uint64 rows = 2;
+}
+
+message PluginDbQueryRequest {
+  string name = 1;
+  string sql  = 2;   // une seule instruction, en lecture seule
+}
+
+message PluginDbQueryResponse {
+  repeated string    columns = 1;
+  repeated PluginDbRow rows  = 2;
+}
+
+message PluginDbRow {
+  repeated PluginDbValue values = 1;
+}
+
+message PluginDbValue {
+  oneof kind {
+    bool   null    = 1;
+    int64  integer = 2;
+    double real    = 3;
+    string text    = 4;
+    bytes  blob    = 5;
+  }
+}
+
+message PluginDbResetRequest {
+  string name = 1;
+}
+
+message PluginDbResetResponse {
+  bool removed = 1;   // false = il n'y avait pas de fichier
 }

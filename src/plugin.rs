@@ -16,9 +16,11 @@
 //! hooks), and the
 //! **host surface** (A2): a [`Host`] handed to the plugin in `on_load`, scoped
 //! to that plugin and gated by the capabilities it DECLARES
-//! (`capabilities = ["control", "push_override"]`). Native plugins call it
-//! directly; WASM plugins through extism host functions (`station_control`,
-//! `push_override`, JSON in/out). The per-plugin db (`db_*`) is a later slice.
+//! (`capabilities = ["control", "push_override", "db"]`). Native plugins call
+//! it directly; WASM plugins through extism host functions (`station_control`,
+//! `push_override`, `db_query` / `db_exec` / `db_batch`, JSON in/out). The
+//! per-plugin database (`db`) is opened by the core in `start`, the plugin's
+//! migrations applied before `on_load` — see `plugin_db`.
 //!
 //! Failure handling (no-silent-failure, visible): a plugin that fails `on_load`
 //! is recorded `Failed` and inactive — the daemon and other plugins still
@@ -27,12 +29,15 @@
 //! restart. Nothing retries silently in a loop.
 
 use std::collections::VecDeque;
+use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use extism::{host_fn, Function, Manifest, Plugin as ExtismPlugin, PluginBuilder, UserData, Wasm, PTR};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
 
+use crate::plugin_db::{self, DbError, DbInspect, DbLimits, PluginDb, Rows};
 use crate::station_control::{
     ControlAction, ControlError, OverrideRequest, PushOutcome, StationControl, Transition,
 };
@@ -131,6 +136,14 @@ pub trait Plugin: Send {
     fn on_scan(&mut self, _media: &[ScanInput]) -> Result<Vec<ScanEnrichment>, String> {
         Ok(Vec::new())
     }
+
+    /// The schema of this plugin's database (capability `db`): ordered
+    /// migrations, `[i]` = version `i + 1`, each one or more SQL statements.
+    /// Applied by the core before `on_load`; an applied one must never change
+    /// (ship a new one). Called only when `db` is declared. Default: none.
+    fn db_migrations(&mut self) -> Result<Vec<String>, String> {
+        Ok(Vec::new())
+    }
 }
 
 /// Facts the core notifies plugins about. `#[non_exhaustive]`: a plugin must
@@ -181,6 +194,8 @@ pub enum Capability {
     Control,
     /// `host.push_override(...)` — content ahead of the grid.
     PushOverride,
+    /// `host.db()` — the plugin's own SQLite database (`plugin_db`).
+    Db,
 }
 
 impl Capability {
@@ -188,6 +203,7 @@ impl Capability {
         match self {
             Capability::Control => "control",
             Capability::PushOverride => "push_override",
+            Capability::Db => "db",
         }
     }
 }
@@ -198,8 +214,12 @@ pub enum HostError {
     Denied { plugin: String, capability: &'static str },
     #[error("no station control is wired")]
     Unavailable,
+    #[error("no database is open for this plugin")]
+    NoDatabase,
     #[error(transparent)]
     Control(#[from] ControlError),
+    #[error(transparent)]
+    Db(#[from] DbError),
 }
 
 /// A plugin's host surface, handed over in `on_load`. Scoped: it carries the
@@ -211,6 +231,7 @@ pub struct Host {
     plugin: String,
     capabilities: Vec<Capability>,
     control: Option<StationControl>,
+    db: Option<Arc<PluginDb>>,
 }
 
 impl Host {
@@ -219,7 +240,14 @@ impl Host {
             plugin: plugin.to_string(),
             capabilities: capabilities.to_vec(),
             control,
+            db: None,
         }
+    }
+
+    /// Attach the plugin's database (opened by the core in `Slot::start`).
+    pub fn with_db(mut self, db: Arc<PluginDb>) -> Self {
+        self.db = Some(db);
+        self
     }
 
     pub fn plugin_name(&self) -> &str {
@@ -230,7 +258,7 @@ impl Host {
         self.capabilities.contains(&capability)
     }
 
-    fn require(&self, capability: Capability) -> Result<&StationControl, HostError> {
+    fn check(&self, capability: Capability) -> Result<(), HostError> {
         if !self.has(capability) {
             let err = HostError::Denied {
                 plugin: self.plugin.clone(),
@@ -239,7 +267,18 @@ impl Host {
             tracing::warn!(%err, "host call refused");
             return Err(err);
         }
+        Ok(())
+    }
+
+    fn require(&self, capability: Capability) -> Result<&StationControl, HostError> {
+        self.check(capability)?;
         self.control.as_ref().ok_or(HostError::Unavailable)
+    }
+
+    /// The plugin's own database. Needs capability `db`.
+    pub fn db(&self) -> Result<&PluginDb, HostError> {
+        self.check(Capability::Db)?;
+        self.db.as_deref().ok_or(HostError::NoDatabase)
     }
 
     /// Pilot the broadcast (first-class station control; the plugin is just
@@ -281,12 +320,60 @@ pub struct PluginDecl {
     /// that file (via extism); when absent, `name` selects a built-in.
     #[serde(default)]
     pub wasm: Option<String>,
-    /// Host calls this plugin may make (`control`, `push_override`). Empty by
-    /// default: a plugin acts on nothing unless it says so.
+    /// Host calls this plugin may make (`control`, `push_override`, `db`).
+    /// Empty by default: a plugin acts on nothing unless it says so.
     #[serde(default)]
     pub capabilities: Vec<Capability>,
+    /// `[plugin.db]` — bounds of the plugin's database (capability `db`
+    /// only; defaults apply when absent).
+    #[serde(default)]
+    pub db: Option<DbLimits>,
     #[serde(default)]
     pub config: toml::Table,
+}
+
+impl PluginDecl {
+    fn has_db(&self) -> bool {
+        self.capabilities.contains(&Capability::Db)
+    }
+
+    fn db_limits(&self) -> DbLimits {
+        self.db.unwrap_or_default()
+    }
+}
+
+/// Check the declared plugins as a whole (at config load, loud): names are
+/// unique (a name is the plugin's identity, and its database file); a plugin
+/// with capability `db` has a file-safe name and valid `[plugin.db]` bounds;
+/// `[plugin.db]` without the capability is a mistake, not ignored.
+pub fn validate_decls(decls: &[PluginDecl]) -> Result<(), String> {
+    let mut seen = std::collections::HashSet::new();
+    for d in decls {
+        if !seen.insert(d.name.as_str()) {
+            return Err(format!("plugin `{}` is declared twice", d.name));
+        }
+        if d.has_db() {
+            plugin_db::validate_name(&d.name)?;
+            d.db_limits()
+                .validate()
+                .map_err(|e| format!("plugin `{}`: [plugin.db] {e}", d.name))?;
+        } else if d.db.is_some() {
+            return Err(format!(
+                "plugin `{}`: [plugin.db] is set but capability `db` is not declared",
+                d.name
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// What the plugin actor needs from the daemon: the station control behind
+/// the host surface, and where plugin databases live (`None` = capability
+/// `db` unavailable: such a plugin fails to start, visibly).
+#[derive(Clone, Default)]
+pub struct PluginEnv {
+    pub control: Option<StationControl>,
+    pub db_dir: Option<PathBuf>,
 }
 
 fn default_order() -> u32 {
@@ -301,6 +388,8 @@ pub enum Phase {
     Event,
     FilterPool,
     Scan,
+    /// Opening the plugin's database or applying its migrations.
+    Migrate,
 }
 
 /// Runtime state of a plugin — kept even when inactive, so it stays visible.
@@ -386,25 +475,79 @@ impl Slot {
     }
 
     /// (Re)build the instance and run `on_load` with its scoped host surface.
+    /// With capability `db`: open the plugin's database first, then apply its
+    /// migrations (failure → `Failed{migrate}`, `on_load` not called).
     /// Sets `Loaded` or `Failed`.
-    fn start(&mut self, control: Option<&StationControl>) {
-        let host = Host::new(&self.decl.name, &self.decl.capabilities, control.cloned());
+    fn start(&mut self, env: &PluginEnv) {
+        let Some(host) = self.open_host(env) else { return };
         match build_plugin(&self.decl, &host) {
             Err(reason) => {
                 self.plugin = None;
                 self.state = PluginState::Failed { phase: Phase::Load, reason };
             }
-            Ok(mut plugin) => match catch(|| plugin.on_load(host)) {
-                Ok(Ok(())) => {
-                    self.plugin = Some(plugin);
-                    self.state = PluginState::Loaded;
-                    self.failures.clear();
-                }
-                Ok(Err(reason)) | Err(reason) => {
+            Ok(plugin) => self.migrate_and_load(plugin, host),
+        }
+    }
+
+    /// The plugin's host surface; with capability `db`, its database is
+    /// opened here — before the instance is built, since a WASM plugin's host
+    /// functions capture the host. `None` = failed (state set).
+    fn open_host(&mut self, env: &PluginEnv) -> Option<Host> {
+        let host = Host::new(&self.decl.name, &self.decl.capabilities, env.control.clone());
+        if !self.decl.has_db() {
+            return Some(host);
+        }
+        let opened = match &env.db_dir {
+            None => Err("capability `db` declared but no plugin database directory is configured".to_string()),
+            Some(dir) => PluginDb::open(dir, &self.decl.name, self.decl.db_limits())
+                .map_err(|e| e.to_string()),
+        };
+        match opened {
+            Ok(db) => Some(host.with_db(Arc::new(db))),
+            Err(reason) => {
+                self.plugin = None;
+                self.state = PluginState::Failed { phase: Phase::Migrate, reason };
+                None
+            }
+        }
+    }
+
+    /// Apply the plugin's migrations (when it has a database), then `on_load`.
+    fn migrate_and_load(&mut self, mut plugin: Box<dyn Plugin>, host: Host) {
+        if let Some(db) = host.db.clone() {
+            let migrated = catch(|| plugin.db_migrations())
+                .and_then(|r| r)
+                .and_then(|m| db.migrate(&m).map_err(|e| e.to_string()));
+            match migrated {
+                Ok(o) if o.applied > 0 => tracing::info!(
+                    plugin = %self.decl.name,
+                    applied = o.applied,
+                    version = o.version,
+                    "plugin database migrated"
+                ),
+                Ok(_) => {}
+                Err(reason) => {
                     self.plugin = None;
-                    self.state = PluginState::Failed { phase: Phase::Load, reason };
+                    self.state = PluginState::Failed { phase: Phase::Migrate, reason };
+                    return;
                 }
-            },
+            }
+        }
+        self.load(plugin, host);
+    }
+
+    /// Run `on_load` with the host surface; `Loaded` or `Failed`.
+    fn load(&mut self, mut plugin: Box<dyn Plugin>, host: Host) {
+        match catch(|| plugin.on_load(host)) {
+            Ok(Ok(())) => {
+                self.plugin = Some(plugin);
+                self.state = PluginState::Loaded;
+                self.failures.clear();
+            }
+            Ok(Err(reason)) | Err(reason) => {
+                self.plugin = None;
+                self.state = PluginState::Failed { phase: Phase::Load, reason };
+            }
         }
     }
 
@@ -488,6 +631,43 @@ enum Msg {
         media: Vec<ScanInput>,
         reply: oneshot::Sender<ScanExtras>,
     },
+    DbLocate {
+        name: String,
+        reply: oneshot::Sender<Result<DbLocation, DbAdminError>>,
+    },
+    DbReset {
+        name: String,
+        reply: oneshot::Sender<Result<bool, DbAdminError>>,
+    },
+}
+
+/// Where a plugin's database lives, for the admin reads.
+#[derive(Debug, Clone)]
+struct DbLocation {
+    path: PathBuf,
+    limits: DbLimits,
+}
+
+/// Why an admin operation on a plugin's database was refused.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum DbAdminError {
+    #[error("unknown plugin `{0}`")]
+    UnknownPlugin(String),
+    /// The plugin has no database (no capability `db`, or no directory), or
+    /// it is loaded (`reset`).
+    #[error("{0}")]
+    Precondition(String),
+    #[error(transparent)]
+    Db(#[from] DbError),
+}
+
+/// `stationctl plugin db <name> info`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DbInfo {
+    pub path: PathBuf,
+    pub limits: DbLimits,
+    /// `None` = the file does not exist yet (plugin never started).
+    pub inspect: Option<DbInspect>,
 }
 
 /// Merged `on_scan` output: extra genres per `rel_path`, every loaded plugin
@@ -548,6 +728,52 @@ impl PluginHandle {
         rx.await.unwrap_or_default()
     }
 
+    async fn db_locate(&self, name: &str) -> Result<DbLocation, DbAdminError> {
+        let (reply, rx) = oneshot::channel();
+        let gone = || DbAdminError::Precondition("plugin actor is no longer running".into());
+        self.tx
+            .send(Msg::DbLocate { name: name.to_string(), reply })
+            .await
+            .map_err(|_| gone())?;
+        rx.await.map_err(|_| gone())?
+    }
+
+    /// Describe a plugin's database (read on a separate read-only
+    /// connection, off the async runtime).
+    pub async fn db_info(&self, name: &str) -> Result<DbInfo, DbAdminError> {
+        let loc = self.db_locate(name).await?;
+        let path = loc.path.clone();
+        let inspect = tokio::task::spawn_blocking(move || plugin_db::inspect(&path))
+            .await
+            .map_err(|e| DbAdminError::Db(DbError::Sql(e.to_string())))??;
+        Ok(DbInfo { path: loc.path, limits: loc.limits, inspect })
+    }
+
+    /// Read-only query on a plugin's database (admin, separate connection).
+    pub async fn db_query(&self, name: &str, sql: &str) -> Result<Rows, DbAdminError> {
+        let loc = self.db_locate(name).await?;
+        let sql = sql.to_string();
+        let rows = tokio::task::spawn_blocking(move || {
+            plugin_db::query_file(&loc.path, &sql, loc.limits.max_rows)
+        })
+        .await
+        .map_err(|e| DbAdminError::Db(DbError::Sql(e.to_string())))??;
+        Ok(rows)
+    }
+
+    /// Delete a plugin's database. Refused while the plugin is loaded (it
+    /// holds the file open); the next start recreates it and re-applies the
+    /// migrations. `Ok(false)` = there was no file.
+    pub async fn db_reset(&self, name: &str) -> Result<bool, DbAdminError> {
+        let (reply, rx) = oneshot::channel();
+        let gone = || DbAdminError::Precondition("plugin actor is no longer running".into());
+        self.tx
+            .send(Msg::DbReset { name: name.to_string(), reply })
+            .await
+            .map_err(|_| gone())?;
+        rx.await.map_err(|_| gone())?
+    }
+
     /// Apply a lifecycle action to one plugin, returning its new state.
     pub async fn control(&self, name: &str, action: Action) -> Result<PluginInfo, String> {
         let (reply, rx) = oneshot::channel();
@@ -567,14 +793,20 @@ impl PluginHandle {
 /// Spawn the plugin actor without a station control: host calls answer
 /// `Unavailable` (tests, tools).
 pub fn spawn(decls: Vec<PluginDecl>) -> PluginHandle {
-    spawn_with(decls, None)
+    spawn_env(decls, PluginEnv::default())
+}
+
+/// Spawn with a station control and no plugin database directory.
+pub fn spawn_with(decls: Vec<PluginDecl>, control: Option<StationControl>) -> PluginHandle {
+    spawn_env(decls, PluginEnv { control, db_dir: None })
 }
 
 /// Spawn the owning task from the declared plugins and return a handle. Enabled
 /// plugins are loaded immediately (a failure is recorded, not fatal); disabled
-/// ones stay `Disabled`. Slots are ordered by (`order`, `name`). `control` is
-/// the station control behind every plugin's host surface.
-pub fn spawn_with(mut decls: Vec<PluginDecl>, control: Option<StationControl>) -> PluginHandle {
+/// ones stay `Disabled`. Slots are ordered by (`order`, `name`). `env` carries
+/// the station control behind every plugin's host surface and the directory
+/// of the plugin databases.
+pub fn spawn_env(mut decls: Vec<PluginDecl>, env: PluginEnv) -> PluginHandle {
     decls.sort_by(|a, b| a.order.cmp(&b.order).then_with(|| a.name.cmp(&b.name)));
     let mut slots: Vec<Slot> = decls
         .into_iter()
@@ -586,7 +818,7 @@ pub fn spawn_with(mut decls: Vec<PluginDecl>, control: Option<StationControl>) -
                 failures: VecDeque::new(),
             };
             if slot.decl.enabled {
-                slot.start(control.as_ref());
+                slot.start(&env);
             }
             slot
         })
@@ -610,10 +842,26 @@ pub fn spawn_with(mut decls: Vec<PluginDecl>, control: Option<StationControl>) -
                     let res = match slots.iter_mut().find(|s| s.decl.name == name) {
                         None => Err(format!("unknown plugin `{name}`")),
                         Some(slot) => {
-                            apply_action(slot, action, control.as_ref());
+                            apply_action(slot, action, &env);
                             Ok(slot.info())
                         }
                     };
+                    let _ = reply.send(res);
+                }
+                Msg::DbLocate { name, reply } => {
+                    let _ = reply.send(db_location(&slots, &name, &env).map(|(_, loc)| loc));
+                }
+                Msg::DbReset { name, reply } => {
+                    let res = db_location(&slots, &name, &env).and_then(|(loaded, loc)| {
+                        if loaded {
+                            return Err(DbAdminError::Precondition(format!(
+                                "plugin `{name}` is loaded: stop it first (stationctl plugin stop {name})"
+                            )));
+                        }
+                        let removed = plugin_db::remove(&loc.path)?;
+                        tracing::info!(plugin = %name, removed, path = %loc.path.display(), "plugin database reset");
+                        Ok(removed)
+                    });
                     let _ = reply.send(res);
                 }
             }
@@ -623,12 +871,35 @@ pub fn spawn_with(mut decls: Vec<PluginDecl>, control: Option<StationControl>) -
     PluginHandle { tx }
 }
 
-fn apply_action(slot: &mut Slot, action: Action, control: Option<&StationControl>) {
+/// A plugin's database location: `(loaded, location)`.
+fn db_location(slots: &[Slot], name: &str, env: &PluginEnv) -> Result<(bool, DbLocation), DbAdminError> {
+    let slot = slots
+        .iter()
+        .find(|s| s.decl.name == name)
+        .ok_or_else(|| DbAdminError::UnknownPlugin(name.to_string()))?;
+    if !slot.decl.has_db() {
+        return Err(DbAdminError::Precondition(format!(
+            "plugin `{name}` has no database (capability `db` not declared)"
+        )));
+    }
+    let dir = env.db_dir.as_ref().ok_or_else(|| {
+        DbAdminError::Precondition("no plugin database directory is configured".into())
+    })?;
+    Ok((
+        matches!(slot.state, PluginState::Loaded),
+        DbLocation {
+            path: plugin_db::db_path(dir, name),
+            limits: slot.decl.db_limits(),
+        },
+    ))
+}
+
+fn apply_action(slot: &mut Slot, action: Action, env: &PluginEnv) {
     match action {
         Action::Start => {
             // Idempotent: starting an already-loaded plugin is a no-op.
             if !matches!(slot.state, PluginState::Loaded) {
-                slot.start(control);
+                slot.start(env);
             }
         }
         Action::Stop => slot.stop(),
@@ -636,7 +907,7 @@ fn apply_action(slot: &mut Slot, action: Action, control: Option<&StationControl
         // is rebuilt from its file on start, so both re-read it.
         Action::Restart | Action::Reload => {
             slot.stop();
-            slot.start(control);
+            slot.start(env);
         }
     }
 }
@@ -1010,6 +1281,72 @@ host_fn!(push_override(user_data: Host; input: String) -> String {
     Ok(wasm_push_override(&host, &input))
 });
 
+/// `db_query` input: `{"sql": "SELECT …", "params": [..] | {..}}` →
+/// `{"ok":true,"columns":[..],"rows":[[..],..]}`. Read-only statements only.
+fn wasm_db_query(host: &Host, input: &str) -> String {
+    host_reply(
+        serde_json::from_str::<plugin_db::Statement>(input)
+            .map_err(|e| format!("bad db_query input: {e}"))
+            .and_then(|q| {
+                host.db()
+                    .and_then(|db| Ok(db.query(&q.sql, &q.params)?))
+                    .map_err(|e| e.to_string())
+            }),
+    )
+}
+
+/// `db_exec` input: `{"sql": "INSERT …", "params": [..] | {..}}` (one
+/// statement) → `{"ok":true,"changes":n,"last_insert_rowid":id}`.
+fn wasm_db_exec(host: &Host, input: &str) -> String {
+    host_reply(
+        serde_json::from_str::<plugin_db::Statement>(input)
+            .map_err(|e| format!("bad db_exec input: {e}"))
+            .and_then(|st| {
+                host.db()
+                    .and_then(|db| Ok(db.exec(&st)?))
+                    .map_err(|e| e.to_string())
+            }),
+    )
+}
+
+/// `db_batch` input: `{"statements": [{"sql": …, "params": …}, …]}`, all or
+/// nothing → `{"ok":true,"results":[{"changes":…,"last_insert_rowid":…},…]}`.
+fn wasm_db_batch(host: &Host, input: &str) -> String {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Req {
+        statements: Vec<plugin_db::Statement>,
+    }
+    host_reply(
+        serde_json::from_str::<Req>(input)
+            .map_err(|e| format!("bad db_batch input: {e}"))
+            .and_then(|r| {
+                host.db()
+                    .and_then(|db| Ok(db.batch(&r.statements)?))
+                    .map_err(|e| e.to_string())
+            })
+            .map(|results| serde_json::json!({ "results": results })),
+    )
+}
+
+host_fn!(db_query(user_data: Host; input: String) -> String {
+    let host = user_data.get()?;
+    let host = host.lock().map_err(|_| anyhow::anyhow!("host surface poisoned"))?;
+    Ok(wasm_db_query(&host, &input))
+});
+
+host_fn!(db_exec(user_data: Host; input: String) -> String {
+    let host = user_data.get()?;
+    let host = host.lock().map_err(|_| anyhow::anyhow!("host surface poisoned"))?;
+    Ok(wasm_db_exec(&host, &input))
+});
+
+host_fn!(db_batch(user_data: Host; input: String) -> String {
+    let host = user_data.get()?;
+    let host = host.lock().map_err(|_| anyhow::anyhow!("host surface poisoned"))?;
+    Ok(wasm_db_batch(&host, &input))
+});
+
 /// A WASM plugin loaded from a `.wasm` file via extism. Implements the same
 /// `Plugin` trait as the built-ins by delegating to the module's exports,
 /// serialising data to JSON at the boundary. `extism::Plugin` is `Send`, so
@@ -1017,16 +1354,19 @@ host_fn!(push_override(user_data: Host; input: String) -> String {
 ///
 /// Exports (all optional): `filter_pool` (missing → pass-through), `on_event`
 /// (missing → ignored), `on_scan` (JSON `[ScanInput]` → `[ScanEnrichment]`;
-/// missing → nothing to add). Host functions offered to the guest (A2), bound to
-/// this plugin's scoped `Host`: `station_control`, `push_override` (imported
-/// by the guest from `extern "ExtismHost"`). Config reaches the guest as JSON
-/// under the key "config".
+/// missing → nothing to add), `db_migrations` (no input → JSON `["SQL", …]`;
+/// missing → no schema). Host functions offered to the guest (A2), bound to
+/// this plugin's scoped `Host`: `station_control`, `push_override`,
+/// `db_query`, `db_exec`, `db_batch` (imported by the guest from
+/// `extern "ExtismHost"`). Config reaches the guest as JSON under the key
+/// "config".
 struct WasmPlugin {
     name: String,
     plugin: ExtismPlugin,
     has_filter: bool,
     has_event: bool,
     has_scan: bool,
+    has_migrations: bool,
 }
 
 impl WasmPlugin {
@@ -1051,6 +1391,9 @@ impl WasmPlugin {
                 UserData::new(host.clone()),
                 push_override,
             ),
+            Function::new("db_query", [PTR], [PTR], UserData::new(host.clone()), db_query),
+            Function::new("db_exec", [PTR], [PTR], UserData::new(host.clone()), db_exec),
+            Function::new("db_batch", [PTR], [PTR], UserData::new(host.clone()), db_batch),
         ];
         // No wasmtime disk cache: by default it lives in `$HOME/.cache/wasmtime`,
         // and in the production image stationd runs as `stationd` with root's
@@ -1066,12 +1409,14 @@ impl WasmPlugin {
         let has_filter = plugin.function_exists("filter_pool");
         let has_event = plugin.function_exists("on_event");
         let has_scan = plugin.function_exists("on_scan");
+        let has_migrations = plugin.function_exists("db_migrations");
         Ok(Self {
             name,
             plugin,
             has_filter,
             has_event,
             has_scan,
+            has_migrations,
         })
     }
 }
@@ -1129,6 +1474,18 @@ impl Plugin for WasmPlugin {
         serde_json::from_str::<Vec<ScanEnrichment>>(&out)
             .map_err(|e| format!("bad on_scan output: {e}"))
     }
+
+    fn db_migrations(&mut self) -> Result<Vec<String>, String> {
+        if !self.has_migrations {
+            return Ok(Vec::new());
+        }
+        let out = self
+            .plugin
+            .call::<&str, String>("db_migrations", "")
+            .map_err(|e| format!("wasm db_migrations failed: {e}"))?;
+        serde_json::from_str::<Vec<String>>(&out)
+            .map_err(|e| format!("bad db_migrations output (expected [\"SQL\", …]): {e}"))
+    }
 }
 
 #[cfg(test)]
@@ -1169,6 +1526,7 @@ mod tests {
             order: 50,
             wasm: None,
             capabilities: vec![],
+            db: None,
             config,
         }
     }
@@ -1601,5 +1959,200 @@ mod tests {
         let extras = h.on_scan(vec![scan_input("x.mp3", &[("Type", "talks")])]).await;
         assert!(extras.is_empty());
         assert_eq!(h.list().await[0].state, "loaded");
+    }
+
+    // ----- per-plugin database (capability `db`) ------------------------
+
+    /// Counts `TrackResolved` per media in its own database.
+    struct CounterPlugin {
+        migrations: Vec<String>,
+        host: Option<Host>,
+    }
+
+    impl CounterPlugin {
+        fn new(migrations: &[&str]) -> Self {
+            Self { migrations: migrations.iter().map(|m| m.to_string()).collect(), host: None }
+        }
+    }
+
+    impl Plugin for CounterPlugin {
+        fn name(&self) -> &str {
+            "counter"
+        }
+        fn on_load(&mut self, host: Host) -> Result<(), String> {
+            host.db().map_err(|e| e.to_string())?;
+            self.host = Some(host);
+            Ok(())
+        }
+        fn db_migrations(&mut self) -> Result<Vec<String>, String> {
+            Ok(self.migrations.clone())
+        }
+        fn on_event(&mut self, event: &PluginEvent) {
+            let PluginEvent::TrackResolved { media_path: Some(m), .. } = event else { return };
+            let db = self.host.as_ref().unwrap().db().unwrap();
+            db.exec(&plugin_db::Statement {
+                sql: "INSERT INTO play (media, n) VALUES (?1, 1) ON CONFLICT(media) DO UPDATE SET n = n + 1".into(),
+                params: plugin_db::Params::Positional(vec![serde_json::json!(m)]),
+            })
+            .unwrap();
+        }
+    }
+
+    const PLAY_SCHEMA: &str = "CREATE TABLE play (media TEXT PRIMARY KEY, n INTEGER NOT NULL)";
+
+    fn db_slot(name: &str) -> Slot {
+        let mut d = decl(name, true, toml::Table::new());
+        d.capabilities = vec![Capability::Db];
+        Slot { decl: d, state: PluginState::Disabled, plugin: None, failures: VecDeque::new() }
+    }
+
+    fn db_env(dir: &std::path::Path) -> PluginEnv {
+        PluginEnv { control: None, db_dir: Some(dir.to_path_buf()) }
+    }
+
+    fn resolved(media: &str) -> PluginEvent {
+        PluginEvent::TrackResolved {
+            media_path: Some(media.into()),
+            playlist_ref: None,
+            rule_id: None,
+            origin: "base".into(),
+        }
+    }
+
+    #[test]
+    fn db_plugin_is_migrated_before_on_load_and_writes_its_own_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut slot = db_slot("counter");
+        let host = slot.open_host(&db_env(dir.path())).expect("db opened");
+        slot.migrate_and_load(Box::new(CounterPlugin::new(&[PLAY_SCHEMA])), host);
+        assert_eq!(slot.state.label(), "loaded", "{}", slot.state.reason());
+        let mut slots = vec![slot];
+        dispatch_event(&mut slots, &resolved("a.mp3"));
+        dispatch_event(&mut slots, &resolved("a.mp3"));
+        let path = plugin_db::db_path(dir.path(), "counter");
+        let rows = plugin_db::query_file(&path, "SELECT media, n FROM play", 10).unwrap();
+        assert_eq!(rows.rows, vec![vec![serde_json::json!("a.mp3"), serde_json::json!(2)]]);
+    }
+
+    #[test]
+    fn a_failing_migration_refuses_the_start_visibly() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut slot = db_slot("counter");
+        let host = slot.open_host(&db_env(dir.path())).unwrap();
+        slot.migrate_and_load(Box::new(CounterPlugin::new(&["CREATE TABLE oops ("])), host);
+        assert_eq!(slot.state.label(), "failed");
+        assert!(slot.state.reason().starts_with("Migrate: migration 1"), "{}", slot.state.reason());
+        assert!(slot.plugin.is_none());
+        // An edited, already-applied migration is refused too.
+        let mut slot = db_slot("counter");
+        let host = slot.open_host(&db_env(dir.path())).unwrap();
+        slot.migrate_and_load(Box::new(CounterPlugin::new(&[PLAY_SCHEMA])), host);
+        assert_eq!(slot.state.label(), "loaded");
+        slot.stop();
+        let host = slot.open_host(&db_env(dir.path())).unwrap();
+        slot.migrate_and_load(Box::new(CounterPlugin::new(&["CREATE TABLE play (media TEXT)"])), host);
+        assert_eq!(slot.state.label(), "failed");
+        assert!(slot.state.reason().contains("modified"), "{}", slot.state.reason());
+    }
+
+    #[test]
+    fn db_capability_without_a_directory_fails_visibly() {
+        let mut slot = db_slot("counter");
+        assert!(slot.open_host(&PluginEnv::default()).is_none());
+        assert_eq!(slot.state.label(), "failed");
+        assert!(slot.state.reason().contains("directory"), "{}", slot.state.reason());
+    }
+
+    #[test]
+    fn host_db_needs_the_capability() {
+        let host = Host::new("x", &[], None);
+        assert!(matches!(host.db(), Err(HostError::Denied { capability: "db", .. })));
+        let host = Host::new("x", &[Capability::Db], None);
+        assert!(matches!(host.db(), Err(HostError::NoDatabase)));
+    }
+
+    #[test]
+    fn wasm_db_calls_answer_json_in_band() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = PluginDb::open(dir.path(), "w", DbLimits::default()).unwrap();
+        db.migrate(&[PLAY_SCHEMA.into()]).unwrap();
+        let host = Host::new("w", &[Capability::Db], None).with_db(Arc::new(db));
+        let j = |s: String| serde_json::from_str::<serde_json::Value>(&s).unwrap();
+
+        let ins = j(wasm_db_exec(&host, r#"{"sql":"INSERT INTO play VALUES (?, ?)","params":["a",1]}"#));
+        assert_eq!(ins["ok"], true);
+        assert_eq!(ins["changes"], 1);
+        let batch = j(wasm_db_batch(
+            &host,
+            r#"{"statements":[{"sql":"INSERT INTO play VALUES ('b', 1)"},{"sql":"UPDATE play SET n = n + 1 WHERE media = :m","params":{"m":"a"}}]}"#,
+        ));
+        assert_eq!(batch["ok"], true);
+        assert_eq!(batch["results"].as_array().unwrap().len(), 2);
+        let q = j(wasm_db_query(&host, r#"{"sql":"SELECT media, n FROM play ORDER BY media"}"#));
+        assert_eq!(q["ok"], true);
+        assert_eq!(q["columns"], serde_json::json!(["media", "n"]));
+        assert_eq!(q["rows"], serde_json::json!([["a", 2], ["b", 1]]));
+
+        // Refusals and errors are data, never traps.
+        let failed = j(wasm_db_batch(
+            &host,
+            r#"{"statements":[{"sql":"INSERT INTO play VALUES ('c', 1)"},{"sql":"INSERT INTO play VALUES ('a', 1)"}]}"#,
+        ));
+        assert_eq!(failed["ok"], false);
+        assert!(failed["error"].as_str().unwrap().starts_with("statement 1"), "{failed}");
+        let pragma = j(wasm_db_exec(&host, r#"{"sql":"PRAGMA journal_mode = OFF"}"#));
+        assert_eq!(pragma["ok"], false);
+        assert!(pragma["error"].as_str().unwrap().contains("not allowed"), "{pragma}");
+        let bad = j(wasm_db_query(&host, r#"{"query":"SELECT 1"}"#));
+        assert_eq!(bad["ok"], false);
+        let without = Host::new("w", &[], None);
+        let denied = j(wasm_db_query(&without, r#"{"sql":"SELECT 1"}"#));
+        assert_eq!(denied["ok"], false);
+        assert!(denied["error"].as_str().unwrap().contains("`db`"), "{denied}");
+    }
+
+    #[tokio::test]
+    async fn db_admin_info_query_and_reset() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut logger = decl("logger", true, toml::Table::new());
+        logger.capabilities = vec![Capability::Db];
+        let plain = decl("blacklist", true, toml::Table::new());
+        let h = spawn_env(vec![logger, plain], db_env(dir.path()));
+
+        let info = h.db_info("logger").await.unwrap();
+        let inspect = info.inspect.expect("created at start");
+        assert_eq!(inspect.schema_version, 0);
+        assert!(inspect.tables.is_empty());
+        let rows = h.db_query("logger", "SELECT count(*) FROM _stationd_migrations").await.unwrap();
+        assert_eq!(rows.rows, vec![vec![serde_json::json!(0)]]);
+        assert!(matches!(
+            h.db_query("logger", "CREATE TABLE t (x)").await,
+            Err(DbAdminError::Db(DbError::NotReadOnly))
+        ));
+
+        assert!(matches!(h.db_reset("logger").await, Err(DbAdminError::Precondition(_))));
+        h.control("logger", Action::Stop).await.unwrap();
+        assert_eq!(h.db_reset("logger").await, Ok(true));
+        assert_eq!(h.db_info("logger").await.unwrap().inspect, None);
+        assert_eq!(h.db_reset("logger").await, Ok(false));
+        // Restart recreates it.
+        h.control("logger", Action::Start).await.unwrap();
+        assert!(h.db_info("logger").await.unwrap().inspect.is_some());
+
+        assert!(matches!(h.db_info("nope").await, Err(DbAdminError::UnknownPlugin(_))));
+        assert!(matches!(h.db_info("blacklist").await, Err(DbAdminError::Precondition(_))));
+    }
+
+    #[test]
+    fn declarations_are_validated_as_a_whole() {
+        let mut a = decl("a", true, toml::Table::new());
+        let b = decl("a", false, toml::Table::new());
+        assert!(validate_decls(&[a.clone(), b]).unwrap_err().contains("twice"));
+        a.db = Some(DbLimits::default());
+        assert!(validate_decls(&[a.clone()]).unwrap_err().contains("capability `db`"));
+        a.capabilities = vec![Capability::Db];
+        assert!(validate_decls(&[a.clone()]).is_ok());
+        a.name = "a/b".into();
+        assert!(validate_decls(&[a]).is_err());
     }
 }

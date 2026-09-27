@@ -14,7 +14,11 @@ use schedule::{ApplyGridRequest, CheckCoverageRequest, EnqueueRequest, ExportGri
 use library::library_service_client::LibraryServiceClient;
 use library::{ListGenresRequest, ListMediaRequest, ScanRequest};
 use plugin::plugin_service_client::PluginServiceClient;
-use plugin::{plugin_control_request::Action as PluginAction, PluginControlRequest, PluginListRequest};
+use plugin::{
+    plugin_control_request::Action as PluginAction, plugin_db_value::Kind as DbKind,
+    PluginControlRequest, PluginDbInfoRequest, PluginDbQueryRequest, PluginDbResetRequest,
+    PluginListRequest,
+};
 use broadcast::broadcast_service_client::BroadcastServiceClient;
 use liquidsoap::liquidsoap_service_client::LiquidsoapServiceClient;
 use liquidsoap::{GetStatusRequest as LsStatusRequest, RenderScriptRequest};
@@ -210,6 +214,27 @@ enum PluginCommand {
     Restart { name: String },
     /// Reload the artefact from disk (== restart in native)
     Reload { name: String },
+    /// The plugin's own database (capability `db`)
+    Db {
+        name: String,
+        #[command(subcommand)]
+        cmd: PluginDbCommand,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum PluginDbCommand {
+    /// File, size, schema version, tables and bounds
+    Info,
+    /// Run one read-only SQL statement (separate read-only connection)
+    Query { sql: String },
+    /// Delete the database (plugin must be stopped; its next start recreates
+    /// it and re-applies its migrations)
+    Reset {
+        /// Confirm the deletion (irreversible)
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -798,13 +823,100 @@ async fn main() -> anyhow::Result<()> {
                 );
             }
         }
+        Command::Plugin(PluginCommand::Db { name, cmd }) => {
+            let mut cli = PluginServiceClient::connect(args.addr.clone()).await?;
+            match cmd {
+                PluginDbCommand::Info => {
+                    let i = cli
+                        .db_info(PluginDbInfoRequest { name: name.clone() })
+                        .await?
+                        .into_inner();
+                    println!("path     {}", i.path);
+                    if !i.exists {
+                        println!("         (no file yet: plugin never started, or reset)");
+                    } else {
+                        println!("size     {} bytes", i.size_bytes);
+                        println!("schema   version {}", i.schema_version);
+                        if i.tables.is_empty() {
+                            println!("tables   (none)");
+                        }
+                        for (n, t) in i.tables.iter().enumerate() {
+                            let head = if n == 0 { "tables  " } else { "        " };
+                            println!("{head} {:<24} {} row(s)", t.name, t.rows);
+                        }
+                    }
+                    println!(
+                        "limits   max_size_mb={} query_timeout_ms={} max_rows={}",
+                        i.max_size_mb, i.query_timeout_ms, i.max_rows
+                    );
+                }
+                PluginDbCommand::Query { sql } => {
+                    let r = cli
+                        .db_query(PluginDbQueryRequest { name: name.clone(), sql: sql.clone() })
+                        .await?
+                        .into_inner();
+                    let cells: Vec<Vec<String>> = r
+                        .rows
+                        .iter()
+                        .map(|row| {
+                            row.values
+                                .iter()
+                                .map(|v| match &v.kind {
+                                    None | Some(DbKind::Null(_)) => "NULL".to_string(),
+                                    Some(DbKind::Integer(i)) => i.to_string(),
+                                    Some(DbKind::Real(f)) => f.to_string(),
+                                    Some(DbKind::Text(t)) => t.clone(),
+                                    Some(DbKind::Blob(b)) => format!("<blob {} bytes>", b.len()),
+                                })
+                                .collect()
+                        })
+                        .collect();
+                    let mut widths: Vec<usize> = r.columns.iter().map(|c| c.chars().count()).collect();
+                    for row in &cells {
+                        for (w, c) in widths.iter_mut().zip(row) {
+                            *w = (*w).max(c.chars().count());
+                        }
+                    }
+                    let line = |row: &[String]| {
+                        row.iter()
+                            .zip(&widths)
+                            .map(|(c, w)| format!("{c:<w$}"))
+                            .collect::<Vec<_>>()
+                            .join("  ")
+                            .trim_end()
+                            .to_string()
+                    };
+                    println!("{}", line(&r.columns));
+                    for row in &cells {
+                        println!("{}", line(row));
+                    }
+                    println!("({} row(s))", cells.len());
+                }
+                PluginDbCommand::Reset { yes } => {
+                    if !yes {
+                        anyhow::bail!(
+                            "this deletes the database of plugin `{name}` for good: re-run with --yes"
+                        );
+                    }
+                    let r = cli
+                        .db_reset(PluginDbResetRequest { name: name.clone() })
+                        .await?
+                        .into_inner();
+                    if r.removed {
+                        println!("{name}: database deleted");
+                    } else {
+                        println!("{name}: no database to delete");
+                    }
+                }
+            }
+        }
         Command::Plugin(cmd) => {
             let (name, action) = match &cmd {
                 PluginCommand::Start { name } => (name, PluginAction::Start),
                 PluginCommand::Stop { name } => (name, PluginAction::Stop),
                 PluginCommand::Restart { name } => (name, PluginAction::Restart),
                 PluginCommand::Reload { name } => (name, PluginAction::Reload),
-                PluginCommand::List => unreachable!("handled above"),
+                PluginCommand::List | PluginCommand::Db { .. } => unreachable!("handled above"),
             };
             let mut cli = PluginServiceClient::connect(args.addr.clone()).await?;
             let reply = cli

@@ -21,7 +21,9 @@ path = "./playlist"
 level = "info"
 
 # Plugins (optional). `capabilities` = host calls the plugin may make on the
-# core ("control", "push_override"); a call outside them is refused and logged.
+# core ("control", "push_override", "db"); a call outside them is refused and
+# logged. "db" = the plugin's own SQLite file, `<database dir>/plugins/<name>.db`
+# (name: ASCII letters, digits, `-`, `_`), bounded by an optional `[plugin.db]`.
 # `enabled` (default false): a declared plugin is armed — listed by
 # `stationctl plugin list`, startable by `stationctl plugin start <name>` — but
 # only activated at start-up with `enabled = true`.
@@ -43,6 +45,17 @@ level = "info"
 # name = "stop-when-idle-wasm"
 # wasm = "plugins/stop-when-idle-wasm/target/wasm32-unknown-unknown/release/stop_when_idle_wasm.wasm"
 # capabilities = ["control"]
+#
+# Play counts in the plugin's own database (plugins/play-stats-wasm), read with
+# `stationctl plugin db play-stats query "SELECT * FROM play_count LIMIT 20"`:
+# [[plugin]]
+# name = "play-stats"
+# wasm = "plugins/play-stats-wasm/target/wasm32-unknown-unknown/release/play_stats_wasm.wasm"
+# capabilities = ["db"]
+# [plugin.db]              # optional, defaults shown
+# max_size_mb = 64         # file size cap
+# query_timeout_ms = 200   # per host call (a db_batch as a whole)
+# max_rows = 10000         # db_query result cap (more = error, not truncation)
 
 # Liquidsoap wiring (optional). Absent = nothing airs (scheduling only).
 # stationd writes the generated script to `script_path` at start-up (only when

@@ -50,6 +50,11 @@ base64 = "0.22"        # en-tête Basic auth
 roxmltree = "0.20"     # lecture de /admin/stats (XML)
 libc = "0.2"           # groupe du fichier icecast.xml (getgrnam_r / getgrgid_r) ; déjà dans l'arbre
 argon2 = "0.5"         # empreintes des mots de passe DJ (fichier des DJ, [live])
+# Base SQLite propre à chaque plugin (capacité `db`), synchrone : les plugins sont appelés
+# depuis leur tâche, un appel hôte ne peut pas attendre sqlx. Version alignée sur sqlx 0.7
+# (même libsqlite3-sys 0.27 : une seule copie de SQLite liée). hooks = autorisation +
+# délai par requête ; limits = ATTACH interdit au niveau du moteur.
+rusqlite = { version = "0.30", features = ["hooks", "limits"] }
 
 [build-dependencies]
 tonic-build = "0.12"

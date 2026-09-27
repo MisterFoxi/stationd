@@ -1,0 +1,6 @@
+ schema_version = 1
+[[dj]]
+id            = "foxi"                  # grid `dj = "marc"`, harbor login user
+name          = "Foxi"                  # optional
+password_hash = "$argon2id$v=19$m=19456,t=2,p=1$Xem8vK95BKIp/k+UOGVxyA$bMpLdKB9WCbqi6zR5UG2BN+Cb8VK2K7PhRPfaf5cUas"    # stationctl dj hash
+enabled       = true                    # default

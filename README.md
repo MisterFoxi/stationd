@@ -246,11 +246,15 @@ Plugins add features; they do not process audio.
     listeners sampled, …
   - `filter_pool`: remove candidates before a track is picked.
   - `on_scan`: turn custom tags into genres.
-- **Host surface:** each plugin declares capabilities, e.g. `control`
-  (stop / pause the station) or `push_override`.
+- **Host surface:** each plugin declares capabilities: `control`
+  (stop / pause the station), `push_override`, `db` (its own SQLite file,
+  `data/plugins/<name>.db`, opened by the core; the plugin ships its schema as
+  migrations and sends SQL through `db_query` / `db_exec` / `db_batch`,
+  confined: no `ATTACH`, no `PRAGMA`, bounded in time, rows and size).
 - **Examples:** native `logger`, `blacklist` and `stop-when-idle` (in
   `src/plugin.rs`); WASM guests in `plugins/`: `blacklist-wasm`,
-  `require-title-wasm`, `stop-when-idle-wasm`, `custom-tags-wasm`.
+  `require-title-wasm`, `stop-when-idle-wasm`, `custom-tags-wasm`,
+  `play-stats-wasm` (capability `db`).
 
 The contracts are in `Doc/plugin-{events,hooks,host}.md`.
 
@@ -552,6 +556,7 @@ docker compose exec -u stationd station stationctl status
 | `override push` \| `list` \| `clear` | Content ahead of the grid (`--media`/`--playlist`, `--hard`, `--expiry`, `--tracks`) |
 | `queue push` | Feed a `queue` playlist (listener request / DJ injection) |
 | `plugin list` \| `start` \| `stop` \| `restart` \| `reload` | Plugin lifecycle |
+| `plugin db <name> info` \| `query "<SELECT>"` \| `reset --yes` | A plugin's own database (read-only query; reset only when stopped) |
 | `ls render` \| `status` | Generated Liquidsoap script; bridge / air status |
 | `icecast status` \| `render` | Audience and health of our mounts; generated `icecast.xml` |
 | `live status` \| `kick` \| `open` \| `close` | Live DJ on air, openings, urgent rights, refused DJs; end the live now; ad-hoc opening (`open <dj> --for 2h`) and its early end |

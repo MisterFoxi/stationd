@@ -5,14 +5,19 @@
 
 use tonic::{Request, Response, Status};
 
-use crate::plugin::{Action, PluginHandle, PluginInfo as CoreInfo};
+use base64::Engine as _;
+
+use crate::plugin::{Action, DbAdminError, PluginHandle, PluginInfo as CoreInfo};
+use crate::plugin_db::DbError;
 
 pub use crate::proto::plugin;
 
 use plugin::plugin_service_server::PluginService;
 use plugin::{
-    plugin_control_request::Action as ProtoAction, PluginControlRequest, PluginControlResponse,
-    PluginInfo, PluginListRequest, PluginListResponse,
+    plugin_control_request::Action as ProtoAction, plugin_db_value::Kind, PluginControlRequest,
+    PluginControlResponse, PluginDbInfoRequest, PluginDbInfoResponse, PluginDbQueryRequest,
+    PluginDbQueryResponse, PluginDbResetRequest, PluginDbResetResponse, PluginDbRow,
+    PluginDbTable, PluginDbValue, PluginInfo, PluginListRequest, PluginListResponse,
 };
 
 pub struct PluginGrpc {
@@ -35,6 +40,40 @@ fn map_info(i: CoreInfo) -> PluginInfo {
         failures: i.failures,
         capabilities: i.capabilities,
     }
+}
+
+fn db_status(e: DbAdminError) -> Status {
+    match e {
+        DbAdminError::UnknownPlugin(_) => Status::not_found(e.to_string()),
+        DbAdminError::Precondition(_) => Status::failed_precondition(e.to_string()),
+        DbAdminError::Db(DbError::Open { .. }) => Status::failed_precondition(e.to_string()),
+        DbAdminError::Db(_) => Status::invalid_argument(e.to_string()),
+    }
+}
+
+/// A JSON cell of `plugin_db::Rows` back to its SQL kind (a BLOB travels as
+/// `{"blob": "<base64>"}` in JSON, as bytes here).
+fn map_value(v: serde_json::Value) -> PluginDbValue {
+    use serde_json::Value as J;
+    let kind = match v {
+        J::Null => Kind::Null(true),
+        J::Bool(b) => Kind::Integer(i64::from(b)),
+        J::Number(n) => match n.as_i64() {
+            Some(i) => Kind::Integer(i),
+            None => Kind::Real(n.as_f64().unwrap_or(f64::NAN)),
+        },
+        J::String(s) => Kind::Text(s),
+        J::Object(m) => match m.get("blob").and_then(|b| b.as_str()) {
+            Some(b) => Kind::Blob(
+                base64::engine::general_purpose::STANDARD
+                    .decode(b)
+                    .unwrap_or_default(),
+            ),
+            None => Kind::Text(serde_json::Value::Object(m).to_string()),
+        },
+        other => Kind::Text(other.to_string()),
+    };
+    PluginDbValue { kind: Some(kind) }
 }
 
 #[tonic::async_trait]
@@ -69,5 +108,68 @@ impl PluginService for PluginGrpc {
         Ok(Response::new(PluginControlResponse {
             plugin: Some(map_info(info)),
         }))
+    }
+
+    async fn db_info(
+        &self,
+        request: Request<PluginDbInfoRequest>,
+    ) -> Result<Response<PluginDbInfoResponse>, Status> {
+        let info = self
+            .handle
+            .db_info(&request.into_inner().name)
+            .await
+            .map_err(db_status)?;
+        let mut resp = PluginDbInfoResponse {
+            path: info.path.display().to_string(),
+            max_size_mb: info.limits.max_size_mb,
+            query_timeout_ms: info.limits.query_timeout_ms,
+            max_rows: info.limits.max_rows,
+            ..Default::default()
+        };
+        if let Some(i) = info.inspect {
+            resp.exists = true;
+            resp.size_bytes = i.size_bytes;
+            resp.schema_version = i.schema_version;
+            resp.tables = i
+                .tables
+                .into_iter()
+                .map(|(name, rows)| PluginDbTable { name, rows })
+                .collect();
+        }
+        Ok(Response::new(resp))
+    }
+
+    async fn db_query(
+        &self,
+        request: Request<PluginDbQueryRequest>,
+    ) -> Result<Response<PluginDbQueryResponse>, Status> {
+        let req = request.into_inner();
+        let rows = self
+            .handle
+            .db_query(&req.name, &req.sql)
+            .await
+            .map_err(db_status)?;
+        Ok(Response::new(PluginDbQueryResponse {
+            columns: rows.columns,
+            rows: rows
+                .rows
+                .into_iter()
+                .map(|r| PluginDbRow {
+                    values: r.into_iter().map(map_value).collect(),
+                })
+                .collect(),
+        }))
+    }
+
+    async fn db_reset(
+        &self,
+        request: Request<PluginDbResetRequest>,
+    ) -> Result<Response<PluginDbResetResponse>, Status> {
+        let removed = self
+            .handle
+            .db_reset(&request.into_inner().name)
+            .await
+            .map_err(db_status)?;
+        Ok(Response::new(PluginDbResetResponse { removed }))
     }
 }

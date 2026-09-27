@@ -89,23 +89,76 @@ Tant que LS n'est pas là, un `hard` demandé est **dégradé en `soft` avec un
 avertissement loggé** (une annonce d'urgence vaut mieux tard que jamais),
 plutôt que refusé — **à confirmer** (cf. Encore ouvert).
 
-### `db_*` — la base du plugin
+### `db` — la base du plugin
 
 Chaque plugin a **sa** base, mais **le core l'ouvre pour son compte** : le
-plugin n'obtient jamais un chemin ni un handle SQLite, seulement une API
-`db_get` / `db_put` / `db_query` scopée à sa base. Conséquences :
+plugin n'obtient jamais un chemin ni un handle SQLite, seulement trois appels
+hôte scopés à sa base. Conséquences :
 
-- **un fichier par plugin** (isolation : un plugin ne corrompt pas les données
-  d'un autre ni du core) ;
+- **un fichier par plugin** (`<dossier de database.path>/plugins/<name>.db`) :
+  un plugin ne corrompt pas les données d'un autre ni du core ;
 - **single-writer préservé** : chaque fichier a un unique writer, le core, pour
   le compte d'un unique plugin ;
 - WASM-compatible : pas d'I/O disque dans le plugin, tout passe par la fonction
   hôte.
 
 C'est de la **famille (B) du point de vue du plugin** (état durable qui lui
-appartient), mais **hors du périmètre de vérité du core** : un plugin stats
-reconstruit ses agrégats au-dessus du journal de diffusion du core, il n'est
-jamais la source de vérité de quoi que ce soit d'essentiel à l'antenne.
+appartient, jamais supprimé automatiquement), mais **hors du périmètre de vérité
+du core** : un plugin stats reconstruit ses agrégats au-dessus du journal de
+diffusion du core, il n'est jamais la source de vérité de quoi que ce soit
+d'essentiel à l'antenne.
+
+**Le plugin possède son schéma** : du vrai SQL (tables, index, `GROUP BY`), pas
+un simple clé/valeur. Il le livre sous forme de **migrations ordonnées**
+(natif : `Plugin::db_migrations` ; WASM : export `db_migrations`, sans entrée,
+qui rend `["SQL", …]`), version = rang + 1. Le core les applique au démarrage,
+**avant `on_load`**, chacune dans une transaction avec son enregistrement dans
+`_stationd_migrations` (texte SQL complet, dans le fichier du plugin). Une
+migration déjà appliquée puis modifiée, ou appliquée mais plus livrée → plugin
+`failed` (phase `Migrate`), `on_load` pas appelé. Même règle que les migrations
+du core : on n'édite jamais, on ajoute.
+
+**Les appels** (JSON dans les deux sens, comme `station_control`) :
+
+| Appel | Entrée | Réponse |
+|---|---|---|
+| `db_query` | `{"sql", "params"?}` — une instruction **en lecture seule** | `{"ok":true,"columns":[…],"rows":[[…],…]}` |
+| `db_exec` | `{"sql", "params"?}` — **une** instruction | `{"ok":true,"changes":n,"last_insert_rowid":id}` |
+| `db_batch` | `{"statements":[{"sql","params"?},…]}` | `{"ok":true,"results":[…]}` — **tout ou rien** |
+
+`params` : tableau (positionnels `?`, `?1`) ou objet (nommés `:x`, `@x`, `$x` ;
+préfixe `:` implicite). Chaque paramètre de l'instruction doit être lié (un
+oubli est une erreur, jamais un NULL silencieux). Valeurs : `null`, booléen
+(→ 0/1), nombre, chaîne, `{"blob": "<base64>"}` (même forme en sortie).
+Un échec est une **donnée** (`{"ok":false,"error":…}`), jamais un trap ; dans
+un `db_batch`, l'erreur nomme l'instruction (`statement 1: …`) et **rien**
+n'est écrit.
+
+**Confinement** (le SQL du plugin n'est pas de confiance) :
+
+- `ATTACH` / `DETACH` refusés (autorisation + `SQLITE_LIMIT_ATTACHED = 0`),
+  `VACUUM` refusé (`VACUUM INTO` écrirait un fichier ailleurs),
+  `load_extension` refusé, mode défensif SQLite ;
+- `PRAGMA` refusés sauf introspection en lecture (`table_info`, `index_list`,
+  `foreign_key_list`…) — un plugin ne relève pas son quota ;
+- pas de `BEGIN` / `COMMIT` / `SAVEPOINT` : les transactions sont au core
+  (`db_batch`), pas de transaction ouverte à cheval sur deux appels ;
+- tables `_stationd*` lisibles, jamais modifiables ;
+- bornes `[plugin.db]` : `max_size_mb` (64 — une écriture qui dépasse échoue,
+  `database or disk is full`), `query_timeout_ms` (200 — par appel, un
+  `db_batch` entier compris ; au-delà l'instruction est interrompue et le batch
+  annulé), `max_rows` (10 000 — plus de lignes = erreur, jamais une troncature
+  silencieuse).
+
+**CLI** (`stationctl plugin db <name> …`, connexion séparée en lecture seule,
+le plugin n'est pas touché) : `info` (fichier, taille, version du schéma,
+tables et lignes, bornes), `query "<SELECT>"` (même confinement, 10 s),
+`reset --yes` (supprime le fichier — refusé tant que le plugin est chargé ; le
+prochain démarrage recrée la base et rejoue les migrations).
+
+Implémentation : `src/plugin_db.rs` (rusqlite synchrone : les plugins sont
+appelés de façon synchrone depuis leur tâche, un appel hôte ne peut pas
+attendre sqlx). Démo : `plugins/play-stats-wasm`.
 
 ## Ce que la surface hôte n'est pas
 
@@ -121,7 +174,7 @@ jamais la source de vérité de quoi que ce soit d'essentiel à l'antenne.
   est accepté, la réponse porte `degraded = true`, le mode demandé (`hard`)
   reste visible dans la file. « L'annonce passe », en retard (prochaine
   frontière).
-- **Capacités déclarées** : `capabilities = ["control", "push_override"]` dans
+- **Capacités déclarées** : `capabilities = ["control", "push_override", "db"]` dans
   le `[[plugin]]` (ensemble fermé ; nom inconnu = config refusée au démarrage).
   Un appel hors capacités est **refusé et loggué**, jamais exécuté ; en WASM
   le refus revient au guest comme donnée (`{"ok":false,…}`), pas comme trap.
@@ -148,9 +201,21 @@ jamais la source de vérité de quoi que ce soit d'essentiel à l'antenne.
   `OVERRIDE` (+ `override_source`) ou `HALTED` (+ `halted_state`, aucun média,
   Liquidsoap ne doit pas combler).
 
+## Décisions (tranche `db`, 2026-09-27)
+
+- **SQL scopé plutôt que clé/valeur** : le plugin déclare ses tables (un
+  plugin stats a besoin de `GROUP BY` et d'index) ; un clé/valeur se réécrit
+  côté guest si besoin. `db_get` / `db_put` prévus au départ abandonnés.
+- **Transactions** : `db_batch` (plusieurs instructions, tout ou rien) répond
+  à la question des écritures multi-clés ; aucune transaction exposée à
+  cheval sur plusieurs appels.
+- **Schéma = migrations livrées par le plugin**, appliquées avant `on_load`,
+  jamais modifiées une fois appliquées.
+- **Capacité `db` déclarée** ; nom du plugin = nom du fichier (ASCII, `-`,
+  `_`) ; noms de plugins uniques (vérifié au chargement de la config, comme
+  `[plugin.db]` sans la capacité).
+
 ## Encore ouvert
 
-- **`db_*`** (tranche suivante) : `db_query` lecture seule + `db_put` atomique
-  suffisent-ils, ou faut-il des transactions multi-clés exposées ?
 - **Persistance de la file d'override** si un cas réel l'exige (aujourd'hui la
   péremption rend la perte au redémarrage acceptable).

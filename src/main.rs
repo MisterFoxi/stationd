@@ -89,8 +89,22 @@ async fn main() -> anyhow::Result<()> {
     // enabled ones now (a failure is recorded, not fatal), each with its host
     // surface scoped to its declared capabilities. The grid engine and the
     // station control emit events to it (best-effort); it is also driven via
-    // `stationctl plugin list|start|stop|restart|reload`.
-    let plugins = stationd::plugin::spawn_with(cfg.plugins.clone(), Some(control.clone()));
+    // `stationctl plugin list|start|stop|restart|reload|db`. A plugin with
+    // capability `db` gets its own SQLite file next to the station database
+    // (`<dir of database.path>/plugins/<name>.db`).
+    let plugin_db_dir = cfg
+        .database
+        .path
+        .parent()
+        .map(|p| p.join("plugins"))
+        .unwrap_or_else(|| std::path::PathBuf::from("plugins"));
+    let plugins = stationd::plugin::spawn_env(
+        cfg.plugins.clone(),
+        stationd::plugin::PluginEnv {
+            control: Some(control.clone()),
+            db_dir: Some(plugin_db_dir),
+        },
+    );
     control.attach_plugins(plugins.clone());
     let plugin_service = PluginGrpc::new(plugins.clone());
     let mut broadcast_service = BroadcastGrpc::new(control.clone());
