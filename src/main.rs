@@ -128,7 +128,8 @@ async fn main() -> anyhow::Result<()> {
                 warn!(path = ?live.djs_path, "DJ file readable by everyone: it holds password hashes, make it 0640");
             }
         }
-        stationd::live::LiveHub::new(live.djs_path.clone(), engine.clone())
+        stationd::live::LiveHub::new(live.djs_path.clone(), engine.clone(), db_pool.clone())
+            .with_urgent_cooldown(live.urgent_cooldown)
     });
 
     // Liquidsoap wiring (optional `[liquidsoap]`): write the generated script

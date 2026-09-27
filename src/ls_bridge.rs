@@ -672,7 +672,7 @@ async fn live_silence_handler(State(state): State<AppState>, headers: HeaderMap)
         return StatusCode::UNAUTHORIZED;
     }
     if let Some(hub) = &state.live {
-        hub.silence();
+        hub.silence().await;
     }
     StatusCode::OK
 }
@@ -1124,7 +1124,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let hub = crate::live::LiveHub::new(&djs, b.engine.clone());
+        let hub = crate::live::LiveHub::new(&djs, b.engine.clone(), pool.clone());
         let app = router(b.clone(), "tok", Some(hub.clone()));
 
         b.at(1000);

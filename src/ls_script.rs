@@ -895,6 +895,7 @@ mod tests {
             silence_timeout: 30,
             silence_threshold: -40.0,
             buffer: 5.0,
+            urgent_cooldown: 600,
         }
     }
 

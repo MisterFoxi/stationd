@@ -7,13 +7,14 @@ use tonic::{Request, Response, Status};
 
 use crate::config::LiveConfig;
 use crate::live::{LiveError, LiveHub, LiveSession};
+use crate::live_opening::Opening;
 
 pub use crate::proto::live;
 
 use live::live_service_server::LiveService;
 use live::{
-    GetStatusRequest, HashPasswordRequest, HashPasswordResponse, KickRequest, KickResponse, LiveStatus,
-    Refused,
+    CloseRequest, CloseResponse, Cooldown, GetStatusRequest, HashPasswordRequest, HashPasswordResponse,
+    KickRequest, KickResponse, LiveStatus, OpenRequest, OpenResponse, Refused,
 };
 
 pub struct LiveGrpc {
@@ -40,6 +41,21 @@ fn session(s: &LiveSession) -> live::LiveSession {
         occurrence: s.occurrence.clone(),
         address: s.address.clone(),
         since: s.since.0,
+        access: s.access.as_str().to_string(),
+    }
+}
+
+fn opening(o: &Opening) -> live::Opening {
+    live::Opening { dj: o.dj.clone(), opened_at: o.opened_at.0, until: o.until.0, cut: o.cut }
+}
+
+fn map_err(e: LiveError) -> Status {
+    match e {
+        LiveError::BadDuration(_) | LiveError::UnknownDj(_) => Status::invalid_argument(e.to_string()),
+        LiveError::NoLive | LiveError::DjDisabled(_) | LiveError::NoOpening(_) | LiveError::DjFile(_) => {
+            Status::failed_precondition(e.to_string())
+        }
+        LiveError::Db(_) => Status::internal(e.to_string()),
     }
 }
 
@@ -50,14 +66,25 @@ impl LiveService for LiveGrpc {
             return Ok(Response::new(LiveStatus { enabled: false, ..Default::default() }));
         };
         let st = hub.status();
+        let openings = hub.openings().await.map_err(map_err)?;
         let path = hub.djs_path().to_path_buf();
         let djs = tokio::task::spawn_blocking(move || crate::live::load_djs(&path))
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
-        let (djs_count, djs_error) = match djs {
-            Ok(d) => (d.len() as u32, String::new()),
-            Err(e) => (0, e),
+        let (djs_count, djs_error, urgent_djs) = match djs {
+            Ok(d) => {
+                let urgent: Vec<String> = d.iter().filter(|dj| dj.urgent).map(|dj| dj.id.clone()).collect();
+                (d.len() as u32, String::new(), urgent)
+            }
+            Err(e) => (0, e, Vec::new()),
         };
+        // Only the DJs holding the right have a cooldown worth showing.
+        let cooldowns = st
+            .cooldowns
+            .into_iter()
+            .filter(|(dj, _)| urgent_djs.contains(dj))
+            .map(|(dj, until)| Cooldown { dj, until: until.0 })
+            .collect();
         let (refusal_dj, refusal_reason, refusal_at) = st
             .last_refusal
             .map(|(dj, why, at)| (dj, why, at.0))
@@ -78,6 +105,10 @@ impl LiveService for LiveGrpc {
             last_refusal_at: refusal_at,
             djs_error,
             djs_count,
+            openings: openings.iter().map(opening).collect(),
+            urgent_djs,
+            cooldowns,
+            urgent_cooldown_s: cfg.urgent_cooldown,
         }))
     }
 
@@ -88,10 +119,25 @@ impl LiveService for LiveGrpc {
         if !self.air {
             return Err(Status::unavailable("Liquidsoap is not wired: nothing to disconnect"));
         }
-        match hub.kick() {
-            Ok(dj) => Ok(Response::new(KickResponse { dj })),
-            Err(LiveError::NoLive) => Err(Status::failed_precondition("no DJ on air")),
-        }
+        let dj = hub.kick().await.map_err(map_err)?;
+        Ok(Response::new(KickResponse { dj }))
+    }
+
+    async fn open(&self, req: Request<OpenRequest>) -> Result<Response<OpenResponse>, Status> {
+        let Some((hub, _)) = &self.wired else {
+            return Err(Status::failed_precondition("no [live] section: no harbor"));
+        };
+        let req = req.into_inner();
+        let o = hub.open(req.dj.trim(), req.duration.trim()).await.map_err(map_err)?;
+        Ok(Response::new(OpenResponse { opening: Some(opening(&o)) }))
+    }
+
+    async fn close(&self, req: Request<CloseRequest>) -> Result<Response<CloseResponse>, Status> {
+        let Some((hub, _)) = &self.wired else {
+            return Err(Status::failed_precondition("no [live] section: no harbor"));
+        };
+        let o = hub.close(req.into_inner().dj.trim()).await.map_err(map_err)?;
+        Ok(Response::new(CloseResponse { opening: Some(opening(&o)) }))
     }
 
     async fn hash_password(

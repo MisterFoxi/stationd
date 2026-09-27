@@ -1,12 +1,13 @@
 // live_v1.proto
 // ─────────────────────────────────────────────────────────────────────────
 // DJ live (harbor, section [live]) : qui est à l'antenne, fin d'un live,
-// empreinte d'un mot de passe pour le fichier des DJ. Face CLI :
-// stationctl live status | kick, stationctl dj hash.
+// ouvertures ponctuelles, empreinte d'un mot de passe pour le fichier des DJ.
+// Face CLI : stationctl live status | kick | open | close, stationctl dj hash.
 //
 // Les connexions elles-mêmes passent par le pont loopback de Liquidsoap
-// (/ls/v1/live/*) : stationd décide de chaque login (fichier des DJ + créneau
-// `live` de la grille).
+// (/ls/v1/live/*) : stationd décide de chaque login (fichier des DJ, puis
+// une des trois voies d'accès, dans l'ordre : créneau `live` de la grille,
+// ouverture ponctuelle, droit permanent `urgent = true` du fichier des DJ).
 
 syntax = "proto3";
 
@@ -15,10 +16,22 @@ package webradio.live.v1;
 service LiveService {
   rpc GetStatus(GetStatusRequest) returns (LiveStatus);
 
-  // Termine le live en cours : le DJ est déconnecté et refusé jusqu'à la fin
-  // de son créneau. failed_precondition : pas de [live] ou personne à
-  // l'antenne ; unavailable si Liquidsoap n'est pas câblé.
+  // Termine le live en cours : le DJ est déconnecté ; la voie par laquelle il
+  // était entré se referme (créneau ou ouverture : jusqu'à sa fin ; droit
+  // urgent : pendant [live] urgent_cooldown). failed_precondition : pas de
+  // [live] ou personne à l'antenne ; unavailable si Liquidsoap n'est pas câblé.
   rpc Kick(KickRequest) returns (KickResponse);
+
+  // Ouverture ponctuelle : le DJ peut se connecter dès maintenant et pendant
+  // `duration` (ex. "2h", 1m à 7d), hors grille. Remplace son ouverture
+  // active. Persistée (survit au redémarrage). invalid_argument : durée,
+  // DJ inconnu ; failed_precondition : pas de [live], DJ désactivé, fichier
+  // des DJ illisible.
+  rpc Open(OpenRequest) returns (OpenResponse);
+
+  // Referme l'ouverture active du DJ. Un DJ déjà à l'antenne par elle y
+  // reste (Kick pour couper). failed_precondition : pas d'ouverture active.
+  rpc Close(CloseRequest) returns (CloseResponse);
 
   // Empreinte argon2id (chaîne PHC) d'un mot de passe, à coller dans le
   // fichier des DJ (`password_hash`). Le calcul reste dans stationd.
@@ -29,10 +42,23 @@ message GetStatusRequest {}
 
 message LiveSession {
   string dj         = 1;
-  string rule_id    = 2;   // règle `live` dont la fenêtre l'a laissé entrer
-  string occurrence = 3;   // rule_id@YYYY-MM-DDTHH:MM
+  string rule_id    = 2;   // règle `live` dont la fenêtre l'a laissé entrer (voie slot)
+  string occurrence = 3;   // slot : rule_id@YYYY-MM-DDTHH:MM ; open : open#<id> ; urgent : vide
   string address    = 4;   // adresse du client (vue par le harbor)
   int64  since      = 5;   // epoch s
+  string access     = 6;   // slot | open | urgent | unknown
+}
+
+message Opening {
+  string dj        = 1;
+  int64  opened_at = 2;   // epoch s
+  int64  until     = 3;   // epoch s, fin (exclue)
+  bool   cut       = 4;   // DJ coupé pendant l'ouverture : refusé jusqu'à sa fin
+}
+
+message Cooldown {
+  string dj    = 1;
+  int64  until = 2;       // epoch s : droit urgent refermé jusque-là (après une coupure)
 }
 
 message Refused {
@@ -60,11 +86,33 @@ message LiveStatus {
   // est alors refusé).
   string djs_error = 14;
   uint32 djs_count = 15;
+  // Ouvertures ponctuelles actives (fin la plus proche d'abord).
+  repeated Opening openings = 16;
+  // DJ titulaires du droit permanent (`urgent = true`).
+  repeated string urgent_djs = 17;
+  // Droits urgents refermés après une coupure, jusqu'à `until`.
+  repeated Cooldown cooldowns = 18;
+  uint32 urgent_cooldown_s = 19;
 }
 
 message KickRequest {}
 message KickResponse {
   string dj = 1;
+}
+
+message OpenRequest {
+  string dj       = 1;
+  string duration = 2;    // 30m, 2h, 1d… (une seule unité)
+}
+message OpenResponse {
+  Opening opening = 1;
+}
+
+message CloseRequest {
+  string dj = 1;
+}
+message CloseResponse {
+  Opening opening = 1;    // telle qu'elle était avant fermeture
 }
 
 message HashPasswordRequest {

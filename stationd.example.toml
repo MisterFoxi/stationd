@@ -85,10 +85,14 @@ level = "info"
 # Live DJ (optional, requires [liquidsoap]): a harbor input in the generated
 # script. Who may connect: the DJ file (kept apart, it holds argon2 hashes —
 # `stationctl dj hash`; re-read at every login). When: the grid's `live`
-# rules (dj + start, open until the next slot starts). The live airs above
-# everything with a short fade; it ends on disconnection or after
-# silence_timeout seconds of silence (the DJ is then refused until the end
-# of its slot). Open harbor_port to the DJs (firewall / NAT), nothing else.
+# rules (dj + start, open until the next slot starts), an ad-hoc opening
+# (`stationctl live open <dj> --for 2h`, persisted, `live close <dj>`), or the
+# permanent right (`urgent = true` in the DJ file: urgent live at any time,
+# never over another live). The live airs above everything with a short
+# fade; it ends on disconnection or after silence_timeout seconds of silence.
+# A DJ cut (silence or kick) loses the way it came in: a slot or an opening
+# until its end, the urgent right for urgent_cooldown seconds.
+# Open harbor_port to the DJs (firewall / NAT), nothing else.
 #
 # [live]
 # djs_path          = "./djs.toml"
@@ -98,6 +102,7 @@ level = "info"
 # silence_timeout   = 30                    # s, 5..=3600
 # silence_threshold = -40.0                 # dBFS
 # buffer            = 5.0                   # s of the DJ stream buffered before it airs
+# urgent_cooldown   = 600                   # s, urgent right closed after a cut (0..=86400)
 #
 # djs.toml (mode 0640):
 #   schema_version = 1
@@ -106,6 +111,7 @@ level = "info"
 #   name          = "Marc"                  # optional
 #   password_hash = "$argon2id$v=19$..."    # stationctl dj hash
 #   enabled       = true                    # default
+#   urgent        = false                   # default; true = may take the air at any time
 # A software without user name: user `source`, password `marc,<password>`.
 
 # Icecast admin access (optional, requires [liquidsoap]). stationd samples

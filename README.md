@@ -209,18 +209,30 @@ A DJ streams to a harbor input of Liquidsoap (`[live]`, port 8005, mount
   (`stationctl dj hash`). It is re-read at every login: no restart needed.
   A software that cannot set a user name logs in as `source` with
   `dj,password` as the password. A DJ password contains neither `:` nor `,`.
-- **When:** a `live` rule of the grid. Outside the window, the login is
-  refused.
+- **When:** one of three ways in, tried in order:
+  1. a `live` rule of the grid (the slot, open until the next slot starts);
+  2. an ad-hoc opening: `stationctl live open <dj> --for 2h` (1m to 7d,
+     persisted across restarts, `live close <dj>` ends it early);
+  3. the permanent right: `urgent = true` on the DJ in the DJ file — the
+     DJ may take the air at any time (urgent live), but never over another
+     live on air.
+
+  Otherwise the login is refused.
 - **On air:** stationd decides every login; the live takes the air with a
   short fade (`fade`, 1.5 s), above everything — hard overrides and hard
   `at_clock` marks are held and air soft after the live.
 - **Back to the programme:** when the DJ disconnects, or after
   `silence_timeout` seconds of silence (30 s). A new track is chosen at that
   moment (the one the live interrupted is dropped). A DJ cut for silence —
-  or by `stationctl live kick` — is refused until the end of the slot.
-- `stationctl live status` shows who is on air, the last live, the refused
-  DJs and the last refused login. Plugins receive `LiveStarted` /
-  `LiveEnded`.
+  or by `stationctl live kick` — loses the way it came in: a slot or an
+  opening until its end; the urgent right for `urgent_cooldown` seconds
+  (600 s). Another way in stays open (e.g. an opening during a cooldown).
+- An opening or a slot only gates the connection: a DJ already on air stays
+  on air past its end (`live kick` ends a live).
+- `stationctl live status` shows who is on air and how it got in, the last
+  live, the openings, the DJs holding the urgent right and their cooldowns,
+  the refused DJs and the last refused login. Plugins receive
+  `LiveStarted` / `LiveEnded`.
 
 ### Plugins
 
@@ -542,7 +554,7 @@ docker compose exec -u stationd station stationctl status
 | `plugin list` \| `start` \| `stop` \| `restart` \| `reload` | Plugin lifecycle |
 | `ls render` \| `status` | Generated Liquidsoap script; bridge / air status |
 | `icecast status` \| `render` | Audience and health of our mounts; generated `icecast.xml` |
-| `live status` \| `kick` | Live DJ on air, last live, refused DJs; end the live now |
+| `live status` \| `kick` \| `open` \| `close` | Live DJ on air, openings, urgent rights, refused DJs; end the live now; ad-hoc opening (`open <dj> --for 2h`) and its early end |
 | `dj hash` | Hash a DJ password for the DJ file (read from stdin, not echoed) |
 | `clock set` \| `show` \| `reset` | Freeze the station clock (testing) |
 | `debug listeners <n>` | Inject a listener sample (overwritten by the next Icecast sample) |

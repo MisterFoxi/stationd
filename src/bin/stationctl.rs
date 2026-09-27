@@ -21,7 +21,7 @@ use liquidsoap::{GetStatusRequest as LsStatusRequest, RenderScriptRequest};
 use icecast::icecast_service_client::IcecastServiceClient;
 use icecast::{GetStatusRequest as IcecastStatusRequest, RenderConfigRequest as IcecastRenderRequest};
 use live::live_service_client::LiveServiceClient;
-use live::{GetStatusRequest as LiveStatusRequest, HashPasswordRequest, KickRequest};
+use live::{CloseRequest as LiveCloseRequest, GetStatusRequest as LiveStatusRequest, HashPasswordRequest, KickRequest, OpenRequest as LiveOpenRequest};
 use broadcast::{
     control_request::Action as BroadcastAction, push_override_request, ClearOverridesRequest,
     ControlRequest, GetStateRequest, ListOverridesRequest, PushOverrideRequest,
@@ -80,7 +80,7 @@ enum Command {
     /// Icecast as stationd reads it: audience, health of our mounts
     #[command(subcommand)]
     Icecast(IcecastCommand),
-    /// Live DJ (harbor, [live]): who is on air, end a live
+    /// Live DJ (harbor, [live]): who is on air, end a live, ad-hoc openings
     #[command(subcommand)]
     Live(LiveCommand),
     /// DJ file helpers ([live] djs_path)
@@ -90,10 +90,24 @@ enum Command {
 
 #[derive(Subcommand, Debug)]
 enum LiveCommand {
-    /// The DJ on air, the last live, DJs refused until the end of their slot
+    /// The DJ on air, the last live, openings, urgent rights, refused DJs
     Status,
-    /// End the live now: the DJ is disconnected and refused until the end of its slot
+    /// End the live now: the DJ is disconnected; the way it came in closes
+    /// (slot / opening: until its end; urgent right: [live] urgent_cooldown)
     Kick,
+    /// Let a DJ connect now, outside the grid, for a while (persisted)
+    Open {
+        /// DJ id (DJ file)
+        dj: String,
+        /// How long the opening lasts: 30m, 2h, 1d… (1m to 7d)
+        #[arg(long = "for", value_name = "DURATION")]
+        duration: String,
+    },
+    /// End a DJ's opening now (a DJ already on air stays: use kick)
+    Close {
+        /// DJ id (DJ file)
+        dj: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -924,7 +938,21 @@ async fn main() -> anyhow::Result<()> {
         Command::Live(LiveCommand::Kick) => {
             let mut lv = LiveServiceClient::connect(args.addr.clone()).await?;
             let r = lv.kick(KickRequest {}).await?.into_inner();
-            println!("live ended: {} disconnected, refused until the end of its slot", r.dj);
+            println!("live ended: {} disconnected, its way in closed (see `live status`)", r.dj);
+        }
+        Command::Live(LiveCommand::Open { dj, duration }) => {
+            let mut lv = LiveServiceClient::connect(args.addr.clone()).await?;
+            let r = lv.open(LiveOpenRequest { dj, duration }).await?.into_inner();
+            if let Some(o) = r.opening {
+                println!("opening: {} may connect now; it ends {}", o.dj, left(o.until));
+            }
+        }
+        Command::Live(LiveCommand::Close { dj }) => {
+            let mut lv = LiveServiceClient::connect(args.addr.clone()).await?;
+            let r = lv.close(LiveCloseRequest { dj }).await?.into_inner();
+            if let Some(o) = r.opening {
+                println!("opening of {} closed (opened {})", o.dj, ago(o.opened_at));
+            }
         }
         Command::Dj(DjCommand::Hash) => {
             let password = read_password("DJ password: ")?;
@@ -1042,6 +1070,16 @@ fn ago(t: i64) -> String {
     format!("{ago} ago (epoch {t})")
 }
 
+/// `in hh:mm:ss (epoch …)`: time left until `t`.
+fn left(t: i64) -> String {
+    let left = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| t - d.as_secs() as i64)
+        .unwrap_or(0)
+        .max(0);
+    format!("in {:02}:{:02}:{:02} (epoch {t})", left / 3600, left % 3600 / 60, left % 60)
+}
+
 /// Read one line from standard input, without echo on a terminal.
 fn read_password(prompt: &str) -> anyhow::Result<String> {
     use std::io::{BufRead, IsTerminal, Write};
@@ -1086,15 +1124,43 @@ fn print_live_status(s: &live::LiveStatus) {
     } else {
         println!("DJ file:   UNUSABLE — every login refused: {}", s.djs_error);
     }
+    if s.urgent_djs.is_empty() {
+        println!("urgent:    nobody holds the permanent right");
+    } else {
+        println!(
+            "urgent:    {} (permanent right; closed {} s after a cut)",
+            s.urgent_djs.join(", "),
+            s.urgent_cooldown_s
+        );
+    }
     match &s.on_air {
-        Some(a) => println!(
-            "on air:    {} — since {} — slot {} — from {}",
-            a.dj,
-            ago(a.since),
-            if a.rule_id.is_empty() { "?" } else { &a.rule_id },
-            if a.address.is_empty() { "?" } else { &a.address }
-        ),
+        Some(a) => {
+            let way = match a.access.as_str() {
+                "slot" => format!("slot {}", if a.rule_id.is_empty() { "?" } else { &a.rule_id }),
+                "open" => "ad-hoc opening".to_string(),
+                "urgent" => "urgent right".to_string(),
+                _ => "?".to_string(),
+            };
+            println!(
+                "on air:    {} — since {} — {} — from {}",
+                a.dj,
+                ago(a.since),
+                way,
+                if a.address.is_empty() { "?" } else { &a.address }
+            )
+        }
         None => println!("on air:    nobody (the programme airs)"),
+    }
+    for o in &s.openings {
+        println!(
+            "opening:   {} — ends {}{}",
+            o.dj,
+            left(o.until),
+            if o.cut { " — cut: refused until its end" } else { "" }
+        );
+    }
+    for c in &s.cooldowns {
+        println!("urgent closed: {} (cut) — reopens {}", c.dj, left(c.until));
     }
     if let Some(l) = &s.last {
         println!("last live: {} — ended {} ({})", l.dj, ago(s.last_ended_at), s.last_reason);

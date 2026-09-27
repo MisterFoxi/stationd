@@ -154,16 +154,30 @@ rien : chaque login passe par `/live/auth`, et stationd l'accepte seulement si
 
 - le DJ est dans le **fichier des DJ** (`[live] djs_path`, hors de
   `stationd.toml` : `schema_version = 1` + `[[dj]] id, name?, password_hash,
-  enabled?`), actif, et que le mot de passe correspond à son empreinte
+  enabled?, urgent?`), actif, et que le mot de passe correspond à son empreinte
   argon2 (`stationctl dj hash`, calculée par stationd). Le fichier est relu
   à chaque tentative : ajout d'un DJ ou changement de mot de passe sans
   redémarrage. Illisible → tout login refusé, bruyamment (le démarrage ne
   l'est pas : la station continue de diffuser) ;
-- sa **fenêtre** est ouverte : une règle `live` de la grille (`dj`, `start`,
-  `days`…), ouverte jusqu'au prochain début d'un autre `day_part` ou `live`
-  (`resolver::live_window`) ;
-- personne n'est déjà à l'antenne, et il n'a pas été coupé (silence ou kick)
-  plus tôt dans la même occurrence du créneau.
+- personne n'est déjà à l'antenne ;
+- une des **trois voies d'accès** est ouverte, essayées dans l'ordre
+  (2026-09-27) :
+  1. **créneau** — une règle `live` de la grille (`dj`, `start`, `days`…),
+     ouverte jusqu'au prochain début d'un autre `day_part` ou `live`
+     (`resolver::live_window`) ;
+  2. **ouverture ponctuelle** — `stationctl live open <dj> --for 2h` (1m à
+     7d) : fenêtre hors grille, **persistée** (table `live_opening`,
+     migration 0018, famille B : survit au redémarrage), une seule active
+     par DJ (une nouvelle remplace l'ancienne), `live close <dj>` la
+     referme ; le DJ doit exister et être actif dans le fichier des DJ ;
+  3. **droit permanent** — `urgent = true` sur le DJ : prise d'antenne
+     urgente à tout moment, jamais par-dessus un autre live.
+
+  Une voie par laquelle le DJ a été coupé (silence ou kick) se referme —
+  créneau : jusqu'à la fin de l'occurrence ; ouverture : jusqu'à sa fin
+  (`cut`, persisté) ; droit urgent : pendant `[live] urgent_cooldown` s
+  (600 ; 0 = aucun délai ; en mémoire) — et la suivante est essayée. Le
+  refus liste les voies refermées, sinon `outside the DJ's slot`.
 
 Logiciel sans nom d'utilisateur : utilisateur `source`, mot de passe
 `dj,motdepasse`. **Pas de `:`** : le harbor coupe le mot de passe au premier
@@ -180,9 +194,10 @@ donc ni `:` ni `,` (refusé par `dj hash`).
   live, dans son `expiry`). Pause / stop agissent sur la programmation
   dessous, pas sur le DJ.
 - **Silence** : `blank.detect` (`silence_timeout` s sous `silence_threshold`
-  dB) → `/live/silence` → stationd refuse ce DJ pour le reste de
-  l'occurrence et envoie `stationd.live_kick` (socket) → `live_raw.stop()`.
-  `stationctl live kick` fait la même chose.
+  dB) ; en 2.4 le handler passe par le callback `live.on_blank(...)` (plus
+  d'argument positionnel) → `/live/silence` → stationd referme la voie
+  d'accès du DJ (voir plus haut) et envoie `stationd.live_kick` (socket) →
+  `live_raw.stop()`. `stationctl live kick` fait la même chose.
 - **Retour** (déconnexion, quelle qu'en soit la cause) : `/live/disconnect`
   (fin de session, `LiveEnded`) répond `flush` — faux si la piste préparée
   est un override (consommé, elle doit passer). Puis, hors pause : piste
@@ -196,9 +211,13 @@ donc ni `:` ni `,` (refusé par `dj hash`).
   `on_disconnect` quand son fil d'alimentation s'arrête (~6 s plus tard, vu
   sur 2.2.4) — un second retour sauterait la piste de retour. Gardé par
   `stationd.live_on`.
-- `stationctl live status` : DJ à l'antenne (depuis, créneau, adresse),
-  dernier live et sa fin (`disconnected | silence | kicked`), DJ refusés,
-  dernier login refusé et sa raison, état du fichier des DJ.
+- `stationctl live status` : DJ à l'antenne (depuis, voie d'accès —
+  créneau, ouverture ou droit urgent —, adresse), dernier live et sa fin
+  (`disconnected | silence | kicked`), ouvertures actives, DJ titulaires du
+  droit urgent et délais en cours, DJ refusés, dernier login refusé et sa
+  raison, état du fichier des DJ.
+- Une ouverture, comme un créneau, ne conditionne que la connexion : un DJ
+  déjà à l'antenne y reste après sa fin (`live kick` pour couper).
 
 Validé contre Liquidsoap **2.2.4** (script généré, syntaxe `null()` et
 `on_track` adaptées pour l'essai ; sortie fichier analysée) : mauvais mot de

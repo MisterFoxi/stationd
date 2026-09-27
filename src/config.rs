@@ -66,6 +66,11 @@ pub struct LiveConfig {
     /// Seconds of the DJ stream buffered before it airs (network jitter).
     #[serde(default = "default_live_buffer")]
     pub buffer: f64,
+    /// Seconds a DJ with the permanent right (`urgent = true` in the DJ file)
+    /// is refused after being cut (silence or kick) when coming back through
+    /// that right. 0 = may come back at once.
+    #[serde(default = "default_live_urgent_cooldown")]
+    pub urgent_cooldown: u32,
 }
 
 fn default_live_port() -> u16 {
@@ -85,6 +90,9 @@ fn default_live_threshold() -> f64 {
 }
 fn default_live_buffer() -> f64 {
     5.0
+}
+fn default_live_urgent_cooldown() -> u32 {
+    600
 }
 
 impl LiveConfig {
@@ -116,6 +124,9 @@ impl LiveConfig {
         }
         if !(self.buffer.is_finite() && (0.5..=30.0).contains(&self.buffer)) {
             return Err(format!("buffer {} out of 0.5..=30 s", self.buffer));
+        }
+        if self.urgent_cooldown > 86_400 {
+            return Err(format!("urgent_cooldown {} out of 0..=86400 s", self.urgent_cooldown));
         }
         let p = self.djs_path.to_string_lossy();
         if p.trim().is_empty() {
@@ -1004,6 +1015,7 @@ mod tests {
         assert_eq!(live.silence_timeout, 30);
         assert_eq!(live.silence_threshold, -40.0);
         assert_eq!(live.buffer, 5.0);
+        assert_eq!(live.urgent_cooldown, 600);
     }
 
     #[test]
@@ -1020,6 +1032,7 @@ mod tests {
         live_err("silence_timeout = 2", "silence_timeout");
         live_err("silence_threshold = 3.0", "silence_threshold");
         live_err("buffer = 0.0", "buffer");
+        live_err("urgent_cooldown = 90000", "urgent_cooldown");
         assert!(matches!(load_str(&format!("{full}        harbor = 1\n")), Err(ConfigError::Parse { .. })));
         // the harbor lives in the generated script
         assert!(matches!(load_str(LIVE), Err(ConfigError::Live(m)) if m.contains("[liquidsoap]")));
