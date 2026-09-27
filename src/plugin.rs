@@ -268,7 +268,10 @@ impl Host {
 #[serde(deny_unknown_fields)]
 pub struct PluginDecl {
     pub name: String,
-    #[serde(default = "default_enabled")]
+    /// Activated at start-up (`on_load`). Default `false`: declaring a plugin
+    /// arms it (listed as `disabled`, startable by `stationctl plugin start`)
+    /// without activating it — activation is always explicit.
+    #[serde(default)]
     pub enabled: bool,
     /// Hook application order, ascending; default 50 (neutral rank). Ties
     /// broken by name for determinism.
@@ -286,9 +289,6 @@ pub struct PluginDecl {
     pub config: toml::Table,
 }
 
-fn default_enabled() -> bool {
-    true
-}
 fn default_order() -> u32 {
     50
 }
@@ -1322,6 +1322,15 @@ mod tests {
         let list = h.list().await;
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].state, "loaded");
+    }
+
+    #[test]
+    fn declared_plugin_is_not_enabled_by_default() {
+        // Declaring arms, it does not activate: `enabled` must be explicit.
+        let d: PluginDecl = toml::from_str(r#"name = "logger""#).unwrap();
+        assert!(!d.enabled);
+        let d: PluginDecl = toml::from_str("name = \"logger\"\nenabled = true").unwrap();
+        assert!(d.enabled);
     }
 
     #[tokio::test]

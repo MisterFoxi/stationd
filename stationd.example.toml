@@ -22,9 +22,13 @@ level = "info"
 
 # Plugins (optional). `capabilities` = host calls the plugin may make on the
 # core ("control", "push_override"); a call outside them is refused and logged.
+# `enabled` (default false): a declared plugin is armed — listed by
+# `stationctl plugin list`, startable by `stationctl plugin start <name>` — but
+# only activated at start-up with `enabled = true`.
 #
 # [[plugin]]
 # name = "logger"
+# enabled = true
 #
 # Graceful stop when nobody listens: arms `stop-when-idle` on a zero listener
 # sample; the station stops at the next track boundary if still at zero.

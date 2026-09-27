@@ -78,7 +78,7 @@ Forme de la déclaration (config station) :
 ```toml
 [[plugin]]
 name    = "stats"
-enabled = true
+enabled = true        # activé au démarrage ; défaut false (déclaré = armé, pas activé)
 order   = 50          # ordre d'application des hooks, croissant ; défaut 50
 # … config propre au plugin, opaque au core, remise au plugin dans on_load
 ```
