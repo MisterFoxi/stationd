@@ -361,13 +361,13 @@ end
          startup = blank(id=\"stationd_startup\")\n\n\
          # Relay of a `remote` playlist: idle until stationd answers `relay`.\n\
          relay = input.http(id=\"stationd_relay\", start=false, {{stationd.relay_url()}})\n\
-         def stationd.relay_on_fn(url) =\n  \
-           if not stationd.relaying() or stationd.relay_url() != url then\n    \
+         def stationd.relay_on_fn(stream_url) =\n  \
+           if not stationd.relaying() or stationd.relay_url() != stream_url then\n    \
              if relay.is_started() then relay.stop() end\n    \
-             stationd.relay_url := url\n    \
+             stationd.relay_url := stream_url\n    \
              relay.start()\n    \
              stationd.relaying := true\n    \
-             log.important(label=\"stationd\", \"relay: #{{url}}\")\n  \
+             log.important(label=\"stationd\", \"relay: #{{stream_url}}\")\n  \
            end\n\
          end\n\
          def stationd.relay_off_fn() =\n  \
@@ -629,7 +629,8 @@ def stationd.live_silence() =
   log.important(label="stationd", "live: silence")
   thread.run(fast=false, {{ignore(stationd.post("live/silence", "{{}}"))}})
 end
-live = blank.detect(id="stationd_live_blank", max_blank={silence}, threshold={threshold}, stationd.live_silence, live_raw)
+live = blank.detect(id="stationd_live_blank", max_blank={silence}, threshold={threshold}, live_raw)
+live.on_blank(synchronous=true, stationd.live_silence)
 
 {transitions}radio = fallback(
   id="stationd_live_air",
@@ -910,7 +911,8 @@ mod tests {
         assert!(s.contains("on_disconnect=stationd.live_disconnected"));
         assert!(s.contains("port=8005,") && s.contains("buffer=5.,") && s.contains("  \"live\"\n)"));
         // silence reported after the configured time
-        assert!(s.contains("blank.detect(id=\"stationd_live_blank\", max_blank=30., threshold=-40., stationd.live_silence, live_raw)"));
+        assert!(s.contains("blank.detect(id=\"stationd_live_blank\", max_blank=30., threshold=-40., live_raw)"));
+        assert!(s.contains("live.on_blank(synchronous=true, stationd.live_silence)"));
         // above the hard cut, before the outputs, with a short fade
         let live_air = s.find("id=\"stationd_live_air\"").unwrap();
         assert!(live_air > s.find("id=\"stationd_cut\"").unwrap());
