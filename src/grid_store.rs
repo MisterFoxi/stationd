@@ -93,6 +93,55 @@ pub async fn reset_every(
     Ok(())
 }
 
+/// A group holding the air (`grid_hold`): the rule that started it, the
+/// group, and when its cycle began.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Hold {
+    pub rule_id: String,
+    pub playlist_ref: String,
+    /// `every` | `at_clock_hard` | `at_clock_soft`.
+    pub origin: String,
+    pub started_at: Epoch,
+}
+
+/// The group holding the air, if any.
+pub async fn get_hold(pool: &SqlitePool) -> Result<Option<Hold>, sqlx::Error> {
+    let row: Option<(String, String, String, i64)> = sqlx::query_as(
+        "SELECT rule_id, playlist_ref, origin, started_at FROM grid_hold WHERE id = 1",
+    )
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|(rule_id, playlist_ref, origin, started_at)| Hold {
+        rule_id,
+        playlist_ref,
+        origin,
+        started_at: Epoch(started_at),
+    }))
+}
+
+/// Give the air to a group until its cycle ends (replaces any other hold).
+pub async fn set_hold(pool: &SqlitePool, hold: &Hold) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO grid_hold (id, rule_id, playlist_ref, origin, started_at)
+         VALUES (1, ?1, ?2, ?3, ?4)
+         ON CONFLICT(id) DO UPDATE SET
+             rule_id = ?1, playlist_ref = ?2, origin = ?3, started_at = ?4",
+    )
+    .bind(&hold.rule_id)
+    .bind(&hold.playlist_ref)
+    .bind(&hold.origin)
+    .bind(hold.started_at.0)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// End the hold. `true` if there was one.
+pub async fn clear_hold(pool: &SqlitePool) -> Result<bool, sqlx::Error> {
+    let r = sqlx::query("DELETE FROM grid_hold WHERE id = 1").execute(pool).await?;
+    Ok(r.rows_affected() > 0)
+}
+
 /// Persist that an `AtClock` occurrence was consumed, so it never fires twice.
 /// The token is the resolver's `GridDecision::mark_taken`. Idempotent.
 pub async fn record_at_clock_taken(

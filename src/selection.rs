@@ -58,6 +58,10 @@ pub enum SelectionError {
     BadFilterValue { field: String, reason: String },
     #[error("no available media matches the selection")]
     PoolEmpty,
+    /// A held group (`resolve_turn` with `continuing`) has no member left in
+    /// its current cycle: the hold ends there, the group is not restarted.
+    #[error("group cycle complete")]
+    CycleComplete,
     #[error(transparent)]
     Sqlx(#[from] sqlx::Error),
 }
@@ -122,6 +126,60 @@ pub async fn resolve_ref_with_plugins(
     resolve_inner(pool, plugins, now, playlist_ref).await
 }
 
+/// One grid turn from `playlist_ref`, and whether it HOLDS the air.
+///
+/// `holds` is true when `playlist_ref` is a `sequence` / `shuffle` group
+/// whose current cycle is not finished after this track (members or `take`
+/// / `runtime` quotas left): the engine then keeps giving it the air at the
+/// next turns, even when the rule that started it (`every`, `at_clock`) is no
+/// longer due. Any other source hands out one track per turn (`holds` false).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Turn {
+    pub resolved: Resolved,
+    pub holds: bool,
+}
+
+/// Resolve one turn (see [`Turn`]). With `continuing`, the group is being
+/// held: it never starts a new cycle — a finished cycle, or one whose
+/// remaining members are all unavailable under `on_member_unavailable =
+/// "skip"`, answers [`SelectionError::CycleComplete`] (the group state is
+/// reset to the top for its next activation). `abort` answers `PoolEmpty`
+/// as usual.
+pub async fn resolve_turn(
+    pool: &SqlitePool,
+    plugins: Option<&PluginHandle>,
+    now: i64,
+    playlist_ref: &str,
+    continuing: bool,
+) -> Result<Turn, SelectionError> {
+    let key = crate::playlist::normalize_ref(playlist_ref)
+        .map_err(|_| SelectionError::PlaylistNotFound(playlist_ref.to_string()))?;
+    let toml = store::playlist_toml_by_ref(pool, &key)
+        .await?
+        .ok_or_else(|| SelectionError::PlaylistNotFound(playlist_ref.to_string()))?;
+    let playlist = Playlist::parse(&toml)?;
+    let sel = &playlist.selection;
+    let shuffle = match (sel.mode, sel.strategy) {
+        (Mode::Group, Some(Strategy::Sequence)) => false,
+        (Mode::Group, Some(Strategy::Shuffle)) => true,
+        _ => {
+            if continuing {
+                // Only a sequence / shuffle group can be held.
+                return Err(SelectionError::CycleComplete);
+            }
+            let resolved = resolve_media(pool, plugins, now, &key, &playlist, 0, &[]).await?;
+            return Ok(Turn { resolved, holds: false });
+        }
+    };
+    let scope: Vec<&Constraints> =
+        playlist.broadcast.as_ref().and_then(|b| b.constraints.as_ref()).into_iter().collect();
+    let resolved =
+        resolve_group_rotation(pool, plugins, now, &key, sel, shuffle, 0, &scope, continuing).await?;
+    let st = crate::group_state::get(pool, &key).await?;
+    let holds = st.member_idx != 0 || st.take_count != 0 || st.member_started_at.is_some();
+    Ok(Turn { resolved, holds })
+}
+
 async fn resolve_inner(
     pool: &SqlitePool,
     plugins: Option<&PluginHandle>,
@@ -177,11 +235,11 @@ async fn resolve_media(
             .map(|path| Resolved::File { path, leaf: Some(reference.to_string()) }),
         Mode::Group => match sel.strategy {
             Some(Strategy::Sequence) => {
-                resolve_group_rotation(pool, plugins, now, reference, sel, false, depth, &scope)
+                resolve_group_rotation(pool, plugins, now, reference, sel, false, depth, &scope, false)
                     .await
             }
             Some(Strategy::Shuffle) => {
-                resolve_group_rotation(pool, plugins, now, reference, sel, true, depth, &scope)
+                resolve_group_rotation(pool, plugins, now, reference, sel, true, depth, &scope, false)
                     .await
             }
             // Rotate = plain round-robin, one track per member per turn. Its
@@ -189,7 +247,7 @@ async fn resolve_media(
             // sequence walk with the default take = 1 already IS a rotation;
             // position persists across turns via group_state.
             Some(Strategy::Rotate) => {
-                resolve_group_rotation(pool, plugins, now, reference, sel, false, depth, &scope)
+                resolve_group_rotation(pool, plugins, now, reference, sel, false, depth, &scope, false)
                     .await
             }
             Some(Strategy::Weighted) => {
@@ -368,6 +426,10 @@ async fn apply_one_constraint_set(
 ///   may overrun. `now` is epoch seconds on the controllable station clock, so
 ///   the budget is testable and `--at`-drivable, and a downtime longer than the
 ///   budget simply expires the member at restart (catch-up).
+///
+/// `stop_at_wrap` (a group held by the engine, see [`resolve_turn`]): never
+/// start a new cycle — at the top of a cycle, or where the walk would wrap,
+/// answer `CycleComplete` (state reset to the top) instead of a track.
 #[allow(clippy::too_many_arguments)]
 async fn resolve_group_rotation(
     pool: &SqlitePool,
@@ -378,6 +440,7 @@ async fn resolve_group_rotation(
     shuffle: bool,
     depth: u32,
     scope: &[&Constraints],
+    stop_at_wrap: bool,
 ) -> Result<Resolved, SelectionError> {
     let n = sel.members.len();
     if n == 0 {
@@ -388,6 +451,12 @@ async fn resolve_group_rotation(
         .unwrap_or(MemberUnavailable::Abort);
 
     let mut st = crate::group_state::get(pool, group_ref).await?;
+    let at_top = |st: &crate::group_state::GroupState| {
+        st.member_idx == 0 && st.take_count == 0 && st.member_started_at.is_none()
+    };
+    if stop_at_wrap && at_top(&st) {
+        return Err(SelectionError::CycleComplete);
+    }
 
     // Traversal order for this cycle. `sequence` = declared order; `shuffle` =
     // the persisted permutation, re-drawn when absent or stale (e.g. the member
@@ -411,7 +480,13 @@ async fn resolve_group_rotation(
     // `abort` (default) it fails the whole group → the grid falls through to a
     // lower-priority source. Bounded to one full pass so we never loop forever.
     for _ in 0..n {
-        // Wrap: past the last member → a fresh cycle (shuffle re-draws).
+        // Wrap: past the last member → a fresh cycle (shuffle re-draws). A
+        // held group ends its cycle here instead (state back to the top).
+        if st.member_idx >= n && stop_at_wrap {
+            let reset = crate::group_state::GroupState::default();
+            crate::group_state::set(pool, group_ref, &reset).await?;
+            return Err(SelectionError::CycleComplete);
+        }
         if st.member_idx >= n {
             st.member_idx = 0;
             st.take_count = 0;

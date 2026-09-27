@@ -1070,19 +1070,54 @@ impl GridEngine {
         let grid = grid_index::load_grid(&self.pool).await?;
         let state = grid_store::load_playback_state(&self.pool).await?;
 
-        let ranked = resolve_ranked(local, &grid, &state);
+        let mut ranked = resolve_ranked(local, &grid, &state);
+        // A group started by an `every` / `at_clock` keeps the air until its
+        // cycle ends: right after the hard rendez-vous, ahead of everything
+        // else (the override layer is already above).
+        let hold = self.current_hold(&grid).await?;
+        let held_at = hold.as_ref().map(|h| {
+            let origin = match h.origin.as_str() {
+                "at_clock_hard" => Origin::AtClockHard,
+                "at_clock_soft" => Origin::AtClockSoft,
+                _ => Origin::Every,
+            };
+            let at = ranked
+                .iter()
+                .position(|d| d.origin != Origin::AtClockHard)
+                .unwrap_or(ranked.len());
+            ranked.insert(
+                at,
+                GridDecision {
+                    origin,
+                    rule_id: Some(h.rule_id.clone()),
+                    playlist_ref: Some(h.playlist_ref.clone()),
+                    mark_taken: None,
+                },
+            );
+            at
+        });
         let had_candidates = !ranked.is_empty();
 
-        for decision in ranked {
+        for (i, decision) in ranked.into_iter().enumerate() {
             let Some(playlist_ref) = decision.playlist_ref.clone() else {
                 continue;
             };
-            let produced = self.produce(&playlist_ref, now).await?;
+            let held = held_at == Some(i);
+            let produced = self.produce(&playlist_ref, now, held).await?;
 
-            if let Some(resolved) = produced {
-                // Persist effects only now that this source actually produced.
-                self.persist_effects(&decision, now).await?;
-                let (media_path, stream, leaf_ref) = self.log_start(resolved, now).await?;
+            if let Some(turn) = produced {
+                if held {
+                    // The rule's effects were persisted when the group started.
+                    if !turn.holds {
+                        grid_store::clear_hold(&self.pool).await?;
+                        tracing::info!(playlist = %playlist_ref, "held group: cycle complete");
+                    }
+                } else {
+                    // Persist effects only now that this source actually produced.
+                    self.persist_effects(&decision, now).await?;
+                    self.start_hold_if_group(&decision, turn.holds, now).await?;
+                }
+                let (media_path, stream, leaf_ref) = self.log_start(turn.resolved, now).await?;
                 self.emit_resolved(&decision, Some(&media_path), format!("{:?}", decision.origin));
                 return Ok(ResolvedDecision {
                     decision,
@@ -1094,6 +1129,13 @@ impl GridEngine {
                 });
             }
 
+            if held {
+                // Cycle over (`skip` past the last members), or a member empty
+                // under `abort`: the hold ends, the grid takes over.
+                tracing::info!(playlist = %playlist_ref, "held group: nothing left in its cycle, hold released");
+                self.end_hold(&playlist_ref, true).await?;
+                continue;
+            }
             tracing::info!(
                 rule = decision.rule_id.as_deref().unwrap_or("-"),
                 playlist = %playlist_ref,
@@ -1133,39 +1175,133 @@ impl GridEngine {
     /// disk (flipped unavailable in the index). `None` = the source produced
     /// nothing usable (empty pool) — the caller falls through. A config error
     /// (unknown ref, unsupported order/mode, bad filter) is surfaced.
+    /// `continuing` = the source is the group holding the air: `None` also
+    /// when its cycle is over (it is never restarted from here).
     async fn produce(
         &self,
         playlist_ref: &str,
         now: Epoch,
-    ) -> Result<Option<crate::selection::Resolved>, EngineError> {
+        continuing: bool,
+    ) -> Result<Option<crate::selection::Turn>, EngineError> {
+        use crate::selection::{Resolved, SelectionError, Turn};
         // Capped so a pool of dead entries can't spin.
         const MAX_DEAD_PICKS: u32 = 32;
         for _ in 0..MAX_DEAD_PICKS {
-            match crate::selection::resolve_ref_with_plugins(
+            match crate::selection::resolve_turn(
                 &self.pool,
                 self.plugins.as_ref(),
                 now.0,
                 playlist_ref,
+                continuing,
             )
             .await
             {
                 // A remote stream: no file on disk to check, no re-pick.
-                Ok(stream @ crate::selection::Resolved::Stream(_)) => return Ok(Some(stream)),
-                Ok(crate::selection::Resolved::File { path, leaf }) if self.media_exists(&path) => {
-                    return Ok(Some(crate::selection::Resolved::File { path, leaf }));
+                Ok(turn @ Turn { resolved: Resolved::Stream(_), .. }) => return Ok(Some(turn)),
+                Ok(turn @ Turn { resolved: Resolved::File { .. }, .. })
+                    if matches!(&turn.resolved, Resolved::File { path, .. } if self.media_exists(path)) =>
+                {
+                    return Ok(Some(turn));
                 }
-                Ok(crate::selection::Resolved::File { path: missing, .. }) => {
+                Ok(Turn { resolved: Resolved::File { path: missing, .. }, .. }) => {
                     tracing::warn!(
                         media = %missing,
                         "resolved media missing on disk; marking unavailable and re-picking"
                     );
                     crate::media_index::mark_unavailable(&self.pool, &missing).await?;
                 }
-                Err(crate::selection::SelectionError::PoolEmpty) => return Ok(None),
+                Err(SelectionError::PoolEmpty) | Err(SelectionError::CycleComplete) => return Ok(None),
                 Err(e) => return Err(EngineError::Selection(e)),
             }
         }
         Ok(None)
+    }
+
+    /// The group holding the air, if it still stands: its rule must still be
+    /// in the grid, enabled, with the same playlist. Otherwise the hold is
+    /// dropped (logged) and the group restarts from the top next time.
+    async fn current_hold(&self, grid: &Grid) -> Result<Option<grid_store::Hold>, EngineError> {
+        let Some(hold) = grid_store::get_hold(&self.pool).await? else {
+            return Ok(None);
+        };
+        let stands = grid.rules.iter().any(|r| {
+            r.enabled
+                && r.id == hold.rule_id
+                && match &r.kind {
+                    RuleKind::Every { playlist_ref, .. } | RuleKind::AtClock { playlist_ref, .. } => {
+                        *playlist_ref == hold.playlist_ref
+                    }
+                    _ => false,
+                }
+        });
+        if stands {
+            return Ok(Some(hold));
+        }
+        tracing::warn!(
+            rule = %hold.rule_id,
+            playlist = %hold.playlist_ref,
+            "held group dropped: its rule is gone, disabled or points elsewhere"
+        );
+        self.end_hold(&hold.playlist_ref, true).await?;
+        Ok(None)
+    }
+
+    /// End the hold; `reset` also puts the group back at the top of its
+    /// cycle (it was cut short), so its next activation starts cleanly.
+    async fn end_hold(&self, playlist_ref: &str, reset: bool) -> Result<(), EngineError> {
+        grid_store::clear_hold(&self.pool).await?;
+        if reset {
+            if let Ok(key) = crate::playlist::normalize_ref(playlist_ref) {
+                crate::group_state::set(&self.pool, &key, &crate::group_state::GroupState::default())
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// After `decision` produced `turn`: a group started by an `every` /
+    /// `at_clock` rule, with its cycle unfinished, holds the air from now on
+    /// (a day part or the base rotation stays in force by itself: no hold).
+    /// A hold still in force for ANOTHER group (a hard rendez-vous group cut
+    /// in) is replaced, and that group reset to the top.
+    async fn start_hold_if_group(
+        &self,
+        decision: &GridDecision,
+        turn_holds: bool,
+        now: Epoch,
+    ) -> Result<(), EngineError> {
+        let origin = match decision.origin {
+            Origin::Every => "every",
+            Origin::AtClockHard => "at_clock_hard",
+            Origin::AtClockSoft => "at_clock_soft",
+            _ => return Ok(()),
+        };
+        let (Some(rule_id), Some(playlist_ref), true) =
+            (decision.rule_id.as_ref(), decision.playlist_ref.as_ref(), turn_holds)
+        else {
+            return Ok(());
+        };
+        let previous = grid_store::get_hold(&self.pool).await?;
+        if let Some(prev) = previous.filter(|p| p.playlist_ref != *playlist_ref) {
+            tracing::info!(
+                rule = %prev.rule_id,
+                playlist = %prev.playlist_ref,
+                "held group interrupted by another group: it will restart from the top"
+            );
+            self.end_hold(&prev.playlist_ref, true).await?;
+        }
+        grid_store::set_hold(
+            &self.pool,
+            &grid_store::Hold {
+                rule_id: rule_id.clone(),
+                playlist_ref: playlist_ref.clone(),
+                origin: origin.to_string(),
+                started_at: now,
+            },
+        )
+        .await?;
+        tracing::info!(rule = %rule_id, playlist = %playlist_ref, "group holds the air until its cycle ends");
+        Ok(())
     }
 
     /// The next `AtClock` **hard** rendez-vous at or after `now` — or one
@@ -1256,7 +1392,7 @@ impl GridEngine {
         let Some(playlist_ref) = decision.playlist_ref.clone() else {
             return Ok(None);
         };
-        let Some(resolved) = self.produce(&playlist_ref, now).await? else {
+        let Some(turn) = self.produce(&playlist_ref, now, false).await? else {
             tracing::warn!(
                 rule = decision.rule_id.as_deref().unwrap_or("-"),
                 playlist = %playlist_ref,
@@ -1265,7 +1401,8 @@ impl GridEngine {
             return Ok(None);
         };
         self.persist_effects(&decision, now).await?;
-        let (media_path, stream, leaf_ref) = self.log_start(resolved, now).await?;
+        self.start_hold_if_group(&decision, turn.holds, now).await?;
+        let (media_path, stream, leaf_ref) = self.log_start(turn.resolved, now).await?;
         self.emit_resolved(&decision, Some(&media_path), format!("{:?}", decision.origin));
         Ok(Some(ResolvedDecision {
             decision,
@@ -1585,6 +1722,146 @@ mod tests {
         // Same mark again (09:16 still floors to :15) → already consumed → base.
         let second = eng.next(at(9, 16)).await.unwrap();
         assert_eq!(second.origin, Origin::BaseRotation);
+    }
+
+    // ----- a group started by every / at_clock holds the air -------------
+
+    /// `music` floor + an `every` 45 min on the group `onehit` (sequence:
+    /// `jhit` then `hit`, one track each) + an hourly hard `top`. `hit_prefix`
+    /// lets a test empty the second member; `policy` = on_member_unavailable.
+    async fn hold_fixture(hit_prefix: &str, policy: &str) -> (tempfile::TempDir, GridEngine) {
+        let (dir, eng) = engine().await;
+        let m = |p: &str| crate::media::ScannedMedia {
+            rel_path: p.into(),
+            title: None,
+            artist: None,
+            album: None,
+            year: None,
+            genres: vec![],
+            duration_ms: 60_000,
+            size_bytes: 1,
+            mtime_ns: 0,
+        };
+        crate::media_index::replace_library(
+            &eng.pool,
+            &[m("music/a.mp3"), m("jhit/j.mp3"), m("hit/h.mp3"), m("top/t.mp3")],
+            1000,
+        )
+        .await
+        .unwrap();
+        for (r, prefix) in [("music", "music/"), ("jhit", "jhit/"), ("hit", hit_prefix), ("top", "top/")] {
+            let toml = format!(
+                "name = \"{r}\"\n[selection]\nmode = \"dynamic\"\norder = \"shuffle\"\n\
+                 [[selection.filter]]\nfield = \"path\"\nop = \"prefix\"\nvalue = \"{prefix}\"\n"
+            );
+            let pl = crate::playlist::Playlist::parse(&toml).unwrap();
+            crate::store::upsert(&eng.pool, r, &pl, &toml, Some(r)).await.unwrap();
+        }
+        let group = format!(
+            "name = \"onehit\"\n[selection]\nmode = \"group\"\nstrategy = \"sequence\"\n\
+             on_member_unavailable = \"{policy}\"\n\
+             members = [ {{ ref = \"jhit\", take = 1 }}, {{ ref = \"hit\", take = 1 }} ]\n"
+        );
+        let pl = crate::playlist::Playlist::parse(&group).unwrap();
+        crate::store::upsert(&eng.pool, "onehit", &pl, &group, Some("onehit")).await.unwrap();
+        insert_rule(&eng.pool, &rule("floor", RuleKind::BaseRotation { playlist_ref: "music".into() }))
+            .await
+            .unwrap();
+        insert_rule(
+            &eng.pool,
+            &rule("OneHit", RuleKind::Every { playlist_ref: "onehit".into(), cadence: Cadence::Elapsed(2700) }),
+        )
+        .await
+        .unwrap();
+        insert_rule(
+            &eng.pool,
+            &rule(
+                "top",
+                RuleKind::AtClock {
+                    playlist_ref: "top".into(),
+                    anchor: ClockAnchor::EveryMinutes(60),
+                    mode: Mode::Hard,
+                    expiry_secs: Some(300),
+                },
+            ),
+        )
+        .await
+        .unwrap();
+        eng.sync_grid().await.unwrap();
+        (dir, eng)
+    }
+
+    async fn media_at(eng: &GridEngine, t: Epoch) -> (String, Origin) {
+        let r = eng.next_media(t).await.unwrap();
+        (r.media_path.unwrap(), r.decision.origin)
+    }
+
+    #[tokio::test]
+    async fn an_every_group_holds_the_air_until_its_cycle_ends() {
+        let (_d, eng) = hold_fixture("hit/", "skip").await;
+        assert_eq!(media_at(&eng, at(9, 10)).await, ("jhit/j.mp3".into(), Origin::Every));
+        assert!(grid_store::get_hold(&eng.pool).await.unwrap().is_some());
+        // The rule is no longer due (reset at the first track): the group
+        // keeps the air all the same.
+        assert_eq!(media_at(&eng, at(9, 11)).await, ("hit/h.mp3".into(), Origin::Every));
+        // Cycle complete: hold released, back to the floor.
+        assert!(grid_store::get_hold(&eng.pool).await.unwrap().is_none());
+        assert_eq!(media_at(&eng, at(9, 15)).await.1, Origin::BaseRotation);
+        // Next activation starts from the top.
+        assert_eq!(media_at(&eng, at(9, 56)).await, ("jhit/j.mp3".into(), Origin::Every));
+    }
+
+    #[tokio::test]
+    async fn the_hold_survives_a_restart() {
+        let (_d, eng) = hold_fixture("hit/", "skip").await;
+        assert_eq!(media_at(&eng, at(9, 10)).await.0, "jhit/j.mp3");
+        let again = GridEngine::new(eng.pool.clone(), "UTC");
+        assert_eq!(media_at(&again, at(9, 12)).await.0, "hit/h.mp3");
+    }
+
+    #[tokio::test]
+    async fn an_empty_member_under_skip_ends_the_cycle_without_restarting_it() {
+        let (_d, eng) = hold_fixture("nothing/", "skip").await;
+        assert_eq!(media_at(&eng, at(9, 10)).await.0, "jhit/j.mp3");
+        // `hit` is empty → skipped → end of the cycle: no second jingle.
+        assert_eq!(media_at(&eng, at(9, 11)).await.1, Origin::BaseRotation);
+        assert!(grid_store::get_hold(&eng.pool).await.unwrap().is_none());
+        assert_eq!(
+            crate::group_state::get(&eng.pool, "onehit").await.unwrap(),
+            crate::group_state::GroupState::default()
+        );
+    }
+
+    #[tokio::test]
+    async fn an_empty_member_under_abort_releases_the_hold_and_resets_the_group() {
+        let (_d, eng) = hold_fixture("nothing/", "abort").await;
+        assert_eq!(media_at(&eng, at(9, 10)).await.0, "jhit/j.mp3");
+        assert_eq!(media_at(&eng, at(9, 11)).await.1, Origin::BaseRotation);
+        assert!(grid_store::get_hold(&eng.pool).await.unwrap().is_none());
+        // Next activation starts with the first member again.
+        assert_eq!(media_at(&eng, at(9, 56)).await.0, "jhit/j.mp3");
+    }
+
+    #[tokio::test]
+    async fn a_hard_rendez_vous_cuts_in_and_the_held_group_resumes() {
+        let (_d, eng) = hold_fixture("hit/", "skip").await;
+        assert_eq!(media_at(&eng, at(9, 59)).await.0, "jhit/j.mp3");
+        let cut = eng.air_at_clock_hard(at(10, 0), at(10, 0)).await.unwrap().unwrap();
+        assert_eq!(cut.media_path.as_deref(), Some("top/t.mp3"));
+        assert_eq!(media_at(&eng, at(10, 1)).await, ("hit/h.mp3".into(), Origin::Every));
+        assert_eq!(media_at(&eng, at(10, 5)).await.1, Origin::BaseRotation);
+    }
+
+    #[tokio::test]
+    async fn a_hold_whose_rule_is_disabled_is_dropped() {
+        let (_d, eng) = hold_fixture("hit/", "skip").await;
+        assert_eq!(media_at(&eng, at(9, 10)).await.0, "jhit/j.mp3");
+        sqlx::query("UPDATE grid_rule SET enabled = 0 WHERE id = 'OneHit'")
+            .execute(&eng.pool)
+            .await
+            .unwrap();
+        assert_eq!(media_at(&eng, at(9, 11)).await.1, Origin::BaseRotation);
+        assert!(grid_store::get_hold(&eng.pool).await.unwrap().is_none());
     }
 
     // ----- AtClock hard: the timer's side ---------------------------------
