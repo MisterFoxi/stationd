@@ -18,3 +18,4 @@ playlist.schema.json
 # Paquets d'exploitation (docker/package.sh)
 /dist
 grid/grid.toml
+grid/grid.toml
