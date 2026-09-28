@@ -20,6 +20,19 @@ service Station {
   rpc PlaylistAdd (PlaylistAddRequest) returns (PlaylistAddReply);
   rpc PlaylistSync (PlaylistSyncRequest) returns (PlaylistSyncReply);
   rpc PlaylistList (PlaylistListRequest) returns (PlaylistListReply);
+  // `playlist remove`: delete a playlist — its file under the playlist root
+  // AND its row in the view (file-first: removing only the row would come
+  // back at the next sync). Refused (failed_precondition) while a grid rule
+  // or a group still references it; not_found for an unknown ref.
+  rpc PlaylistRemove (PlaylistRemoveRequest) returns (PlaylistRemoveReply);
+  // `playlist export`: the TOML stationd holds for one playlist (what it
+  // applied — may differ from the file if it was edited since).
+  rpc PlaylistExport (PlaylistExportRequest) returns (PlaylistExportReply);
+  // `playlist reload`: the view becomes exactly the playlist root — `sync`
+  // (add / update, best-effort) PLUS the removal of the rows whose file is
+  // gone. A row whose file is gone but that a grid rule or a surviving group
+  // still references is kept and reported (never a dangling reference).
+  rpc PlaylistReload (PlaylistReloadRequest) returns (PlaylistReloadReply);
 }
 
 message StatusRequest {}
@@ -90,4 +103,35 @@ message PlaylistSummary {
   string name = 3;      // display name
   string mode = 4;      // selection mode (static/dynamic/remote/queue/group)
   bool enabled = 5;
+}
+
+// A playlist is designated by its ref (canonical relative path, e.g.
+// `emission/intro`, case-insensitive, `.toml` optional) or by its UUID (the
+// only handle of an add-only entry, which has no path).
+message PlaylistRemoveRequest {
+  string reference = 1;
+}
+
+message PlaylistRemoveReply {
+  string id = 1;
+  string rel_path = 2;   // empty for an add-only entry
+  string file = 3;       // file deleted (relative to the playlist root); empty = none on disk
+}
+
+message PlaylistExportRequest {
+  string reference = 1;
+}
+
+message PlaylistExportReply {
+  string id = 1;
+  string rel_path = 2;
+  string toml_content = 3;
+}
+
+message PlaylistReloadRequest {}
+
+message PlaylistReloadReply {
+  uint32 added = 1;                      // files successfully reconciled
+  repeated string removed = 2;           // refs dropped from the view (file gone)
+  repeated PlaylistSyncError errors = 3; // rejected files, and gone-but-referenced rows kept
 }

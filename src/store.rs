@@ -110,6 +110,55 @@ pub async fn playlist_toml_by_ref(
     Ok(row.map(|(t,)| t))
 }
 
+/// One playlist as stored in the view: its identity and the TOML applied.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StoredPlaylist {
+    pub id: String,
+    pub rel_path: Option<String>,
+    pub toml: String,
+}
+
+/// Find one playlist by its UUID, or else by its ref (normalized like every
+/// ref: case-insensitive, `.toml` optional). `None` if neither matches.
+pub async fn find(pool: &SqlitePool, reference: &str) -> Result<Option<StoredPlaylist>, sqlx::Error> {
+    let by_id: Option<(String, Option<String>, String)> =
+        sqlx::query_as("SELECT id, rel_path, toml FROM playlists WHERE id = ?1")
+            .bind(reference.trim())
+            .fetch_optional(pool)
+            .await?;
+    let row = match by_id {
+        Some(r) => Some(r),
+        None => match crate::playlist::normalize_ref(reference) {
+            Ok(key) => {
+                sqlx::query_as("SELECT id, rel_path, toml FROM playlists WHERE rel_path = ?1")
+                    .bind(&key)
+                    .fetch_optional(pool)
+                    .await?
+            }
+            Err(_) => None,
+        },
+    };
+    Ok(row.map(|(id, rel_path, toml)| StoredPlaylist { id, rel_path, toml }))
+}
+
+/// Every playlist of the view (identity + TOML).
+pub async fn all(pool: &SqlitePool) -> Result<Vec<StoredPlaylist>, sqlx::Error> {
+    let rows: Vec<(String, Option<String>, String)> =
+        sqlx::query_as("SELECT id, rel_path, toml FROM playlists ORDER BY rel_path IS NULL, rel_path, id")
+            .fetch_all(pool)
+            .await?;
+    Ok(rows.into_iter().map(|(id, rel_path, toml)| StoredPlaylist { id, rel_path, toml }).collect())
+}
+
+/// Drop one playlist from the view. Its durable playback state (cursor,
+/// played episodes, queue, group state) is left alone: keyed by ref, it is
+/// picked up again if a playlist of the same ref comes back. Returns whether
+/// a row was deleted.
+pub async fn delete(pool: &SqlitePool, id: &str) -> Result<bool, sqlx::Error> {
+    let r = sqlx::query("DELETE FROM playlists WHERE id = ?1").bind(id).execute(pool).await?;
+    Ok(r.rows_affected() > 0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

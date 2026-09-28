@@ -136,12 +136,15 @@ piste **préparée** par l'ancienne instance (redémarrer quand `next:` est
 rempli) → « recognised from its annotations » à son démarrage (couvert par
 les tests).
 
-### A3 — `stationctl playlist remove` / `export` / `reload`
+### A3 — `stationctl playlist remove` / `export` / `reload` ✅ code (2026-09-28) — à valider sur devstationd
 
-Aujourd'hui une playlist ne peut pas être retirée au CLI (invariant « CLI
-complet » cassé). À livrer de bout en bout (RPC + CLI + tests) :
-`remove`, `export` (TOML canonique), `reload` (relecture des fichiers
-`playlist/`). `watch` reste après l'alpha.
+Voir Fait et `Doc/admin.md`. Validation : `cargo test --locked` (460), puis
+en réel : `playlist export <ref>` (stdout et `--out`), `playlist remove <ref>`
+sans `--yes` (refus), sur une playlist de la grille (refus, règle citée),
+sur une playlist libre (`--yes` : fichier supprimé, absente de `list`, pas
+revenue après `sync`) ; supprimer un `.toml` à la main puis `playlist
+reload` (retirée ; gardée + signalée si la grille la cite). `watch` reste
+après l'alpha.
 
 ### A4 — Refonte complète de la TUI
 
@@ -187,6 +190,33 @@ coder ; `Doc/tui-dev.md` à réécrire en conséquence.
 ---
 
 ## Fait
+
+### — Playlists : `remove` / `export` / `reload` (2026-09-28) —
+
+Trois RPC `Station` (`PlaylistRemove`, `PlaylistExport`, `PlaylistReload`,
+`proto/station.proto`) + `stationctl playlist remove|export|reload`. Une
+playlist se désigne par sa ref (insensible à la casse, `.toml` optionnel)
+ou son UUID (`store::find`).
+- **remove** (`sync::remove`) : file-first — supprime le **fichier** sous
+  `[playlist] path` (retrouvé par sa clé, casse d'origine) puis la ligne ;
+  retirer la ligne seule reviendrait au prochain `sync`. Refusé
+  (`failed_precondition`) tant qu'une règle de grille ou un groupe la
+  référence (`sync::referrers`, liste les référents) ; ref inconnue →
+  `not_found` ; plusieurs fichiers pour la même clé → refus. Entrée
+  add-only (sans chemin) : ligne seule. CLI : `--yes` obligatoire (comme
+  `plugin db reset`). L'état famille B (curseur, épisodes joués, file,
+  groupe) est gardé : il resservira si une playlist de même ref revient.
+- **export** : le TOML appliqué (celui de la vue, avec son id), stdout ou
+  `--out`.
+- **reload** (`sync::reload_root`) : `sync` + retrait des lignes dont le
+  fichier a disparu. Une ligne disparue mais encore référencée par la
+  grille ou par un groupe qui reste est **gardée et signalée** (jamais de
+  référence pendante) ; un groupe gardé retient ses membres (point fixe).
+  Un fichier seulement invalide existe encore : sa dernière ligne valide
+  reste. Entrées add-only non touchées. `sync` inchangé (ajout / mise à
+  jour seulement).
+- Tests : `tests/playlist_admin.rs` (5). `cargo test --locked` : 460 verts.
+
 
 ### — Redémarrage de stationd : pistes auto-décrites + resync (2026-09-28) —
 

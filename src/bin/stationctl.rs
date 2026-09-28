@@ -8,7 +8,10 @@ use clap::{Parser, Subcommand};
 use stationd::proto::{broadcast, icecast, library, liquidsoap, live, plugin, schedule, station, stats};
 
 use station::station_client::StationClient;
-use station::{PlaylistAddRequest, PlaylistListRequest, PlaylistSyncRequest, QuitRequest, ShutdownRequest, StatusRequest};
+use station::{
+    PlaylistAddRequest, PlaylistExportRequest, PlaylistListRequest, PlaylistReloadRequest, PlaylistRemoveRequest,
+    PlaylistSyncRequest, QuitRequest, ShutdownRequest, StatusRequest,
+};
 use schedule::schedule_service_client::ScheduleServiceClient;
 use schedule::{ApplyGridRequest, CheckCoverageRequest, EnqueueRequest, ExportGridRequest, GridFile, PreviewRequest, ResolveNextRequest, SetClockRequest};
 use library::library_service_client::LibraryServiceClient;
@@ -407,6 +410,27 @@ enum PlaylistCommand {
     Sync,
     /// List the playlists currently in stationd's view.
     List,
+    /// Make the view exactly the playlist root: sync (add / update) plus drop
+    /// the playlists whose file is gone. One still referenced by a grid rule
+    /// or a group is kept and reported.
+    Reload,
+    /// Print (or write) the TOML stationd holds for one playlist.
+    Export {
+        /// Playlist ref (e.g. `emission/intro`) or UUID
+        reference: String,
+        /// Write to this file instead of stdout.
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// Delete a playlist: its file under the playlist root and its entry in
+    /// the view. Refused while a grid rule or a group references it.
+    Remove {
+        /// Playlist ref (e.g. `emission/intro`) or UUID
+        reference: String,
+        /// Confirm the deletion (the file is deleted)
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[tokio::main]
@@ -506,6 +530,64 @@ async fn main() -> anyhow::Result<()> {
                     let state = if p.enabled { "enabled" } else { "disabled" };
                     println!("{handle}  [{}]  {}  ({state})  {}", p.mode, p.name, p.id);
                 }
+            }
+        }
+        Command::Playlist(PlaylistCommand::Reload) => {
+            let reply = client
+                .playlist_reload(PlaylistReloadRequest {})
+                .await?
+                .into_inner();
+            println!("synced:  {} playlist(s)", reply.added);
+            if reply.removed.is_empty() {
+                println!("removed: none");
+            } else {
+                println!("removed: {} (file gone)", reply.removed.len());
+                for r in &reply.removed {
+                    println!("  - {r}");
+                }
+            }
+            if reply.errors.is_empty() {
+                println!("errors:  none");
+            } else {
+                println!("errors:  {}", reply.errors.len());
+                for e in &reply.errors {
+                    println!("  - {}: {}", e.path, e.message);
+                }
+                std::process::exit(1);
+            }
+        }
+        Command::Playlist(PlaylistCommand::Export { reference, out }) => {
+            let reply = client
+                .playlist_export(PlaylistExportRequest { reference })
+                .await?
+                .into_inner();
+            match out {
+                Some(path) => {
+                    std::fs::write(&path, &reply.toml_content)
+                        .map_err(|e| anyhow::anyhow!("cannot write {}: {e}", path.display()))?;
+                    let handle = if reply.rel_path.is_empty() { &reply.id } else { &reply.rel_path };
+                    println!("exported {handle} → {}", path.display());
+                }
+                None => print!("{}", reply.toml_content),
+            }
+        }
+        Command::Playlist(PlaylistCommand::Remove { reference, yes }) => {
+            if !yes {
+                anyhow::bail!(
+                    "this deletes playlist `{reference}` (its file and its entry): re-run with --yes \
+                     (`playlist export {reference} --out <file>` keeps a copy)"
+                );
+            }
+            let reply = client
+                .playlist_remove(PlaylistRemoveRequest { reference })
+                .await?
+                .into_inner();
+            let handle = if reply.rel_path.is_empty() { "(no path)" } else { &reply.rel_path };
+            println!("removed: {handle}  {}", reply.id);
+            if reply.file.is_empty() {
+                println!("file:    none on disk");
+            } else {
+                println!("file:    {} (deleted)", reply.file);
             }
         }
         Command::Schedule(ScheduleCommand::List) => {

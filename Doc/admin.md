@@ -68,6 +68,9 @@ Réveils automatiques (core) : audience devenue inconnue, DJ qui prend l'antenne
 | `playlist add <PATH>` | Enregistre un fichier playlist TOML : validé, UUID attribué, fichier réécrit sur place avec l'id | `<PATH>` : fichier `.toml` |
 | `playlist sync` | Réconcilie tous les `*.toml` sous `[playlist] path` (récursif). Un fichier invalide est signalé, pas bloquant | — |
 | `playlist list` | Playlists connues de stationd | — |
+| `playlist reload` | La vue devient exactement le répertoire : `sync` + retrait des playlists dont le fichier a disparu. Une playlist disparue mais encore référencée (règle de grille, groupe qui reste) est gardée et signalée ; erreur = code ≠ 0 | — |
+| `playlist export <REF>` | Affiche le TOML que stationd applique pour cette playlist | `<REF>` : ref (`emission/intro`) ou UUID ; `--out <fichier>` (défaut stdout) |
+| `playlist remove <REF> --yes` | Supprime la playlist : son fichier sous `[playlist] path` et son entrée. Refusé tant qu'une règle de grille ou un groupe la référence. L'état de lecture (curseur, épisodes joués, file) est gardé | `<REF>` : ref ou UUID ; `--yes` obligatoire |
 | `schedule validate <PATH>` | Valide une grille sans l'installer ; rejet = code ≠ 0 | `<PATH>` : `grid.toml` |
 | `schedule apply <PATH>` | Valide et installe la grille (atomique) ; l'état de lecture est conservé | `<PATH>` |
 | `schedule export` | Réécrit la grille courante en TOML | `--rule <id>` (répétable) ; `--out <fichier>` (défaut stdout) |

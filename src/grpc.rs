@@ -11,8 +11,10 @@ pub use crate::proto::station;
 
 use station::station_server::Station;
 use station::{
-    PlaylistAddReply, PlaylistAddRequest, PlaylistListReply, PlaylistListRequest, PlaylistSummary,
-    PlaylistSyncError, PlaylistSyncReply, PlaylistSyncRequest, QuitReply, QuitRequest,
+    PlaylistAddReply, PlaylistAddRequest, PlaylistExportReply, PlaylistExportRequest,
+    PlaylistListReply, PlaylistListRequest, PlaylistReloadReply, PlaylistReloadRequest,
+    PlaylistRemoveReply, PlaylistRemoveRequest, PlaylistSummary, PlaylistSyncError,
+    PlaylistSyncReply, PlaylistSyncRequest, QuitReply, QuitRequest,
     ShutdownReply, ShutdownRequest, StatusReply, StatusRequest,
 };
 
@@ -260,6 +262,71 @@ impl Station for StationService {
             .collect();
 
         Ok(Response::new(PlaylistListReply { playlists }))
+    }
+
+    async fn playlist_remove(
+        &self,
+        request: Request<PlaylistRemoveRequest>,
+    ) -> Result<Response<PlaylistRemoveReply>, TonicStatus> {
+        use crate::sync::RemoveError;
+        let reference = request.into_inner().reference;
+        match crate::sync::remove(&self.db, &self.playlist_root, &reference).await {
+            Ok(r) => {
+                tracing::info!(
+                    id = %r.id,
+                    rel_path = r.rel_path.as_deref().unwrap_or("-"),
+                    file = r.file.as_deref().unwrap_or("-"),
+                    "playlist removed"
+                );
+                Ok(Response::new(PlaylistRemoveReply {
+                    id: r.id,
+                    rel_path: r.rel_path.unwrap_or_default(),
+                    file: r.file.unwrap_or_default(),
+                }))
+            }
+            Err(e @ RemoveError::NotFound(_)) => Err(TonicStatus::not_found(e.to_string())),
+            Err(e @ (RemoveError::Referenced { .. } | RemoveError::Ambiguous { .. })) => {
+                Err(TonicStatus::failed_precondition(e.to_string()))
+            }
+            Err(e @ RemoveError::Failed(_)) => Err(TonicStatus::internal(e.to_string())),
+        }
+    }
+
+    async fn playlist_export(
+        &self,
+        request: Request<PlaylistExportRequest>,
+    ) -> Result<Response<PlaylistExportReply>, TonicStatus> {
+        let reference = request.into_inner().reference;
+        let row = store::find(&self.db, &reference)
+            .await
+            .map_err(|e| TonicStatus::internal(format!("could not read playlist view: {e}")))?
+            .ok_or_else(|| {
+                TonicStatus::not_found(format!("no playlist `{reference}` (neither a ref nor an id of the view)"))
+            })?;
+        Ok(Response::new(PlaylistExportReply {
+            id: row.id,
+            rel_path: row.rel_path.unwrap_or_default(),
+            toml_content: row.toml,
+        }))
+    }
+
+    async fn playlist_reload(
+        &self,
+        _request: Request<PlaylistReloadRequest>,
+    ) -> Result<Response<PlaylistReloadReply>, TonicStatus> {
+        let outcome = crate::sync::reload_root(&self.db, &self.playlist_root).await;
+        for r in &outcome.removed {
+            tracing::info!(playlist = %r, "playlist file gone: dropped from the view");
+        }
+        Ok(Response::new(PlaylistReloadReply {
+            added: outcome.added,
+            removed: outcome.removed,
+            errors: outcome
+                .errors
+                .into_iter()
+                .map(|e| PlaylistSyncError { path: e.path, message: e.message })
+                .collect(),
+        }))
     }
 }
 

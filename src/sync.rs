@@ -194,3 +194,214 @@ pub async fn sync_root(db: &SqlitePool, root: &Path) -> SyncOutcome {
 
     SyncOutcome { added, errors }
 }
+
+// ---------------------------------------------------------------------------
+// remove / reload: the view follows the root, never a dangling reference
+// ---------------------------------------------------------------------------
+
+/// The playlist files under `root`, by canonical key (every `*.toml`,
+/// valid or not: an invalid file still exists — its last valid row stays).
+fn files_by_key(root: &Path) -> HashMap<String, Vec<PathBuf>> {
+    let mut map: HashMap<String, Vec<PathBuf>> = HashMap::new();
+    for entry in walkdir::WalkDir::new(root).into_iter().filter_map(Result::ok) {
+        let path = entry.path();
+        if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("toml") {
+            continue;
+        }
+        let rel = path.strip_prefix(root).unwrap_or(path);
+        if let Ok(key) = playlist::normalize_ref(&rel.to_string_lossy()) {
+            map.entry(key).or_default().push(path.to_path_buf());
+        }
+    }
+    map
+}
+
+/// Who references playlist `key`: the grid rules airing it, and the groups
+/// of the view listing it as a member — except the groups in `ignore`
+/// (themselves on their way out). Human-readable, e.g. "grid rule `night`",
+/// "group `emission/emission`".
+pub async fn referrers(
+    db: &SqlitePool,
+    key: &str,
+    ignore: &HashSet<String>,
+) -> Result<Vec<String>, String> {
+    let mut out = Vec::new();
+    let grid = crate::grid_index::load_grid(db).await.map_err(|e| format!("could not read the grid: {e}"))?;
+    for rule in &grid.rules {
+        if let Some(raw) = crate::grid_toml::playlist_ref_of(rule) {
+            if playlist::normalize_ref(raw).as_deref() == Ok(key) {
+                out.push(format!("grid rule `{}`", rule.id));
+            }
+        }
+    }
+    let rows = store::all(db).await.map_err(|e| format!("could not read the playlist view: {e}"))?;
+    for row in rows {
+        let Some(group_key) = row.rel_path else { continue };
+        if group_key == key || ignore.contains(&group_key) {
+            continue;
+        }
+        let Ok(pl) = Playlist::parse(&row.toml) else { continue };
+        if pl.selection.mode != playlist::Mode::Group {
+            continue;
+        }
+        let member = pl
+            .selection
+            .members
+            .iter()
+            .any(|m| playlist::resolve_member_ref(&group_key, &m.r#ref).as_deref() == Ok(key));
+        if member {
+            out.push(format!("group `{group_key}`"));
+        }
+    }
+    Ok(out)
+}
+
+/// Why a `remove` did not happen.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RemoveError {
+    /// No playlist with this UUID or ref.
+    NotFound(String),
+    /// Still aired by grid rules / listed by groups: nothing removed.
+    Referenced { key: String, by: Vec<String> },
+    /// Several files map to the same ref (case): ambiguous, nothing removed.
+    Ambiguous { key: String, files: Vec<String> },
+    /// The file could not be deleted / the view could not be read or written.
+    Failed(String),
+}
+
+impl std::fmt::Display for RemoveError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RemoveError::NotFound(r) => write!(f, "no playlist `{r}` (neither a ref nor an id of the view)"),
+            RemoveError::Referenced { key, by } => {
+                write!(f, "playlist `{key}` is still referenced by {}: remove those references first", by.join(", "))
+            }
+            RemoveError::Ambiguous { key, files } => {
+                write!(f, "several files map to `{key}` ({}): rename or delete one by hand", files.join(", "))
+            }
+            RemoveError::Failed(m) => f.write_str(m),
+        }
+    }
+}
+
+/// What a `remove` did.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Removed {
+    pub id: String,
+    /// `None` for an add-only entry (no position in the tree).
+    pub rel_path: Option<String>,
+    /// The file deleted, relative to the root (`None`: none on disk).
+    pub file: Option<String>,
+}
+
+/// Remove playlist `reference` (UUID or ref): its file under `root` first,
+/// then its row. File-first: removing the row alone would bring it back at
+/// the next sync. Refused while referenced (no dangling ref in the grid or a
+/// group). A file that can't be deleted leaves everything as it was.
+pub async fn remove(db: &SqlitePool, root: &Path, reference: &str) -> Result<Removed, RemoveError> {
+    let row = store::find(db, reference)
+        .await
+        .map_err(|e| RemoveError::Failed(format!("could not read the playlist view: {e}")))?
+        .ok_or_else(|| RemoveError::NotFound(reference.to_string()))?;
+
+    let mut file = None;
+    if let Some(key) = &row.rel_path {
+        let by = referrers(db, key, &HashSet::new()).await.map_err(RemoveError::Failed)?;
+        if !by.is_empty() {
+            return Err(RemoveError::Referenced { key: key.clone(), by });
+        }
+        let files = files_by_key(root).remove(key).unwrap_or_default();
+        let display = |p: &PathBuf| p.strip_prefix(root).unwrap_or(p).display().to_string();
+        if files.len() > 1 {
+            return Err(RemoveError::Ambiguous { key: key.clone(), files: files.iter().map(display).collect() });
+        }
+        if let Some(path) = files.first() {
+            std::fs::remove_file(path)
+                .map_err(|e| RemoveError::Failed(format!("could not delete {}: {e}", display(path))))?;
+            file = Some(display(path));
+        }
+    }
+    store::delete(db, &row.id).await.map_err(|e| {
+        RemoveError::Failed(format!("file deleted but the view was not updated ({e}): run `playlist reload`"))
+    })?;
+    Ok(Removed { id: row.id, rel_path: row.rel_path, file })
+}
+
+/// Outcome of a `reload`: the `sync` part, plus the refs dropped from the
+/// view because their file is gone.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReloadOutcome {
+    pub added: u32,
+    pub removed: Vec<String>,
+    pub errors: Vec<SyncError>,
+}
+
+/// Make the view exactly the root: [`sync_root`] (add / update), then drop
+/// every row whose file is gone — unless a grid rule or a group that stays
+/// still references it (kept, reported: never a dangling reference). A file
+/// that is merely invalid still exists: its last valid row stays. Add-only
+/// entries (no path) are not the root's: left alone.
+pub async fn reload_root(db: &SqlitePool, root: &Path) -> ReloadOutcome {
+    let SyncOutcome { added, mut errors } = sync_root(db, root).await;
+    let mut removed = Vec::new();
+
+    let on_disk = files_by_key(root);
+    let rows = match store::all(db).await {
+        Ok(r) => r,
+        Err(e) => {
+            errors.push(SyncError { path: "(view)".into(), message: format!("could not read the playlist view: {e}") });
+            return ReloadOutcome { added, removed, errors };
+        }
+    };
+    let gone: Vec<(String, String)> = rows
+        .into_iter()
+        .filter_map(|r| r.rel_path.map(|k| (r.id, k)))
+        .filter(|(_, k)| !on_disk.contains_key(k))
+        .collect();
+    // A group going away with its member does not hold the member back —
+    // but a group KEPT (still referenced) does: settle the kept set first.
+    let mut leaving: HashSet<String> = gone.iter().map(|(_, k)| k.clone()).collect();
+    let mut kept: HashMap<String, Vec<String>> = HashMap::new();
+    loop {
+        let mut changed = false;
+        for (_, key) in &gone {
+            if !leaving.contains(key) {
+                continue;
+            }
+            match referrers(db, key, &leaving).await {
+                Ok(by) if by.is_empty() => {}
+                Ok(by) => {
+                    leaving.remove(key);
+                    kept.insert(key.clone(), by);
+                    changed = true;
+                }
+                Err(e) => {
+                    leaving.remove(key);
+                    errors.push(SyncError { path: key.clone(), message: e });
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    for (id, key) in gone {
+        if let Some(by) = kept.remove(&key) {
+            errors.push(SyncError {
+                path: key,
+                message: format!("file gone but still referenced by {}: kept in the view", by.join(", ")),
+            });
+        } else if leaving.contains(&key) {
+            match store::delete(db, &id).await {
+                Ok(_) => removed.push(key),
+                Err(e) => errors.push(SyncError {
+                    path: key,
+                    message: format!("file gone, could not drop it from the view: {e}"),
+                }),
+            }
+        }
+    }
+    ReloadOutcome { added, removed, errors }
+}

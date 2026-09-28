@@ -392,7 +392,8 @@ pub fn validate_refs(rules: &[Rule], known: &HashSet<String>) -> Vec<String> {
     errors
 }
 
-fn playlist_ref_of(r: &Rule) -> Option<&str> {
+/// The playlist a rule airs (`None` for a live slot).
+pub fn playlist_ref_of(r: &Rule) -> Option<&str> {
     match &r.kind {
         RuleKind::BaseRotation { playlist_ref } => Some(playlist_ref),
         RuleKind::DayPart { playlist_ref, .. } => Some(playlist_ref),
