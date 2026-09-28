@@ -5,24 +5,8 @@ sans reconstruire le contexte. À distinguer des docs de `Doc/` (décisions
 d'architecture durables) : ce fichier-ci est volatil, à mettre à jour à
 chaque session.
 
-Dernière mise à jour : 2026-09-28.
+Dernière mise à jour : 2026-09-28 (A4 lot 0).
 
-
-## Ajout : TUI d'administration (correctif préparé, compilation à confirmer)
-
-Premier jalon Ratatui derrière la feature `tui` : `stationd-tui`, vues
-Status/Playlists/Grid et polling gRPC. Modules générés partagés dans `proto`,
-`ListRules` relié à la lecture de l'index, `stationctl schedule list` ajouté.
-Aucun appel au résolveur vivant pour afficher les données.
-
-**Validation restante :** `cargo build --features tui` puis
-`cargo test --features tui`, et essai terminal avec le daemon reconstruit.
-Rust/Cargo/protoc indisponibles dans l'environnement de préparation ; le
-lockfile doit être actualisé par le premier build. Les indications plus bas
-sur `ListRules` non implémenté décrivent l'état antérieur à ce correctif.
-Voir `Doc/tui-dev.md` pour le périmètre, les commandes et les limites.
-
----
 
 ## Où on en est en une phrase
 
@@ -144,24 +128,43 @@ après l'alpha.
 
 ### A4 — Refonte complète de la TUI
 
-La TUI actuelle (`stationd-tui`, feature `tui`, `Doc/tui-dev.md`) ne sert
-à rien en exploitation : trois onglets en lecture seule (Status / Playlists
-/ Grid) par polling, plus un formulaire qui écrit des TOML de playlist **sur
-la machine du TUI** en embarquant le parseur de `stationd::playlist` — de la
-logique métier côté client, contraire à l'invariant. Jamais compilée
-(Rust indispo dans l'env de préparation).
+Référence : `Doc/StationD-TUI-Dossier-technique.md` (v2.1 : décisions,
+contrat gRPC existant / à ajouter, écrans, lots 0–8 + A). L'ancienne TUI
+(feature `tui`, `src/bin/stationd-tui/`, `Doc/tui-dev.md`) est abandonnée,
+rien n'en est repris.
 
-Cible : outil d'administration complet pour un humain, **client gRPC pur au
-même rang que `stationctl`** — toute action passe par un RPC existant, aucune
-logique métier ni écriture de fichier côté TUI. Au minimum, couvrir ce que
-`stationctl` sait faire au quotidien : antenne (`ls status`, pause / resume
-/ next, `station stop|start|state`), grille (`schedule list|next|preview|
-check|validate|apply`), playlists (`list`, `sync`, puis `remove`/`export`/
-`reload` d'A3), queue (`enqueue`), bibliothèque (`library scan|list|genres`),
-live (`live status|kick`), Icecast (`icecast status`), plugins (`plugin
-list|start|stop|restart|reload`), stats. Périmètre exact, navigation et
-suivi en direct (polling vs contrat Watch/Subscribe) à définir avant de
-coder ; `Doc/tui-dev.md` à réécrire en conséquence.
+**Lot 0 fait (2026-09-28)** — compilé, clippy propre, 12 tests verts dans
+l'env de préparation ; essayé en terminal contre un faux stationd (120×35,
+80×24, < 80×24, coupure et reprise de stationd). **À valider sur devstationd :
+`make tui` contre le vrai stationd.**
+- Workspace Cargo : paquet racine `stationd` (membre par défaut : `cargo
+  build`/`test` à la racine inchangés, `package.sh` aussi) + `crates/
+  stationd-proto` (clients gRPC seuls, générés depuis `proto/`, sans
+  dépendance au daemon) + `crates/stationd-tui`. `plugins/` exclus.
+- Feature `tui` et dépendances ratatui 0.29 / crossterm 0.28 retirées du
+  daemon. `Cargo.lock` : ajouts seulement, aucune version du daemon changée
+  (`cargo check -p stationd --all-targets --locked` vert).
+- TUI : rat-salsa 4.0.3 (+ tokio), rat-widget 3.2.1, rat-focus 2.1.1,
+  rat-theme4 4.5.3, ratatui 0.30 découpé (core / widgets / crossterm 0.29).
+  Trait `Screen` + registre (8 onglets, touches 1–8), bandeau 2 lignes
+  (station, état de diffusion, auditeurs `—` si inconnu, live, overrides,
+  liaison, heure et fuseau station, uptime), valeurs anciennes marquées `~`,
+  reconnexion à délai croissant plafonné (2 → 10 s), aide `?`, message sous
+  80×24. Antenne = vue provisoire sur `Liquidsoap.GetStatus` ; autres
+  écrans = emplacements qui disent leur lot. Tags grisé tant que le plugin
+  `tags` n'est pas chargé.
+- `make tui` → `cargo build -p stationd-tui` ; options : `make tui T="--theme Nord"`
+  (`--list-themes` pour la liste).
+- Écart au dossier : la liaison se fait en TCP (`--addr`, défaut
+  `http://127.0.0.1:50051` comme stationctl) ; le socket Unix arrive au lot A.
+
+**Constat pour le dossier** : `PlaylistService` (`proto/playlist_v1.proto`)
+n'est ni compilé ni servi — le contrat réel des playlists est
+`Station.PlaylistAdd|Sync|List|Remove|Export|Reload` (TOML brut). §3.1 et
+§3.5 du dossier à corriger.
+
+**Suivant : lot 1** — `OnAirService` dans stationd (Watch + History +
+simulation des morceaux à suivre).
 
 ### Après l'alpha (non bloquant)
 

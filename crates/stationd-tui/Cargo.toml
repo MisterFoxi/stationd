@@ -1,0 +1,28 @@
+# TUI d'administration de stationd : client gRPC pur, au même rang que
+# stationctl (Doc/StationD-TUI-Dossier-technique.md). Ne dépend pas du crate
+# stationd — seulement du contrat client (stationd-proto).
+[package]
+name = "stationd-tui"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "stationd-tui"
+path = "src/main.rs"
+
+[dependencies]
+stationd-proto = { path = "../stationd-proto" }
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+jiff = "0.2"
+tokio = { version = "1", features = ["rt-multi-thread", "time", "macros"] }
+tonic = "0.12"
+# Socle d'interface (dossier, D11). ratatui 0.30 découpé : core / widgets / crossterm.
+rat-salsa = { version = "4.0.3", features = ["async", "dialog_widgets"] }
+rat-widget = "3.2.1"
+rat-focus = "2.1.1"
+rat-theme4 = "4.5.3"
+ratatui-core = "0.1.2"
+ratatui-widgets = "0.3.2"
+ratatui-crossterm = "0.1.2"

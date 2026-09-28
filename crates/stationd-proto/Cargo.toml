@@ -1,0 +1,17 @@
+# Contrat gRPC de stationd côté CLIENT, partagé par les clients (stationd-tui,
+# plus tard stationctl et api). Ne dépend que de tonic/prost : un client n'a
+# pas à compiler le daemon (sqlx, extism…) pour parler à stationd.
+# Les .proto restent à la racine du dépôt (proto/), source unique.
+[package]
+name = "stationd-proto"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+tonic = "0.12"
+prost = "0.13"
+prost-types = "0.13"
+
+[build-dependencies]
+tonic-build = "0.12"

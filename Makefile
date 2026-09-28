@@ -21,6 +21,8 @@ SVC     ?= station
 P       ?=
 # A = arguments de stationctl (make ctl A="…").
 A       ?= status
+# T = arguments de stationd-tui (make tui T="…").
+T       ?=
 # Script Liquidsoap généré, vu du conteneur ([liquidsoap] script_path).
 LIQ     ?= /src/data/station.liq
 WASM    := wasm32-unknown-unknown
@@ -92,9 +94,9 @@ plugins: ## Plugins WASM (tous, ou P=<dossier>)
 
 all: build plugins test ## build + plugins + test
 
-tui: ## Compile et lance la TUI (même profil que build)
-> $(EXEC) cargo build $(CARGO_PROFILE) --features tui
-> $(DC) exec -it -u dev $(SVC) ./target/$(PROFILE)/stationd-tui
+tui: ## Compile et lance la TUI (même profil que build) ; options : make tui T="--theme Nord"
+> $(EXEC) cargo build $(CARGO_PROFILE) -p stationd-tui
+> $(DC) exec -it -u dev $(SVC) ./target/$(PROFILE)/stationd-tui $(T)
 
 # --- services s6 -------------------------------------------------------------
 restart: build ## cargo build puis relance de stationd seul, attend qu'il soit prêt (l'antenne n'est pas coupée)

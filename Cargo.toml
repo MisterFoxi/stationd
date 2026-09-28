@@ -6,19 +6,16 @@ default-run = "stationd"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
-[features]
-default = []
-tui = ["dep:ratatui", "dep:crossterm", "dep:tempfile"]
-
-[[bin]]
-name = "stationd-tui"
-path = "src/bin/stationd-tui/main.rs"
-required-features = ["tui"]
+# Workspace : le daemon (ce paquet, racine) + les clients hors daemon.
+# `cargo build` / `cargo test` à la racine ne visent que stationd (paquet
+# racine = membre par défaut) ; la TUI se compile avec `-p stationd-tui`.
+# Les plugins WASM (plugins/*) restent des racines autonomes ([workspace] vide).
+[workspace]
+members = [".", "crates/stationd-proto", "crates/stationd-tui"]
+default-members = ["."]
+exclude = ["plugins"]
 
 [dependencies]
-ratatui = { version = "0.29", optional = true }
-crossterm = { version = "0.28", optional = true }
-tempfile = { version = "3", optional = true }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
