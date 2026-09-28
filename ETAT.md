@@ -136,14 +136,10 @@ piste **préparée** par l'ancienne instance (redémarrer quand `next:` est
 rempli) → « recognised from its annotations » à son démarrage (couvert par
 les tests).
 
-### A3 — `stationctl playlist remove` / `export` / `reload` ✅ code (2026-09-28) — à valider sur devstationd
+### A3 — `stationctl playlist remove` / `export` / `reload` ✅ (2026-09-28)
 
-Voir Fait et `Doc/admin.md`. Validation : `cargo test --locked` (460), puis
-en réel : `playlist export <ref>` (stdout et `--out`), `playlist remove <ref>`
-sans `--yes` (refus), sur une playlist de la grille (refus, règle citée),
-sur une playlist libre (`--yes` : fichier supprimé, absente de `list`, pas
-revenue après `sync`) ; supprimer un `.toml` à la main puis `playlist
-reload` (retirée ; gardée + signalée si la grille la cite). `watch` reste
+Voir Fait et `Doc/admin.md`. Validé en réel sur devstationd le 2026-09-28
+(après `make restart` : `make all` ne relance pas stationd). `watch` reste
 après l'alpha.
 
 ### A4 — Refonte complète de la TUI
@@ -216,6 +212,7 @@ ou son UUID (`store::find`).
   reste. Entrées add-only non touchées. `sync` inchangé (ajout / mise à
   jour seulement).
 - Tests : `tests/playlist_admin.rs` (5). `cargo test --locked` : 460 verts.
+  Validé en réel sur devstationd le 2026-09-28.
 
 
 ### — Redémarrage de stationd : pistes auto-décrites + resync (2026-09-28) —
