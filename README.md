@@ -420,13 +420,18 @@ sudo systemctl disable --now icecast2 icecast-stationd liquidsoap-stationd
 ```sh
 docker compose build
 docker compose up -d
-docker compose exec -u dev station cargo build          # stationd + stationctl
+make build                                              # stationd + stationctl
 docker compose logs -f station
 ```
 
+`make build` compiles in **release** (optimised, no debug info) on the git
+branch `main`, in **debug** elsewhere (`PROFILE=release|debug` forces it), and
+points `target/active` at that profile: s6 runs `target/active/stationd`
+(`STATIOND_BIN`). A bare `cargo build` does not move the link.
+
 On the very first start the binary does not exist yet: stationd's service
 waits (`… absent: run cargo build`) and Icecast/Liquidsoap are held until
-stationd answers — nothing else to do once `cargo build` has run. After a
+stationd answers — nothing else to do once `make build` has run. After a
 change to `docker/` or `.env`: `docker compose build` then
 `docker compose up -d --force-recreate`.
 
@@ -434,8 +439,7 @@ change to `docker/` or `.env`: `docker compose build` then
 
 ```sh
 # rebuild + restart stationd only (the air is not cut)
-docker compose exec -u dev station cargo build
-docker compose exec station s6-svc -r /run/service/stationd
+make restart
 
 # stop stationd for good (survives restarts), then start it again
 docker compose exec station stationctl station stop
@@ -450,14 +454,13 @@ docker compose exec station s6-svc -r /run/service/liquidsoap
 docker compose exec -u dev station cargo test
 docker compose exec -u dev -w /src/plugins/custom-tags-wasm station \
   cargo build --release --target wasm32-unknown-unknown
-docker compose exec -u dev station cargo build --features tui
-docker compose exec -it -u dev station ./target/debug/stationd-tui
+make tui
 ```
 
 **CLI** — an alias on the host keeps `stationctl` in step with the daemon:
 
 ```sh
-alias stationctl='docker compose -f /data/dev/stationd/compose.yaml exec -u dev station /src/target/debug/stationctl'
+alias stationctl='docker compose -f /data/dev/stationd/compose.yaml exec -u dev station /src/target/active/stationctl'
 stationctl library scan
 stationctl playlist sync
 stationctl schedule apply grid.toml

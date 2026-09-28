@@ -187,6 +187,19 @@ coder ; `Doc/tui-dev.md` à réécrire en conséquence.
 
 ## Fait
 
+### — Dev : build release sur la branche `main` (2026-09-28) —
+
+`make build` / `restart` / `tui` compilent en **release** (optimisé, sans
+debug) quand la branche git du dépôt est `main`, en debug ailleurs
+(`PROFILE=release|debug` pour forcer). `make build` pose le lien
+`target/active` → profil construit ; l'image de dev lance
+`STATIOND_BIN=/src/target/active` (s6 `run` + sonde `check`, `make ctl`).
+**Migration : `make image` une fois** (ENV de l'image), puis `make build`
+(crée le lien) ; alias hôte `stationctl` → `/src/target/active/stationctl`
+(README). Un `cargo build` nu ne déplace pas le lien. Paquet
+d'exploitation inchangé (déjà `--release`).
+
+
 ### — Playlists : `remove` / `export` / `reload` (2026-09-28) —
 
 Trois RPC `Station` (`PlaylistRemove`, `PlaylistExport`, `PlaylistReload`,

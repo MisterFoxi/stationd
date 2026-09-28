@@ -9,6 +9,9 @@
 # envoyé au démon).
 FROM ubuntu:26.04
 
+# STATIOND_BIN = target/active : lien posé par `make build` vers le profil du
+# dernier build (release sur la branche main, debug ailleurs — cf. Makefile).
+
 # Versions épinglées = celles validées sur devstationd (archive Ubuntu).
 ARG ICECAST_VERSION=2.5.0-1
 # Vide = version du dépôt ; sinon la chaîne exacte de `apt policy liquidsoap`.
@@ -31,7 +34,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     CARGO_HOME=/usr/local/cargo \
     PATH=/command:/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
     STATIOND_ROOT=/src \
-    STATIOND_BIN=/src/target/debug \
+    STATIOND_BIN=/src/target/active \
     S6_CMD_WAIT_FOR_SERVICES_MAXTIME=0
 
 # tzdata : indispensable — jiff résout [station] timezone dans /usr/share/zoneinfo.
