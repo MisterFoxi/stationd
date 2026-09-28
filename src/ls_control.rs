@@ -157,10 +157,10 @@ pub fn command_for(t: &Transition) -> Option<&'static str> {
     match t.to {
         BroadcastState::Paused => Some("stationd.pause"),
         BroadcastState::Running => Some("stationd.resume"),
-        // stop: graceful (current track to its end) but the prepared track is
-        // dropped, so the pull asks again and gets `halted` right away.
-        BroadcastState::Stopped => Some("stationd.flush"),
-        // draining: nothing yet — it becomes `stopped` at a boundary.
+        // sleeping: reached AT a boundary (the pull got `halted`) — nothing
+        // prepared to drop, the noise is already coming.
+        BroadcastState::Sleeping => None,
+        // draining: nothing yet — it becomes `sleeping` at a boundary.
         BroadcastState::Draining => None,
     }
 }
@@ -179,8 +179,8 @@ enum Push {
 /// `initial` = the state restored at start-up: re-asserted once (a Liquidsoap
 /// that stayed up while stationd restarted converges).
 ///
-/// - transitions: `paused` ⇒ `pause`, `running` ⇒ `resume`, `stopped` ⇒
-///   `flush` (the stop lands at the end of the CURRENT track);
+/// - transitions: `paused` ⇒ `pause`, `running` ⇒ `resume` (`sleeping` is
+///   reached at a track boundary: nothing to push);
 /// - soft override ⇒ `flush` (it airs at the next boundary, not one later);
 /// - hard override ⇒ resolved now and cut in with `interrupt <uri>` (the
 ///   current track is dropped; the pull re-asks, so a multi-track playlist
@@ -221,10 +221,10 @@ pub fn spawn_air_sync(
                     Ok(_) => {
                         tracing::info!(cmd, "Liquidsoap control: applied");
                         if let Push::State { t: Some(t), .. } = push {
-                            // From a pause — or from a stop pushed during
-                            // a pause, which leaves the track frozen: the
-                            // frozen track plays on. (No frozen track → no-op.)
-                            if matches!(t.from, BroadcastState::Paused | BroadcastState::Stopped)
+                            // From a pause: the frozen track plays on. (A
+                            // wake from sleeping has no frozen track: the
+                            // pull brings the slot of now.)
+                            if t.from == BroadcastState::Paused
                                 && t.to == BroadcastState::Running
                             {
                                 bridge.resumed_from_pause();
@@ -455,11 +455,11 @@ mod tests {
         assert_eq!(wait_for(&seen, 1).await, ["stationd.resume"]);
         control.apply(ControlAction::Pause, "cli").unwrap();
         control.apply(ControlAction::Resume, "cli").unwrap();
-        control.apply(ControlAction::Stop, "cli").unwrap(); // graceful, prepared track dropped
-        control.apply(ControlAction::Resume, "cli").unwrap();
+        control.sleep_now(); // reached at a boundary: nothing pushed
+        control.apply(ControlAction::Wake, "stop-when-idle").unwrap();
         assert_eq!(
-            wait_for(&seen, 5).await,
-            ["stationd.resume", "stationd.pause", "stationd.resume", "stationd.flush", "stationd.resume"]
+            wait_for(&seen, 4).await,
+            ["stationd.resume", "stationd.pause", "stationd.resume", "stationd.resume"]
         );
     }
 
@@ -516,12 +516,12 @@ mod tests {
         assert_eq!(wait_for(&seen, 2).await[1], "stationd.flush");
         assert_eq!(bridge.next().await.kind, "file");
         assert!(bridge.prepared_is_override());
-        // A newer soft, a hard and a stop: none of them flushes it.
+        // A newer soft, a hard and a pause: none of them flushes it.
         control.push_override(req("jingles/b.mp3", OverrideMode::Soft), "cli").unwrap();
         control.push_override(req("news/flash.mp3", OverrideMode::Hard), "cli").unwrap();
         let got = wait_for(&seen, 3).await;
         assert!(got[2].starts_with("stationd.interrupt "), "{got:?}");
-        control.apply(ControlAction::Stop, "cli").unwrap();
+        control.apply(ControlAction::Pause, "cli").unwrap();
         tokio::time::sleep(Duration::from_millis(300)).await;
         let got = seen.lock().unwrap().clone();
         assert_eq!(got.iter().filter(|c| *c == "stationd.flush").count(), 1, "{got:?}");
@@ -647,14 +647,13 @@ mod tests {
     }
 
     #[test]
-    fn pause_resume_and_stop_flush_are_pushed() {
+    fn pause_resume_and_wake_are_pushed() {
         use BroadcastState::*;
         let t = |from, to| Transition { from, to };
         assert_eq!(command_for(&t(Running, Paused)), Some("stationd.pause"));
         assert_eq!(command_for(&t(Paused, Running)), Some("stationd.resume"));
-        assert_eq!(command_for(&t(Stopped, Running)), Some("stationd.resume"));
-        assert_eq!(command_for(&t(Running, Stopped)), Some("stationd.flush"), "stop drops the prepared track");
-        assert_eq!(command_for(&t(Draining, Stopped)), Some("stationd.flush"));
+        assert_eq!(command_for(&t(Sleeping, Running)), Some("stationd.resume"));
+        assert_eq!(command_for(&t(Draining, Sleeping)), None, "reached at a boundary");
         assert_eq!(command_for(&t(Running, Draining)), None);
     }
 

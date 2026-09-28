@@ -331,7 +331,12 @@ puis le groupe suit `on_member_unavailable`.
 `broadcast.constraints` est autorisé pour `static`, `dynamic` et `queue` :
 
 - `no_same_artist_within` : durée ;
-- `no_same_track_within` : durée.
+- `no_same_track_within` : durée (même FICHIER) ;
+- `no_same_title_within` : durée (même MORCEAU, quel que soit le fichier —
+  copies dans plusieurs dossiers, versions `_1` / `_2`). Deux médias sont le
+  même morceau quand l'une de leurs clés coïncide : le tag titre, et le nom de
+  fichier sans extension ni suffixe de copie `_<n>` / ` (<n>)`, tous deux en
+  minuscules, ponctuation / `_` / espaces repliés (`media_index::song_keys`).
 
 Ces exclusions sont évaluées avant chaque piste, y compris en groupe. Elles portent
 sur l'historique de toute la station et ne sont jamais relâchées implicitement.

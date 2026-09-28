@@ -53,8 +53,8 @@ fn map_state(s: BroadcastState) -> ProtoState {
     match s {
         BroadcastState::Running => ProtoState::Running,
         BroadcastState::Paused => ProtoState::Paused,
-        BroadcastState::Stopped => ProtoState::Stopped,
         BroadcastState::Draining => ProtoState::Draining,
+        BroadcastState::Sleeping => ProtoState::Sleeping,
     }
 }
 
@@ -79,13 +79,13 @@ impl BroadcastService for BroadcastGrpc {
         request: Request<ControlRequest>,
     ) -> Result<Response<ControlResponse>, Status> {
         let action = match ProtoAction::try_from(request.into_inner().action) {
-            Ok(ProtoAction::Stop) => ControlAction::Stop,
             Ok(ProtoAction::Pause) => ControlAction::Pause,
             Ok(ProtoAction::Resume) => ControlAction::Resume,
             Ok(ProtoAction::StopWhenIdle) => ControlAction::StopWhenIdle,
+            Ok(ProtoAction::Wake) => ControlAction::Wake,
             Ok(ProtoAction::Unspecified) | Err(_) => {
                 return Err(Status::invalid_argument(
-                    "action must be stop/pause/resume/stop_when_idle",
+                    "action must be pause/resume/stop_when_idle/wake (stopping stationd: Station.Shutdown)",
                 ))
             }
         };

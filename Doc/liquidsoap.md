@@ -39,7 +39,7 @@ radio  → normalize/compress (option) → %include custom → output.icecast
 
 `kind` de `/next` :
 - `file` → `uri = annotate:stationd_rid="N":/chemin/absolu` ;
-- `halted` → `state = paused|stopped` : **bruit de fond**, jamais le fallback ;
+- `halted` → `state = paused|sleeping` : **bruit de fond**, jamais le fallback ;
 - `relay` → `uri` = l'URL d'une playlist `remote` : relayée (voir « Relais »).
 - `none` → `reason = fallback|pool_empty|error` : fallback sécu.
 
@@ -241,6 +241,7 @@ Liquidsoap, qui doit être le groupe partagé `stationd`) et y enregistre :
 | `stationd.skip` | la piste en cours est abandonnée, la piste préparée démarre (crossfade) ; en pause, elle démarrera au resume |
 | `stationd.flush` | vide la piste déjà préparée (préchargée) : le pull redemande à stationd |
 | `stationd.interrupt <uri>` | override hard : la file `interrupt` coupe l'antenne maintenant ; la piste coupée est abandonnée (skip) ; à la fin de l'insert, la piste préparée démarre |
+| `stationd.park` | arrêt opérateur : lève `halted` (bruit de fond à la fin de la piste en cours) jusqu'à ce que stationd réponde autre chose que `halted` ; coupe un relais |
 | `stationd.state` | diagnostic : `paused= halted= loading=` |
 | `stationd.live_kick` | déconnecte le DJ du harbor (`[live]` seulement) ; le retour suit par le hook de déconnexion |
 
@@ -251,13 +252,18 @@ Qui envoie quoi :
   est journalisé, visible dans `stationctl ls status` (`control:`) et
   **retenté** toutes les 5 s jusqu'à ce qu'il passe ou soit remplacé. Au
   démarrage de stationd, l'état restauré est réaffirmé une fois ;
-- `stop` reste gracieux (la piste en cours va au bout) mais pousse `flush` :
-  la piste préparée est abandonnée, le pull redemande et reçoit `halted`, le
-  bruit de fond arrive **à la fin de la piste en cours** (pas une piste plus
-  tard). Exception : si le crossfade a déjà commencé à mixer la suivante, elle
-  passe. La piste abandonnée reste comptée dans l'historique anti-répétition
-  (écrit à la résolution). `stop` pendant une pause laisse la piste gelée ; un
-  `resume` ultérieur la reprend ;
+- la **veille** (`sleeping`, 2026-09-28 — remplace `stopped`) est atteinte
+  au pull, donc à un bord de piste : rien à pousser. Réveil (`wake` /
+  `resume`) → `resume` : le pull redemande, piste du créneau courant ;
+- **arrêt opérateur** (`stationctl station stop`, RPC `Station.Shutdown`) :
+  stationd écrit le marqueur `data/stationd.stopped`, ne résout plus rien
+  (tout pull reçoit `halted`), pousse `stationd.park` (drapeau `halted` levé
+  d'office : un stationd injoignable garde le bruit, seul un retour autre que
+  `halted` le baisse) puis `flush` (la piste préparée est abandonnée, le bruit
+  arrive **à la fin de la piste en cours** ; exception : crossfade déjà
+  commencé), et sort. s6 voit le marqueur et parque le service. Si
+  Liquidsoap redémarre pendant l'arrêt, le drapeau est perdu : fallback de
+  sécurité jusqu'au `station start` ;
 - **overrides** (même tâche, `AirEvent::Override`) :
   - `soft` → `flush` : l'override est servi au prochain pull, donc **à la fin
     de la piste en cours** (plus une piste plus tard) ;
@@ -321,7 +327,7 @@ Constats Icecast 2.5.0 : erreurs en enveloppe `<report>` (reportxml) avec
 `<incident><state><text>` ; plus de `<bitrate>` par source ; titre mp3 en
 une seule chaîne (`title` = `display-title` = `x_icy_title`).
 
-Le passage `draining → stopped` a lieu au pull suivant, désormais demandé
+Le passage `draining → sleeping` a lieu au pull suivant, désormais demandé
 en fin de piste : le bruit arrive à la fin de la piste en cours (plus de
 piste de trop, sauf échantillon à 0 reçu dans les dernières secondes, après
 la demande).

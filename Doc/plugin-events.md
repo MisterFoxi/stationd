@@ -79,7 +79,7 @@ auditeurs = 0 » avant qu'Icecast ne soit branché.
 | Événement | Dépend de | Données | Usage typique |
 |---|---|---|---|
 | `ListenersSampled` | Icecast (injectable) | `count`, `at` | déclencheur audience (stop-when-idle), courbes d'audience |
-| `BroadcastStateChanged` | contrôle diffusion (A2) | `from`, `to` (running/paused/stopped/draining) | réaction à un drain/arrêt |
+| `BroadcastStateChanged` | contrôle diffusion (A2) | `from`, `to` (running/paused/draining/sleeping), `by` (plugin, `cli`, `stop-when-idle`, `live`, `audience-unknown`) | réaction à une veille / un réveil |
 | `LiveStarted` | DJ live (harbor, `live::LiveHub`) | `dj`, `rule_id` (vide si entré par une ouverture ponctuelle ou le droit urgent), `at` | annoncer le live, notifier, journaliser |
 | `LiveEnded` | DJ live | `dj`, `reason` (disconnected/silence/kicked), `at` | fin d'émission, alerte sur coupure pour silence |
 | `TrackStarted` / `TrackFinished` | Liquidsoap | `media_path`, `at` | *vraie* diffusion (vs simple résolution), scrobble, durée d'écoute |

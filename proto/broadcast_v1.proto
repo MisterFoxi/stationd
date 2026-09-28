@@ -4,9 +4,13 @@
 // ces actions existent indépendamment de tout plugin — un plugin (via sa
 // surface hôte, capacités déclarées) n'est qu'un émetteur parmi d'autres.
 //
-//   État      running | paused | stopped | draining
-//             draining = arrêt gracieux ARMÉ : devient stopped au prochain
+//   État      running | paused | draining | sleeping
+//             draining = mise en veille ARMÉE : devient sleeping au prochain
 //             bord de piste si le dernier échantillon d'auditeurs vaut 0.
+//             sleeping = veille (bruit de fond, rien n'est résolu) ; quittée
+//             par wake (no-op hors sleeping) ou resume. L'arrêt opérateur
+//             n'est pas un état de diffusion : c'est stationd lui-même arrêté
+//             (station.proto, Shutdown).
 //   Override  contenu poussé DEVANT la grille (override > one-shot > grille
 //             > fallback). Avec Liquidsoap : `soft` = au prochain bord de
 //             piste (la piste préparée est vidée), `hard` = coupe la piste en
@@ -22,11 +26,11 @@ service BroadcastService {
   // État courant + dernier échantillon d'auditeurs.
   rpc GetState(GetStateRequest) returns (BroadcastStatus);
 
-  // stop | pause | resume | stop-when-idle. Refusé (failed_precondition) si
-  // la transition n'a pas de sens (pause d'une station arrêtée…).
+  // pause | resume | stop-when-idle | wake. Refusé (failed_precondition) si
+  // la transition n'a pas de sens (pause d'une station en veille…).
   // Avec Liquidsoap : pause = immédiate (piste gelée, bruit de fond à
-  // l'antenne), resume = reprise de la piste gelée ; stop reste gracieux
-  // (fin de la piste en cours).
+  // l'antenne), resume = reprise de la piste gelée ; la veille arrive au
+  // bord de piste. wake / resume depuis la veille : piste du créneau courant.
   rpc Control(ControlRequest) returns (ControlResponse);
 
   // Injection de test d'un échantillon d'auditeurs (émet ListenersSampled).
@@ -48,8 +52,9 @@ enum State {
   STATE_UNSPECIFIED = 0;
   RUNNING  = 1;
   PAUSED   = 2;
-  STOPPED  = 3;
+  reserved 3;       // ancien STOPPED (arrêt opérateur = stationd arrêté)
   DRAINING = 4;
+  SLEEPING = 5;
 }
 
 message GetStateRequest {}
@@ -63,10 +68,11 @@ message ControlRequest {
   Action action = 1;
   enum Action {
     ACTION_UNSPECIFIED = 0;
-    STOP           = 1;
+    reserved 1;             // ancien STOP → station.proto Shutdown
     PAUSE          = 2;
     RESUME         = 3;
     STOP_WHEN_IDLE = 4;
+    WAKE           = 5;     // quitte sleeping ; no-op depuis tout autre état
   }
 }
 
@@ -98,13 +104,13 @@ message PushOverrideRequest {
   enum Mode {
     MODE_UNSPECIFIED = 0;   // → SOFT
     SOFT = 1;               // au prochain bord de piste
-    HARD = 2;               // coupe maintenant — dégradé en SOFT sans Liquidsoap / station arrêtée
+    HARD = 2;               // coupe maintenant — dégradé en SOFT sans Liquidsoap / station en pause ou en veille
   }
 }
 
 message PushOverrideResponse {
   uint64 id       = 1;
-  bool   degraded = 2;   // HARD demandé, joué SOFT (pas de Liquidsoap, ou station en pause/arrêtée)
+  bool   degraded = 2;   // HARD demandé, joué SOFT (pas de Liquidsoap, ou station en pause/en veille)
   uint32 pending  = 3;   // overrides en attente après le push
 }
 

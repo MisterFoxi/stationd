@@ -13,15 +13,21 @@
 //!            relay          (a `remote` playlist: input.http, once the pull
 //!                            has no track left — soft entry),
 //!            pull,
-//!            halted noise   (while stationd reports paused/stopped),
+//!            halted noise   (while stationd reports paused/sleeping, or
+//!                            parked: stationd stopped by the operator),
 //!            blank          (until stationd answered once — start-up),
 //!            safety fallback (nothing to air / stationd unreachable) ])
 //! radio  → normalize/compress (optional) → custom include → icecast outputs
 //! on_track(pull | halted noise | fallback) → POST /ls/v1/track  # what REALLY airs
 //! ```
 //!
-//! Halted ≠ fallback: when the station is paused/stopped stationd answers
+//! Halted ≠ fallback: when the station is paused/sleeping stationd answers
 //! `halted`, and the background noise fills the air — never the safety file.
+//! The same holds while stationd itself is stopped by the operator
+//! (`stationctl station stop`): before exiting it sends `stationd.park`, which
+//! raises the halted flag; only a reply other than `halted` lowers it, so an
+//! unreachable stationd keeps the noise (a crash while running still falls
+//! back to the safety file). A Liquidsoap restarted meanwhile forgets it.
 //! The current track is never cut: the pull source stays first while it still
 //! has a track; the noise only takes over at its end.
 //!
@@ -176,7 +182,9 @@ pub fn render(ls: &LiquidsoapConfig, live: Option<&LiveConfig>, station_name: &s
 stationd = ()
 let stationd.api_url = {api_url}
 let stationd.api_token = {token}
-# True while stationd reports the station paused/stopped (at a track boundary).
+# True while stationd reports the station paused/sleeping (at a track
+# boundary), or since `stationd.park` (stationd stopped by the operator).
+# Lowered only by a reply other than `halted`: stationd unreachable keeps it.
 let stationd.halted = ref(false)
 # True while paused through the control socket: immediate, the current track
 # is frozen (not read) and resumes where it stopped.
@@ -476,6 +484,16 @@ def stationd.cmd_interrupt(uri) =
   "OK"
 end
 
+# stationd is being stopped by the operator: noise at the end of the current
+# track (not the safety file) until stationd answers again.
+def stationd.cmd_park(_) =
+  relay_off = stationd.relay_off()
+  relay_off()
+  stationd.halted := true
+  log.important(label="stationd", "park: stationd stopped by the operator, halted noise until it answers again")
+  "OK"
+end
+
 def stationd.cmd_state(_) =
   "paused=#{stationd.paused()} halted=#{stationd.halted()} loading=#{stationd.loading()}"
 end
@@ -485,6 +503,7 @@ server.register(namespace="stationd", usage="resume", description="Resume the fr
 server.register(namespace="stationd", usage="skip", description="Skip the current track.", "skip", stationd.cmd_skip)
 server.register(namespace="stationd", usage="flush", description="Drop the prepared track (re-ask stationd).", "flush", stationd.cmd_flush)
 server.register(namespace="stationd", usage="interrupt <uri>", description="Hard override: cut in now.", "interrupt", stationd.cmd_interrupt)
+server.register(namespace="stationd", usage="park", description="stationd stopping: halted noise until it answers again.", "park", stationd.cmd_park)
 server.register(namespace="stationd", usage="state", description="Bridge flags.", "state", stationd.cmd_state)
 "##,
     );
@@ -774,7 +793,7 @@ mod tests {
         // the cut sits above the whole air chain, before the outputs
         assert!(s.find("stationd_cut").unwrap() > s.find("stationd_air").unwrap());
         assert!(s.find("stationd_cut").unwrap() < s.find("output.icecast").unwrap());
-        for cmd in ["pause", "resume", "skip", "flush", "state"] {
+        for cmd in ["pause", "resume", "skip", "flush", "park", "state"] {
             assert!(s.contains(&format!("namespace=\"stationd\", usage=\"{cmd}\"")), "{cmd}");
         }
         assert!(s.contains("usage=\"interrupt <uri>\""));

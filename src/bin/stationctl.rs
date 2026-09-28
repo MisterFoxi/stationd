@@ -8,7 +8,7 @@ use clap::{Parser, Subcommand};
 use stationd::proto::{broadcast, icecast, library, liquidsoap, live, plugin, schedule, station, stats};
 
 use station::station_client::StationClient;
-use station::{PlaylistAddRequest, PlaylistListRequest, PlaylistSyncRequest, QuitRequest, StatusRequest};
+use station::{PlaylistAddRequest, PlaylistListRequest, PlaylistSyncRequest, QuitRequest, ShutdownRequest, StatusRequest};
 use schedule::schedule_service_client::ScheduleServiceClient;
 use schedule::{ApplyGridRequest, CheckCoverageRequest, EnqueueRequest, ExportGridRequest, GridFile, PreviewRequest, ResolveNextRequest, SetClockRequest};
 use library::library_service_client::LibraryServiceClient;
@@ -51,7 +51,8 @@ struct Args {
 enum Command {
     /// Show stationd's status (name, uptime, pid)
     Status,
-    /// Ask stationd to shut down cleanly
+    /// Ask stationd to exit cleanly — its supervisor starts it again (a
+    /// restart). To stop it for good: `station stop`
     Quit,
     /// Playlist operations
     #[command(subcommand)]
@@ -71,7 +72,8 @@ enum Command {
     /// Manual clock (testing)
     #[command(subcommand)]
     Clock(ClockCommand),
-    /// Broadcast control: state, stop / pause / resume / stop-when-idle
+    /// Station control: state, stop / start (stationd itself), pause / resume,
+    /// stop-when-idle / wake
     #[command(subcommand)]
     Station(StationCommand),
     /// Override queue: content pushed ahead of the grid
@@ -168,19 +170,45 @@ enum LsCommand {
 
 #[derive(Subcommand, Debug)]
 enum StationCommand {
-    /// Show the broadcast state and the last listener sample
-    State,
-    /// Stop the broadcast (graceful: at the end of the current track)
-    Stop,
+    /// Show the broadcast state and the last listener sample (stationd
+    /// stopped by the operator: says so, exit code 3)
+    State {
+        /// stationd's working directory, where data/stationd.stopped lives
+        /// (default: $STATIOND_ROOT, else the current directory)
+        #[arg(long)]
+        root: Option<PathBuf>,
+    },
+    /// Stop stationd itself: the current track plays to its end, then the
+    /// background noise; its supervisor (s6) does not start it again — not
+    /// even after a restart — until `station start`. Refused while a DJ is on
+    /// air, unless --force (the DJ is disconnected first)
+    Stop {
+        #[arg(long)]
+        force: bool,
+    },
+    /// Start stationd again after `station stop` (in the container: removes
+    /// data/stationd.stopped, restarts the s6 service, waits until it answers)
+    Start {
+        /// stationd's working directory (default: $STATIOND_ROOT, else the
+        /// current directory)
+        #[arg(long)]
+        root: Option<PathBuf>,
+        /// Seconds to wait for stationd to answer
+        #[arg(long, default_value_t = 30)]
+        timeout: u64,
+    },
     /// Pause now: current track frozen, background noise on air (Liquidsoap)
     Pause,
-    /// Resume: the frozen track plays on (also cancels an armed stop-when-idle)
+    /// Resume: the frozen track plays on; from sleep, the slot of now (also
+    /// cancels an armed stop-when-idle)
     Resume,
     /// Skip to the next track now
     #[command(alias = "skip")]
     Next,
-    /// Arm a graceful stop: at the next track boundary with zero listeners
+    /// Arm the idle sleep: at the next track boundary with zero listeners
     StopWhenIdle,
+    /// Wake a sleeping station (no-op in any other state: never un-pauses)
+    Wake,
 }
 
 #[derive(Subcommand, Debug)]
@@ -195,7 +223,7 @@ enum OverrideCommand {
         #[arg(long)]
         playlist: Option<String>,
         /// Cut the current track now (degraded to soft without Liquidsoap, or
-        /// while the station is paused/stopped)
+        /// while the station is paused/sleeping)
         #[arg(long)]
         hard: bool,
         /// Staleness window from now, e.g. 30s, 5m, 2h (default: never stale)
@@ -384,6 +412,22 @@ enum PlaylistCommand {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+    // The two commands that must work while stationd is down.
+    match &args.command {
+        Command::Station(StationCommand::Start { root, timeout }) => {
+            return station_start(&args.addr, &stationd_root(root.as_ref()), *timeout).await;
+        }
+        Command::Station(StationCommand::State { root }) => {
+            let mut bc = match BroadcastServiceClient::connect(args.addr.clone()).await {
+                Ok(bc) => bc,
+                Err(e) => return offline_state(&stationd_root(root.as_ref()), &args.addr, e),
+            };
+            let s = bc.get_state(GetStateRequest {}).await?.into_inner();
+            print_broadcast_status(&s);
+            return Ok(());
+        }
+        _ => {}
+    }
     let mut client = StationClient::connect(args.addr.clone()).await?;
 
     match args.command {
@@ -975,10 +1019,22 @@ async fn main() -> anyhow::Result<()> {
             let state = if status.frozen { "FROZEN" } else { "real time" };
             println!("clock: {state} \u{2014} {}", status.effective_local);
         }
-        Command::Station(StationCommand::State) => {
-            let mut bc = BroadcastServiceClient::connect(args.addr.clone()).await?;
-            let s = bc.get_state(GetStateRequest {}).await?.into_inner();
-            print_broadcast_status(&s);
+        Command::Station(StationCommand::State { .. } | StationCommand::Start { .. }) => {
+            unreachable!("handled before connecting")
+        }
+        Command::Station(StationCommand::Stop { force }) => {
+            // A DJ on air without --force, an unwritable marker: refused
+            // (non-zero exit), stationd keeps running.
+            let r = client.shutdown(ShutdownRequest { force }).await?.into_inner();
+            if r.kicked {
+                println!("live DJ disconnected");
+            }
+            if r.parked {
+                println!("air: the current track plays to its end, then the background noise");
+            } else {
+                println!("air: Liquidsoap NOT parked — the safety fallback will air");
+            }
+            println!("stationd stopped (marker {}): not restarted until `stationctl station start`", r.marker);
         }
         Command::Station(StationCommand::Next) => {
             let mut bc = BroadcastServiceClient::connect(args.addr.clone()).await?;
@@ -987,11 +1043,14 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::Station(cmd) => {
             let action = match cmd {
-                StationCommand::Stop => BroadcastAction::Stop,
                 StationCommand::Pause => BroadcastAction::Pause,
                 StationCommand::Resume => BroadcastAction::Resume,
                 StationCommand::StopWhenIdle => BroadcastAction::StopWhenIdle,
-                StationCommand::State | StationCommand::Next => unreachable!("handled above"),
+                StationCommand::Wake => BroadcastAction::Wake,
+                StationCommand::State { .. }
+                | StationCommand::Start { .. }
+                | StationCommand::Stop { .. }
+                | StationCommand::Next => unreachable!("handled above"),
             };
             let mut bc = BroadcastServiceClient::connect(args.addr.clone()).await?;
             // A meaningless transition comes back as failed_precondition → `?`
@@ -1409,6 +1468,104 @@ fn print_icecast_status(s: &icecast::IcecastStatus) {
             println!("  title:     {}", m.title);
         }
     }
+}
+
+/// The s6 service directory of stationd in the container (s6-overlay v3).
+const S6_SERVICE: &str = "/run/service/stationd";
+
+/// Exit code of `station state` when stationd is stopped by the operator.
+const EXIT_OPERATOR_STOPPED: i32 = 3;
+
+/// stationd's working directory: `--root`, else `$STATIOND_ROOT`, else `.`.
+fn stationd_root(root: Option<&PathBuf>) -> PathBuf {
+    root.cloned()
+        .or_else(|| std::env::var_os("STATIOND_ROOT").map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+fn local_time(epoch: i64) -> String {
+    jiff::Timestamp::from_second(epoch)
+        .map(|t| t.to_zoned(jiff::tz::TimeZone::system()).strftime("%Y-%m-%d %H:%M:%S %Z").to_string())
+        .unwrap_or_else(|_| format!("epoch {epoch}"))
+}
+
+/// `station state` with stationd unreachable: the marker tells a stop by the
+/// operator (exit 3) from an outage (error).
+fn offline_state(root: &std::path::Path, addr: &str, err: tonic::transport::Error) -> anyhow::Result<()> {
+    let marker = stationd::operator_stop::marker_under(root);
+    match stationd::operator_stop::read_marker(&marker) {
+        Some(at) => {
+            let since = at.map(|a| format!(" since {}", local_time(a))).unwrap_or_default();
+            println!("state:     STOPPED by the operator{since} ({})", marker.display());
+            println!("restart:   stationctl station start");
+            std::process::exit(EXIT_OPERATOR_STOPPED);
+        }
+        None => anyhow::bail!(
+            "stationd unreachable at {addr} ({err}) and no stop marker at {}: not an operator stop",
+            marker.display()
+        ),
+    }
+}
+
+/// `station start`: remove the marker, restart the parked s6 service, wait
+/// until it is up, then show the state. Local by nature — stationd is not
+/// there to answer — the only command that is not a gRPC call.
+async fn station_start(addr: &str, root: &std::path::Path, timeout_s: u64) -> anyhow::Result<()> {
+    use std::process::Command as Proc;
+    let marker = stationd::operator_stop::marker_under(root);
+    if !std::path::Path::new(S6_SERVICE).is_dir() {
+        anyhow::bail!(
+            "no s6 service {S6_SERVICE} here: run it in the container \
+             (`docker compose exec station stationctl station start`); \
+             outside s6, launch stationd directly — it lifts the stop itself"
+        );
+    }
+    let was_stopped = stationd::operator_stop::read_marker(&marker).is_some();
+    stationd::operator_stop::remove_marker(&marker)
+        .map_err(|e| anyhow::anyhow!("cannot remove {}: {e}", marker.display()))?;
+    if !was_stopped {
+        // Not stopped: a running stationd is left alone.
+        if let Ok(mut bc) = BroadcastServiceClient::connect(addr.to_string()).await {
+            println!("stationd is already running (no stop marker)");
+            print_broadcast_status(&bc.get_state(GetStateRequest {}).await?.into_inner());
+            return Ok(());
+        }
+    }
+    // -r + -wR: restart and wait until restarted AND ready (the parked
+    // service was already « up and ready »: a plain wait would return at once).
+    println!("marker removed, restarting the s6 service: waiting for stationd…");
+    let status = Proc::new("s6-svc")
+        .args(["-T", &(timeout_s * 1000).to_string(), "-wR", "-r", S6_SERVICE])
+        .status();
+    if !matches!(&status, Ok(s) if s.success()) {
+        // Put the stop back when the service could not even be told: the
+        // state must not lie. (A timeout leaves it starting: no marker.)
+        let told = std::path::Path::new(S6_SERVICE).join("supervise/control");
+        let writable = {
+            use std::os::unix::fs::OpenOptionsExt;
+            // Non-blocking: a fifo without reader must not hang the CLI.
+            std::fs::OpenOptions::new()
+                .write(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(&told)
+                .is_ok()
+        };
+        if was_stopped && !writable {
+            let _ = stationd::operator_stop::write_marker(
+                &marker,
+                stationd::resolver::Epoch(jiff::Timestamp::now().as_second()),
+                "cli (start refused)",
+            );
+            anyhow::bail!(
+                "cannot control {S6_SERVICE} ({status:?}): run as root, or check the service \
+                 permissions (s6-svperms in the stationd run script) — still stopped"
+            );
+        }
+        anyhow::bail!("stationd not ready after {timeout_s} s ({status:?}): see the container logs");
+    }
+    let mut bc = BroadcastServiceClient::connect(addr.to_string()).await?;
+    print_broadcast_status(&bc.get_state(GetStateRequest {}).await?.into_inner());
+    Ok(())
 }
 
 fn state_name(state: i32) -> &'static str {

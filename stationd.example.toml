@@ -75,7 +75,7 @@ level = "info"
 # fallback_path = "./radio/error.mp3"       # safety net: nothing to air / stationd down
 #                                           # default: /usr/share/stationd/error.mp3
 #                                           # (production image only)
-# halted_path   = "./radio/bruit.mp3"       # looped while paused/stopped
+# halted_path   = "./radio/bruit.mp3"       # looped while paused/sleeping/stopped
 #                                           # default: /usr/share/stationd/bruit.mp3
 # normalize     = false                     # normalize + compress on the air chain
 # custom_include = "/etc/stationd/custom.liq"  # sees `radio`, may reassign it
@@ -131,7 +131,9 @@ level = "info"
 # /admin/stats every poll_interval seconds: the listeners of the mounts it
 # feeds ([[liquidsoap.output]]) → ListenersSampled (stop-when-idle). A failed
 # read — Icecast down, bad credentials, mount without source — makes the
-# audience unknown, never 0: a draining station keeps playing.
+# audience unknown, never 0: a draining station keeps playing, a sleeping
+# one wakes. While asleep it samples every poll_interval_sleeping seconds
+# (the wake latency when a listener comes back).
 # Admin credentials (<admin-user>/<admin-password> of icecast.xml), NOT the
 # source password. Plain http, Icecast reached directly (not via the proxy).
 #
@@ -140,6 +142,7 @@ level = "info"
 # admin_user     = "admin"                  # default
 # admin_password = "change-me-admin"        # ASCII
 # poll_interval  = 15                       # seconds, 2..=600
+# poll_interval_sleeping = 3                # seconds while asleep, 2..=600
 #
 # Optional: stationd generates Icecast's own config (icecast.xml) — one mount
 # per [[liquidsoap.output]] with its source password, UTF-8 titles, only our

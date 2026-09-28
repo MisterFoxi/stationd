@@ -54,6 +54,16 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     info!(station = %cfg.station.name, "stationd starting");
+
+    // Operator's stop marker: under s6 stationd is never launched while it
+    // exists (`stationctl station start` removes it first). Found here = an
+    // explicit launch by hand: that launch lifts the stop.
+    let marker = PathBuf::from(stationd::operator_stop::MARKER_PATH);
+    match stationd::operator_stop::remove_marker(&marker) {
+        Ok(true) => warn!(path = ?marker, "operator stop marker found and removed: an explicit start lifts the stop"),
+        Ok(false) => {}
+        Err(e) => anyhow::bail!("operator stop marker {marker:?} present and not removable ({e}): refusing to start"),
+    }
     info!(db_path = ?cfg.database.path, "SQLite database");
     info!(media_path = ?cfg.media.library_path, "media library");
     info!(playlist_path = ?cfg.playlist.path, "playlist directory (source of truth)");
@@ -152,6 +162,7 @@ async fn main() -> anyhow::Result<()> {
     // restarted to pick it up) and serve the loopback bridge it pulls from.
     // A bind failure is fatal: a configured station that cannot air must not
     // pretend to run.
+    let mut operator_ls = None;
     let (ls_service, ls_task) = match &cfg.liquidsoap {
         None => {
             info!("no [liquidsoap] section: nothing airs (scheduling only)");
@@ -180,6 +191,7 @@ async fn main() -> anyhow::Result<()> {
             // AtClock hard: a timer cuts the rendez-vous in at the mark.
             stationd::ls_control::spawn_at_clock_ticker(engine.clone(), air_tx);
             broadcast_service = broadcast_service.with_liquidsoap(ls_control.clone());
+            operator_ls = Some(ls_control.clone());
             let router = stationd::ls_bridge::router(bridge.clone(), &ls_cfg.api_token, live_hub.clone());
             let listener = tokio::net::TcpListener::bind(ls_cfg.http_addr()).await?;
             info!(addr = %ls_cfg.http_bind, "Liquidsoap bridge listening (loopback)");
@@ -210,7 +222,13 @@ async fn main() -> anyhow::Result<()> {
             }
             let client = stationd::icecast::IcecastClient::new(ic).map_err(anyhow::Error::msg)?;
             let mounts: Vec<String> = ls_cfg.outputs.iter().map(|o| o.mount.clone()).collect();
-            info!(icecast = client.authority(), ?mounts, every_s = ic.poll_interval, "Icecast audience sampling");
+            info!(
+                icecast = client.authority(),
+                ?mounts,
+                every_s = ic.poll_interval,
+                asleep_every_s = ic.poll_interval_sleeping,
+                "Icecast audience sampling"
+            );
             let mut service = IcecastGrpc::new(
                 icecast_monitor.clone(),
                 client.authority().to_string(),
@@ -244,6 +262,7 @@ async fn main() -> anyhow::Result<()> {
                 client,
                 mounts,
                 std::time::Duration::from_secs(ic.poll_interval),
+                std::time::Duration::from_secs(ic.poll_interval_sleeping),
                 control.clone(),
                 icecast_monitor.clone(),
             );
@@ -282,12 +301,18 @@ async fn main() -> anyhow::Result<()> {
         db_pool.clone(),
         cfg.playlist.path.clone(),
         shutdown_tx,
-    );
+    )
+    .with_operator_stop(grpc::OperatorStop {
+        control: control.clone(),
+        ls: operator_ls,
+        marker,
+    });
 
     info!(%addr, "gRPC server listening (status, quit, schedule, library, plugin, broadcast, liquidsoap, icecast, live, stats)");
 
-    // Three ways to shut down cleanly: via `stationctl quit` (shutdown_rx,
-    // triggered by the service's `quit` handler), or via a signal — Ctrl+C
+    // Three ways to shut down cleanly: via `stationctl quit` or `stationctl
+    // station stop` (shutdown_rx, triggered by the service's `quit` /
+    // `shutdown` handlers — the latter leaves the marker), or via a signal — Ctrl+C
     // (SIGINT) when interactive, or SIGTERM (what `systemctl stop` sends by
     // default; without this handler, systemd would wait out its timeout and
     // then kill the process forcefully instead of a clean shutdown).
@@ -297,7 +322,7 @@ async fn main() -> anyhow::Result<()> {
     let shutdown_signal = async move {
         tokio::select! {
             _ = shutdown_rx => {
-                info!("shutdown requested via the `quit` command");
+                info!("shutdown requested (`quit` / `station stop`)");
             }
             _ = tokio::signal::ctrl_c() => {
                 info!("shutdown requested (Ctrl+C / SIGINT)");

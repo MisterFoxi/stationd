@@ -6,7 +6,17 @@ package station;
 // deliberately starting small.
 service Station {
   rpc Status (StatusRequest) returns (StatusReply);
+  // Restart-style exit: stationd leaves, its supervisor starts it again.
   rpc Quit (QuitRequest) returns (QuitReply);
+  // The operator's stop (`stationctl station stop`): stationd writes the
+  // marker data/stationd.stopped (fsync'd — on failure nothing stops), parks
+  // Liquidsoap on the background noise (`stationd.park` + `flush`: the
+  // current track plays to its end) and exits. The supervisor (s6) sees the
+  // marker and does not start it again, even after a restart, until
+  // `stationctl station start`. Liquidsoap and Icecast stay up.
+  // failed_precondition while a DJ is on air, unless `force` (the DJ is
+  // disconnected first).
+  rpc Shutdown (ShutdownRequest) returns (ShutdownReply);
   rpc PlaylistAdd (PlaylistAddRequest) returns (PlaylistAddReply);
   rpc PlaylistSync (PlaylistSyncRequest) returns (PlaylistSyncReply);
   rpc PlaylistList (PlaylistListRequest) returns (PlaylistListReply);
@@ -24,6 +34,16 @@ message StatusReply {
 message QuitRequest {}
 
 message QuitReply {}
+
+message ShutdownRequest {
+  bool force = 1;   // a DJ on air is disconnected first
+}
+
+message ShutdownReply {
+  string marker = 1;     // the marker written (path as stationd sees it)
+  bool   kicked = 2;     // a DJ was disconnected (force)
+  bool   parked = 3;     // Liquidsoap parked on the noise (false: the safety fallback will air)
+}
 
 // `playlist add`: the CLI ships the raw TOML content (it does only a
 // syntactic pre-check locally, then delegates the I/O of *sending*).

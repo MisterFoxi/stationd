@@ -16,6 +16,23 @@ if [ ! -f "$STATIOND_ROOT/stationd.toml" ]; then
   sleep 5
   exit 1
 fi
+# `stationctl station start` (utilisateur dev / stationd, pas root) doit
+# pouvoir relancer ce service et attendre qu'il soit prêt : lecture de l'état,
+# contrôle et abonnement aux événements ouverts au groupe stationd. Posé à
+# chaque lancement (le répertoire de supervision vit dans /run).
+if ! s6-svperms -g stationd -O stationd -E stationd . ; then
+  echo "[stationd] s6-svperms a échoué : seul root pourra lancer « stationctl station start »" >&2
+fi
+# Arrêt opérateur (`stationctl station stop`, src/operator_stop.rs) : le
+# marqueur data/stationd.stopped est présent → on ne lance PAS stationd. Le
+# service se déclare prêt (Liquidsoap et Icecast, qui en dépendent, démarrent
+# quand même, sur le .liq et l'icecast.xml du dernier lancement) puis dort.
+# Relance : `stationctl station start` (retire le marqueur + s6-svc -r).
+if [ -f "$STATIOND_ROOT/data/stationd.stopped" ]; then
+  echo "[stationd] arrêté par l'opérateur ($STATIOND_ROOT/data/stationd.stopped) — relance : stationctl station start" >&2
+  echo >&3        # notification-fd = 3 : prêt
+  exec s6-pause   # parqué : s6 supervise, ne relance rien
+fi
 # Exploitation : umask 007 (STATIOND_UMASK) — ce que stationd écrit
 # (playlist add…) reste modifiable par le groupe stationd, donc par
 # l'administrateur du nœud. Dev : 022 (défaut), rien ne change.

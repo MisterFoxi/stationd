@@ -528,9 +528,9 @@ impl LsBridge {
     }
 
     /// What the air is doing, from the broadcast state and what Liquidsoap
-    /// last reported: `playing`, `paused`, `stop armed` (stop-when-idle),
-    /// `stopping` (stop requested, the current track plays to its end) or
-    /// `stopped` (halted noise on air).
+    /// last reported: `playing`, `paused`, `sleep armed` (stop-when-idle),
+    /// `falling asleep` (asleep, the current track plays to its end) or
+    /// `sleeping` (halted noise on air).
     pub fn air_state(&self) -> &'static str {
         use crate::station_control::BroadcastState::*;
         if self.engine.control().live_dj().is_some() {
@@ -539,8 +539,8 @@ impl LsBridge {
         match self.engine.control().state() {
             Running => "playing",
             Paused => "paused",
-            Draining => "stop armed",
-            Stopped => {
+            Draining => "sleep armed",
+            Sleeping => {
                 let track_on_air = self
                     .lock()
                     .status
@@ -548,9 +548,9 @@ impl LsBridge {
                     .as_ref()
                     .is_some_and(|a| a.kind == OnAirKind::Track);
                 if track_on_air {
-                    "stopping"
+                    "falling asleep"
                 } else {
-                    "stopped"
+                    "sleeping"
                 }
             }
         }
@@ -757,9 +757,9 @@ mod tests {
     #[tokio::test]
     async fn halted_is_not_a_fallback() {
         let (_d, b) = bridge().await;
-        b.engine.control().apply(ControlAction::Stop, "cli").unwrap();
+        b.engine.control().sleep_now();
         let r = b.next().await;
-        assert_eq!(r, NextReply::halted("stopped"));
+        assert_eq!(r, NextReply::halted("sleeping"));
         b.engine.control().apply(ControlAction::Resume, "cli").unwrap();
         assert_eq!(b.next().await.kind, "file");
     }
@@ -815,7 +815,7 @@ mod tests {
         assert_eq!((n.rid, n.media_path.as_str(), n.playlist_ref.as_deref()), (2, "music/a.mp3", Some("music")));
         assert!(!b.prepared_is_override());
         // A halted reply: nothing queued behind the current track.
-        b.engine.control().apply(ControlAction::Stop, "cli").unwrap();
+        b.engine.control().sleep_now();
         b.next().await;
         assert!(b.status().next.is_none());
     }
@@ -843,15 +843,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stop_is_stopping_until_the_track_ends() {
+    async fn sleep_is_falling_asleep_until_the_track_ends() {
         let (_d, b) = bridge().await;
         b.next().await;
         b.track_started(&TrackEvent { rid: "1".into(), kind: String::new() }).await;
         assert_eq!(b.air_state(), "playing");
-        b.engine.control().apply(ControlAction::Stop, "cli").unwrap();
-        assert_eq!(b.air_state(), "stopping", "the current track plays to its end");
+        b.engine.control().apply(ControlAction::StopWhenIdle, "cli").unwrap();
+        assert_eq!(b.air_state(), "sleep armed");
+        b.engine.control().sample_listeners(0);
+        b.next().await; // the pull at the end of the track: the gate sleeps
+        assert_eq!(b.air_state(), "falling asleep", "the current track plays to its end");
         b.track_started(&TrackEvent { rid: String::new(), kind: "halted".into() }).await;
-        assert_eq!(b.air_state(), "stopped");
+        assert_eq!(b.air_state(), "sleeping");
         b.engine.control().apply(ControlAction::Resume, "cli").unwrap();
         b.engine.control().apply(ControlAction::Pause, "cli").unwrap();
         assert_eq!(b.air_state(), "paused");
@@ -1022,12 +1025,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_stop_lets_the_track_end_and_it_is_marked() {
+    async fn falling_asleep_lets_the_track_end_and_it_is_marked() {
         let (_d, b, pool) = pod_bridge().await;
         b.at(1000);
         b.next().await;
         b.start(1).await;
-        b.engine.control().apply(ControlAction::Stop, "cli").unwrap();
+        b.engine.control().sleep_now();
         b.at(1600); // plays to its end, then the halted noise
         b.source("halted").await;
         assert_eq!(played(&pool, "pod").await, ["pod/ep1.mp3".to_string()].into());

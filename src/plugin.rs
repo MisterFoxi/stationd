@@ -168,9 +168,10 @@ pub enum PluginEvent {
     /// An audience sample (Icecast later; `stationctl debug listeners` today).
     /// `at` = epoch seconds.
     ListenersSampled { count: u32, at: i64 },
-    /// The broadcast state changed (`running|paused|stopped|draining`). `by`
-    /// names the emitter: a plugin, `cli`, or `stop-when-idle` for a drain
-    /// completed by the core at a track boundary.
+    /// The broadcast state changed (`running|paused|draining|sleeping`). `by`
+    /// names the emitter: a plugin, `cli`, `stop-when-idle` for a drain
+    /// completed by the core at a track boundary, `live` / `audience-unknown`
+    /// for a sleeping station woken by the core.
     BroadcastStateChanged { from: String, to: String, by: String },
     /// A DJ took the air (harbor): `dj` = its id in the DJ file, `rule_id` =
     /// the grid `live` rule whose window let it in. `at` = epoch seconds.
@@ -1156,11 +1157,13 @@ impl Plugin for BlacklistPlugin {
 
 /// Demo of the A2 composition « observe + act »: on `ListenersSampled` with a
 /// count of 0 (for `min_zero_samples` consecutive samples, default 1) it arms
-/// `host.control(StopWhenIdle)`. The core owns the mechanism (the drain
-/// completes at the next track boundary if the audience is still 0); this
-/// plugin only carries the policy. A non-zero sample resets the streak. It
-/// arms once per idle period: an operator's `resume` is not overridden until
-/// the audience comes back and leaves again.
+/// `host.control(StopWhenIdle)`; with a count > 0 it calls `Wake`. The core
+/// owns the mechanism (the drain falls asleep at the next track boundary if
+/// the audience is still 0; `wake` only leaves `sleeping`, so a listener
+/// never un-pauses nor restarts an operator's stop); this plugin only carries
+/// the policy. A non-zero sample resets the streak. It arms once per idle
+/// period: an operator's `resume` is not overridden until the audience comes
+/// back and leaves again.
 ///
 /// Requires capability `control` — refused at `on_load` otherwise (visible
 /// `Failed`), never a policy that silently can't act.
@@ -1203,6 +1206,12 @@ impl Plugin for StopWhenIdlePlugin {
         };
         if *count > 0 {
             self.zero_streak = 0;
+            let Some(host) = &self.host else { return };
+            match host.control(ControlAction::Wake) {
+                Ok(Some(_)) => tracing::info!(listeners = count, "[stop-when-idle] listeners back: station woken"),
+                Ok(None) => {}
+                Err(e) => tracing::warn!(%e, "[stop-when-idle] could not wake the station"),
+            }
             return;
         }
         self.zero_streak = self.zero_streak.saturating_add(1);
@@ -1241,7 +1250,8 @@ fn host_reply<T: Serialize>(res: Result<T, String>) -> String {
     v.to_string()
 }
 
-/// `station_control` input: `{"action": "stop|pause|resume|stop_when_idle"}`.
+/// `station_control` input: `{"action": "pause|resume|stop_when_idle|wake"}`.
+/// `stop` is refused (unknown action): stopping stationd is the operator's.
 fn wasm_station_control(host: &Host, input: &str) -> String {
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
@@ -1538,7 +1548,7 @@ mod tests {
         let control = StationControl::new_in_memory();
         let host = Host::new("stats", &[], Some(control.clone()));
         assert!(matches!(
-            host.control(ControlAction::Stop),
+            host.control(ControlAction::Pause),
             Err(HostError::Denied { .. })
         ));
         assert_eq!(control.state(), crate::station_control::BroadcastState::Running);
@@ -1575,7 +1585,7 @@ mod tests {
     #[test]
     fn host_without_control_is_unavailable() {
         let host = Host::new("x", &[Capability::Control], None);
-        assert!(matches!(host.control(ControlAction::Stop), Err(HostError::Unavailable)));
+        assert!(matches!(host.control(ControlAction::Pause), Err(HostError::Unavailable)));
     }
 
     #[test]
@@ -1592,6 +1602,11 @@ mod tests {
         let bad: serde_json::Value =
             serde_json::from_str(&wasm_station_control(&host, r#"{"action":"explode"}"#)).unwrap();
         assert_eq!(bad["ok"], false);
+        // A plugin can never stop stationd.
+        let stop: serde_json::Value =
+            serde_json::from_str(&wasm_station_control(&host, r#"{"action":"stop"}"#)).unwrap();
+        assert_eq!(stop["ok"], false);
+        assert_eq!(control.state(), crate::station_control::BroadcastState::Draining);
         let denied: serde_json::Value = serde_json::from_str(&wasm_push_override(
             &host,
             r#"{"content":{"media":"a.mp3"}}"#,
@@ -1651,8 +1666,23 @@ mod tests {
         // The core completes it at the next track boundary (audience still 0).
         assert_eq!(
             control.gate(),
-            crate::station_control::Gate::Halt(crate::station_control::BroadcastState::Stopped)
+            crate::station_control::Gate::Halt(crate::station_control::BroadcastState::Sleeping)
         );
+        // A listener comes back: woken.
+        control.sample_listeners(1);
+        h.list().await;
+        assert_eq!(control.state(), crate::station_control::BroadcastState::Running);
+    }
+
+    #[test]
+    fn stop_when_idle_never_wakes_a_paused_station() {
+        let control = StationControl::new_in_memory();
+        let mut p = StopWhenIdlePlugin::from_config(&toml::Table::new()).unwrap();
+        p.on_load(Host::new("stop-when-idle", &[Capability::Control], Some(control.clone())))
+            .unwrap();
+        control.apply(ControlAction::Pause, "cli").unwrap();
+        p.on_event(&PluginEvent::ListenersSampled { count: 3, at: 0 });
+        assert_eq!(control.state(), crate::station_control::BroadcastState::Paused);
     }
 
     #[test]

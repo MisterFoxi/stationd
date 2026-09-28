@@ -321,6 +321,22 @@ fn verdict_for(
                 }
             }
         }
+        if let Some(d) = &c.no_same_title_within {
+            if let (Ok(need_s), Some(have_ms)) =
+                (crate::playlist::parse_duration_secs(d), stats.total_duration_ms)
+            {
+                // Pool duration is an upper bound: copies of one song count
+                // once here, so the real margin is smaller.
+                let need_ms = need_s.saturating_mul(1000);
+                if have_ms < need_ms {
+                    verdict = verdict.worst(Verdict::Thin);
+                    reasons.push(format!(
+                        "no_same_title_within {d} : pool {} < {d} (rejeu de morceau forcé)",
+                        fmt_hms(have_ms)
+                    ));
+                }
+            }
+        }
         if c.no_same_artist_within.is_some() {
             match stats.distinct_artists {
                 // A pool with fewer than 2 distinct artists can never satisfy a
@@ -1045,8 +1061,10 @@ impl GridEngine {
     /// - no rule covers `now` at all → a `Fallback` decision, media `None`.
     ///
     /// Two layers come BEFORE the grid (the pure resolver is untouched):
-    /// 1. the broadcast **gate** — paused/stopped → `halted`, nothing resolved
-    ///    (a draining station with zero listeners stops right here);
+    /// 1. the broadcast **gate** — paused/sleeping → `halted`, nothing
+    ///    resolved (a draining station with zero listeners falls asleep right
+    ///    here). Right after a wake, a held group is released: the station
+    ///    airs the slot of NOW, not a cycle cut when it fell asleep;
     /// 2. the **override queue** — the highest priority of the architecture
     ///    (`override > one-shot > grid > fallback`).
     pub async fn next_media(&self, now: Epoch) -> Result<ResolvedDecision, EngineError> {
@@ -1066,6 +1084,12 @@ impl GridEngine {
                 leaf_ref: None,
                 log_id: None,
             });
+        }
+        if self.control.take_woken() {
+            if let Some(hold) = grid_store::get_hold(&self.pool).await? {
+                tracing::info!(playlist = %hold.playlist_ref, "woke from sleep: held group released");
+                self.end_hold(&hold.playlist_ref, true).await?;
+            }
         }
         if let Some(resolved) = self.next_override(now).await? {
             return Ok(resolved);
@@ -1863,6 +1887,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_wake_releases_the_held_group_and_airs_the_slot_of_now() {
+        use crate::station_control::ControlAction;
+        let (_d, eng) = hold_fixture("hit/", "skip").await;
+        assert_eq!(media_at(&eng, at(9, 10)).await.0, "jhit/j.mp3");
+        // Asleep mid-cycle, woken 30 min later.
+        eng.control().sleep_now();
+        assert!(eng.next_media(at(9, 20)).await.unwrap().halted.is_some());
+        eng.control().apply(ControlAction::Wake, "stop-when-idle").unwrap();
+        assert_eq!(media_at(&eng, at(9, 40)).await, ("music/a.mp3".into(), Origin::BaseRotation));
+        assert!(grid_store::get_hold(&eng.pool).await.unwrap().is_none());
+        // Reset: its next activation starts from the top.
+        assert_eq!(media_at(&eng, at(9, 56)).await, ("jhit/j.mp3".into(), Origin::Every));
+    }
+
+    #[tokio::test]
+    async fn a_pause_keeps_the_held_group() {
+        use crate::station_control::ControlAction;
+        let (_d, eng) = hold_fixture("hit/", "skip").await;
+        assert_eq!(media_at(&eng, at(9, 10)).await.0, "jhit/j.mp3");
+        eng.control().apply(ControlAction::Pause, "cli").unwrap();
+        eng.control().apply(ControlAction::Resume, "cli").unwrap();
+        assert_eq!(media_at(&eng, at(9, 12)).await.0, "hit/h.mp3");
+    }
+
+    #[tokio::test]
     async fn its_rule_restarts_the_group_from_the_top() {
         let (_d, eng) = hold_fixture("hit/", "skip").await;
         // An interrupted activation left the cursor on the second member.
@@ -2553,23 +2602,23 @@ mode = "dynamic""#;
     }
 
     #[tokio::test]
-    async fn stopped_station_resolves_nothing_and_logs_nothing() {
+    async fn sleeping_station_resolves_nothing_and_logs_nothing() {
         use crate::station_control::ControlAction;
         let (_dir, eng) = engine_with_floor().await;
-        eng.control().apply(ControlAction::Stop, "cli").unwrap();
+        eng.control().sleep_now();
         let r = eng.next_media(at(9, 0)).await.unwrap();
-        assert_eq!(r.halted, Some(BroadcastState::Stopped));
+        assert_eq!(r.halted, Some(BroadcastState::Sleeping));
         assert!(r.media_path.is_none());
         assert!(crate::broadcast_log::tracks_since(&eng.pool, 0).await.unwrap().is_empty());
-        // Resume → the grid plays again.
-        eng.control().apply(ControlAction::Resume, "cli").unwrap();
+        // Wake → the grid plays again.
+        eng.control().apply(ControlAction::Wake, "stop-when-idle").unwrap();
         let r = eng.next_media(at(9, 1)).await.unwrap();
         assert_eq!(r.media_path.as_deref(), Some("music/a.mp3"));
         assert!(r.halted.is_none());
     }
 
     #[tokio::test]
-    async fn draining_stops_at_the_boundary_once_listeners_are_zero() {
+    async fn draining_sleeps_at_the_boundary_once_listeners_are_zero() {
         use crate::station_control::ControlAction;
         let (_dir, eng) = engine_with_floor().await;
         eng.control().apply(ControlAction::StopWhenIdle, "cli").unwrap();
@@ -2581,8 +2630,8 @@ mode = "dynamic""#;
         );
         eng.control().sample_listeners(0);
         let r = eng.next_media(at(9, 3)).await.unwrap();
-        assert_eq!(r.halted, Some(BroadcastState::Stopped));
-        assert_eq!(eng.control().state(), BroadcastState::Stopped);
+        assert_eq!(r.halted, Some(BroadcastState::Sleeping));
+        assert_eq!(eng.control().state(), BroadcastState::Sleeping);
     }
 
     #[tokio::test]

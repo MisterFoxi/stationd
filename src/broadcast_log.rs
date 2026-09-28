@@ -56,6 +56,25 @@ pub async fn record(
     Ok(r.last_insert_rowid())
 }
 
+/// Song keys (`media_index::song_keys`) of everything chosen at or after
+/// `cutoff` — the set to avoid for a `no_same_title_within` window. The title
+/// comes from the media index (a media no longer indexed keeps its file-name
+/// key).
+pub async fn song_keys_since(pool: &SqlitePool, cutoff: i64) -> Result<HashSet<String>, sqlx::Error> {
+    let rows: Vec<(String, Option<String>)> = sqlx::query_as(
+        "SELECT DISTINCT b.rel_path, m.title FROM broadcast_log b
+         LEFT JOIN media m ON m.rel_path = b.rel_path
+         WHERE b.played_at >= ?1",
+    )
+    .bind(cutoff)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .iter()
+        .flat_map(|(p, t)| crate::media_index::song_keys(p, t.as_deref()))
+        .collect())
+}
+
 /// Liquidsoap really started the track logged as `id` at `at`.
 pub async fn mark_aired(pool: &SqlitePool, id: i64, at: Epoch) -> Result<(), sqlx::Error> {
     sqlx::query("UPDATE broadcast_log SET aired_at = ?2 WHERE id = ?1 AND aired_at IS NULL")

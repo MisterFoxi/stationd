@@ -5,7 +5,7 @@ sans reconstruire le contexte. À distinguer des docs de `Doc/` (décisions
 d'architecture durables) : ce fichier-ci est volatil, à mettre à jour à
 chaque session.
 
-Dernière mise à jour : 2026-09-27.
+Dernière mise à jour : 2026-09-28.
 
 
 ## Ajout : TUI d'administration (correctif préparé, compilation à confirmer)
@@ -117,6 +117,14 @@ Liquidsoap 2.2.4 (conteneur de préparation), **à valider sur devstationd
 Environnement : tout se teste désormais dans le conteneur de dev (README
 « Run (Docker) ») ; plus d'unités systemd sur devstationd.
 
+**Veille / arrêt opérateur (2026-09-28) — validation sur devstationd** :
+`cargo test --locked` (447), `liquidsoap --check` du script généré (commande
+`stationd.park`), build `stop-when-idle-wasm`, puis en réel : plugin
+`stop-when-idle` activé → 0 auditeur → `sleeping` (bruit), un `curl` sur le
+mount → réveil en ~5 s sur le créneau courant ; `station stop` → bruit à la
+fin de la piste (pas le fallback), `docker compose restart` → toujours
+arrêté, `station state` code 3, `station start` en `-u dev`.
+
 **DJ live — validation sur devstationd (Liquidsoap 2.4)** : `cargo test
 --locked` (378 attendus), `liquidsoap --check` du script généré avec
 `[live]`, puis un vrai client (butt / Mixxx) : login, hors créneau, fondu,
@@ -187,6 +195,78 @@ Autres, indépendants :
 ---
 
 ## Fait
+
+### — Veille sans auditeur (`sleeping` / `wake`) + arrêt opérateur par s6 (2026-09-28) —
+
+Spec validée (projet claude.ai : `claude/spec-veille-et-arret-operateur.md`).
+Deux besoins séparés, jusque-là confondus dans `stopped` :
+
+**Veille.** `BroadcastState` = `running | paused | draining | sleeping`
+(`stopped` supprimé ; migration **0021** : ancien `stopped` → `sleeping`,
+CHECK reconstruit). `draining` → `sleeping` au bord de piste (gate).
+Nouvelle action **`wake`** : ne quitte que `sleeping`, no-op ailleurs (ne
+dépause jamais, n'annule pas un drain). Réveils portés par le core :
+audience devenue inconnue (`clear_listeners`, `by = audience-unknown`) et DJ
+qui prend l'antenne (`set_live`, `by = live`). Au réveil (`sleeping →
+running`, flag `take_woken`) le moteur libère le groupe tenu (remis en tête
+de cycle) : on diffuse le créneau de l'heure du réveil. Pas sur `pause →
+resume`. Plugin `stop-when-idle` natif + WASM : `wake` dès `count > 0`.
+Surface plugin : actions `pause | resume | stop_when_idle | wake` — **`stop`
+retiré** (refusé). `[icecast] poll_interval_sleeping` (défaut 3 s) :
+échantillonnage accéléré pendant la veille (latence de réveil). `ls status` :
+`sleep armed` / `falling asleep` / `sleeping`. Proto broadcast : `STOPPED`
+et action `STOP` réservés, `SLEEPING` / `WAKE` ajoutés.
+
+**Arrêt opérateur.** `stationctl station stop [--force]` → RPC
+`Station.Shutdown` : refus si DJ à l'antenne sans `--force` (sinon
+`live_kick`) ; marqueur `./data/stationd.stopped` écrit avec fsync (échec =
+rien d'arrêté, stationd continue) ; plus rien de résolu (gate) ;
+`stationd.park` (nouvelle commande socket : lève `halted`, seul un retour
+≠ `halted` le baisse → bruit de fond, pas le fallback, même stationd
+parti) puis `flush` ; sortie. `src/operator_stop.rs` (marqueur).
+**s6** : le `run` de stationd voit le marqueur → se déclare prêt (fd 3) et
+`exec s6-pause` : Liquidsoap / Icecast démarrent quand même ; survit au
+redémarrage du conteneur. `s6-svperms -g/-O/-E stationd` posé à chaque
+lancement (start possible sans root). `stationctl station start` (local,
+seule commande non gRPC) : retire le marqueur, `s6-svc -T … -wR -r
+/run/service/stationd`, affiche l'état. `station state` stationd injoignable
++ marqueur → « STOPPED by the operator », code 3. Lancement manuel de
+stationd avec marqueur présent : il le retire (log). `quit` = redémarrage.
+
+**Validation (environnement de préparation, Rust 1.95 + protoc)** :
+`cargo test --locked` vert (**447** : 425 lib + 1 stationctl + 21 intégration ; 429 avant), clippy sans
+nouvel avertissement, `--features tui` compile, plugin WASM `cargo check`
+(cible wasm32 absente ici). Smoke local : stop → marqueur, state code 3,
+relance manuelle lève le marqueur. **s6 réel (s6 2.12, hors s6-overlay)** :
+stop en non-root → service parqué et prêt ; redémarrage de s6-svscan →
+toujours parqué ; `station start` en non-root (membre stationd) → stationd
+prêt en 0,5 s ; `start` sur station en marche = no-op.
+**À valider sur devstationd** : `liquidsoap --check` du script (commande
+`park` ; le Liquidsoap 2.2.4 de préparation ne lit pas la syntaxe 2.4),
+build WASM, E2E : veille/réveil avec vrais auditeurs, stop → bruit à la fin
+de la piste, `docker compose restart` → parqué, `station start`.
+
+### — Anti-répétition par morceau : `no_same_title_within` (2026-09-27) —
+
+Constaté en réel : `no_same_track_within` (chemin) laissait repasser le même
+morceau sous un autre fichier — copies dans plusieurs dossiers (Ballad /
+EpicBallad / ToSort…) et versions `_1` / `_2` (`the_caverns_of_asperiche_liams_rescue*` :
+4 fichiers, passés à 10:53 et 15:00). Décision (utilisateur) : coder la
+contrainte par morceau.
+
+- `[broadcast.constraints] no_same_title_within = "<durée>"` (`playlist::Constraints`).
+- `media_index::song_keys(rel_path, title)` : tag titre replié + nom de
+  fichier sans extension ni suffixe `_<n>` / ` (<n>)`, replié (minuscules,
+  non-alphanumériques → espace). Même morceau = une clé commune.
+  `Passang 2` garde son `2` (seul `_<n>` / `(<n>)` est un suffixe de copie).
+- `broadcast_log::song_keys_since` (titre lu dans l'index) ; filtre dans
+  `selection::apply_one_constraint_set` (dur, jamais relâché, comme les autres) ;
+  `schedule check` : pool plus court que la fenêtre → `Thin`.
+- Sur la bibliothèque de devstationd (genre `song`) : 264 fichiers → 182
+  morceaux, 75 en plusieurs fichiers.
+- Tests (+2) : clés (versions, copies, graphies, suffixe non-copie, Unicode) ;
+  sélection (fichier joué, sa version `_1`, sa copie d'un autre dossier exclus ;
+  de retour hors fenêtre). `cargo test --locked` vert (429).
 
 ### — Statistiques de diffusion : provenance dans `broadcast_log`, `stationctl stats` (2026-09-27) —
 

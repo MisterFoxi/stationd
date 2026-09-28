@@ -83,7 +83,7 @@ imbriqués à ajouter plus tard si le besoin apparaît.
 | `schedule[]` | `start`/`end`/`days` (+ `date_start`/`date_end`) | créneaux (`scheduled`) |
 | `repeat` | booléen | source finie : reboucler ou non |
 | `on_exhausted` | `fallthrough` \| `stop` \| `disable` \| `hold` | comportement à épuisement |
-| `constraints` | `no_same_artist_within`, `no_same_track_within` | anti-répétition au séquençage |
+| `constraints` | `no_same_artist_within`, `no_same_track_within`, `no_same_title_within` | anti-répétition au séquençage (`title` = même morceau quel que soit le fichier : tag titre, ou nom de fichier sans suffixe de copie `_1` / `(2)`) |
 
 ## Compteurs et tour-de-rôle
 

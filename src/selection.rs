@@ -378,7 +378,8 @@ async fn resolve_leaf(
 /// Drop candidates barred by the anti-repetition constraints in scope — the
 /// leaf's own plus those inherited from every enclosing group — evaluated
 /// against the station-wide broadcast history (`broadcast_log`): a candidate
-/// whose `rel_path` played within a `no_same_track_within`, or whose `artist`
+/// whose `rel_path` played within a `no_same_track_within`, whose SONG
+/// (`media_index::song_keys`) played within a `no_same_title_within`, or whose `artist`
 /// played within a `no_same_artist_within`, is removed. Each constraint set is
 /// applied in turn (cumulative: the strictest window wins). A HARD filter,
 /// never relaxed implicitly (doc): if it empties the pool the caller surfaces
@@ -410,6 +411,20 @@ async fn apply_one_constraint_set(
         let cutoff = now.saturating_sub(secs as i64);
         let recent = broadcast_log::tracks_since(pool, cutoff).await?;
         candidates.retain(|cand| !recent.contains(&cand.rel_path));
+    }
+    if let Some(window) = &c.no_same_title_within {
+        let secs = crate::playlist::parse_duration_secs(window).map_err(|e| {
+            SelectionError::Unsupported(format!("no_same_title_within `{window}`: {e}"))
+        })?;
+        let cutoff = now.saturating_sub(secs as i64);
+        let recent = broadcast_log::song_keys_since(pool, cutoff).await?;
+        if !recent.is_empty() {
+            candidates.retain(|cand| {
+                crate::media_index::song_keys(&cand.rel_path, cand.title.as_deref())
+                    .iter()
+                    .all(|k| !recent.contains(k))
+            });
+        }
     }
     if let Some(window) = &c.no_same_artist_within {
         let secs = crate::playlist::parse_duration_secs(window).map_err(|e| {
@@ -2593,6 +2608,69 @@ mod tests {
             resolve_ref_at(&pool, now, "rot").await,
             Err(SelectionError::PoolEmpty)
         ));
+    }
+
+    #[tokio::test]
+    async fn no_same_title_within_excludes_every_copy_of_the_song() {
+        let (_d, pool) = fresh_db().await;
+        let m = |rel: &str, title: &str| ScannedMedia {
+            rel_path: rel.into(),
+            title: Some(title.into()),
+            artist: None,
+            album: None,
+            year: None,
+            genres: vec![],
+            duration_ms: 180_000,
+            size_bytes: 1,
+            mtime_ns: 0,
+        };
+        media_index::replace_library(
+            &pool,
+            &[
+                m("Ballad/the_caverns_rescue.mp3", "the caverns"),
+                m("Ballad/the_caverns_rescue_1.mp3", "the caverns"),
+                m("EpicBallad/the_caverns_rescue.mp3", "the_caverns_rescue"),
+                m("Other/b.mp3", "B"),
+            ],
+            1000,
+        )
+        .await
+        .unwrap();
+        let toml = r#"
+            name = "Rot"
+            [selection]
+            mode = "dynamic"
+            order = "shuffle"
+            [[selection.filter]]
+            field = "path"
+            op = "prefix"
+            value = ""
+            [broadcast.constraints]
+            no_same_title_within = "1h"
+        "#;
+        add_playlist(&pool, "rot", toml).await;
+        let now = 1_000_000;
+        crate::broadcast_log::record(
+            &pool,
+            "Ballad/the_caverns_rescue.mp3",
+            None,
+            crate::resolver::Epoch(now - 1800),
+            Default::default(),
+        )
+        .await
+        .unwrap();
+        // The played file, its `_1` version (same title tag) and the EpicBallad
+        // copy (same file name) are all the same song: only b.mp3 is left.
+        for _ in 0..20 {
+            assert_eq!(resolve_ref_at(&pool, now, "rot").await.unwrap(), "Other/b.mp3");
+        }
+        // Outside the window: the song is back.
+        let later = now + 3600;
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..60 {
+            seen.insert(resolve_ref_at(&pool, later, "rot").await.unwrap());
+        }
+        assert!(seen.len() > 1);
     }
 
     #[tokio::test]

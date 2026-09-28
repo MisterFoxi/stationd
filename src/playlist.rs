@@ -225,6 +225,12 @@ pub struct Constraints {
     pub no_same_artist_within: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub no_same_track_within: Option<String>,
+    /// Same SONG, whatever the file: two files count as one song when their
+    /// song keys meet (`media_index::song_keys` — the title tag, and the file
+    /// name without a `_1` / `(2)` copy suffix). Catches copies in several
+    /// folders and numbered versions that `no_same_track_within` (path) misses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_same_title_within: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

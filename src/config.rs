@@ -152,6 +152,10 @@ pub struct IcecastConfig {
     /// Seconds between two samples.
     #[serde(default = "default_icecast_poll_interval")]
     pub poll_interval: u64,
+    /// Seconds between two samples while the station sleeps: the wake
+    /// latency (plus one pull retry) when a listener comes back.
+    #[serde(default = "default_icecast_poll_interval_sleeping")]
+    pub poll_interval_sleeping: u64,
     /// `[icecast.server]` present = stationd generates Icecast's own config
     /// (`icecast.xml`). Absent = stationd only reads an Icecast configured
     /// elsewhere.
@@ -225,7 +229,11 @@ fn default_icecast_poll_interval() -> u64 {
     15
 }
 
-/// Bounds of `[icecast] poll_interval` (s).
+fn default_icecast_poll_interval_sleeping() -> u64 {
+    3
+}
+
+/// Bounds of `[icecast] poll_interval` and `poll_interval_sleeping` (s).
 const ICECAST_POLL_RANGE: std::ops::RangeInclusive<u64> = 2..=600;
 
 impl IcecastConfig {
@@ -242,13 +250,17 @@ impl IcecastConfig {
         if self.admin_password.is_empty() || !printable_ascii(&self.admin_password) {
             return Err("admin_password: non-empty printable ASCII required".into());
         }
-        if !ICECAST_POLL_RANGE.contains(&self.poll_interval) {
-            return Err(format!(
-                "poll_interval {} out of {}..={} s",
-                self.poll_interval,
-                ICECAST_POLL_RANGE.start(),
-                ICECAST_POLL_RANGE.end()
-            ));
+        for (key, v) in [
+            ("poll_interval", self.poll_interval),
+            ("poll_interval_sleeping", self.poll_interval_sleeping),
+        ] {
+            if !ICECAST_POLL_RANGE.contains(&v) {
+                return Err(format!(
+                    "{key} {v} out of {}..={} s",
+                    ICECAST_POLL_RANGE.start(),
+                    ICECAST_POLL_RANGE.end()
+                ));
+            }
         }
         let ls = match ls {
             Some(ls) if !ls.outputs.is_empty() => ls,
@@ -953,6 +965,7 @@ mod tests {
         let ic = c.icecast.unwrap();
         assert_eq!(ic.admin_user, "admin");
         assert_eq!(ic.poll_interval, 15);
+        assert_eq!(ic.poll_interval_sleeping, 3);
         assert_eq!(ic.authority().unwrap(), "127.0.0.1:8000");
         assert!(ic.foreign_outputs(c.liquidsoap.as_ref().unwrap()).is_empty());
     }
@@ -969,6 +982,7 @@ mod tests {
             admin_user: "admin".into(),
             admin_password: "x".into(),
             poll_interval: 15,
+            poll_interval_sleeping: 3,
             server: None,
         };
         assert_eq!(ic("http://icecast.lan/").authority().unwrap(), "icecast.lan:80");
@@ -992,6 +1006,8 @@ mod tests {
         assert!(matches!(load_str(&colon_user), Err(ConfigError::Icecast(m)) if m.contains("admin_user")));
         let fast = format!("{full}        poll_interval = 1\n");
         assert!(matches!(load_str(&fast), Err(ConfigError::Icecast(m)) if m.contains("poll_interval")));
+        let fast_asleep = format!("{full}        poll_interval_sleeping = 1\n");
+        assert!(matches!(load_str(&fast_asleep), Err(ConfigError::Icecast(m)) if m.contains("poll_interval_sleeping")));
         let typo = full.replace("admin_password", "admin_pasword");
         assert!(matches!(load_str(&typo), Err(ConfigError::Parse { .. })));
     }

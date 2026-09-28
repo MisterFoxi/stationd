@@ -396,21 +396,35 @@ pub fn apply_sample(
     }
 }
 
-/// Sample every `every` (first sample right away). Logs a problem when it
-/// appears or changes, and the recovery — not every failed poll.
+/// Delay before the next sample: `asleep` while the station sleeps (the
+/// wake latency is this period plus one pull retry), `every` otherwise.
+pub fn sample_period(control: &StationControl, every: Duration, asleep: Duration) -> Duration {
+    if control.state() == crate::station_control::BroadcastState::Sleeping {
+        asleep
+    } else {
+        every
+    }
+}
+
+/// Sample every `every` — `asleep` while the station sleeps — (first sample
+/// right away). Logs a problem when it appears or changes, and the recovery —
+/// not every failed poll.
 pub fn spawn_sampler(
     client: IcecastClient,
     mounts: Vec<String>,
     every: Duration,
+    asleep: Duration,
     control: StationControl,
     monitor: IcecastMonitor,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let mut tick = tokio::time::interval(every);
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut last_problem: Option<String> = None;
+        let mut first = true;
         loop {
-            tick.tick().await;
+            if !first {
+                tokio::time::sleep(sample_period(&control, every, asleep)).await;
+            }
+            first = false;
             let fetched = client.stats().await;
             let problem = apply_sample(fetched, &mounts, &control, &monitor);
             match (&last_problem, &problem) {
@@ -603,7 +617,22 @@ mod tests {
         // Recovery.
         assert_eq!(apply_sample(Ok(zero), &ours, &control, &monitor), None);
         assert!(monitor.snapshot().problem.is_none());
-        assert_eq!(control.gate(), Gate::Halt(crate::station_control::BroadcastState::Stopped));
+        assert_eq!(control.gate(), Gate::Halt(crate::station_control::BroadcastState::Sleeping));
+
+        // Asleep, then Icecast becomes unreadable: the station wakes.
+        apply_sample(Err("127.0.0.1:8000: unreachable".into()), &ours, &control, &monitor);
+        assert_eq!(control.state(), crate::station_control::BroadcastState::Running);
+    }
+
+    #[test]
+    fn a_sleeping_station_is_sampled_faster() {
+        use crate::station_control::BroadcastState;
+        let control = StationControl::new_in_memory();
+        let (normal, asleep) = (Duration::from_secs(15), Duration::from_secs(3));
+        assert_eq!(sample_period(&control, normal, asleep), normal);
+        control.sleep_now();
+        assert_eq!(control.state(), BroadcastState::Sleeping);
+        assert_eq!(sample_period(&control, normal, asleep), asleep);
     }
 
     /// Icecast refreshes its counter every ~5 s: two reads 15 s apart may
@@ -671,6 +700,7 @@ mod tests {
             admin_user: "admin".into(),
             admin_password: password.into(),
             poll_interval: 15,
+            poll_interval_sleeping: 3,
             server: None,
         }
     }

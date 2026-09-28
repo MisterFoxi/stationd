@@ -41,21 +41,27 @@ Conséquences :
 
 | Action | Effet | Nature |
 |---|---|---|
-| `Stop` | arrête la diffusion | dur (immédiat) |
 | `Pause` / `Resume` | suspend / reprend | dur |
-| `StopWhenIdle` | **arrêt gracieux armé** : s'arrête à la prochaine occasion propre (fin de piste **et** zéro auditeur), pas un kill | mou (armé) |
+| `StopWhenIdle` | **mise en veille armée** : `sleeping` à la prochaine occasion propre (fin de piste **et** zéro auditeur), pas un kill | mou (armé) |
+| `Wake` | quitte `sleeping` ; **no-op depuis tout autre état** (ne dépause jamais, n'annule pas un drain) | mou |
 
 `control` est **first-class sur la station** : ces actions existent
-indépendamment de tout plugin (`stationctl station stop|pause|resume|
-stop-when-idle`), et un plugin peut les invoquer via `host.control(...)`. Un
-plugin n'est donc qu'un émetteur parmi d'autres — on doit pouvoir arrêter la
-station à la main sans aucun plugin chargé.
+indépendamment de tout plugin (`stationctl station pause|resume|
+stop-when-idle|wake`), et un plugin peut les invoquer via `host.control(...)`.
+Un plugin n'est donc qu'un émetteur parmi d'autres.
+
+**Pas de `Stop`** (2026-09-28) : l'arrêt opérateur (`stationctl station stop`)
+arrête stationd lui-même (marqueur `data/stationd.stopped`, s6 ne le relance
+pas) — hors de portée de tout plugin ; `{"action":"stop"}` est refusé.
 
 `StopWhenIdle` est le cas « MAJ quand plus personne n'écoute » : ce n'est pas
-« stop maintenant » mais « stop dès que c'est propre ». Il produit un état de
-diffusion `draining` observable (cf. `BroadcastStateChanged`).
+« stop maintenant » mais « en veille dès que c'est propre ». Il produit un état
+de diffusion `draining` observable (cf. `BroadcastStateChanged`). Le réveil est
+`Wake` (le plugin `stop-when-idle` l'appelle dès qu'un auditeur revient) ; le
+core réveille aussi seul une station en veille quand l'audience devient
+inconnue ou qu'un DJ prend l'antenne.
 
-Note : l'**état** de diffusion (`running`/`paused`/`stopped`/`draining`) et la
+Note : l'**état** de diffusion (`running`/`paused`/`draining`/`sleeping`) et la
 **commande** existent au niveau contrat et sont testables tout de suite ; l'effet
 réel sur le flux audio dépend du câblage Liquidsoap, mais l'état de la station,
 lui, n'attend pas LS.
@@ -190,11 +196,15 @@ attendre sqlx). Démo : `plugins/play-stats-wasm`.
   au-delà. Pas de quarantaine sur refus (ce n'est pas un crash).
 - **File volatile** : en mémoire. Un arrêt du daemon perd les overrides en
   attente — **annoncé** dans les logs d'arrêt (nombre perdu), pas silencieux.
-  L'état de diffusion, lui, est persisté (un `stop` reste un `stop` après
-  redémarrage).
-- **`StopWhenIdle`** : `draining` devient `stopped` au prochain bord de piste
+  L'état de diffusion, lui, est persisté (une veille reste une veille après
+  redémarrage ; migration 0021 : un ancien `stopped` devient `sleeping`).
+- **`StopWhenIdle`** : `draining` devient `sleeping` au prochain bord de piste
   si le **dernier** échantillon d'auditeurs vaut 0. Jamais échantillonné →
-  aucun arrêt (pas de signal d'audience). `resume` annule un drain.
+  aucune veille (pas de signal d'audience). `resume` annule un drain.
+- **Réveil** (`Wake`, ou `resume`) : la piste du créneau à l'heure du réveil
+  (un groupe tenu au moment de la veille est libéré et remis en tête de
+  cycle). Pendant la veille, Icecast est lu toutes les
+  `[icecast] poll_interval_sleeping` s (défaut 3).
 - **Contrat** : `broadcast_v1.proto` (`GetState` / `Control` /
   `SampleListeners` / `PushOverride` / `ListOverrides` / `ClearOverrides`),
   CLI `stationctl station|override|debug listeners`. `ResolveNext` rend

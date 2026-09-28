@@ -95,7 +95,7 @@ against the library; a fixed tracklist is just a special case.
 Orders are `shuffle`, `sequential`, `newest` and `oldest` (cursor-based).
 Group members have quotas: `take = N` tracks, or `runtime = "20m"` of wall
 time. Playback constraints are enforced at play time:
-`no_same_track_within`, `no_same_artist_within` and `unplayed_only` (play
+`no_same_track_within`, `no_same_title_within` (same song under another file: copies, `_1` versions), `no_same_artist_within` and `unplayed_only` (play
 each episode once).
 
 ```toml
@@ -187,13 +187,24 @@ waiting for the clock, in UTC and in local time (useful across DST changes).
 
 ### Broadcast control and overrides
 
-- **Station state:** `running`, `paused`, `stopped`, or `draining` (stop at
-  the next track boundary once there are zero listeners). The state survives
-  restarts.
+- **Station state:** `running`, `paused`, `draining` (sleep armed: at the
+  next track boundary once there are zero listeners) or `sleeping` (background
+  noise, nothing resolved). The state survives restarts.
   - `pause` freezes the current track and airs background noise; `resume`
     continues the track where it stopped.
-  - `stop` is graceful: it takes effect at the end of the current track.
+  - `wake` leaves `sleeping` (no-op otherwise: it never un-pauses). The
+    station airs the slot of the wake time: a group held when it fell asleep
+    is released. The core also wakes it when the audience becomes unknown or
+    a DJ takes the air. `stop-when-idle` (plugin) arms the sleep at 0
+    listeners and wakes the station when a listener comes back.
   - `next` skips to the next track now.
+- **Operator stop:** `station stop` stops **stationd itself** (the current
+  track plays to its end, then the background noise — Liquidsoap and Icecast
+  stay up) and it is not restarted, even after a container or host restart,
+  until `station start`. The switch is the marker `data/stationd.stopped`;
+  `station state` reports it (exit code 3). Refused while a DJ is on air,
+  unless `--force`. `quit` is a restart (the supervisor starts it again).
+  No plugin can stop stationd.
 - **Overrides** push a media or a playlist ahead of the grid, with an
   optional expiry and a track count.
   - `soft` airs at the next track boundary.
@@ -247,7 +258,8 @@ Plugins add features; they do not process audio.
   - `filter_pool`: remove candidates before a track is picked.
   - `on_scan`: turn custom tags into genres.
 - **Host surface:** each plugin declares capabilities: `control`
-  (stop / pause the station), `push_override`, `db` (its own SQLite file,
+  (pause / resume, arm the idle sleep, wake — never stop stationd),
+  `push_override`, `db` (its own SQLite file,
   `data/plugins/<name>.db`, opened by the core; the plugin ships its schema as
   migrations and sends SQL through `db_query` / `db_exec` / `db_batch`,
   confined: no `ATTACH`, no `PRAGMA`, bounded in time, rows and size).
@@ -288,7 +300,9 @@ reverse proxy), every `poll_interval` seconds:
 - **Audience:** the listeners of the mounts stationd feeds are summed and
   published as `ListenersSampled`, which drives `stop-when-idle`. A failed
   read (Icecast down, bad credentials, a mount without source) makes the
-  audience *unknown*, never 0: a draining station keeps playing.
+  audience *unknown*, never 0: a draining station keeps playing, a sleeping
+  one wakes. While the station sleeps, the audience is read every
+  `poll_interval_sleeping` seconds (default 3): the wake latency.
 - **Mount health:** `stationctl icecast status` shows, per mount, whether a
   source is connected and since when, the announced and the measured bitrate
   (averaged over a minute; a stalled source reads 0), the listeners and the
@@ -338,7 +352,7 @@ script_path    = "./data/station.liq"
 api_token      = "change-me"                 # ASCII shared secret
 control_socket = "/run/stationd/liquidsoap.sock"  # created by the image
 fallback_path  = "./radio/error.mp3"         # safety net (default: the production image's)
-halted_path    = "./radio/bruit.mp3"         # looped while paused/stopped (idem)
+halted_path    = "./radio/bruit.mp3"         # looped while paused/sleeping/stopped (idem)
 
 [[liquidsoap.output]]
 host     = "127.0.0.1"
@@ -422,6 +436,10 @@ change to `docker/` or `.env`: `docker compose build` then
 # rebuild + restart stationd only (the air is not cut)
 docker compose exec -u dev station cargo build
 docker compose exec station s6-svc -r /run/service/stationd
+
+# stop stationd for good (survives restarts), then start it again
+docker compose exec station stationctl station stop
+docker compose exec station stationctl station start
 
 # after a change to [liquidsoap], [icecast], [icecast.server] or the outputs:
 # restart stationd (rewrites the files), then the consumer
@@ -547,12 +565,13 @@ docker compose exec -u stationd station stationctl status
 
 | Command | What it does |
 |---|---|
-| `stationctl status` / `quit` | Daemon status / clean shutdown |
+| `stationctl status` / `quit` | Daemon status / clean exit (restarted by its supervisor) |
 | `library scan` \| `list` \| `genres` | Scan the media root, list the index (`--genre`), genre inventory |
 | `playlist add` \| `sync` \| `list` | Register or reconcile playlist TOML files |
 | `schedule validate` \| `apply` \| `export` \| `list` | Manage the grid |
 | `schedule preview` \| `check` | Project the grid over time; check each rule has enough media |
-| `station state` \| `pause` \| `resume` \| `stop` \| `stop-when-idle` \| `next` | Broadcast control |
+| `station state` \| `pause` \| `resume` \| `stop-when-idle` \| `wake` \| `next` | Broadcast control |
+| `station stop [--force]` \| `start` | Stop stationd itself until `start` (marker `data/stationd.stopped`; `start` runs in the container) |
 | `override push` \| `list` \| `clear` | Content ahead of the grid (`--media`/`--playlist`, `--hard`, `--expiry`, `--tracks`) |
 | `queue push` | Feed a `queue` playlist (listener request / DJ injection) |
 | `plugin list` \| `start` \| `stop` \| `restart` \| `reload` | Plugin lifecycle |

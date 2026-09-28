@@ -35,6 +35,7 @@ pub mod ls_grpc;
 pub mod ls_script;
 pub mod media;
 pub mod media_index;
+pub mod operator_stop;
 pub mod playlist;
 pub mod playlist_cursor;
 pub mod pool_inspection;

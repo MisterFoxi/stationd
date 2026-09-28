@@ -20,3 +20,4 @@ value = ["talks", "jingle"]      # genres : tags du fichier (et plugin custom-ta
 [broadcast.constraints]
 no_same_artist_within = "1h"
 no_same_track_within  = "6h"
+no_same_title_within  = "6h"             # même morceau sous un autre fichier (copie, version _1)

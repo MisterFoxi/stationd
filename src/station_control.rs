@@ -6,11 +6,18 @@
 //! the last listener sample — and holds no business condition. A plugin (or a
 //! human via the CLI) decides *when* to use them.
 //!
-//! - **Broadcast state** `running | paused | stopped | draining`. `draining`
-//!   is an armed graceful stop: it becomes `stopped` at the next track
-//!   boundary (`gate`) once the last listener sample is 0. Persisted (family
-//!   B, migration 0014) through an ordered writer task, so the synchronous
-//!   API stays callable from a plugin hook.
+//! - **Broadcast state** `running | paused | draining | sleeping`. `draining`
+//!   is an armed graceful stop: it becomes `sleeping` at the next track
+//!   boundary (`gate`) once the last listener sample is 0. `sleeping` = the
+//!   idle stop (background noise on air, nothing resolved); `wake` brings it
+//!   back and is a no-op from any other state, so an audience can never undo
+//!   an operator's pause. The operator's stop is not a broadcast state: it is
+//!   stationd itself stopped (`shutdown`, marker `data/stationd.stopped`).
+//!   Persisted (family B, migrations 0014 / 0021) through an ordered writer
+//!   task, so the synchronous API stays callable from a plugin hook.
+//! - **Core wake rules** (mechanism, not policy): a sleeping station wakes
+//!   when the audience becomes *unknown* (a failure is never read as « no
+//!   one listens ») and when a DJ takes the air.
 //! - **Override queue**: content pushed ahead of the grid (`next_media`
 //!   consults it before `resolve_next`). In memory, capped, with per-entry
 //!   expiry (a missed override is dropped, never replayed late). With
@@ -23,7 +30,7 @@
 //!
 //! With Liquidsoap wired, every transition is also forwarded to the air
 //! (`attach_air` → `ls_control`): `paused` pauses the air now, `running`
-//! resumes it; `stopped` stays graceful (track boundary, via `gate`).
+//! resumes it; `sleeping` is reached at a track boundary (via `gate`).
 //!
 //! Every state change emits `BroadcastStateChanged`; every listener sample
 //! emits `ListenersSampled` (best-effort, via the plugin handle once
@@ -53,10 +60,12 @@ pub const MAX_PENDING_OVERRIDES: usize = 64;
 pub enum BroadcastState {
     Running,
     Paused,
-    Stopped,
-    /// Armed graceful stop: stops at the next clean occasion (track boundary
+    /// Armed graceful stop: sleeps at the next clean occasion (track boundary
     /// AND zero listeners). Not a kill.
     Draining,
+    /// Idle stop (no listeners): background noise on air, nothing resolved.
+    /// Left by `wake` (audience back, DJ, unknown audience) or `resume`.
+    Sleeping,
 }
 
 impl BroadcastState {
@@ -64,8 +73,8 @@ impl BroadcastState {
         match self {
             BroadcastState::Running => "running",
             BroadcastState::Paused => "paused",
-            BroadcastState::Stopped => "stopped",
             BroadcastState::Draining => "draining",
+            BroadcastState::Sleeping => "sleeping",
         }
     }
 
@@ -73,21 +82,25 @@ impl BroadcastState {
         Some(match s {
             "running" => BroadcastState::Running,
             "paused" => BroadcastState::Paused,
-            "stopped" => BroadcastState::Stopped,
             "draining" => BroadcastState::Draining,
+            "sleeping" => BroadcastState::Sleeping,
             _ => return None,
         })
     }
 }
 
-/// A control command, from the CLI or a plugin (`host.control`).
+/// A control command, from the CLI or a plugin (`host.control`). Stopping
+/// stationd itself is not one of them: it is the operator's `shutdown`
+/// (gRPC `Station.Shutdown`), out of any plugin's reach.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ControlAction {
-    Stop,
     Pause,
     Resume,
     StopWhenIdle,
+    /// Leave `sleeping`; a no-op from any other state (never un-pauses,
+    /// never cancels a drain).
+    Wake,
 }
 
 /// A state change actually performed (a no-op returns `None` instead).
@@ -188,7 +201,7 @@ pub struct OverrideEntry {
 pub struct PushOutcome {
     pub id: u64,
     /// A `hard` was requested and degraded to `soft` (no Liquidsoap wired,
-    /// or the station is paused/stopped).
+    /// or the station is paused/sleeping).
     pub degraded: bool,
     /// Pending overrides after the push.
     pub pending: usize,
@@ -210,6 +223,15 @@ struct Inner {
     /// DJ on air (harbor), if any: the live holds the air above everything,
     /// so no hard cut can happen meanwhile (`live::LiveHub` sets it).
     live: Option<String>,
+    /// Set on `sleeping → running`: the grid engine releases a held group
+    /// before resolving (the wake airs the slot of NOW, not a cycle cut
+    /// long ago). Taken once (`take_woken`).
+    woken: bool,
+    /// The operator is stopping stationd (`Station.Shutdown`): from now on
+    /// every track boundary answers `halted`, so Liquidsoap keeps the noise
+    /// rather than preparing a track stationd will not be there to report.
+    /// In memory only: the stop itself is the marker file.
+    stopping: bool,
 }
 
 /// Cheap, clonable handle. One per station; shared by the grid engine, the
@@ -245,6 +267,8 @@ impl StationControl {
                 next_id: 1,
                 clock: None,
                 live: None,
+                woken: false,
+                stopping: false,
             })),
             plugins: Arc::new(OnceLock::new()),
             air: Arc::new(OnceLock::new()),
@@ -317,9 +341,14 @@ impl StationControl {
 
     // ----- live -----------------------------------------------------------
 
-    /// A DJ took the air (`Some`) or gave it back (`None`).
+    /// A DJ took the air (`Some`) or gave it back (`None`). A DJ taking the
+    /// air wakes a sleeping station (core rule).
     pub fn set_live(&self, dj: Option<String>) {
+        let on_air = dj.is_some();
         self.lock().live = dj;
+        if on_air {
+            self.wake_if_sleeping("live");
+        }
     }
 
     /// The DJ on air, if any.
@@ -369,30 +398,73 @@ impl StationControl {
             let mut g = self.lock();
             let from = g.state;
             let to = match (action, from) {
-                (ControlAction::Stop, _) => Stopped,
                 (ControlAction::Resume, _) => Running,
                 (ControlAction::Pause, Running | Draining | Paused) => Paused,
-                (ControlAction::Pause, Stopped) => {
+                (ControlAction::Pause, Sleeping) => {
                     return Err(ControlError::Refused(
-                        "cannot pause a stopped station (resume first)".into(),
+                        "cannot pause a sleeping station (resume first)".into(),
                     ))
                 }
                 (ControlAction::StopWhenIdle, Running | Draining) => Draining,
-                (ControlAction::StopWhenIdle, Stopped) => Stopped,
+                (ControlAction::StopWhenIdle, Sleeping) => Sleeping,
                 (ControlAction::StopWhenIdle, Paused) => {
                     return Err(ControlError::Refused(
                         "cannot arm stop-when-idle on a paused station (resume first)".into(),
                     ))
                 }
+                (ControlAction::Wake, Sleeping) => Running,
+                (ControlAction::Wake, s) => s,
             };
             if to == from {
                 return Ok(None);
             }
             g.state = to;
+            if from == Sleeping && to == Running {
+                g.woken = true;
+            }
             Transition { from, to }
         };
         self.changed(transition, by);
         Ok(Some(transition))
+    }
+
+    /// Core wake rule: `sleeping → running`, signed `by`. No-op otherwise.
+    fn wake_if_sleeping(&self, by: &str) {
+        let t = {
+            let mut g = self.lock();
+            if g.state != BroadcastState::Sleeping {
+                return;
+            }
+            g.state = BroadcastState::Running;
+            g.woken = true;
+            Transition { from: BroadcastState::Sleeping, to: BroadcastState::Running }
+        };
+        self.changed(t, by);
+    }
+
+    /// stationd is being stopped by the operator: nothing is resolved any
+    /// more (every boundary halts). Irreversible for this process.
+    pub fn begin_operator_stop(&self) {
+        self.lock().stopping = true;
+    }
+
+    /// The station woke since the last call (`sleeping → running`): the grid
+    /// engine then releases a held group before resolving.
+    pub fn take_woken(&self) -> bool {
+        std::mem::take(&mut self.lock().woken)
+    }
+
+    /// Test helper: put the station to sleep right away (the real path is
+    /// `stop_when_idle` + a zero sample + a track boundary).
+    #[cfg(test)]
+    pub fn sleep_now(&self) {
+        let t = {
+            let mut g = self.lock();
+            let from = g.state;
+            g.state = BroadcastState::Sleeping;
+            Transition { from, to: BroadcastState::Sleeping }
+        };
+        self.changed(t, "test");
     }
 
     fn changed(&self, t: Transition, by: &str) {
@@ -420,12 +492,14 @@ impl StationControl {
 
     /// The audience became unknown (Icecast unreachable, one of our mounts has
     /// no source, unreadable stats): forget the last sample. A draining
-    /// station then keeps playing — a failure is never read as « 0
-    /// listeners ». No event: `ListenersSampled` carries facts, not their
-    /// absence (the error is visible in `stationctl icecast status`).
-    /// Returns `true` when a sample was actually forgotten.
+    /// station then keeps playing and a sleeping one wakes — a failure is
+    /// never read as « 0 listeners ». No event: `ListenersSampled` carries
+    /// facts, not their absence (the error is visible in `stationctl icecast
+    /// status`). Returns `true` when a sample was actually forgotten.
     pub fn clear_listeners(&self) -> bool {
-        self.lock().listeners.take().is_some()
+        let forgot = self.lock().listeners.take().is_some();
+        self.wake_if_sleeping("audience-unknown");
+        forgot
     }
 
     /// Last listener count, if ever sampled (and not forgotten since).
@@ -434,17 +508,21 @@ impl StationControl {
     }
 
     /// Called at a track boundary, before anything is resolved. `draining`
-    /// with a last sample of 0 completes the graceful stop here.
+    /// with a last sample of 0 goes to sleep here.
     pub fn gate(&self) -> Gate {
         let completed = {
             let mut g = self.lock();
+            if g.stopping {
+                // Reported as `sleeping` to Liquidsoap: noise, not a track.
+                return Gate::Halt(BroadcastState::Sleeping);
+            }
             match g.state {
                 BroadcastState::Running => return Gate::Play,
-                s @ (BroadcastState::Paused | BroadcastState::Stopped) => return Gate::Halt(s),
+                s @ (BroadcastState::Paused | BroadcastState::Sleeping) => return Gate::Halt(s),
                 BroadcastState::Draining => {
                     if g.listeners.map(|(c, _)| c) == Some(0) {
-                        g.state = BroadcastState::Stopped;
-                        Transition { from: BroadcastState::Draining, to: BroadcastState::Stopped }
+                        g.state = BroadcastState::Sleeping;
+                        Transition { from: BroadcastState::Draining, to: BroadcastState::Sleeping }
                     } else {
                         return Gate::Play;
                     }
@@ -452,7 +530,7 @@ impl StationControl {
             }
         };
         self.changed(completed, "stop-when-idle");
-        Gate::Halt(BroadcastState::Stopped)
+        Gate::Halt(BroadcastState::Sleeping)
     }
 
     // ----- overrides ----------------------------------------------------
@@ -492,7 +570,8 @@ impl StationControl {
             }
         };
         // A hard cut needs the air wired AND a station on air: a halted
-        // station keeps it queued; it plays as soft once resumed. A live DJ
+        // (paused / sleeping) station keeps it queued; it plays as soft once
+        // it airs again. A live DJ
         // holds the air above any cut: soft too, after the live.
         let air_live = self.air.get().is_some()
             && matches!(self.state(), BroadcastState::Running | BroadcastState::Draining)
@@ -661,12 +740,87 @@ mod tests {
         assert!(c.apply(ControlAction::Pause, "cli").unwrap().is_none(), "no-op");
         assert!(c.apply(ControlAction::StopWhenIdle, "cli").is_err(), "paused → refused");
         c.apply(ControlAction::Resume, "cli").unwrap();
-        c.apply(ControlAction::Stop, "cli").unwrap();
-        assert_eq!(c.state(), Stopped);
-        assert!(c.apply(ControlAction::Pause, "cli").is_err(), "stopped → refused");
-        assert!(c.apply(ControlAction::StopWhenIdle, "cli").unwrap().is_none(), "already stopped");
+        c.sleep_now();
+        assert!(c.apply(ControlAction::Pause, "cli").is_err(), "sleeping → refused");
+        assert!(c.apply(ControlAction::StopWhenIdle, "cli").unwrap().is_none(), "already asleep");
         c.apply(ControlAction::Resume, "cli").unwrap();
         assert_eq!(c.state(), Running);
+    }
+
+    #[test]
+    fn wake_only_leaves_sleeping() {
+        let c = StationControl::new_in_memory();
+        assert!(c.apply(ControlAction::Wake, "p").unwrap().is_none(), "running: no-op");
+        c.apply(ControlAction::Pause, "cli").unwrap();
+        assert!(c.apply(ControlAction::Wake, "p").unwrap().is_none(), "never un-pauses");
+        assert_eq!(c.state(), Paused);
+        c.apply(ControlAction::Resume, "cli").unwrap();
+        c.apply(ControlAction::StopWhenIdle, "cli").unwrap();
+        assert!(c.apply(ControlAction::Wake, "p").unwrap().is_none(), "never cancels a drain");
+        assert_eq!(c.state(), Draining);
+        c.sleep_now();
+        let t = c.apply(ControlAction::Wake, "p").unwrap().unwrap();
+        assert_eq!((t.from, t.to), (Sleeping, Running));
+        assert!(c.take_woken(), "the engine is told once");
+        assert!(!c.take_woken());
+    }
+
+    #[test]
+    fn resume_from_pause_is_not_a_wake() {
+        let c = StationControl::new_in_memory();
+        c.apply(ControlAction::Pause, "cli").unwrap();
+        c.apply(ControlAction::Resume, "cli").unwrap();
+        assert!(!c.take_woken(), "a pause is a freeze: the held group stays");
+        c.sleep_now();
+        c.apply(ControlAction::Resume, "cli").unwrap();
+        assert!(c.take_woken(), "an operator's resume from sleep is a wake too");
+    }
+
+    #[test]
+    fn an_unknown_audience_wakes_a_sleeping_station() {
+        let c = StationControl::new_in_memory();
+        c.sleep_now();
+        // Restart in sleeping: nothing sampled yet, stays asleep.
+        assert_eq!(c.listeners(), None);
+        assert_eq!(c.gate(), Gate::Halt(Sleeping));
+        c.sample_listeners(0);
+        assert_eq!(c.state(), Sleeping);
+        // Icecast becomes unreadable: wake (never read as « no one »).
+        c.clear_listeners();
+        assert_eq!(c.state(), Running);
+        assert!(c.take_woken());
+        // Not sleeping: nothing changes.
+        c.clear_listeners();
+        assert_eq!(c.state(), Running);
+    }
+
+    #[test]
+    fn a_dj_taking_the_air_wakes_a_sleeping_station() {
+        let c = StationControl::new_in_memory();
+        c.sleep_now();
+        c.set_live(Some("dj".into()));
+        assert_eq!(c.state(), Running);
+        c.set_live(None);
+        c.apply(ControlAction::Pause, "cli").unwrap();
+        c.set_live(Some("dj".into()));
+        assert_eq!(c.state(), Paused, "a live never un-pauses");
+    }
+
+    #[test]
+    fn an_operator_stop_halts_every_boundary() {
+        let c = StationControl::new_in_memory();
+        assert_eq!(c.gate(), Gate::Play);
+        c.begin_operator_stop();
+        assert_eq!(c.gate(), Gate::Halt(Sleeping));
+        assert_eq!(c.state(), Running, "not a broadcast state: nothing persisted");
+    }
+
+    #[test]
+    fn stopped_is_no_longer_a_state() {
+        assert_eq!(BroadcastState::parse("stopped"), None);
+        assert_eq!(BroadcastState::parse("sleeping"), Some(Sleeping));
+        assert!(serde_json::from_str::<ControlAction>(r#""stop""#).is_err());
+        assert_eq!(serde_json::from_str::<ControlAction>(r#""wake""#).unwrap(), ControlAction::Wake);
     }
 
     #[test]
@@ -675,8 +829,8 @@ mod tests {
         assert_eq!(c.gate(), Gate::Play);
         c.apply(ControlAction::Pause, "cli").unwrap();
         assert_eq!(c.gate(), Gate::Halt(Paused));
-        c.apply(ControlAction::Stop, "cli").unwrap();
-        assert_eq!(c.gate(), Gate::Halt(Stopped));
+        c.sleep_now();
+        assert_eq!(c.gate(), Gate::Halt(Sleeping));
     }
 
     #[test]
@@ -692,8 +846,8 @@ mod tests {
         c.sample_listeners(0);
         assert_eq!(c.state(), Draining);
         // …the next track boundary does.
-        assert_eq!(c.gate(), Gate::Halt(Stopped));
-        assert_eq!(c.state(), Stopped);
+        assert_eq!(c.gate(), Gate::Halt(Sleeping));
+        assert_eq!(c.state(), Sleeping);
     }
 
     #[test]
@@ -710,7 +864,7 @@ mod tests {
         assert!(!c.clear_listeners(), "already unknown");
         // A fresh zero sample completes it again.
         c.sample_listeners(0);
-        assert_eq!(c.gate(), Gate::Halt(Stopped));
+        assert_eq!(c.gate(), Gate::Halt(Sleeping));
     }
 
     #[test]
@@ -873,7 +1027,7 @@ mod tests {
         let pool = crate::db::init(&dir.path().join("t.db")).await.unwrap();
         let c = StationControl::load(pool.clone()).await.unwrap();
         assert_eq!(c.state(), Running, "fresh install → running");
-        c.apply(ControlAction::Stop, "cli").unwrap();
+        c.sleep_now();
         // The writer is async: poll briefly until the row lands.
         for _ in 0..50 {
             let row: Option<(String,)> =
@@ -881,12 +1035,45 @@ mod tests {
                     .fetch_optional(&pool)
                     .await
                     .unwrap();
-            if row.map(|r| r.0) == Some("stopped".into()) {
+            if row.map(|r| r.0) == Some("sleeping".into()) {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
         let again = StationControl::load(pool).await.unwrap();
-        assert_eq!(again.state(), Stopped, "an operator's stop survives a restart");
+        assert_eq!(again.state(), Sleeping, "an idle stop survives a restart");
+    }
+
+    #[tokio::test]
+    async fn migration_0021_turns_a_stopped_row_into_sleeping() {
+        // Replay 0021 on a pre-0021 table holding the old value.
+        // One connection: every `:memory:` connection is its own database.
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::raw_sql(include_str!("../migrations/0014_broadcast_state.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO broadcast_state (id, state, updated_at) VALUES (1, 'stopped', 7)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::raw_sql(include_str!("../migrations/0021_broadcast_sleeping.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        let row: (String, i64) = sqlx::query_as("SELECT state, updated_at FROM broadcast_state WHERE id = 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(row, ("sleeping".to_string(), 7));
+        // The new CHECK refuses the old value.
+        assert!(sqlx::query("UPDATE broadcast_state SET state = 'stopped' WHERE id = 1")
+            .execute(&pool)
+            .await
+            .is_err());
     }
 }

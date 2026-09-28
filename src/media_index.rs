@@ -126,6 +126,59 @@ pub fn genre_key(genre: &str) -> String {
     genre.trim().to_lowercase()
 }
 
+/// Lowercase, every non-alphanumeric run (`_`, `-`, punctuation, spaces)
+/// folded to one space, trimmed. Unicode-aware (`é` stays a letter).
+fn fold_words(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars().flat_map(char::to_lowercase) {
+        if ch.is_alphanumeric() {
+            out.push(ch);
+        } else if !out.ends_with(' ') {
+            out.push(' ');
+        }
+    }
+    out.trim().to_string()
+}
+
+/// The keys identifying a media's SONG for `no_same_title_within`: its title
+/// tag (folded), and its file name without the extension nor a copy suffix
+/// `_<n>` / ` (<n>)` (folded). Two media are the same song when their key sets
+/// meet — so `Ballad/x_1.mp3`, `EpicBallad/x.mp3` and a file tagged like
+/// either count as one. Empty keys are dropped.
+pub fn song_keys(rel_path: &str, title: Option<&str>) -> Vec<String> {
+    let name = rel_path.rsplit('/').next().unwrap_or(rel_path);
+    let stem = match name.rsplit_once('.') {
+        Some((s, ext)) if !s.is_empty() && !ext.contains(' ') => s,
+        _ => name,
+    };
+    let stem = stem.trim_end();
+    let strip_copy = |s: &str| -> Option<String> {
+        // `name_2`
+        if let Some((head, n)) = s.rsplit_once('_') {
+            if !head.is_empty() && !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()) {
+                return Some(head.to_string());
+            }
+        }
+        // `name (2)`
+        if let Some(inner) = s.strip_suffix(')') {
+            if let Some((head, n)) = inner.rsplit_once('(') {
+                if !head.trim().is_empty() && !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()) {
+                    return Some(head.trim_end().to_string());
+                }
+            }
+        }
+        None
+    };
+    let base = strip_copy(stem).unwrap_or_else(|| stem.to_string());
+    let mut keys = Vec::with_capacity(2);
+    for k in [title.map(fold_words), Some(fold_words(&base))].into_iter().flatten() {
+        if !k.is_empty() && !keys.contains(&k) {
+            keys.push(k);
+        }
+    }
+    keys
+}
+
 /// List media rows ordered by `rel_path`. When `only_available` is true, rows
 /// marked unavailable (vanished from disk) are excluded. `genres` filters
 /// case-insensitively (see [`genre_key`]): a row is kept when it carries AT
@@ -332,6 +385,26 @@ mod tests {
             size_bytes: 4_200_000,
             mtime_ns: 1_700_000_000_000_000_000,
         }
+    }
+
+    #[test]
+    fn song_keys_fold_titles_file_names_and_copy_suffixes() {
+        assert_eq!(
+            song_keys("Ballad/the_caverns_of_asperiche_liams_rescue_1.mp3", Some("the caverns of asperiche liams")),
+            vec!["the caverns of asperiche liams", "the caverns of asperiche liams rescue"]
+        );
+        assert_eq!(
+            song_keys("EpicBallad/the_caverns_of_asperiche_liams_rescue.mp3", Some("the_caverns_of_asperiche_liams_rescue")),
+            vec!["the caverns of asperiche liams rescue"]
+        );
+        // Same song, different spelling of the file name.
+        assert_eq!(song_keys("Rock/bitchy_betty.mp3", None), song_keys("ToSort/joh/Bitchy Betty.mp3", None));
+        assert_eq!(song_keys("ToSort/joh/In the Low Caste_1.mp3", None), vec!["in the low caste"]);
+        assert_eq!(song_keys("x/Song (2).mp3", None), vec!["song"]);
+        // A number that is part of the name, not a copy suffix, stays.
+        assert_eq!(song_keys("Trance/Passang 2.mp3", None), vec!["passang 2"]);
+        assert_eq!(song_keys("a/_1.mp3", Some("  ")), vec!["1"]);
+        assert_eq!(song_keys("a/Électro Été.mp3", None), vec!["électro été"]);
     }
 
     #[tokio::test]
