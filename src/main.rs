@@ -188,6 +188,9 @@ async fn main() -> anyhow::Result<()> {
             let (air_tx, air_rx) = tokio::sync::mpsc::unbounded_channel();
             control.attach_air(air_tx.clone());
             stationd::ls_control::spawn_air_sync(air_rx, ls_control.clone(), bridge.clone(), control.state());
+            // A Liquidsoap that kept playing while stationd restarted: learn
+            // what is on air from it instead of waiting for its next track.
+            stationd::ls_control::spawn_resync(ls_control.clone(), bridge.clone());
             // AtClock hard: a timer cuts the rendez-vous in at the mark.
             stationd::ls_control::spawn_at_clock_ticker(engine.clone(), air_tx);
             broadcast_service = broadcast_service.with_liquidsoap(ls_control.clone());

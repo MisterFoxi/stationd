@@ -31,14 +31,15 @@ radio  → normalize/compress (option) → %include custom → output.icecast
 | Route | Corps | Réponse |
 |---|---|---|
 | `POST /ls/v1/next` | `{}` | `{kind, uri, state, reason}` — les 4 champs toujours présents |
-| `POST /ls/v1/track` | `{rid, kind}` | 200 |
+| `POST /ls/v1/track` | `{rid, kind, boot, media, pl, leaf, log}` | 200 |
 | `POST /ls/v1/live/auth` | `{user, password, address}` | `{allow}` |
 | `POST /ls/v1/live/connect` | `{}` | 200 |
 | `POST /ls/v1/live/disconnect` | `{}` | `{flush}` |
 | `POST /ls/v1/live/silence` | `{}` | 200 |
 
 `kind` de `/next` :
-- `file` → `uri = annotate:stationd_rid="N":/chemin/absolu` ;
+- `file` → `uri = annotate:stationd_boot="B",stationd_rid="N",stationd_media="…",stationd_pl="…",stationd_leaf="…",stationd_log="…":/chemin/absolu`
+  (piste **auto-décrite**, voir « Redémarrage de stationd ») ;
 - `halted` → `state = paused|sleeping` : **bruit de fond**, jamais le fallback ;
 - `relay` → `uri` = l'URL d'une playlist `remote` : relayée (voir « Relais »).
 - `none` → `reason = fallback|pool_empty|error` : fallback sécu.
@@ -48,6 +49,36 @@ pistes station (`Every` au compteur) ; `kind = halted|fallback` = une source
 propre à Liquidsoap. Visible dans `stationctl ls status` : `on air` (en cours)
 et `next` (la piste préparée, demandée quelques secondes avant la fin de la
 courante — vide le reste du temps, c'est normal).
+
+### Redémarrage de stationd (Liquidsoap continue)
+
+L'état du pont (pistes remises, `on air`) est en mémoire ; Liquidsoap, lui,
+continue sa piste. Deux mécanismes évitent que stationd redémarré soit aveugle :
+
+- **pistes auto-décrites** : l'annotation de chaque piste porte l'instance
+  qui l'a remise (`stationd_boot`), son média, sa playlist, sa feuille et sa
+  ligne `broadcast_log` (valeurs percent-encodées : `[A-Za-z0-9._~/-]` tels
+  quels, le reste en `%XX`) ; le script les renvoie toutes sur `/track`. Une
+  piste préparée par l'instance précédente est reconnue à son démarrage
+  (comptée, tamponnée diffusée, fin jugée) au lieu d'un `unknown request id`.
+  Un `rid` d'une autre instance n'est jamais comparé aux nôtres (qui
+  recommencent à 1) ;
+- **resync au démarrage** : stationd demande `stationd.on_air` sur le socket
+  (5 essais, 2 s d'écart) : dernier rapport du script (`track|halted|
+  fallback|relay|live`), annotations de la dernière piste, temps qu'elle a
+  joué (`elapsed()` de sa source, pauses exclues), drapeau de pause. `ls
+  status` montre la piste tout de suite, et sa fin est jugée avec le temps
+  joué avant le redémarrage (marque `unplayed_only`). Ni recomptée, ni
+  retamponnée (déjà fait par l'instance précédente). Ignoré si Liquidsoap a
+  déjà signalé un démarrage à la nouvelle instance. En pause : la piste gelée
+  est gardée pour le `resume`. Liquidsoap injoignable = il démarre avec
+  stationd (il signalera sa première piste) ; script sans `stationd.on_air`
+  = avertissement « redémarrer Liquidsoap » (le script est réécrit au
+  démarrage de stationd).
+
+Limites : la piste **préparée** n'apparaît dans `next` qu'à son démarrage ;
+un relais repris affiche `relay` sans son URL ; un live en cours reste inconnu
+de stationd jusqu'à son départ (état du live en mémoire, cf. Limites).
 
 ### Piste suivante demandée en fin de piste (2026-09-25)
 
@@ -243,6 +274,7 @@ Liquidsoap, qui doit être le groupe partagé `stationd`) et y enregistre :
 | `stationd.interrupt <uri>` | override hard : la file `interrupt` coupe l'antenne maintenant ; la piste coupée est abandonnée (skip) ; à la fin de l'insert, la piste préparée démarre |
 | `stationd.park` | arrêt opérateur : lève `halted` (bruit de fond à la fin de la piste en cours) jusqu'à ce que stationd réponde autre chose que `halted` ; coupe un relais |
 | `stationd.state` | diagnostic : `paused= halted= loading=` |
+| `stationd.on_air` | JSON `{kind, paused, elapsed, rid, boot, media, pl, leaf, log}` : ce qui est à l'antenne, pour stationd redémarré (resync) |
 | `stationd.live_kick` | déconnecte le DJ du harbor (`[live]` seulement) ; le retour suit par le hook de déconnexion |
 
 Qui envoie quoi :

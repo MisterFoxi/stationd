@@ -7,7 +7,8 @@
 //!   gate, override queue, grid — `GridEngine::next_media`) and answer
 //!   `{kind, uri, state, reason}` (all four always present, empty when not
 //!   relevant — Liquidsoap parses a fixed record):
-//!   - `file`   → `uri` = `annotate:stationd_rid="N":/abs/path`;
+//!   - `file`   → `uri` = `annotate:stationd_boot="B",stationd_rid="N",…:/abs/path`
+//!     (a self-described track, see below);
 //!   - `halted` → `state` = paused|stopped: Liquidsoap airs the halted noise,
 //!     NOT the safety fallback;
 //!   - `relay`  → `uri` = the stream URL of a `remote` playlist: Liquidsoap
@@ -15,10 +16,25 @@
 //!     the answer stays `relay` (the script keeps asking while relaying);
 //!   - `none`   → `reason` = fallback|pool_empty|error:
 //!     Liquidsoap airs its safety fallback.
-//! - `POST /ls/v1/track` — `{rid, kind}`: what REALLY started airing (the
-//!   post-crossfade air chain). A known `rid` = one of our tracks: the station
-//!   track counter (`Every` by tracks) advances. `kind` = fallback|halted for
-//!   Liquidsoap's own sources.
+//! - `POST /ls/v1/track` — `{rid, kind, boot, media, pl, leaf, log}`: what
+//!   REALLY started airing (the post-crossfade air chain). A known `rid` = one
+//!   of our tracks: the station track counter (`Every` by tracks) advances.
+//!   `kind` = fallback|halted|relay|live for Liquidsoap's own sources.
+//!
+//! Self-described tracks: the annotation of a track carries, besides its
+//! `rid`, the instance that handed it out (`stationd_boot`), its media, its
+//! playlist, its leaf and its `broadcast_log` row (`stationd_media`,
+//! `stationd_pl`, `stationd_leaf`, `stationd_log`, percent-encoded), all sent
+//! back on `/track`. A track handed out by a PREVIOUS stationd (restarted
+//! while Liquidsoap kept its prepared track) is thus recognised and counted
+//! like any other, instead of airing as an `unknown request id`.
+//!
+//! Resync at start-up (`resync`): Liquidsoap only reports a start, so a
+//! restarted stationd would not know what is on air until the next one.
+//! `ls_control::spawn_resync` asks Liquidsoap (`stationd.on_air`: last
+//! report + time the track has played) and seeds the on-air state: `ls
+//! status` shows it at once, and its end is judged like any other track's
+//! (`unplayed_only` mark).
 //!
 //! Liquidsoap only reports STARTS. The end of a track is inferred here: a
 //! track leaves the air when something else starts (next track, halted
@@ -40,6 +56,7 @@
 //! status`, and forwards the track-start signal.
 
 use std::collections::VecDeque;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -82,13 +99,96 @@ impl NextReply {
     }
 }
 
-/// Body of `POST /track`.
+/// Body of `POST /track`: the `stationd_*` annotations of a track (empty
+/// for Liquidsoap's own sources, which carry a `kind` instead).
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct TrackEvent {
     #[serde(default)]
     pub rid: String,
     #[serde(default)]
     pub kind: String,
+    /// Instance that handed the track out (`LsBridge::boot`).
+    #[serde(default)]
+    pub boot: String,
+    /// Media path (relative to the library root), percent-encoded.
+    #[serde(default)]
+    pub media: String,
+    /// Playlist ref, percent-encoded (empty = none: a media override).
+    #[serde(default)]
+    pub pl: String,
+    /// Leaf playlist ref, percent-encoded (empty = none).
+    #[serde(default)]
+    pub leaf: String,
+    /// `broadcast_log` row id (empty = none).
+    #[serde(default)]
+    pub log: String,
+}
+
+impl TrackEvent {
+    /// The track as described by its own annotations — `None` when they
+    /// don't name a media (a script older than self-description).
+    fn described(&self) -> Option<Pending> {
+        let media = pct_decode(&self.media)?;
+        if media.is_empty() {
+            return None;
+        }
+        let opt = |v: &str| pct_decode(v).filter(|s| !s.is_empty());
+        Some(Pending {
+            rid: self.rid.parse().unwrap_or(0),
+            media_path: media,
+            playlist_ref: opt(&self.pl),
+            leaf_ref: opt(&self.leaf),
+            log_id: self.log.parse().ok(),
+        })
+    }
+}
+
+/// Reply of Liquidsoap's `stationd.on_air` (control socket): its last report
+/// (`kind` = track|halted|fallback|relay|live, empty = nothing reported yet),
+/// the annotations of the last track it reported, how long that track has
+/// played (seconds, pauses excluded; negative = unknown) and the pause flag.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct AirSnapshot {
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub paused: bool,
+    #[serde(default)]
+    pub elapsed: f64,
+    #[serde(flatten)]
+    pub track: TrackEvent,
+}
+
+/// Percent-encode an annotation value: only `[A-Za-z0-9._~/-]` pass as is,
+/// so the value never needs Liquidsoap's own quoting rules.
+fn pct_encode(v: &str) -> String {
+    let mut o = String::with_capacity(v.len());
+    for b in v.bytes() {
+        if b.is_ascii_alphanumeric() || b"._~/-".contains(&b) {
+            o.push(b as char);
+        } else {
+            let _ = write!(o, "%{b:02X}");
+        }
+    }
+    o
+}
+
+/// Inverse of [`pct_encode`]; `None` on a malformed or non-UTF-8 value.
+fn pct_decode(v: &str) -> Option<String> {
+    let b = v.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' {
+            let hex = std::str::from_utf8(b.get(i + 1..i + 3)?).ok()?;
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
 }
 
 /// A track stationd handed out, not yet reported as started.
@@ -227,6 +327,10 @@ struct BridgeState {
 #[derive(Clone)]
 pub struct LsBridge {
     engine: GridEngine,
+    /// This instance, stamped on every track handed out (`stationd_boot`): a
+    /// track from another instance is taken from its own annotations, never
+    /// matched against our request ids (which restart at 1).
+    boot: Arc<str>,
     /// Absolute media root: Liquidsoap does not share stationd's CWD, so a
     /// relative `library_path` is made absolute once, here.
     media_root: PathBuf,
@@ -235,11 +339,21 @@ pub struct LsBridge {
 
 impl LsBridge {
     pub fn new(engine: GridEngine, media_root: &Path) -> std::io::Result<Self> {
+        let boot = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
         Ok(Self {
             engine,
+            boot: Arc::from(format!("{boot:x}")),
             media_root: std::path::absolute(media_root)?,
             inner: Arc::new(Mutex::new(BridgeState { next_rid: 1, ..Default::default() })),
         })
+    }
+
+    /// This instance's stamp (see `boot`).
+    pub fn boot(&self) -> &str {
+        &self.boot
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, BridgeState> {
@@ -326,7 +440,22 @@ impl LsBridge {
         let rid = st.next_rid;
         st.next_rid += 1;
         let abs = self.media_root.join(media);
-        let uri = format!("annotate:stationd_rid=\"{rid}\":{}", abs.to_string_lossy());
+        // Self-described: a restarted stationd recognises it (see module doc).
+        let mut ann = format!(
+            "stationd_boot=\"{}\",stationd_rid=\"{rid}\",stationd_media=\"{}\"",
+            self.boot,
+            pct_encode(media)
+        );
+        if let Some(pl) = &playlist_ref {
+            let _ = write!(ann, ",stationd_pl=\"{}\"", pct_encode(pl));
+        }
+        if let Some(leaf) = &leaf_ref {
+            let _ = write!(ann, ",stationd_leaf=\"{}\"", pct_encode(leaf));
+        }
+        if let Some(id) = log_id {
+            let _ = write!(ann, ",stationd_log=\"{id}\"");
+        }
+        let uri = format!("annotate:{ann}:{}", abs.to_string_lossy());
         st.pending.push_back(Pending { rid, media_path: media.to_string(), playlist_ref, leaf_ref, log_id });
         while st.pending.len() > PENDING_CAP {
             st.pending.pop_front();
@@ -394,11 +523,35 @@ impl LsBridge {
         let now = self.engine.effective_now(None).0;
         let mut leaving: Vec<Left> = Vec::new();
         let on_air = if !ev.rid.is_empty() {
-            let found = ev.rid.parse::<u64>().ok().and_then(|rid| {
-                let mut st = self.lock();
-                let idx = st.pending.iter().position(|p| p.rid == rid)?;
-                st.pending.remove(idx)
-            });
+            // Ours (this instance, or a script without the stamp): matched by
+            // rid. Another instance's (stationd restarted meanwhile): taken
+            // from its own annotations — its rid means nothing here.
+            let ours = ev.boot.is_empty() || ev.boot == *self.boot;
+            let found = if ours {
+                ev.rid.parse::<u64>().ok().and_then(|rid| {
+                    let mut st = self.lock();
+                    let idx = st.pending.iter().position(|p| p.rid == rid)?;
+                    st.pending.remove(idx)
+                })
+            } else {
+                None
+            };
+            let found = match found {
+                Some(p) => Some(p),
+                None => {
+                    // Another instance's rid could equal one of ours: never
+                    // compared (0 is never handed out).
+                    let adopted = ev.described().map(|p| Pending { rid: if ours { p.rid } else { 0 }, ..p });
+                    if let Some(p) = &adopted {
+                        tracing::info!(
+                            media = %p.media_path,
+                            boot = %ev.boot,
+                            "track handed out before a stationd restart: recognised from its annotations"
+                        );
+                    }
+                    adopted
+                }
+            };
             {
                 // Something new starts: the track on air (if ours) left, and
                 // a track frozen by a pause was abandoned (skip while paused).
@@ -510,6 +663,60 @@ impl LsBridge {
                 tracing::error!(media = %left.media, error = %e, "could not record the end of a track");
             }
         }
+    }
+
+    /// Seed the on-air state from Liquidsoap's own account (`stationd.on_air`)
+    /// after a stationd restart. Ignored once Liquidsoap has reported a start
+    /// to this instance (fresher). The track already counted and stamped by
+    /// the previous instance is not counted again; the time it has played
+    /// carries over, so its end is judged like any other track's. Returns
+    /// whether something was seeded.
+    pub fn resync(&self, snap: &AirSnapshot) -> bool {
+        let now = self.engine.effective_now(None).0;
+        let elapsed = if snap.elapsed.is_finite() && snap.elapsed > 0.0 {
+            snap.elapsed as i64
+        } else {
+            0
+        };
+        let track = snap.track.described().map(|p| OnAir {
+            kind: OnAirKind::Track,
+            media_path: Some(p.media_path),
+            playlist_ref: p.playlist_ref,
+            since: now - elapsed,
+            leaf_ref: p.leaf_ref,
+            aired_s: elapsed,
+            counting_since: Some(now),
+        });
+        let mut st = self.lock();
+        if st.status.on_air.is_some() {
+            return false;
+        }
+        let on_air = match snap.kind.as_str() {
+            "" => return false, // Liquidsoap started with us: nothing aired yet
+            "track" => match track {
+                Some(t) => t,
+                None => OnAir::source(OnAirKind::Unknown, now),
+            },
+            "halted" => {
+                // Paused: the track is frozen, a resume continues it.
+                if snap.paused {
+                    st.before_halt = track.map(|t| OnAir { counting_since: None, ..t });
+                }
+                OnAir::source(OnAirKind::Halted, now)
+            }
+            "fallback" => OnAir::source(OnAirKind::Fallback, now),
+            "relay" => OnAir::source(OnAirKind::Relay, now),
+            "live" => OnAir::source(OnAirKind::Live, now),
+            _ => OnAir::source(OnAirKind::Unknown, now),
+        };
+        tracing::info!(
+            kind = on_air.kind.as_str(),
+            media = on_air.media_path.as_deref().unwrap_or("-"),
+            elapsed_s = elapsed,
+            "on air, as reported by Liquidsoap (stationd restarted)"
+        );
+        st.status.on_air = Some(on_air);
+        true
     }
 
     /// Liquidsoap acknowledged a resume from pause: the frozen track plays on
@@ -743,15 +950,147 @@ mod tests {
         (dir, LsBridge::new(eng, Path::new("/srv/media")).unwrap())
     }
 
+    /// The value of annotation `key` in a handed-out uri.
+    fn ann(uri: &str, key: &str) -> Option<String> {
+        let rest = uri.split_once(&format!("{key}=\""))?.1;
+        Some(rest.split_once('"')?.0.to_string())
+    }
+
+    /// What Liquidsoap sends back on `/track` for a handed-out uri (the
+    /// script copies every `stationd_*` annotation).
+    fn echo(uri: &str) -> TrackEvent {
+        let a = |k| ann(uri, k).unwrap_or_default();
+        TrackEvent {
+            rid: a("stationd_rid"),
+            kind: String::new(),
+            boot: a("stationd_boot"),
+            media: a("stationd_media"),
+            pl: a("stationd_pl"),
+            leaf: a("stationd_leaf"),
+            log: a("stationd_log"),
+        }
+    }
+
     #[tokio::test]
-    async fn next_hands_out_an_annotated_absolute_uri() {
+    async fn next_hands_out_a_self_described_absolute_uri() {
         let (_d, b) = bridge().await;
         let r = b.next().await;
         assert_eq!(r.kind, "file");
-        assert_eq!(r.uri, "annotate:stationd_rid=\"1\":/srv/media/music/a.mp3");
+        assert!(r.uri.starts_with("annotate:stationd_boot=\""), "{}", r.uri);
+        assert!(r.uri.ends_with("\":/srv/media/music/a.mp3"), "{}", r.uri);
+        assert_eq!(ann(&r.uri, "stationd_boot").as_deref(), Some(b.boot()));
+        assert_eq!(ann(&r.uri, "stationd_rid").as_deref(), Some("1"));
+        assert_eq!(ann(&r.uri, "stationd_media").as_deref(), Some("music/a.mp3"));
+        assert_eq!(ann(&r.uri, "stationd_pl").as_deref(), Some("music"));
+        assert!(ann(&r.uri, "stationd_log").unwrap().parse::<i64>().is_ok());
         let r2 = b.next().await;
-        assert!(r2.uri.starts_with("annotate:stationd_rid=\"2\":"));
+        assert_eq!(ann(&r2.uri, "stationd_rid").as_deref(), Some("2"));
         assert_eq!(b.status().pulls, 2);
+    }
+
+    #[test]
+    fn annotation_values_are_percent_encoded_both_ways() {
+        let v = "Émissions/l'été \"live\", 1:2%.mp3";
+        let e = pct_encode(v);
+        assert!(e.bytes().all(|c| c.is_ascii_alphanumeric() || b"._~/-%".contains(&c)), "{e}");
+        assert_eq!(pct_decode(&e).as_deref(), Some(v));
+        assert_eq!(pct_decode("music/a.mp3").as_deref(), Some("music/a.mp3"));
+        assert_eq!(pct_decode("bad%zz"), None);
+        assert_eq!(pct_decode("cut%4"), None);
+    }
+
+    // ----- stationd restarted while Liquidsoap kept playing ----------------
+
+    #[tokio::test]
+    async fn a_track_prepared_by_a_previous_instance_is_recognised() {
+        let (d, old) = bridge().await;
+        old.next().await; // rid 1, started by the old instance
+        old.start(1).await;
+        let prepared = old.next().await.uri; // rid 2: prepared, then stationd restarts
+        // The new instance: same database, fresh bridge.
+        let pool = db::init(&d.path().join("t.db")).await.unwrap();
+        let new = LsBridge::new(GridEngine::new(pool.clone(), "UTC"), Path::new("/srv/media")).unwrap();
+        assert_ne!(new.boot(), old.boot());
+        new.next().await; // its own rid 1 (a collision with the old rid space)
+        new.track_started(&echo(&prepared)).await;
+        let st = new.status();
+        let on_air = st.on_air.unwrap();
+        assert_eq!(on_air.kind, OnAirKind::Track, "not an unknown request id");
+        assert_eq!(on_air.media_path.as_deref(), Some("music/a.mp3"));
+        assert_eq!(on_air.playlist_ref.as_deref(), Some("music"));
+        assert_eq!(st.tracks_started, 1);
+        assert_eq!(st.next.map(|n| n.rid), Some(1), "our own prepared track is untouched");
+        // Stamped aired by the new instance: both old picks aired, the new one prepared.
+        let rows = crate::broadcast_log::plays(&pool, 0, crate::broadcast_log::PlaysBy::Rule, 0)
+            .await
+            .unwrap();
+        assert_eq!((rows[0].picked, rows[0].aired), (3, 2));
+    }
+
+    #[tokio::test]
+    async fn resync_puts_the_track_on_air_and_its_end_is_judged() {
+        let (d, old, pool) = pod_bridge().await;
+        old.at(1000);
+        let uri = old.next().await.uri; // ep1
+        old.start(1).await;
+        // stationd restarts 400 s into the episode; Liquidsoap tells the rest.
+        let new = LsBridge::new(GridEngine::new(pool.clone(), "UTC"), Path::new("/srv/media")).unwrap();
+        new.at(1400);
+        let snap = AirSnapshot { kind: "track".into(), paused: false, elapsed: 400.0, track: echo(&uri) };
+        assert!(new.resync(&snap));
+        let on_air = new.status().on_air.unwrap();
+        assert_eq!((on_air.kind.clone(), on_air.since), (OnAirKind::Track, 1000));
+        assert_eq!(on_air.leaf_ref.as_deref(), Some("pod"));
+        assert_eq!(new.status().tracks_started, 0, "counted by the previous instance");
+        // Played to its end: 400 s before the restart + 200 s after.
+        new.at(1600);
+        let next = new.next().await.uri;
+        new.track_started(&echo(&next)).await;
+        assert_eq!(played(&pool, "pod").await, ["pod/ep1.mp3".to_string()].into());
+        drop(d);
+    }
+
+    #[tokio::test]
+    async fn resync_never_overrides_a_fresher_report() {
+        let (_d, b) = bridge().await;
+        // Liquidsoap started with us: nothing reported yet → nothing seeded.
+        assert!(!b.resync(&AirSnapshot::default()));
+        assert!(b.status().on_air.is_none());
+        b.track_started(&TrackEvent { rid: String::new(), kind: "halted".into(), ..Default::default() }).await;
+        let snap = AirSnapshot { kind: "fallback".into(), ..Default::default() };
+        assert!(!b.resync(&snap), "a report already reached this instance");
+        assert_eq!(b.status().on_air.unwrap().kind, OnAirKind::Halted);
+    }
+
+    #[tokio::test]
+    async fn resync_during_a_pause_keeps_the_frozen_track_for_the_resume() {
+        let (_d, old, pool) = pod_bridge().await;
+        old.at(1000);
+        let uri = old.next().await.uri;
+        old.start(1).await;
+        let new = LsBridge::new(GridEngine::new(pool.clone(), "UTC"), Path::new("/srv/media")).unwrap();
+        new.engine.control().apply(ControlAction::Pause, "cli").unwrap();
+        new.at(5000);
+        let snap = AirSnapshot { kind: "halted".into(), paused: true, elapsed: 300.0, track: echo(&uri) };
+        assert!(new.resync(&snap));
+        assert_eq!(new.status().on_air.unwrap().kind, OnAirKind::Halted);
+        new.engine.control().apply(ControlAction::Resume, "cli").unwrap();
+        new.resumed_from_pause();
+        let back = new.status().on_air.unwrap();
+        assert_eq!((back.kind, back.media_path.as_deref()), (OnAirKind::Track, Some("pod/ep1.mp3")));
+        new.at(5300); // 300 s more: 600 s in all
+        let next = new.next().await.uri;
+        new.track_started(&echo(&next)).await;
+        assert_eq!(played(&pool, "pod").await, ["pod/ep1.mp3".to_string()].into());
+    }
+
+    #[test]
+    fn the_snapshot_parses_the_script_reply() {
+        let raw = r#"{"kind":"track","paused":false,"elapsed":12.5,"rid":"3","boot":"ab","media":"a%20b.mp3","pl":"music","leaf":"","log":"7"}"#;
+        let s: AirSnapshot = serde_json::from_str(raw).unwrap();
+        assert_eq!((s.kind.as_str(), s.elapsed), ("track", 12.5));
+        let p = s.track.described().unwrap();
+        assert_eq!((p.media_path.as_str(), p.playlist_ref.as_deref(), p.leaf_ref, p.log_id), ("a b.mp3", Some("music"), None, Some(7)));
     }
 
     #[tokio::test]
@@ -776,7 +1115,7 @@ mod tests {
     async fn track_start_puts_the_media_on_air_and_counts_it() {
         let (_d, b) = bridge().await;
         b.next().await;
-        b.track_started(&TrackEvent { rid: "1".into(), kind: String::new() }).await;
+        b.track_started(&TrackEvent { rid: "1".into(), ..Default::default() }).await;
         let st = b.status();
         let on_air = st.on_air.unwrap();
         assert_eq!(on_air.kind, OnAirKind::Track);
@@ -784,7 +1123,7 @@ mod tests {
         assert_eq!(on_air.playlist_ref.as_deref(), Some("music"));
         assert_eq!(st.tracks_started, 1);
         // The same rid twice is unknown (consumed), never double-counted.
-        b.track_started(&TrackEvent { rid: "1".into(), kind: String::new() }).await;
+        b.track_started(&TrackEvent { rid: "1".into(), ..Default::default() }).await;
         let st = b.status();
         assert_eq!(st.on_air.unwrap().kind, OnAirKind::Unknown);
         assert_eq!(st.tracks_started, 1);
@@ -794,7 +1133,7 @@ mod tests {
     async fn a_started_track_is_stamped_aired_a_merely_prepared_one_is_not() {
         let (d, b) = bridge().await;
         b.next().await; // rid 1
-        b.track_started(&TrackEvent { rid: "1".into(), kind: String::new() }).await;
+        b.track_started(&TrackEvent { rid: "1".into(), ..Default::default() }).await;
         b.next().await; // rid 2: prepared, never started
         let pool = db::init(&d.path().join("t.db")).await.unwrap();
         let rows = crate::broadcast_log::plays(&pool, 0, crate::broadcast_log::PlaysBy::Rule, 0)
@@ -808,7 +1147,7 @@ mod tests {
     async fn next_is_the_prefetched_track_until_it_starts() {
         let (_d, b) = bridge().await;
         b.next().await; // rid 1: starts right away
-        b.track_started(&TrackEvent { rid: "1".into(), kind: String::new() }).await;
+        b.track_started(&TrackEvent { rid: "1".into(), ..Default::default() }).await;
         assert!(b.status().next.is_none(), "started → no longer next");
         b.next().await; // rid 2: prefetched while 1 airs
         let n = b.status().next.unwrap();
@@ -824,12 +1163,12 @@ mod tests {
     async fn resume_from_pause_puts_the_frozen_track_back_on_air() {
         let (_d, b) = bridge().await;
         b.next().await;
-        b.track_started(&TrackEvent { rid: "1".into(), kind: String::new() }).await;
+        b.track_started(&TrackEvent { rid: "1".into(), ..Default::default() }).await;
         let before = b.status().on_air.unwrap();
         // The noise takes over BECAUSE of a pause (the state is Paused first):
         // only then is the track frozen rather than ended.
         b.engine.control().apply(ControlAction::Pause, "cli").unwrap();
-        b.track_started(&TrackEvent { rid: String::new(), kind: "halted".into() }).await;
+        b.track_started(&TrackEvent { rid: String::new(), kind: "halted".into(), ..Default::default() }).await;
         assert_eq!(b.status().on_air.unwrap().kind, OnAirKind::Halted);
         b.engine.control().apply(ControlAction::Resume, "cli").unwrap();
         b.resumed_from_pause();
@@ -846,14 +1185,14 @@ mod tests {
     async fn sleep_is_falling_asleep_until_the_track_ends() {
         let (_d, b) = bridge().await;
         b.next().await;
-        b.track_started(&TrackEvent { rid: "1".into(), kind: String::new() }).await;
+        b.track_started(&TrackEvent { rid: "1".into(), ..Default::default() }).await;
         assert_eq!(b.air_state(), "playing");
         b.engine.control().apply(ControlAction::StopWhenIdle, "cli").unwrap();
         assert_eq!(b.air_state(), "sleep armed");
         b.engine.control().sample_listeners(0);
         b.next().await; // the pull at the end of the track: the gate sleeps
         assert_eq!(b.air_state(), "falling asleep", "the current track plays to its end");
-        b.track_started(&TrackEvent { rid: String::new(), kind: "halted".into() }).await;
+        b.track_started(&TrackEvent { rid: String::new(), kind: "halted".into(), ..Default::default() }).await;
         assert_eq!(b.air_state(), "sleeping");
         b.engine.control().apply(ControlAction::Resume, "cli").unwrap();
         b.engine.control().apply(ControlAction::Pause, "cli").unwrap();
@@ -880,8 +1219,7 @@ mod tests {
         assert_eq!(left.len(), 1);
         assert_eq!(left[0].content, OverrideContent::Media("jingles/soft.mp3".into()));
         // its start is recognised (rid handed out)
-        let rid = uri.split('"').nth(1).unwrap().to_string();
-        b.track_started(&TrackEvent { rid, kind: String::new() }).await;
+        b.track_started(&echo(&uri)).await;
         assert_eq!(b.status().on_air.unwrap().media_path.as_deref(), Some("news/flash.mp3"));
         // already consumed → nothing to interrupt with
         assert!(b.interrupt_uri(hard.id).await.is_none());
@@ -890,13 +1228,13 @@ mod tests {
     #[tokio::test]
     async fn liquidsoap_own_sources_are_reported() {
         let (_d, b) = bridge().await;
-        b.track_started(&TrackEvent { rid: String::new(), kind: "halted".into() }).await;
+        b.track_started(&TrackEvent { rid: String::new(), kind: "halted".into(), ..Default::default() }).await;
         let first = b.status().on_air.unwrap();
         assert_eq!(first.kind, OnAirKind::Halted);
         // The noise loops: `since` stays the start of the halted period.
-        b.track_started(&TrackEvent { rid: String::new(), kind: "halted".into() }).await;
+        b.track_started(&TrackEvent { rid: String::new(), kind: "halted".into(), ..Default::default() }).await;
         assert_eq!(b.status().on_air.unwrap().since, first.since);
-        b.track_started(&TrackEvent { rid: String::new(), kind: "fallback".into() }).await;
+        b.track_started(&TrackEvent { rid: String::new(), kind: "fallback".into(), ..Default::default() }).await;
         assert_eq!(b.status().on_air.unwrap().kind, OnAirKind::Fallback);
     }
 
@@ -953,10 +1291,10 @@ mod tests {
             self.engine.set_clock(Some(crate::resolver::Epoch(t)));
         }
         async fn start(&self, rid: u64) {
-            self.track_started(&TrackEvent { rid: rid.to_string(), kind: String::new() }).await;
+            self.track_started(&TrackEvent { rid: rid.to_string(), ..Default::default() }).await;
         }
         async fn source(&self, kind: &str) {
-            self.track_started(&TrackEvent { rid: String::new(), kind: kind.into() }).await;
+            self.track_started(&TrackEvent { rid: String::new(), kind: kind.into(), ..Default::default() }).await;
         }
     }
 
@@ -1082,7 +1420,7 @@ mod tests {
         assert_eq!(r, NextReply::relay("http://relay.example/live".into()));
         assert!(b.status().next.is_none(), "nothing queued for a relay");
         // Liquidsoap switches to the relay: on air, with its URL.
-        b.track_started(&TrackEvent { rid: String::new(), kind: "relay".into() }).await;
+        b.track_started(&TrackEvent { rid: String::new(), kind: "relay".into(), ..Default::default() }).await;
         let on_air = b.status().on_air.unwrap();
         assert_eq!(on_air.kind, OnAirKind::Relay);
         assert_eq!(on_air.media_path.as_deref(), Some("http://relay.example/live"));
@@ -1092,7 +1430,7 @@ mod tests {
         b.engine.set_clock(Some(crate::resolver::Epoch(7 * 3600)));
         let r = b.next().await;
         assert_eq!(r.kind, "file");
-        b.track_started(&TrackEvent { rid: "1".into(), kind: String::new() }).await;
+        b.track_started(&TrackEvent { rid: "1".into(), ..Default::default() }).await;
         assert_eq!(b.status().on_air.unwrap().kind, OnAirKind::Track);
     }
 

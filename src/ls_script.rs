@@ -21,6 +21,10 @@
 //! on_track(pull | halted noise | fallback) → POST /ls/v1/track  # what REALLY airs
 //! ```
 //!
+//! Tracks are self-described (`ls_bridge`): every `stationd_*` annotation is
+//! sent back on `/track`, and the last report is kept for `stationd.on_air`
+//! (control socket), which a restarted stationd asks to learn what is on air.
+//!
 //! Halted ≠ fallback: when the station is paused/sleeping stationd answers
 //! `halted`, and the background noise fills the air — never the safety file.
 //! The same holds while stationd itself is stopped by the operator
@@ -309,12 +313,36 @@ def stationd.next() =
   end
 end
 
-# Report what REALLY starts airing: one of our tracks (rid) or one of
-# Liquidsoap's own sources (kind = halted | fallback).
-def stationd.report(rid, kind) =
+# Last report, for `stationd.on_air` (a restarted stationd asks what is on
+# air): its kind, the annotations of the last track, and how long that track
+# has played (set by whoever reports it; pauses excluded: not read).
+let stationd.air_kind = ref("")
+let stationd.air_track = ref([])
+let stationd.air_elapsed = ref(fun () -> -1.)
+
+# A track's self-description (its `stationd_*` annotations), as JSON fields.
+def stationd.track_fields(j, m) =
+  j.add("rid", m["stationd_rid"])
+  j.add("boot", m["stationd_boot"])
+  j.add("media", m["stationd_media"])
+  j.add("pl", m["stationd_pl"])
+  j.add("leaf", m["stationd_leaf"])
+  j.add("log", m["stationd_log"])
+end
+
+# Report what REALLY starts airing: one of our tracks (metadata `m`, kind "")
+# or one of Liquidsoap's own sources (m = [], kind = halted | fallback |
+# relay | live).
+def stationd.report(m, kind) =
+  if kind == "" then
+    stationd.air_track := m
+    stationd.air_kind := "track"
+  else
+    stationd.air_kind := kind
+  end
   j = json()
-  j.add("rid", rid)
   j.add("kind", kind)
+  stationd.track_fields(j, m)
   ignore(stationd.post("track", json.stringify(compact=true, j)))
 end
 
@@ -334,7 +362,8 @@ end
          def stationd.pull_started(m) =\n  \
            relay_off = stationd.relay_off()\n  \
            relay_off()\n  \
-           stationd.report(m[\"stationd_rid\"], \"\")\n\
+           stationd.air_elapsed := fun () -> pull.elapsed()\n  \
+           stationd.report(m, \"\")\n\
          end\n\
          source.methods(pull).on_track(synchronous=false, stationd.pull_started)\n\
          # Skip target: the track source itself, before the crossfade.\n\
@@ -399,7 +428,7 @@ end
          # start: a noise loop left mid-way is resumed (no new track), a later stop\n\
          # would go unreported. Off the streaming thread (HTTP call).\n\
          def stationd.switched_to(kind, b) =\n  \
-           thread.run(fast=false, {{stationd.report(\"\", kind)}})\n  \
+           thread.run(fast=false, {{stationd.report([], kind)}})\n  \
            b\n\
          end\n\n\
          radio = fallback(\n  \
@@ -431,7 +460,11 @@ end
         "\n# Hard overrides: pushed by stationd (`stationd.interrupt`), they cut the\n\
          # air now (track_sensitive=false) and give it back when they end.\n\
          interrupt = request.queue(id=\"stationd_interrupt\")\n\
-         source.methods(interrupt).on_track(synchronous=false, fun (m) -> stationd.report(m[\"stationd_rid\"], \"\"))\n\
+         def stationd.interrupt_started(m) =\n  \
+           stationd.air_elapsed := fun () -> interrupt.elapsed()\n  \
+           stationd.report(m, \"\")\n\
+         end\n\
+         source.methods(interrupt).on_track(synchronous=false, stationd.interrupt_started)\n\
          radio = fallback(id=\"stationd_cut\", track_sensitive=false, [interrupt, radio])\n",
     );
 
@@ -498,6 +531,18 @@ def stationd.cmd_state(_) =
   "paused=#{stationd.paused()} halted=#{stationd.halted()} loading=#{stationd.loading()}"
 end
 
+# What is on air, for a restarted stationd (it lost its in-memory state):
+# the last report, the last track's annotations and how long it has played.
+def stationd.cmd_on_air(_) =
+  j = json()
+  j.add("kind", stationd.air_kind())
+  j.add("paused", stationd.paused())
+  elapsed = stationd.air_elapsed()
+  j.add("elapsed", elapsed())
+  stationd.track_fields(j, stationd.air_track())
+  json.stringify(compact=true, j)
+end
+
 server.register(namespace="stationd", usage="pause", description="Pause now (noise on air, track frozen).", "pause", stationd.cmd_pause)
 server.register(namespace="stationd", usage="resume", description="Resume the frozen track.", "resume", stationd.cmd_resume)
 server.register(namespace="stationd", usage="skip", description="Skip the current track.", "skip", stationd.cmd_skip)
@@ -505,6 +550,7 @@ server.register(namespace="stationd", usage="flush", description="Drop the prepa
 server.register(namespace="stationd", usage="interrupt <uri>", description="Hard override: cut in now.", "interrupt", stationd.cmd_interrupt)
 server.register(namespace="stationd", usage="park", description="stationd stopping: halted noise until it answers again.", "park", stationd.cmd_park)
 server.register(namespace="stationd", usage="state", description="Bridge flags.", "state", stationd.cmd_state)
+server.register(namespace="stationd", usage="on_air", description="What is on air (JSON), for a restarted stationd.", "on_air", stationd.cmd_on_air)
 "##,
     );
 
@@ -546,14 +592,14 @@ fn render_live(live: &LiveConfig) -> String {
                add(normalize=false, [fade.in(duration={fade}, b), fade.out(duration={fade}, a)])\n\
              end\n\
              def stationd.to_live(a, b) =\n  \
-               thread.run(fast=false, {{stationd.report(\"\", \"live\")}})\n  \
+               thread.run(fast=false, {{stationd.report([], \"live\")}})\n  \
                stationd.fade_switch(a, b)\n\
              end\n"
         )
     } else {
         "def stationd.fade_switch(_, b) = b end\n\
          def stationd.to_live(_, b) =\n  \
-           thread.run(fast=false, {stationd.report(\"\", \"live\")})\n  \
+           thread.run(fast=false, {stationd.report([], \"live\")})\n  \
            b\n\
          end\n"
             .to_string()
@@ -941,7 +987,7 @@ mod tests {
         assert!(s.contains("transition_length=1.5,"));
         assert!(s.contains("fade.in(duration=1.5, b), fade.out(duration=1.5, a)"));
         assert!(s.contains("transitions=[stationd.to_live, stationd.fade_switch]"));
-        assert!(s.contains("stationd.report(\"\", \"live\")"));
+        assert!(s.contains("stationd.report([], \"live\")"));
         // the return drops the frozen track and asks for a new one now
         let back = s.find("def stationd.live_return() =").unwrap();
         assert!(back < s.find("def stationd.live_disconnected() =").unwrap(), "defined before use");

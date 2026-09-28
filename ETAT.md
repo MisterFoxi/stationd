@@ -125,18 +125,16 @@ Validés en réel : veille / arrêt opérateur, DJ live sur Liquidsoap 2.4
 (vrai client), capacité `db` des plugins (`play-stats`), `on_scan`
 (`custom-tags`), packaging (`package.sh` → `install.sh` sur nœud propre).
 
-### A2 — Pont amnésique au redémarrage de stationd
+### A2 — Pont amnésique au redémarrage de stationd ✅ (2026-09-28)
 
-Constaté en réel le 2026-09-25 : l'état du pont (pulls, `on air`, pistes
-préparées) est en mémoire ; Liquidsoap continue sa piste et ne rappelle
-`/next` / `/track` qu'au début de la suivante. Conséquences : `ls status`
-vide jusqu'au prochain changement de piste ; la piste préparée par
-l'ancienne instance démarre en `unknown request id` ; ces deux pistes ne
-sont jamais marquées `unplayed_only`. Sur un nœud sans surveillance (s6,
-mise à jour, crash), ça arrivera. Pistes (à trancher) : (1) pistes
-auto-décrites — l'annotation porte aussi média et feuille, renvoyés sur
-`/track` ; (2) resynchronisation au démarrage — demander à Liquidsoap, par
-le socket, ce qui est à l'antenne et depuis quand.
+Pistes auto-décrites + resync au démarrage, voir Fait et `Doc/liquidsoap.md`
+« Redémarrage de stationd ». Validé en réel sur devstationd (Liquidsoap 2.4) :
+`s6-svc -r` de stationd en milieu de piste → `ls status` montre aussitôt la
+piste (« on air, as reported by Liquidsoap », `elapsed_s=71`), la nouvelle
+instance prépare la suivante normalement. Reste à voir une fois en réel : une
+piste **préparée** par l'ancienne instance (redémarrer quand `next:` est
+rempli) → « recognised from its annotations » à son démarrage (couvert par
+les tests).
 
 ### A3 — `stationctl playlist remove` / `export` / `reload`
 
@@ -189,6 +187,37 @@ coder ; `Doc/tui-dev.md` à réécrire en conséquence.
 ---
 
 ## Fait
+
+### — Redémarrage de stationd : pistes auto-décrites + resync (2026-09-28) —
+
+Stationd redémarré pendant que Liquidsoap joue n'est plus aveugle (A2).
+- **Pistes auto-décrites** (`ls_bridge::hand_out`) : l'annotation porte
+  `stationd_boot` (instance, horodatage ns en hexa), `stationd_rid`,
+  `stationd_media`, `stationd_pl`, `stationd_leaf`, `stationd_log`
+  (percent-encodés, `pct_encode`/`pct_decode`). Le script renvoie tout sur
+  `/track` (`stationd.track_fields`). `track_started` : `boot` = le nôtre (ou
+  vide, ancien script) → recherche par `rid` comme avant ; autre instance →
+  piste reprise de ses annotations (rid mis à 0, jamais comparé) : comptée,
+  tamponnée `aired`, fin jugée.
+- **Resync** (`ls_control::spawn_resync`, lancé dans `main`) : commande socket
+  `stationd.on_air` → JSON `{kind, paused, elapsed, rid, boot, media, pl,
+  leaf, log}` (le script garde son dernier rapport, `stationd.air_*`, et
+  `elapsed()` de la source de la piste). `LsBridge::resync` : ignoré si un
+  démarrage a déjà été signalé à cette instance ou si Liquidsoap n'a rien
+  signalé ; `track` → à l'antenne avec `since = now - elapsed` et le temps
+  déjà joué (fin jugée normalement), sans recompter ; `halted` + pause →
+  piste gelée gardée pour le `resume`. 5 essais / 2 s ; injoignable = silence ;
+  script trop vieux = avertissement « redémarrer Liquidsoap ».
+- Tests : 8 nouveaux (encodage, piste d'une instance précédente malgré une
+  collision de rid, resync + marque `unplayed_only`, resync ignoré si plus
+  frais, resync en pause, parsing de la réponse, resync via faux socket,
+  ancien script / pas de Liquidsoap). `cargo test --locked` : 455 verts.
+  Validé en réel sur devstationd (2.4) le 2026-09-28. Après mise à jour,
+  **redémarrer Liquidsoap une fois** (nouveau script) : sinon stationd
+  avertit au démarrage (« Liquidsoap does not know `stationd.on_air` »).
+- Limites : `next` vide jusqu'au démarrage de la piste préparée ; relais
+  repris sans URL ; live en cours inconnu jusqu'à son départ.
+
 
 ### — Veille sans auditeur (`sleeping` / `wake`) + arrêt opérateur par s6 (2026-09-28) —
 

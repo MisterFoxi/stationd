@@ -143,13 +143,70 @@ impl LsControl {
         let _ = wr.write_all(b"quit\n").await;
         let reply = reply.join("\n");
         // Liquidsoap answers an unknown command with an error text, not a
-        // transport failure: our commands all answer "OK" (or the state).
+        // transport failure: our commands all answer "OK" (or the state /
+        // the on-air JSON, checked by their callers).
         let cmd = cmd.split(' ').next().unwrap_or(cmd);
-        if cmd != "stationd.state" && reply != "OK" {
+        if cmd != "stationd.state" && cmd != "stationd.on_air" && reply != "OK" {
             return Err(LsControlError::Refused { cmd: cmd.to_string(), reply });
         }
         Ok(reply)
     }
+}
+
+/// Attempts of the start-up resync (Liquidsoap may be (re)starting too).
+const RESYNC_ATTEMPTS: u32 = 5;
+const RESYNC_EVERY: Duration = if cfg!(test) {
+    Duration::from_millis(50)
+} else {
+    Duration::from_secs(2)
+};
+
+/// stationd just started: ask Liquidsoap what is on air (`stationd.on_air`)
+/// and seed the bridge with it (`LsBridge::resync`). A Liquidsoap that kept
+/// playing while stationd restarted is thus followed at once — `ls status`,
+/// end-of-track judgement — instead of from its next track start.
+///
+/// Unreachable after a few attempts = Liquidsoap starting with us (it reports
+/// its first start itself): not an error. An `ERROR…` reply = a script older
+/// than this stationd: loudly told to restart Liquidsoap (the script was
+/// rewritten at start-up). Any other unreadable reply is an error.
+pub fn spawn_resync(ls: LsControl, bridge: LsBridge) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        for attempt in 1..=RESYNC_ATTEMPTS {
+            match ls.command("stationd.on_air").await {
+                // Liquidsoap answers an unknown command with an error text,
+                // not a transport failure: a script older than this stationd.
+                Ok(reply) if reply.starts_with("ERROR") => {
+                    tracing::warn!(
+                        %reply,
+                        "resync: Liquidsoap does not know `stationd.on_air`: restart Liquidsoap to apply the new script"
+                    );
+                    return;
+                }
+                Ok(reply) => {
+                    match serde_json::from_str::<crate::ls_bridge::AirSnapshot>(&reply) {
+                        Ok(snap) => {
+                            if !bridge.resync(&snap) {
+                                tracing::debug!("resync: nothing to take from Liquidsoap");
+                            }
+                        }
+                        Err(e) => tracing::error!(
+                            error = %e,
+                            reply = %reply,
+                            "resync: unreadable reply to `stationd.on_air`: on-air state not restored"
+                        ),
+                    }
+                    return;
+                }
+                Err(e) if attempt == RESYNC_ATTEMPTS => {
+                    tracing::info!(error = %e, "resync: Liquidsoap not reachable, it will report its first track itself");
+                    ls.clear_error();
+                    return;
+                }
+                Err(_) => tokio::time::sleep(RESYNC_EVERY).await,
+            }
+        }
+    })
 }
 
 /// The Liquidsoap command a broadcast transition calls for, if any.
@@ -442,6 +499,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resync_seeds_the_bridge_from_liquidsoap() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, seen) = fake_ls(
+            dir.path(),
+            r#"{"kind":"track","paused":false,"elapsed":42.0,"rid":"7","boot":"old","media":"music/a.mp3","pl":"music","leaf":"music","log":""}"#,
+        );
+        let (_d, bridge) = bridge().await;
+        spawn_resync(LsControl::new(path), bridge.clone()).await.unwrap();
+        assert_eq!(seen.lock().unwrap().clone(), ["stationd.on_air"]);
+        let on_air = bridge.status().on_air.unwrap();
+        assert_eq!(on_air.media_path.as_deref(), Some("music/a.mp3"));
+        assert_eq!(on_air.aired_s, 42);
+    }
+
+    #[tokio::test]
+    async fn resync_with_an_old_script_or_no_liquidsoap_leaves_the_bridge_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, _) = fake_ls(dir.path(), "ERROR: unknown command, type \"help\" to get a list of commands.");
+        let (_d, bridge) = bridge().await;
+        spawn_resync(LsControl::new(path), bridge.clone()).await.unwrap();
+        assert!(bridge.status().on_air.is_none());
+        // No Liquidsoap at all: gives up quietly after a few attempts.
+        let ls = LsControl::new(dir.path().join("none.sock"));
+        spawn_resync(ls.clone(), bridge.clone()).await.unwrap();
+        assert!(bridge.status().on_air.is_none());
+        assert!(ls.health().last_error.is_none(), "not an error worth showing");
+    }
+
+    #[tokio::test]
     async fn air_sync_follows_the_state_machine() {
         use crate::station_control::{ControlAction, StationControl};
         let dir = tempfile::tempdir().unwrap();
@@ -486,7 +572,7 @@ mod tests {
         let got = wait_for(&seen, 4).await;
         assert_eq!(got[2], "stationd.flush", "prepared grid track re-asked");
         assert!(
-            got[3].starts_with("stationd.interrupt annotate:stationd_rid=")
+            got[3].starts_with("stationd.interrupt annotate:stationd_boot=")
                 && got[3].ends_with(":/m/news/flash.mp3"),
             "{got:?}"
         );
@@ -590,7 +676,7 @@ mod tests {
         let got = wait_for(&seen, 3).await;
         assert_eq!(got[1], "stationd.flush", "prepared grid track re-asked after the insert");
         assert!(
-            got[2].starts_with("stationd.interrupt annotate:stationd_rid=")
+            got[2].starts_with("stationd.interrupt annotate:stationd_boot=")
                 && got[2].ends_with(":/m/news/n.mp3"),
             "{got:?}"
         );
