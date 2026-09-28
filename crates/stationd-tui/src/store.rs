@@ -7,7 +7,7 @@
 use std::time::{Duration, Instant};
 
 use jiff::tz::TimeZone;
-use stationd_proto::{broadcast, liquidsoap, live, plugin, station};
+use stationd_proto::{broadcast, liquidsoap, live, onair, plugin, station};
 
 use crate::rpc::BannerRead;
 
@@ -76,6 +76,10 @@ pub struct Store {
     pub tz: Option<TimeZone>,
     /// Nom du fuseau tel que reçu (affiché même s'il n'a pas pu être résolu).
     pub tz_name: Option<String>,
+    /// Dernier instantané de l'antenne (flux `OnAirService.Watch`).
+    pub onair: Option<onair::OnAirSnapshot>,
+    /// Le flux de l'antenne est-il ouvert ? `Err` = pourquoi il ne l'est pas.
+    pub onair_link: Result<(), String>,
 }
 
 impl Store {
@@ -91,6 +95,8 @@ impl Store {
             plugins: Sourced::default(),
             tz: None,
             tz_name: None,
+            onair: None,
+            onair_link: Err("flux de l'antenne : ouverture…".into()),
         }
     }
 
@@ -119,6 +125,18 @@ impl Store {
         self.overrides.apply(read.overrides, at);
         self.plugins.apply(read.plugins, at);
         ok
+    }
+
+    /// Un instantané de l'antenne arrive : on ignore un instantané plus
+    /// ancien que celui qu'on a (révision croissante), sauf après une
+    /// reconnexion où stationd a pu redémarrer (révision repartie de 1).
+    pub fn apply_onair(&mut self, snap: onair::OnAirSnapshot, fresh_stream: bool) {
+        let older = self.onair.as_ref().is_some_and(|o| o.revision >= snap.revision);
+        if older && !fresh_stream {
+            return;
+        }
+        self.onair_link = Ok(());
+        self.onair = Some(snap);
     }
 
     /// Uptime de stationd extrapolé depuis la dernière observation. `None`
@@ -259,5 +277,16 @@ mod tests {
         assert_eq!(human_duration(Duration::from_secs(2 * 86_400 + 4 * 3600 + 18 * 60)), "2j 04h 18m");
         assert_eq!(human_duration(Duration::from_secs(4 * 3600 + 2 * 60)), "4h 02m");
         assert_eq!(human_duration(Duration::from_secs(12 * 60 + 5)), "12m 05s");
+    }
+
+    #[test]
+    fn an_older_onair_snapshot_is_ignored_unless_the_stream_restarted() {
+        let mut st = Store::new("http://x");
+        let snap = |rev| onair::OnAirSnapshot { revision: rev, ..Default::default() };
+        st.apply_onair(snap(5), true);
+        st.apply_onair(snap(4), false);
+        assert_eq!(st.onair.as_ref().unwrap().revision, 5);
+        st.apply_onair(snap(1), true);
+        assert_eq!(st.onair.as_ref().unwrap().revision, 1);
     }
 }

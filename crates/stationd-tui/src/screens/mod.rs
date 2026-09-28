@@ -8,7 +8,7 @@ use planned::Planned;
 
 pub fn registry() -> Vec<Box<dyn Screen>> {
     vec![
-        Box::new(antenne::Antenne),
+        Box::new(antenne::Antenne::default()),
         Box::new(Planned {
             title: "Contrôle",
             lot: "lot 2",

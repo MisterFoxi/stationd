@@ -162,6 +162,9 @@ pub enum DbError {
     Batch { index: usize, reason: String },
     #[error("{0}")]
     Sql(String),
+    /// A write while the core runs the plugin for a simulation.
+    #[error("the database is read-only during a simulation (nothing may change)")]
+    ReadOnly,
 }
 
 /// Statement parameters: positional (`?`, `?1`) as an array, or named
@@ -364,6 +367,8 @@ pub struct PluginDb {
     guard: Arc<Guard>,
     path: PathBuf,
     limits: DbLimits,
+    /// Set by the core around a simulated hook: `exec` / `batch` refused.
+    read_only: std::sync::atomic::AtomicBool,
 }
 
 impl std::fmt::Debug for PluginDb {
@@ -413,6 +418,7 @@ impl PluginDb {
             guard,
             path,
             limits,
+            read_only: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -457,8 +463,22 @@ impl PluginDb {
         })
     }
 
+    /// Refuse writes (`exec` / `batch`) while `on` — the core, around a hook
+    /// it runs for a simulation. Reads stay allowed.
+    pub fn set_read_only(&self, on: bool) {
+        self.read_only.store(on, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn check_writable(&self) -> Result<(), DbError> {
+        if self.read_only.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(DbError::ReadOnly);
+        }
+        Ok(())
+    }
+
     /// One statement (`db_exec`), in its own implicit transaction.
     pub fn exec(&self, stmt: &Statement) -> Result<ExecOutcome, DbError> {
+        self.check_writable()?;
         let conn = self.lock()?;
         self.as_plugin(|| run_exec(&conn, stmt).map_err(|e| self.lift(e)))
     }
@@ -466,6 +486,7 @@ impl PluginDb {
     /// Several statements, all or nothing (`db_batch`). The first failure
     /// rolls the whole batch back and names the statement.
     pub fn batch(&self, stmts: &[Statement]) -> Result<Vec<ExecOutcome>, DbError> {
+        self.check_writable()?;
         let conn = self.lock()?;
         conn.execute_batch("BEGIN IMMEDIATE")
             .map_err(|e| DbError::Sql(e.to_string()))?;
@@ -832,6 +853,20 @@ mod tests {
     fn schema(db: &PluginDb) {
         db.migrate(&["CREATE TABLE play (media TEXT PRIMARY KEY, n INTEGER NOT NULL)".into()])
             .expect("migrate");
+    }
+
+    #[test]
+    fn read_only_refuses_writes_but_not_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = open(dir.path(), "ro");
+        schema(&db);
+        db.set_read_only(true);
+        let ins = st("INSERT INTO play (media, n) VALUES (?1, 1)", json!(["a"]));
+        assert!(matches!(db.exec(&ins), Err(DbError::ReadOnly)));
+        assert!(matches!(db.batch(std::slice::from_ref(&ins)), Err(DbError::ReadOnly)));
+        assert!(db.query("SELECT count(*) FROM play", &Params::default()).is_ok());
+        db.set_read_only(false);
+        assert!(db.exec(&ins).is_ok());
     }
 
     #[test]

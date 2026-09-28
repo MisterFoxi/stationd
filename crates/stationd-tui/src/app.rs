@@ -78,6 +78,10 @@ pub enum AppEvent {
     Rendered,
     /// Une lecture du bandeau est arrivée.
     Banner(Box<BannerRead>),
+    /// Un instantané de l'antenne ; `true` = premier d'un flux (re)ouvert.
+    OnAir(Box<stationd_proto::onair::OnAirSnapshot>, bool),
+    /// Le flux de l'antenne est fermé ou n'a pas pu s'ouvrir.
+    OnAirLost(String),
 }
 
 impl From<RenderedEvent> for AppEvent {
@@ -130,6 +134,7 @@ pub fn init(state: &mut Scenery, ctx: &mut Global) -> Result<(), Error> {
     // Horloge et progression : un tick par seconde.
     state.clock = Some(ctx.add_timer(TimerDef::new().repeat_forever().timer(Duration::from_secs(1))));
     spawn_banner_poll(ctx);
+    spawn_onair_watch(ctx);
     state.status.status(0, "Connexion à stationd…");
     state.active().enter(ctx)?;
     Ok(())
@@ -151,6 +156,50 @@ fn spawn_banner_poll(ctx: &Global) {
             tokio::time::sleep(delay).await;
         }
         Ok(Control::Continue)
+    });
+}
+
+/// Tâche de fond : suit le flux de l'antenne et le rouvre après une coupure
+/// (délai croissant plafonné). Chaque instantané part vers la boucle.
+fn spawn_onair_watch(ctx: &Global) {
+    let channel = ctx.channel.clone();
+    ctx.spawn_async_ext(move |chan| async move {
+        let mut delay = rpc::POLL_OK;
+        loop {
+            match rpc::watch_onair(channel.clone()).await {
+                Ok(mut stream) => {
+                    let mut fresh = true;
+                    loop {
+                        match stream.message().await {
+                            Ok(Some(snap)) => {
+                                delay = rpc::POLL_OK;
+                                let ev = AppEvent::OnAir(Box::new(snap), fresh);
+                                fresh = false;
+                                if chan.send(Ok(Control::Event(ev))).await.is_err() {
+                                    return Ok(Control::Continue);
+                                }
+                            }
+                            Ok(None) => break,
+                            Err(status) => {
+                                let ev = AppEvent::OnAirLost(format!("flux de l'antenne : {}", rpc::status_text(&status)));
+                                if chan.send(Ok(Control::Event(ev))).await.is_err() {
+                                    return Ok(Control::Continue);
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    let ev = AppEvent::OnAirLost(format!("flux de l'antenne : {e}"));
+                    if chan.send(Ok(Control::Event(ev))).await.is_err() {
+                        return Ok(Control::Continue);
+                    }
+                }
+            }
+            delay = rpc::next_delay(delay, false);
+            tokio::time::sleep(delay).await;
+        }
     });
 }
 
@@ -293,6 +342,14 @@ pub fn event(event: &AppEvent, state: &mut Scenery, ctx: &mut Global) -> Result<
                 state.status.status(0, error.clone());
             }
             state.status.status(1, format!("écran : {}", state.screens[state.active].title()));
+            return Ok(Control::Changed);
+        }
+        AppEvent::OnAir(snap, fresh) => {
+            ctx.store.apply_onair((**snap).clone(), *fresh);
+            return Ok(Control::Changed);
+        }
+        AppEvent::OnAirLost(why) => {
+            ctx.store.onair_link = Err(why.clone());
             return Ok(Control::Changed);
         }
         AppEvent::Rendered => {

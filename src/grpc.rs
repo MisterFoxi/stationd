@@ -77,6 +77,13 @@ impl StationService {
         self
     }
 
+    /// The playlist view changed: what airs next may differ (on-air view).
+    fn playlists_changed(&self) {
+        if let Some(stop) = &self.operator_stop {
+            stop.control.bump_air();
+        }
+    }
+
     /// The operator's stop, minus the exit itself (testable): refuse during a
     /// live unless `force`, write the marker (error = nothing stopped), halt
     /// every boundary, then act on the air (best effort: logged).
@@ -207,6 +214,7 @@ impl Station for StationService {
         self.upsert_view(&id.to_string(), &playlist, &rewritten, None)
             .await
             .map_err(TonicStatus::internal)?;
+        self.playlists_changed();
 
         Ok(Response::new(PlaylistAddReply {
             toml_content: rewritten,
@@ -224,6 +232,7 @@ impl Station for StationService {
         // it can be driven directly by an integration test. This handler is
         // a thin translator: run it, map the metier errors to the proto.
         let outcome = crate::sync::sync_root(&self.db, &self.playlist_root).await;
+        self.playlists_changed();
 
         let errors = outcome
             .errors
@@ -272,6 +281,7 @@ impl Station for StationService {
         let reference = request.into_inner().reference;
         match crate::sync::remove(&self.db, &self.playlist_root, &reference).await {
             Ok(r) => {
+                self.playlists_changed();
                 tracing::info!(
                     id = %r.id,
                     rel_path = r.rel_path.as_deref().unwrap_or("-"),
@@ -315,6 +325,7 @@ impl Station for StationService {
         _request: Request<PlaylistReloadRequest>,
     ) -> Result<Response<PlaylistReloadReply>, TonicStatus> {
         let outcome = crate::sync::reload_root(&self.db, &self.playlist_root).await;
+        self.playlists_changed();
         for r in &outcome.removed {
             tracing::info!(playlist = %r, "playlist file gone: dropped from the view");
         }

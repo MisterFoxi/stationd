@@ -165,6 +165,29 @@ Sortir de quarantaine est **toujours** explicite (`plugin restart`) — jamais u
 réarmement automatique, qui rejouerait le crash en boucle. C'est la contrepartie
 de « visible et sous contrôle ».
 
+## Mode simulation (aperçu de l'antenne, 2026-09-28)
+
+La vue de l'antenne (`OnAirService`, `stationctl onair`, TUI) montre les
+morceaux théoriques à suivre en **simulant** le moteur sur une copie en
+mémoire de la base. Les plugins y participent, sous un régime propre :
+
+- **`filter_pool` est appelé** (la suite simulée doit filtrer comme la vraie),
+  via un `PluginHandle::simulation()`.
+- **Aucune action n'est possible** pendant cet appel : la surface hôte du
+  plugin passe en mode simulation — `control` et `push_override` rendent
+  une erreur (`refused: the core is running a simulation`), sa base passe en
+  lecture seule (`db_exec` / `db_batch` refusés, `db_query` permis). En WASM
+  le refus revient comme donnée (`{"ok":false,…}`), jamais comme trap. Un
+  plugin n'a rien à déclarer : c'est l'hôte qui garantit l'absence d'effet.
+- **Un échec ne compte pas** : un `filter_pool` qui panique pendant une
+  simulation ne touche ni le compteur d'échecs ni la quarantaine ; l'étage
+  passe tel quel et l'échec remonte comme **note** de la simulation (visible
+  dans la vue de l'antenne).
+- **Aucun événement** : une décision simulée n'est pas un fait, `on_event`
+  n'en entend jamais parler (`TrackResolved` & co. ne partent pas).
+- Rien n'est journalisé pour une simulation (elle tourne à chaque changement
+  de piste).
+
 ## Encore ouvert
 
 - **Plugin « critique » vs best-effort** : faut-il qu'un plugin déclare qu'il

@@ -5,7 +5,7 @@
 
 use clap::{Parser, Subcommand};
 
-use stationd::proto::{broadcast, icecast, library, liquidsoap, live, plugin, schedule, station, stats};
+use stationd::proto::{broadcast, icecast, library, liquidsoap, live, onair, plugin, schedule, station, stats};
 
 use station::station_client::StationClient;
 use station::{
@@ -29,6 +29,7 @@ use icecast::icecast_service_client::IcecastServiceClient;
 use icecast::{GetStatusRequest as IcecastStatusRequest, RenderConfigRequest as IcecastRenderRequest};
 use live::live_service_client::LiveServiceClient;
 use stats::stats_service_client::StatsServiceClient;
+use onair::on_air_service_client::OnAirServiceClient;
 use stats::{plays_request::By as PlaysBy, PlaysRequest};
 use live::{CloseRequest as LiveCloseRequest, GetStatusRequest as LiveStatusRequest, HashPasswordRequest, KickRequest, OpenRequest as LiveOpenRequest};
 use broadcast::{
@@ -99,6 +100,24 @@ enum Command {
     Dj(DjCommand),
     /// Broadcast statistics: plays grouped by playlist, rule, media…
     /// (`aired` = really started by Liquidsoap, `picked` = chosen by stationd)
+    /// The air: what plays, what is prepared, what should follow (a
+    /// simulation, `~`), what played, which playlist leads and which follow
+    Onair {
+        #[command(subcommand)]
+        what: Option<OnairCommand>,
+        /// Tracks to come, the prepared one included (max 30)
+        #[arg(long, default_value_t = 10)]
+        upcoming: u32,
+        /// Last tracks played (max 100)
+        #[arg(long, default_value_t = 10)]
+        history: u32,
+        /// Playlists to come (max 20)
+        #[arg(long, default_value_t = 5)]
+        playlists: u32,
+        /// Keep printing a new snapshot at every change (Ctrl+C to stop)
+        #[arg(long)]
+        follow: bool,
+    },
     Stats {
         /// Window up to now: 30m, 24h, 7d…
         #[arg(long, default_value = "24h")]
@@ -108,6 +127,19 @@ enum Command {
         by: StatsBy,
         /// Max lines (0 = all)
         #[arg(long, default_value_t = 20)]
+        limit: u32,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum OnairCommand {
+    /// Tracks really aired, most recent first (from the broadcast log)
+    History {
+        /// Only tracks aired strictly before this instant (epoch UTC, seconds)
+        #[arg(long)]
+        before: Option<i64>,
+        /// How many (0 = 50, max 500)
+        #[arg(long, default_value_t = 30)]
         limit: u32,
     },
 }
@@ -1236,6 +1268,42 @@ async fn main() -> anyhow::Result<()> {
                 println!("opening of {} closed (opened {})", o.dj, ago(o.opened_at));
             }
         }
+        Command::Onair { what: Some(OnairCommand::History { before, limit }), .. } => {
+            let mut cli = OnAirServiceClient::connect(args.addr.clone()).await?;
+            let r = cli
+                .history(onair::HistoryRequest { before, limit })
+                .await?
+                .into_inner();
+            if r.tracks.is_empty() {
+                println!("(nothing aired)");
+            }
+            let tz = jiff::tz::TimeZone::system();
+            for t in &r.tracks {
+                println!("{}", onair_history_line(t, &tz, true));
+            }
+        }
+        Command::Onair { what: None, upcoming, history, playlists, follow } => {
+            let mut cli = OnAirServiceClient::connect(args.addr.clone()).await?;
+            let mut stream = cli
+                .watch(onair::WatchRequest {
+                    upcoming,
+                    history,
+                    playlists_ahead: playlists,
+                })
+                .await?
+                .into_inner();
+            let mut first = true;
+            while let Some(snap) = stream.message().await? {
+                if !first {
+                    println!("\n{}", "─".repeat(72));
+                }
+                first = false;
+                print_onair(&snap);
+                if !follow {
+                    break;
+                }
+            }
+        }
         Command::Stats { since, by, limit } => {
             let by = match by {
                 StatsBy::Playlist => PlaysBy::Playlist,
@@ -1563,6 +1631,150 @@ fn stationd_root(root: Option<&PathBuf>) -> PathBuf {
     root.cloned()
         .or_else(|| std::env::var_os("STATIOND_ROOT").map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from("."))
+}
+
+// ----- onair ---------------------------------------------------------------
+
+fn onair_tz(name: &str) -> jiff::tz::TimeZone {
+    jiff::tz::TimeZone::get(name).unwrap_or_else(|_| jiff::tz::TimeZone::system())
+}
+
+fn hm(epoch: i64, tz: &jiff::tz::TimeZone, secs: bool) -> String {
+    let fmt = if secs { "%H:%M:%S" } else { "%H:%M" };
+    jiff::Timestamp::from_second(epoch)
+        .map(|t| t.to_zoned(tz.clone()).strftime(fmt).to_string())
+        .unwrap_or_else(|_| epoch.to_string())
+}
+
+fn mmss(ms: Option<u64>) -> String {
+    match ms {
+        Some(ms) => {
+            let s = ms / 1000;
+            if s >= 3600 {
+                format!("{}:{:02}:{:02}", s / 3600, (s / 60) % 60, s % 60)
+            } else {
+                format!("{}:{:02}", s / 60, s % 60)
+            }
+        }
+        None => "—".into(),
+    }
+}
+
+/// `Artist — Title`; the file name when the tags are missing (said so).
+fn onair_label(t: &onair::Track) -> String {
+    let file = t.rel_path.rsplit('/').next().unwrap_or(&t.rel_path);
+    match (t.artist.is_empty(), t.title.is_empty()) {
+        (false, false) => format!("{} — {}", t.artist, t.title),
+        (true, false) => t.title.clone(),
+        _ if t.stream => format!("relay {}", t.rel_path),
+        _ => format!("{file} (no title)"),
+    }
+}
+
+fn onair_from(t: &onair::Track) -> String {
+    let mut parts = Vec::new();
+    if !t.playlist_ref.is_empty() {
+        parts.push(t.playlist_ref.clone());
+    }
+    if !t.leaf_ref.is_empty() && t.leaf_ref != t.playlist_ref {
+        parts.push(format!("› {}", t.leaf_ref));
+    }
+    if !t.origin.is_empty() {
+        let rule = if t.rule_id.is_empty() { String::new() } else { format!(" {}", t.rule_id) };
+        parts.push(format!("[{}{rule}]", t.origin));
+    }
+    if !t.override_source.is_empty() {
+        parts.push(format!("by {}", t.override_source));
+    }
+    parts.join(" ")
+}
+
+fn onair_history_line(t: &onair::Track, tz: &jiff::tz::TimeZone, secs: bool) -> String {
+    use onair::track::Outcome;
+    let when = t.started_at.map(|e| hm(e, tz, secs)).unwrap_or_else(|| "—".into());
+    let end = match Outcome::try_from(t.outcome).unwrap_or(Outcome::Unspecified) {
+        Outcome::Aired => "aired",
+        Outcome::Cut => "CUT",
+        Outcome::Unknown => "end unknown",
+        Outcome::Unspecified => "",
+    };
+    format!("  {when}  {:<44} {:>7}  {:<11} {}", onair_label(t), mmss(t.duration_ms), end, onair_from(t))
+}
+
+fn print_onair(s: &onair::OnAirSnapshot) {
+    let tz = onair_tz(&s.timezone);
+    let listeners = s.listeners.map_or("listeners —".to_string(), |n| format!("listeners {n}"));
+    let mut head = vec![s.state.clone(), listeners];
+    if s.pending_overrides > 0 {
+        head.push(format!("{} pending override(s)", s.pending_overrides));
+    }
+    if !s.live_dj.is_empty() {
+        head.push(format!("LIVE {}", s.live_dj));
+    }
+    if !s.liquidsoap {
+        head.push("no [liquidsoap]: nothing airs".into());
+    }
+    println!("{}   (#{} at {} {})", head.join(" · "), s.revision, hm(s.observed_at, &tz, true), s.timezone);
+
+    println!("\nON AIR");
+    match (&s.on_air, s.on_air_kind.as_str()) {
+        (Some(t), _) => {
+            let since = t.started_at.map(|e| hm(e, &tz, true)).unwrap_or_else(|| "—".into());
+            let elapsed = t.started_at.map(|e| (s.observed_at - e).max(0) as u64 * 1000);
+            println!(
+                "  {since}  {:<44} {} / {}  {}",
+                onair_label(t),
+                mmss(elapsed),
+                mmss(t.duration_ms),
+                onair_from(t)
+            );
+        }
+        (None, "") => println!("  (nothing reported by Liquidsoap)"),
+        (None, kind) => println!("  {kind}"),
+    }
+    if let Some(p) = &s.current_playlist {
+        let rule = if p.rule_id.is_empty() { String::new() } else { format!(", rule {}", p.rule_id) };
+        println!("  playlist: {} ({}{rule})", p.playlist_ref, p.origin);
+    }
+
+    println!("\nNEXT");
+    if let Some(t) = &s.prefetched {
+        println!("  prepared  {:<44} {:>7}  {}", onair_label(t), mmss(t.duration_ms), onair_from(t));
+    }
+    for t in &s.upcoming {
+        let when = t.estimated_at.map(|e| format!("~{}", hm(e, &tz, false))).unwrap_or_else(|| "~ —".into());
+        let cut = t.cut_at.map(|e| format!("  (cut at {})", hm(e, &tz, false))).unwrap_or_default();
+        println!("  {when:<9} {:<44} {:>7}  {}{cut}", onair_label(t), mmss(t.duration_ms), onair_from(t));
+    }
+    if s.prefetched.is_none() && s.upcoming.is_empty() {
+        println!("  (nothing)");
+    }
+
+    if !s.next_playlists.is_empty() || !s.indicative.is_empty() {
+        println!("\nPLAYLISTS AHEAD");
+        for p in &s.next_playlists {
+            let when = p.from.map(|e| hm(e, &tz, false)).unwrap_or_else(|| "—".into());
+            println!("  {when}  {:<24} [{} {}]", p.playlist_ref, p.origin, p.rule_id);
+        }
+        for p in &s.indicative {
+            println!("  (by track count)  {:<24} [{}]", p.playlist_ref, p.rule_id);
+        }
+    }
+
+    println!("\nPLAYED");
+    if s.history.is_empty() {
+        println!("  (nothing yet)");
+    }
+    for t in &s.history {
+        println!("{}", onair_history_line(t, &tz, false));
+    }
+
+    if !s.notes.is_empty() {
+        println!("\nNOTES");
+        for n in &s.notes {
+            println!("  - {n}");
+        }
+    }
 }
 
 fn local_time(epoch: i64) -> String {

@@ -248,6 +248,9 @@ pub struct OnAir {
     pub aired_s: i64,
     /// Start of the current on-air stretch; `None` while frozen by a pause.
     pub counting_since: Option<i64>,
+    /// Its `broadcast_log` row (provenance, and where its end is written).
+    /// `None` for Liquidsoap's own sources or an unannotated track.
+    pub log_id: Option<i64>,
 }
 
 impl OnAir {
@@ -260,6 +263,7 @@ impl OnAir {
             leaf_ref: None,
             aired_s: 0,
             counting_since: None,
+            log_id: None,
         }
     }
 
@@ -275,6 +279,7 @@ struct Left {
     media: String,
     leaf: Option<String>,
     aired_s: i64,
+    log_id: Option<i64>,
 }
 
 impl Left {
@@ -283,7 +288,12 @@ impl Left {
         if a.kind != OnAirKind::Track {
             return None;
         }
-        Some(Left { media: a.media_path.clone()?, leaf: a.leaf_ref.clone(), aired_s: a.aired_at(now) })
+        Some(Left {
+            media: a.media_path.clone()?,
+            leaf: a.leaf_ref.clone(),
+            aired_s: a.aired_at(now),
+            log_id: a.log_id,
+        })
     }
 }
 
@@ -296,6 +306,10 @@ pub struct NextUp {
     /// Came from the override queue (already consumed there): a flush must
     /// never drop it, or the override would be lost.
     pub from_override: bool,
+    /// Leaf playlist that produced it (member of a group).
+    pub leaf_ref: Option<String>,
+    /// Its `broadcast_log` row (provenance).
+    pub log_id: Option<i64>,
 }
 
 /// Snapshot for `stationctl ls status`.
@@ -398,6 +412,8 @@ impl LsBridge {
                                 media_path: media,
                                 playlist_ref: r.decision.playlist_ref.clone(),
                                 from_override: r.override_source.is_some(),
+                                leaf_ref: r.leaf_ref.clone(),
+                                log_id: r.log_id,
                             });
                             NextReply::file(uri)
                         }
@@ -424,6 +440,8 @@ impl LsBridge {
             st.status.next = None;
         }
         st.status.last_reply = Some(reply.clone());
+        drop(st);
+        self.engine.control().bump_air();
         reply
     }
 
@@ -586,6 +604,7 @@ impl LsBridge {
                         leaf_ref: p.leaf_ref,
                         aired_s: 0,
                         counting_since: Some(now),
+                        log_id: p.log_id,
                     }
                 }
                 None => {
@@ -657,12 +676,15 @@ impl LsBridge {
         self.lock().status.on_air = Some(on_air);
         for left in leaving {
             let at = crate::resolver::Epoch(now);
-            if let Err(e) =
-                self.engine.on_track_left(&left.media, left.leaf.as_deref(), left.aired_s, at).await
+            if let Err(e) = self
+                .engine
+                .track_left(left.log_id, &left.media, left.leaf.as_deref(), left.aired_s, at)
+                .await
             {
                 tracing::error!(media = %left.media, error = %e, "could not record the end of a track");
             }
         }
+        self.engine.control().bump_air();
     }
 
     /// Seed the on-air state from Liquidsoap's own account (`stationd.on_air`)
@@ -686,6 +708,7 @@ impl LsBridge {
             leaf_ref: p.leaf_ref,
             aired_s: elapsed,
             counting_since: Some(now),
+            log_id: p.log_id,
         });
         let mut st = self.lock();
         if st.status.on_air.is_some() {
@@ -716,6 +739,8 @@ impl LsBridge {
             "on air, as reported by Liquidsoap (stationd restarted)"
         );
         st.status.on_air = Some(on_air);
+        drop(st);
+        self.engine.control().bump_air();
         true
     }
 
@@ -732,6 +757,8 @@ impl LsBridge {
                 st.status.on_air = Some(track);
             }
         }
+        drop(st);
+        self.engine.control().bump_air();
     }
 
     /// What the air is doing, from the broadcast state and what Liquidsoap

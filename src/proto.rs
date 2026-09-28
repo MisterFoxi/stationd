@@ -34,3 +34,7 @@ pub mod live {
 pub mod stats {
     tonic::include_proto!("webradio.stats.v1");
 }
+
+pub mod onair {
+    tonic::include_proto!("webradio.onair.v1");
+}

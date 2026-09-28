@@ -1,6 +1,6 @@
 # StationD — Dossier technique de la TUI
 
-Version 2.1 — 28 septembre 2026
+Version 2.3 — 28 septembre 2026
 Statut : refonte complète (remplace la v1.0 du 25/09). Document vivant : il suit les besoins, pas l'inverse.
 Socle : Rust + Ratatui + rat-salsa / rat-widget, client gRPC pur de `stationd`.
 
@@ -32,7 +32,7 @@ La TUI v1 ne permettait ni de piloter la station, ni de créer une playlist corr
 ## 2. Principes
 
 - **Client pur.** La TUI affiche, saisit, envoie. Validation, sélection, projection, priorités : toujours stationd.
-- **TOML source de vérité.** Une playlist ou une règle se crée/modifie en produisant du TOML validé puis appliqué par stationd (`Validate` → `Apply`), comme `stationctl`.
+- **TOML source de vérité.** Une playlist ou une règle se crée/modifie en produisant du TOML que stationd valide, enregistre sur le nœud et applique (`Validate` pour le direct, `Save` pour enregistrer).
 - **Lire n'a aucun effet.** Naviguer, prévisualiser, simuler ne fait jamais avancer un curseur, un groupe, un historique ou un compteur.
 - **Pas de faux zéro.** Inconnu s'affiche `—`, théorique `~`, périmé en grisé avec son âge. Jamais 0 à la place de « inconnu ».
 - **Aucune erreur avalée.** Toute réponse en erreur est visible dans la ligne de statut puis consultable dans Système.
@@ -49,86 +49,65 @@ La TUI v1 ne permettait ni de piloter la station, ni de créer une playlist corr
 | `LiveService` | `GetStatus`, `Kick`, `Open`, `Close` | Panneau live |
 | `LiquidsoapService` | `GetStatus` | Système (et repli de l'Antenne tant que §3.2 n'existe pas) |
 | `IcecastService` | `GetStatus` | Système, auditeurs par mount |
-| `PlaylistService` | `ListPlaylists`, `GetPlaylist`, `Validate`, `Apply`, `Export` | Playlists |
-| `Station` | `PlaylistRemove`, `PlaylistReload` | Playlists |
+| `Station` | `PlaylistList`, `PlaylistExport`, `PlaylistAdd`, `PlaylistSync`, `PlaylistRemove`, `PlaylistReload` | Playlists (TOML brut ; pas de validation à blanc, erreurs en texte libre) |
 | `ScheduleService` | `ListRules`, `Preview`, `CheckCoverage`, `ExportGrid`, `ValidateGrid`, `ApplyGrid`, `Enqueue` | Agenda, playlists `queue` |
 | `LibraryService` | `Scan`, `ListMedia`, `ListGenres` | Médias |
 | `StatsService` | `Plays` | Statistiques |
 | `PluginService` | `List`, `Control`, `DbInfo`, `DbQuery` | Plugins |
 
-### 3.2 À ajouter — `OnAirService.Watch` (vue principale)
+**Attention** : `proto/playlist_v1.proto` (`PlaylistService` : `Validate`, `Apply`, `GetPlaylist`, `Diagnostic` structuré…) est un contrat de conception, **ni compilé ni servi** par stationd. Le contrat réel des playlists est celui de `Station` ci-dessus.
 
-Aujourd'hui l'antenne ne se lit qu'à travers `Liquidsoap.GetStatus` : un `rel_path`, une playlist, une heure de début, le morceau préchargé. Pas de titre/artiste/durée, pas de règle, pas d'historique détaillé, pas de suite au-delà d'un morceau, et tout est à interroger en boucle.
+### 3.2 `OnAirService` (vue principale) — fait au lot 1
 
-Nouveau RPC en flux serveur : un instantané complet à la connexion, puis un nouvel instantané à chaque changement (début de piste, préchargement, changement d'état, override, live, apply de grille/playlist, échantillon d'auditeurs).
+Contrat : `proto/onair_v1.proto`. `Watch(upcoming, history, playlists_ahead)`
+pousse un instantané complet au démarrage puis à chaque changement ;
+`History(before, limit)` remonte au-delà. Plafonds : 30 à suivre, 100 joués,
+20 playlists. CLI : `stationctl onair [--upcoming N] [--history N]
+[--playlists N] [--follow]`, `stationctl onair history [--before E] [--limit N]`.
 
-```proto
-service OnAirService {
-  rpc Watch(WatchRequest) returns (stream OnAirSnapshot);
-  rpc History(HistoryRequest) returns (HistoryResponse);   // défilement au-delà de l'instantané
-}
+L'instantané porte : état de diffusion, auditeurs (absent = inconnu), nature
+de l'antenne, **morceau à l'antenne** (titre/artiste/album/durée de l'index,
+début réel, playlist, membre, règle, origine), **préparé** (certain),
+**à suivre** (simulés, début estimé absent dès qu'une durée manque, `cut_at`
+si un rendez-vous hard le coupe), **notes**, **joués** (plus récent d'abord,
+issue diffusé / coupé / inconnu), **playlist en cours**, **playlists à venir**
+(projection de la grille, heure et `at_local`), règles au compteur
+(indicatif), DJ, overrides en attente, présence de Liquidsoap, fuseau.
 
-message WatchRequest {
-  uint32 upcoming = 1;   // défaut 10
-  uint32 history  = 2;   // défaut 20
-  uint32 playlists_ahead = 3; // défaut 5
-}
+Déclenchement (`src/onair.rs`) : deux compteurs dans `StationControl`
+(`bump_air` : début de piste, préchargement, état, override, live, clock,
+apply de grille, playlists ; `bump_meta` : auditeurs). Une seule tâche calcule
+pour tous, seulement si quelqu'un écoute, regroupe les rafales (200 ms) et ne
+relance la simulation que sur `air`. Tick de 30 s.
 
-message OnAirSnapshot {
-  uint64 revision = 1;                 // monotone ; la TUI ignore un instantané plus ancien
-  int64  observed_at_ms = 2;
-  broadcast.v1.State state = 3;
-  optional uint32 listeners = 4;       // absent = inconnu
-  Track  on_air = 5;                   // absent = rien (halted, fallback sans piste…)
-  string on_air_kind = 6;              // track | fallback | halted | live | unknown
-  Track  prefetched = 7;               // déjà remis à Liquidsoap : certain
-  repeated Track upcoming = 8;         // théoriques (simulation §3.3)
-  repeated SimulationNote notes = 9;   // pourquoi la suite peut changer
-  repeated Track history = 10;         // plus récent d'abord
-  PlaylistSlot current_playlist = 11;
-  repeated PlaylistSlot next_playlists = 12; // issu de Preview, ordonné
-  repeated PlaylistSlot indicative = 13;     // règles au compteur de titres : sans heure
-  LiveSummary live = 14;
-  uint32 pending_overrides = 15;
-}
+Issue des joués : migration `0022` (`broadcast_log.left_at`,
+`played_to_end`), écrite quand le pont rapporte la fin d'une de nos pistes
+(`GridEngine::track_left`, identifiant de ligne transporté par le pont).
 
-message Track {
-  string rel_path = 1;
-  string title = 2; string artist = 3; string album = 4;
-  optional uint64 duration_ms = 5;     // absent : flux continu / inconnu
-  optional int64  started_at_ms = 6;   // on_air/history : début réel
-  optional int64  estimated_at_ms = 7; // upcoming : début estimé
-  string playlist_ref = 8;             // playlist de la règle (un groupe = le groupe)
-  string leaf_ref = 9;                 // playlist feuille (membre d'un groupe)
-  string rule_id = 10;
-  schedule.v1.Decision.Origin origin = 11;
-  string override_source = 12;
-  Outcome outcome = 13;                // history : AIRED | CUT | SKIPPED ; autres : UNSPECIFIED
-}
+Position : calculée par le client (`maintenant − started_at`), figée en pause.
 
-message PlaylistSlot {
-  string playlist_ref = 1;
-  string rule_id = 2;
-  schedule.v1.Decision.Origin origin = 3;
-  optional int64 from_ms = 4;          // absent pour l'indicatif
-  string label = 5;                    // "every 4 titres", "day_part 22:00→06:00"…
-}
-```
+### 3.3 Simulation des morceaux à suivre — fait au lot 1
 
-Position dans le morceau : calculée par la TUI (`maintenant − started_at_ms`, figée si `PAUSED`), recalée à chaque instantané. Pas de RPC de position.
+`src/onair_sim.rs`. Le **vrai moteur** tourne sur une **copie en mémoire** de
+la base (`db::memory_copy` : mêmes migrations, lignes copiées en une
+transaction de lecture — le WAL ne bloque pas l'écrivain réel) avec une copie
+détachée de `StationControl` (overrides en attente compris). Il tire les
+morceaux comme Liquidsoap, en avançant l'horloge de la durée indexée de
+chacun ; un rendez-vous hard qui tombe dans un morceau le coupe. Tous les
+effets (curseurs, groupes, `Every`, jetons, files `queue`, journal qui
+nourrit l'anti-répétition, marques `unplayed_only`) restent dans la copie :
+la simulation est fidèle, la station intacte (testé : contenu de toutes les
+tables et file d'override identiques avant/après). Journaux coupés.
 
-`History` sert à remonter au-delà des 20 derniers (curseur `before_ms`, `limit`), depuis `broadcast_log`.
+Plugins : `filter_pool` appliqué, **actions refusées** par l'hôte pendant
+l'appel, échec non compté mais signalé en note, aucun événement
+(`Doc/plugin-hooks.md` « Mode simulation »).
 
-### 3.3 Simulation des morceaux à suivre
-
-Côté stationd, derrière `upcoming` :
-
-- Part d'une **copie** de l'état famille B (curseurs, groupes tenus, anti-répétition, `Every`) et de la file d'override ; enchaîne N appels au résolveur en avançant l'heure simulée de la durée de chaque morceau. **Rien n'est écrit.**
-- Le 1er élément est le morceau préchargé (déjà certain) ; la simulation commence après lui.
-- `filter_pool` des plugins **appliqué**, avec un indicateur `simulation = true` passé au plugin. Un plugin qui ne sait pas simuler sans effet le déclare (`simulation_safe = false`) : il est alors ignoré dans la simulation et une `SimulationNote` le dit.
-- Le tirage des modes `shuffle` utilise une graine propre à la simulation : la suite affichée est **une** suite possible, pas une promesse.
-- `SimulationNote` liste ce qui rend la suite incertaine : ordre aléatoire, override en attente, créneau live qui s'ouvre dans la fenêtre, plugin ignoré, durée inconnue (au-delà, `estimated_at_ms` absent).
-- Recalcul à chaque changement de piste, apply, override, live. Coût borné (N ≤ 50).
+Pas de simulation (et une note) quand la station est en pause, en veille, en
+veille imminente (0 auditeur), ou qu'un DJ est à l'antenne. Sans Liquidsoap,
+la simulation montre ce que la grille choisirait (note). Les ordres aléatoires
+sont retirés à chaque simulation : la liste peut changer d'un instantané à
+l'autre, c'est dit en note.
 
 ### 3.4 À ajouter — Médias
 
@@ -137,14 +116,17 @@ Côté stationd, derrière `upcoming` :
 
 ### 3.5 À ajouter — Playlists
 
-- `PlaylistService.PreviewPool(PlaylistFile)` : évalue un **brouillon** sans l'appliquer → nombre de médias, durée connue, nombre de durées inconnues, une page d'échantillon, diagnostics. Sert au formulaire en direct.
-- `PlaylistService.Save { PlaylistFile, expected_revision }` → valide, **écrit le fichier dans le dossier des playlists du nœud** (écriture atomique), applique, renvoie `{ ok, diagnostics, revision, toml }`. `expected_revision` absent = création (refus si le fichier existe) ; différent de la révision sur disque = conflit, rien n'est écrit. `GetPlaylist` / `Export` renvoient la révision courante. Même règle pour la suppression (`PlaylistRemove` avec révision attendue). CLI : `stationctl playlist save`.
-- **Alignement du proto** : `Selection` ne porte que `static | dynamic | group` et `GroupStrategy` marque `rotate/weighted` hors slice, alors que le modèle TOML gère 5 modes (static, dynamic, remote, queue, group). À vérifier et aligner avant l'éditeur, sinon la TUI ne peut pas présenter `queue` et `remote`.
+Aujourd'hui `Station.PlaylistAdd` prend le TOML brut, valide, met à jour la vue et renvoie le TOML réécrit : **c'est le client qui écrit le fichier**. Il n'existe ni validation à blanc, ni diagnostic par champ, ni aperçu de pool d'un brouillon. À ajouter :
+
+- `Validate(toml)` : valide sans rien appliquer ni écrire → diagnostics structurés (fichier, chemin de champ, valeur rejetée, attendu, message), le format de `Diagnostic` de `playlist_v1.proto`.
+- `PreviewPool(toml)` : évalue un **brouillon** sans l'appliquer → nombre de médias, durée connue, nombre de durées inconnues, une page d'échantillon, diagnostics. Sert au formulaire en direct.
+- `Save { ref, toml, expected_revision }` : valide, **écrit le fichier dans le dossier des playlists du nœud** (écriture atomique), applique, renvoie `{ ok, diagnostics, revision, toml }`. `expected_revision` absent = création (refus si le fichier existe) ; différent de la révision sur disque = conflit, rien n'est écrit. `PlaylistExport` renvoie la révision courante ; `PlaylistRemove` prend une révision attendue. CLI : `stationctl playlist validate|save`.
+- **À trancher au lot 3** : ajouter ces RPC à `Station` (à côté des `Playlist*` existants) **ou** mettre en service `PlaylistService` (`playlist_v1.proto`) après l'avoir aligné sur le modèle réel (5 modes : static, dynamic, remote, queue, group ; son `Selection` n'en porte que 3) et y déplacer les `Playlist*` de `Station`.
 
 ### 3.6 À ajouter — Grille
 
-- `ValidateGrid` et `ApplyGrid` doivent renvoyer des `Diagnostic` (fichier, chemin de champ, valeur rejetée, attendu), comme `PlaylistService`. Le proto le prévoit en commentaire ; sans ça, l'éditeur de règle ne peut pas dire ce qui ne va pas.
-- `ScheduleService.SaveGrid { GridFile, expected_revision }` : même mécanisme que `PlaylistService.Save` (écriture par stationd, révision, conflit).
+- `ValidateGrid` et `ApplyGrid` doivent renvoyer des `Diagnostic` (fichier, chemin de champ, valeur rejetée, attendu), même format que les playlists (§3.5). Le proto le prévoit en commentaire ; sans ça, l'éditeur de règle ne peut pas dire ce qui ne va pas.
+- `ScheduleService.SaveGrid { GridFile, expected_revision }` : même mécanisme que le `Save` des playlists (§3.5 : écriture par stationd, révision, conflit).
 
 ### 3.7 À ajouter — Événements
 
@@ -339,14 +321,14 @@ Toute action qui touche l'antenne : dialogue qui nomme l'objet exact, « Annuler
 **Création / modification** (`n` / `e`) : formulaire à gauche, TOML généré + diagnostics à droite.
 
 1. Identité : `name`, `handle` optionnel, `enabled`, `member_only`. Le fichier cible est proposé à partir du ref.
-2. Mode : liste fermée issue du proto, chaque mode n'affiche **que** ses champs (le `oneof` le garantit).
+2. Mode : les 5 modes de la grammaire TOML (static, dynamic, remote, queue, group) ; chaque mode n'affiche **que** ses champs. La TUI ne fait que présenter : la validation reste celle de stationd (`Validate`, §3.5).
    - *static* : sélecteur de médias (recherche floue + arbre des dossiers, sélection multiple), ordre sequential/shuffle, réordonnancement `u`/`j`.
    - *dynamic* : éditeur de filtres ligne par ligne (champ → opérateurs valides pour ce champ → valeur typée ; valeurs de genre proposées depuis `ListGenres`), match all/any, ordre, `order_by` seulement si ordre daté, `unplayed_only` seulement si ordre daté.
    - *group* : stratégie, membres (sélecteur de playlists), `take` ou `weight` selon la stratégie, `on_member_unavailable`.
-   - *queue / remote* : après alignement du proto (§3.5).
+   - *queue / remote* : champs de leur grammaire (cf. `examples/`), même principe.
 3. Diffusion : `limit`, `repeat` (interdit avec `unplayed_only`), `on_exhausted`, contraintes anti-répétition (durées saisies en `2h`, `30m`).
-4. **Aperçu du pool en direct** (`PreviewPool`, 300 ms après la dernière frappe) : nombre, durée, durées inconnues, 20 premiers médias. Pool vide = alerte rouge.
-5. `Ctrl+S` : `PlaylistService.Save` avec la révision lue à l'ouverture → stationd valide, écrit le fichier sur le nœud et applique. La TUI n'écrit jamais de fichier, qu'elle soit locale ou distante. Une erreur place le curseur sur le champ indiqué par `field_path` et garde toute la saisie. Un conflit de révision (fichier modifié entre-temps) ouvre un dialogue : comparer, recharger (perte du brouillon annoncée) ou garder le brouillon ; jamais d'écrasement.
+4. **Aperçu du pool en direct** (`PreviewPool` §3.5, 300 ms après la dernière frappe) : nombre, durée, durées inconnues, 20 premiers médias. Pool vide = alerte rouge.
+5. `Ctrl+S` : `Save` (§3.5) avec la révision lue à l'ouverture → stationd valide, écrit le fichier sur le nœud et applique. La TUI n'écrit jamais de fichier, qu'elle soit locale ou distante. Une erreur place le curseur sur le champ indiqué par `field_path` et garde toute la saisie. Un conflit de révision (fichier modifié entre-temps) ouvre un dialogue : comparer, recharger (perte du brouillon annoncée) ou garder le brouillon ; jamais d'écrasement.
 
 Autres actions : `E` éditer le TOML brut (éditeur intégré, puis `Save` — un éditeur externe n'a de sens qu'en local), `x` exporter, `d` supprimer (affiche d'abord règles et groupes qui la référencent), `r` recharger.
 
@@ -407,9 +389,9 @@ Vues déclaratives des plugins chargés (§4.3). Base de chaque plugin : `DbInfo
 |---|---|---|
 | 0 | Crate proto partagée, squelette TUI (rat-salsa, `Screen`, registre, connexion socket Unix, bandeau), vérification des crates rat-* | — |
 | A | stationd : `AuthService`, intercepteur de droits sur tous les RPC, écoute TCP + TLS auto-signé, `stationctl login/user` ; TUI : écran de login, profils, empreintes | Avant tout usage distant ; indépendant des lots 1–8 en local |
-| 1 | stationd : `OnAirService` (Watch + History + simulation §3.3) | — |
-| 2 | TUI : Antenne + Contrôle | 1 (repli par interrogation possible avant) |
-| 3 | stationd : `PreviewPool`, `PlaylistService.Save` (écriture + révision), alignement des modes, `SearchMedia` | — |
+| 1 ✅ | stationd : `OnAirService` (Watch + History + simulation §3.3), `stationctl onair`, TUI : écran Antenne | — |
+| 2 | TUI : Contrôle (+ actions depuis Antenne : pause, suivant, override) | 1 |
+| 3 | stationd : playlists `Validate` / `PreviewPool` / `Save` (écriture + révision) — service à trancher (§3.5), `SearchMedia` | — |
 | 4 | TUI : Playlists (liste + éditeur) + Médias | 3 |
 | 5 | stationd : diagnostics de grille, `SaveGrid` | — |
 | 6 | TUI : Agenda (jour, semaine, couverture, édition) | 5 pour l'édition |
@@ -424,15 +406,17 @@ Chaque RPC ajouté a sa commande `stationctl` dans le même lot.
 - Antenne : le préchargé correspond à `next_media` de Liquidsoap ; après chaque changement de piste, l'ancien 1er « à suivre » est à l'antenne ou une note expliquait pourquoi non.
 - Flux sans durée : ni barre ni heure de fin inventées ; heures estimées absentes au-delà.
 - Auditeurs inconnus affichés `—`, jamais 0.
-- Playlist créée par formulaire, relue par `Export` : identique champ à champ ; commentaires du TOML existant préservés ou édition bloquée au profit de l'éditeur externe.
+- Playlist créée par formulaire, relue par `Export` : identique champ à champ ; commentaires du TOML existant préservés par stationd au `Save`, ou édition par formulaire bloquée au profit de l'éditeur TOML intégré.
 - Erreur de validation : curseur sur le bon champ, saisie conservée.
 - Agenda sur les nuits de changement d'heure (mars/octobre) et un `day_part` 22:00→06:00.
 - 120×35 et 80×24, redimensionnement pendant une saisie, coupure de stationd puis reprise.
 - Quitter restaure le terminal et laisse la station tourner.
+- TUI distante : login refusé (mauvais mot de passe, compte désactivé), jeton expiré en pleine édition (brouillon conservé), rôle `Viewer` (aucune action mutante possible, refus serveur si forcé), empreinte TLS changée (connexion refusée).
+- Deux clients modifient la même playlist : le second `Save` est refusé pour conflit, rien n'est écrasé.
 
 ## 9. Ouvert
 
-- Contrat exact du plugin `tags` (méthodes, format `TXXX:Tags` : séparateur, casse, espaces de noms type `mood:calm`, formats non-MP3).
-- Lien entre `TXXX:Type` (plugin actuel) et les tags : même plugin / tag réservé `type:…` ?
-- Écriture du TOML d'une playlist quand la TUI tourne sur une autre machine que le nœud : aujourd'hui le client écrit le fichier (comme `stationctl`), ce qui suppose d'être sur le nœud.
-- Rôles et droits (lecture seule vs opérateur) : reporté avec le reste des rôles.
+- Contrat exact du plugin `tags` : format de `TXXX:Tags` (séparateur NUL ID3v2.4, casse, espaces de noms type `mood:calm`), équivalent pour les formats non-MP3 (FLAC/OGG : champs Vorbis `TYPE` / `TAGS`).
+- Capacités exactes par rôle (`Owner` / `Operator` / `Viewer`) : répartition RPC par RPC à fixer au lot A.
+- Durée de vie des jetons et renouvellement (session TUI longue).
+- Gestion des brouillons si la connexion est perdue longtemps : conservation en mémoire seulement, ou sauvegarde locale côté TUI ?

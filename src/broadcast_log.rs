@@ -85,6 +85,72 @@ pub async fn mark_aired(pool: &SqlitePool, id: i64, at: Epoch) -> Result<(), sql
     Ok(())
 }
 
+/// Our track logged as `id` left the air at `at` (migration 0022):
+/// `played_to_end` = `Some(true)` it went to its end, `Some(false)` it was
+/// cut, `None` unknown (duration not indexed). First report wins — a track
+/// leaves the air once.
+pub async fn record_left(
+    pool: &SqlitePool,
+    id: i64,
+    at: Epoch,
+    played_to_end: Option<bool>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE broadcast_log SET left_at = ?2, played_to_end = ?3 WHERE id = ?1 AND left_at IS NULL")
+        .bind(id)
+        .bind(at.0)
+        .bind(played_to_end)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// One logged track with its provenance, its air stamps and what the media
+/// index knows of it (`title`… `None` = not indexed / tag absent).
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+pub struct LogRow {
+    pub id: i64,
+    pub rel_path: String,
+    pub played_at: i64,
+    pub aired_at: Option<i64>,
+    pub left_at: Option<i64>,
+    pub played_to_end: Option<bool>,
+    pub rule_id: Option<String>,
+    pub origin: Option<String>,
+    pub playlist_ref: Option<String>,
+    pub leaf_ref: Option<String>,
+    pub title: Option<String>,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+    pub duration_ms: Option<i64>,
+}
+
+const LOG_ROW_SELECT: &str = "SELECT b.id, b.rel_path, b.played_at, b.aired_at, b.left_at, b.played_to_end,
+            b.rule_id, b.origin, b.playlist_ref, b.leaf_ref,
+            m.title, coalesce(m.artist, b.artist) AS artist, m.album, m.duration_ms
+     FROM broadcast_log b LEFT JOIN media m ON m.rel_path = b.rel_path";
+
+/// The logged track `id`, if any.
+pub async fn row(pool: &SqlitePool, id: i64) -> Result<Option<LogRow>, sqlx::Error> {
+    sqlx::query_as(&format!("{LOG_ROW_SELECT} WHERE b.id = ?1"))
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+}
+
+/// Tracks REALLY aired (`aired_at` set) strictly before `before`, most recent
+/// first, at most `limit` — the on-air history. A track chosen but never
+/// started (prepared then flushed) is not history.
+pub async fn aired_before(pool: &SqlitePool, before: i64, limit: u32) -> Result<Vec<LogRow>, sqlx::Error> {
+    sqlx::query_as(&format!(
+        "{LOG_ROW_SELECT} WHERE b.aired_at IS NOT NULL AND b.aired_at < ?1
+         ORDER BY b.aired_at DESC, b.id DESC LIMIT ?2"
+    ))
+    .bind(before)
+    .bind(i64::from(limit))
+    .fetch_all(pool)
+    .await
+}
+
 /// What `plays` groups the history by.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlaysBy {
@@ -259,5 +325,28 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(aired_at, Some(1_011));
+    }
+
+    #[tokio::test]
+    async fn history_lists_aired_tracks_with_their_end() {
+        let (_d, pool) = fresh_db().await;
+        let pv = Provenance { rule_id: Some("r"), origin: Some("DayPart"), playlist_ref: Some("soir"), leaf_ref: Some("soir") };
+        let a = record(&pool, "a.mp3", Some("A"), Epoch(100), pv).await.unwrap();
+        let b = record(&pool, "b.mp3", None, Epoch(200), pv).await.unwrap();
+        let _never = record(&pool, "c.mp3", None, Epoch(300), pv).await.unwrap(); // chosen, never aired
+        mark_aired(&pool, a, Epoch(101)).await.unwrap();
+        mark_aired(&pool, b, Epoch(201)).await.unwrap();
+        record_left(&pool, a, Epoch(199), Some(true)).await.unwrap();
+        record_left(&pool, a, Epoch(500), Some(false)).await.unwrap(); // first report wins
+        record_left(&pool, b, Epoch(250), Some(false)).await.unwrap();
+
+        let h = aired_before(&pool, i64::MAX, 10).await.unwrap();
+        assert_eq!(h.iter().map(|r| r.rel_path.as_str()).collect::<Vec<_>>(), vec!["b.mp3", "a.mp3"]);
+        assert_eq!((h[1].left_at, h[1].played_to_end), (Some(199), Some(true)));
+        assert_eq!(h[0].played_to_end, Some(false));
+        assert_eq!(h[1].artist.as_deref(), Some("A"), "artist from the log when not indexed");
+        assert_eq!(h[0].rule_id.as_deref(), Some("r"));
+        assert_eq!(aired_before(&pool, 201, 10).await.unwrap().len(), 1, "strictly before");
+        assert_eq!(row(&pool, b).await.unwrap().unwrap().aired_at, Some(201));
     }
 }

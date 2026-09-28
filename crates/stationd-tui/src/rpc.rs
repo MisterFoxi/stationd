@@ -7,7 +7,7 @@
 use std::future::Future;
 use std::time::{Duration, Instant};
 
-use stationd_proto::{broadcast, liquidsoap, live, plugin, station};
+use stationd_proto::{broadcast, liquidsoap, live, onair, plugin, station};
 use tonic::transport::{Channel, Endpoint};
 
 /// Délai maximal d'une lecture simple (dossier §18 de la v1, conservé).
@@ -88,6 +88,26 @@ pub async fn read_banner(channel: Channel) -> BannerRead {
         live: live_status,
         overrides: overrides.map(|r| r.overrides),
         plugins: plugins.map(|r| r.plugins),
+    }
+}
+
+/// Ce que la TUI demande au flux de l'antenne : le maximum servi, chaque
+/// écran coupe à sa guise (pas de réabonnement pour changer d'affichage).
+pub const ONAIR_REQUEST: onair::WatchRequest =
+    onair::WatchRequest { upcoming: 30, history: 50, playlists_ahead: 10 };
+
+/// Ouvre le flux `OnAirService.Watch`. Rend le flux, ou le texte d'erreur.
+pub async fn watch_onair(
+    channel: Channel,
+) -> Result<tonic::Streaming<onair::OnAirSnapshot>, String> {
+    let mut cli = onair::on_air_service_client::OnAirServiceClient::new(channel);
+    match tokio::time::timeout(READ_TIMEOUT, cli.watch(ONAIR_REQUEST)).await {
+        Ok(Ok(r)) => Ok(r.into_inner()),
+        Ok(Err(status)) if status.code() == tonic::Code::Unimplemented => {
+            Err("ce stationd ne sert pas OnAirService (à mettre à jour)".into())
+        }
+        Ok(Err(status)) => Err(status_text(&status)),
+        Err(_) => Err(format!("pas de réponse en {} s", READ_TIMEOUT.as_secs())),
     }
 }
 

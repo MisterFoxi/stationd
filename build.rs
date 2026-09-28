@@ -28,6 +28,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     tonic_build::compile_protos("proto/live_v1.proto")?;
     // Broadcast statistics (plays by playlist / rule / media — stationctl stats).
     tonic_build::compile_protos("proto/stats_v1.proto")?;
+    // The on-air view (snapshot stream + history — stationctl onair, TUI).
+    // Uses proto3 `optional` (listeners, durations, instants).
+    tonic_build::configure()
+        .protoc_arg("--experimental_allow_proto3_optional")
+        .compile_protos(&["proto/onair_v1.proto"], &["proto"])?;
 
     // Force a rebuild whenever a migration file is added, changed, or
     // removed. `sqlx::migrate!` embeds the migrations into the binary at
@@ -48,6 +53,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-changed=proto/icecast_v1.proto");
     println!("cargo:rerun-if-changed=proto/live_v1.proto");
     println!("cargo:rerun-if-changed=proto/stats_v1.proto");
+    println!("cargo:rerun-if-changed=proto/onair_v1.proto");
 
     Ok(())
 }

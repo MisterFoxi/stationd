@@ -19,6 +19,7 @@ use stationd::icecast_grpc::IcecastGrpc;
 use stationd::live_grpc::live::live_service_server::LiveServiceServer;
 use stationd::stats_grpc::{stats::stats_service_server::StatsServiceServer, StatsGrpc};
 use stationd::live_grpc::LiveGrpc;
+use stationd::onair_grpc::{proto::on_air_service_server::OnAirServiceServer, OnAirGrpc};
 use stationd::grid_engine::GridEngine;
 use stationd::station_control::StationControl;
 use stationd::library_grpc::LibraryGrpc;
@@ -163,6 +164,7 @@ async fn main() -> anyhow::Result<()> {
     // A bind failure is fatal: a configured station that cannot air must not
     // pretend to run.
     let mut operator_ls = None;
+    let mut onair_bridge = None;
     let (ls_service, ls_task) = match &cfg.liquidsoap {
         None => {
             info!("no [liquidsoap] section: nothing airs (scheduling only)");
@@ -182,6 +184,7 @@ async fn main() -> anyhow::Result<()> {
                 warn!("{w}");
             }
             let bridge = stationd::ls_bridge::LsBridge::new(engine.clone(), &cfg.media.library_path)?;
+            onair_bridge = Some(bridge.clone());
             // Control socket: pause/resume follow the broadcast state machine
             // (whoever changes it); skip is a direct RPC.
             let ls_control = stationd::ls_control::LsControl::new(std::path::absolute(&ls_cfg.control_socket)?);
@@ -282,6 +285,19 @@ async fn main() -> anyhow::Result<()> {
         _ => LiveGrpc::disabled(),
     };
 
+    // On-air view (stationctl onair, TUI): one task, computing only while
+    // someone watches; its simulation of what follows runs the real engine
+    // on an in-memory copy of the database (nothing is ever written back).
+    let onair = stationd::onair::OnAirHub::spawn(stationd::onair::Sources {
+        pool: db_pool.clone(),
+        db_path: cfg.database.path.clone(),
+        tz: cfg.station.timezone.clone(),
+        engine: engine.clone(),
+        control: control.clone(),
+        bridge: onair_bridge,
+        plugins: Some(plugins.clone()),
+    });
+
     let schedule_service = ScheduleGrpc::new(engine);
 
     // Media library: single owning actor over the `media` view. The heavy scan
@@ -311,7 +327,7 @@ async fn main() -> anyhow::Result<()> {
         marker,
     });
 
-    info!(%addr, "gRPC server listening (status, quit, schedule, library, plugin, broadcast, liquidsoap, icecast, live, stats)");
+    info!(%addr, "gRPC server listening (status, quit, schedule, library, plugin, broadcast, liquidsoap, icecast, live, stats, onair)");
 
     // Three ways to shut down cleanly: via `stationctl quit` or `stationctl
     // station stop` (shutdown_rx, triggered by the service's `quit` /
@@ -346,6 +362,7 @@ async fn main() -> anyhow::Result<()> {
         .add_service(IcecastServiceServer::new(icecast_service))
         .add_service(LiveServiceServer::new(live_service))
         .add_service(StatsServiceServer::new(StatsGrpc::new(db_pool.clone())))
+        .add_service(OnAirServiceServer::new(OnAirGrpc::new(onair)))
         .serve_with_shutdown(addr, shutdown_signal)
         .await?;
 

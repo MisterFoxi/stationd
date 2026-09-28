@@ -5,7 +5,7 @@ sans reconstruire le contexte. À distinguer des docs de `Doc/` (décisions
 d'architecture durables) : ce fichier-ci est volatil, à mettre à jour à
 chaque session.
 
-Dernière mise à jour : 2026-09-28 (A4 lot 0).
+Dernière mise à jour : 2026-09-28 (A4 lot 1).
 
 
 ## Où on en est en une phrase
@@ -133,10 +133,10 @@ contrat gRPC existant / à ajouter, écrans, lots 0–8 + A). L'ancienne TUI
 (feature `tui`, `src/bin/stationd-tui/`, `Doc/tui-dev.md`) est abandonnée,
 rien n'en est repris.
 
-**Lot 0 fait (2026-09-28)** — compilé, clippy propre, 12 tests verts dans
-l'env de préparation ; essayé en terminal contre un faux stationd (120×35,
-80×24, < 80×24, coupure et reprise de stationd). **À valider sur devstationd :
-`make tui` contre le vrai stationd.**
+**Lot 0 fait et validé sur devstationd (2026-09-28)** — `make tui` se
+connecte au vrai stationd ; clippy propre, 12 tests verts ; essayé aussi en
+terminal contre un faux stationd (120×35, 80×24, < 80×24, coupure et
+reprise de stationd).
 - Workspace Cargo : paquet racine `stationd` (membre par défaut : `cargo
   build`/`test` à la racine inchangés, `package.sh` aussi) + `crates/
   stationd-proto` (clients gRPC seuls, générés depuis `proto/`, sans
@@ -158,13 +158,36 @@ l'env de préparation ; essayé en terminal contre un faux stationd (120×35,
 - Écart au dossier : la liaison se fait en TCP (`--addr`, défaut
   `http://127.0.0.1:50051` comme stationctl) ; le socket Unix arrive au lot A.
 
-**Constat pour le dossier** : `PlaylistService` (`proto/playlist_v1.proto`)
-n'est ni compilé ni servi — le contrat réel des playlists est
-`Station.PlaylistAdd|Sync|List|Remove|Export|Reload` (TOML brut). §3.1 et
-§3.5 du dossier à corriger.
+**Constat** : `PlaylistService` (`proto/playlist_v1.proto`) n'est ni
+compilé ni servi — le contrat réel des playlists est
+`Station.PlaylistAdd|Sync|List|Remove|Export|Reload` (TOML brut). Dossier
+corrigé (v2.2, §3.1 et §3.5) ; au lot 3, choisir entre enrichir `Station`
+et mettre en service un `PlaylistService` aligné sur les 5 modes.
 
-**Suivant : lot 1** — `OnAirService` dans stationd (Watch + History +
-simulation des morceaux à suivre).
+**Lot 1 fait (2026-09-28)** — 450+ tests verts, clippy sans nouvel
+avertissement ; essayé en réel dans l'env de préparation : stationd avec
+`[liquidsoap]`, Liquidsoap émulé par appels HTTP au pont, `stationctl onair`
+et la TUI (120×35, 80×24). **À valider sur devstationd** (vrai Liquidsoap).
+- Contrat `proto/onair_v1.proto` : `OnAirService.Watch` (flux d'instantanés)
+  et `History`. `stationctl onair [--follow]`, `stationctl onair history`.
+- `src/onair.rs` (instantané, tâche unique qui ne calcule que si quelqu'un
+  écoute, rafales regroupées), `src/onair_sim.rs` (simulation), `src/onair_grpc.rs`.
+- Simulation : le vrai moteur sur une copie EN MÉMOIRE de la base
+  (`db::memory_copy`) + copie détachée de `StationControl` ; rien n'est écrit
+  dans la base réelle ni la file d'override (testé). Rendez-vous hard = coupe.
+- Plugins en simulation : `filter_pool` appelé, `control` / `push_override` /
+  écritures en base refusés par l'hôte, échec non compté (note), aucun
+  événement (`Doc/plugin-hooks.md` « Mode simulation »).
+- Compteurs de changement dans `StationControl` (`bump_air` / `bump_meta`),
+  appelés par le pont, les overrides, l'état, le live, `apply_grid`, les RPC
+  playlists.
+- Migration `0022` : `broadcast_log.left_at` / `played_to_end` (issue des
+  joués), écrite par `GridEngine::track_left` (le pont transporte `log_id`).
+- TUI : écran Antenne complet (à l'antenne + progression, playlists en cours
+  et à venir, préparé + à suivre `~`, notes, joués avec issue ; `+`/`-`),
+  bandeau sur le flux, repli sur `Liquidsoap.GetStatus` si le flux manque.
+
+**Suivant : lot 2** — écran Contrôle (et actions depuis Antenne).
 
 ### Après l'alpha (non bloquant)
 
@@ -1909,6 +1932,12 @@ dans le découpage des modules (`grid_index` = A, `grid_store` = B).
 
 ## Pièges & points de vigilance
 
+- **SQLite en mémoire + ATTACH** (`db::memory_copy`) : ouvrir la base en
+  mémoire par le nom spécial `:memory:` (`SqliteConnectOptions::filename`),
+  PAS par l'URL sqlx `sqlite::memory:` — celle-ci pose `SQLITE_OPEN_MEMORY`,
+  que SQLite applique aussi aux bases ATTACHées : le fichier réel s'attachait
+  comme une base vide (« no such table: src.… »).
+
 - **Base de dev à recréer** : migrations `0005`→`0010` sont neuves. En cas de
   souci de schéma/checksum sqlx, `rm -rf data/` + relancer (file-first, la vue
   est jetable). Ne JAMAIS éditer une migration déjà appliquée en prod.
@@ -2081,6 +2110,11 @@ dans le découpage des modules (`grid_index` = A, `grid_store` = B).
 | `src/ls_script.rs` | Générateur du script Liquidsoap (pur : config → `.liq`) |
 | `src/ls_bridge.rs` | Pont HTTP loopback Liquidsoap → stationd (`/next`, `/track`), `on air` / `next` |
 | `src/ls_control.rs` | Socket de contrôle stationd → Liquidsoap + tâche air sync (état, overrides) |
+| `src/onair.rs` | Vue de l'antenne : instantané (à l'antenne, préparé, à suivre, joués, playlists), tâche unique déclenchée par les compteurs de `StationControl` |
+| `src/onair_sim.rs` | Simulation des morceaux à suivre : vrai moteur sur copie en mémoire de la base (`db::memory_copy`), plugins en mode simulation |
+| `src/onair_grpc.rs` | Transport gRPC `OnAirService` (`Watch` en flux, `History`) |
+| `crates/stationd-proto` | Clients gRPC seuls (générés depuis `proto/`), partagés par les clients hors daemon |
+| `crates/stationd-tui` | TUI (rat-salsa) : client gRPC pur ; `screens/` un module par écran |
 | `src/ls_grpc.rs` | Transport gRPC `LiquidsoapService` (`RenderScript`, `GetStatus`) |
 | `src/icecast.rs` | Lecture `/admin/stats` Icecast : parseur, audience, client HTTP, moniteur (débit réel), échantillonneur |
 | `src/icecast_grpc.rs` | Transport gRPC `IcecastService` (`GetStatus`, `RenderConfig`) |

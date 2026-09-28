@@ -16,6 +16,7 @@ const PROTOS: &[(&str, bool)] = &[
     ("icecast_v1.proto", true),
     ("live_v1.proto", false),
     ("stats_v1.proto", false),
+    ("onair_v1.proto", true),
 ];
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

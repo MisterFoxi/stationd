@@ -1,0 +1,96 @@
+// onair_v1.proto
+// ─────────────────────────────────────────────────────────────────────────
+// L'ANTENNE en direct : ce qui passe, ce qui va passer, ce qui est passé,
+// quelle playlist mène et lesquelles suivent. Un seul instantané cohérent,
+// poussé à chaque changement (Doc/StationD-TUI-Dossier-technique.md §3.2).
+//
+// Lecture pure : rien ici ne modifie la station. Les morceaux « à suivre »
+// au-delà du préchargé sont une SIMULATION faite sur une copie en mémoire de
+// la base (même moteur, mêmes plugins en mode simulation) : une suite
+// possible, pas une promesse — les `notes` disent ce qui peut la changer.
+//
+// No-silent-failure : inconnu = champ absent (optional), jamais 0 ; une
+// simulation impossible ou tronquée le dit dans `notes`.
+
+syntax = "proto3";
+
+package webradio.onair.v1;
+
+service OnAirService {
+  // Un instantané complet tout de suite, puis un nouveau à chaque changement
+  // (début de piste, préchargement, état de diffusion, override, live, apply
+  // de grille / playlists, échantillon d'auditeurs) — changements rapprochés
+  // regroupés. Le flux se termine quand le client le ferme.
+  rpc Watch(WatchRequest) returns (stream OnAirSnapshot);
+
+  // Historique de diffusion au-delà de l'instantané, plus récent d'abord.
+  rpc History(HistoryRequest) returns (HistoryResponse);
+}
+
+message WatchRequest {
+  uint32 upcoming = 1;         // morceaux à suivre (préchargé compris) ; 0 → 10 ; plafonné à 30
+  uint32 history = 2;          // derniers joués ; 0 → 20 ; plafonné à 100
+  uint32 playlists_ahead = 3;  // playlists à suivre ; 0 → 5 ; plafonné à 20
+}
+
+message OnAirSnapshot {
+  uint64 revision = 1;              // croissant : un client ignore un instantané plus ancien
+  int64 observed_at = 2;            // epoch UTC (s) du calcul
+  string state = 3;                 // running | paused | draining | sleeping
+  optional uint32 listeners = 4;    // absent = inconnu
+  string on_air_kind = 5;           // track | fallback | halted | relay | live | unknown | "" (rien reçu / pas de Liquidsoap)
+  Track on_air = 6;                 // absent si rien d'identifiable à l'antenne
+  Track prefetched = 7;             // déjà remis à Liquidsoap : certain
+  repeated Track upcoming = 8;      // simulés, après le préchargé
+  repeated string notes = 9;        // pourquoi la suite peut différer / est tronquée
+  repeated Track history = 10;      // plus récent d'abord
+  PlaylistSlot current_playlist = 11;
+  repeated PlaylistSlot next_playlists = 12;  // changements de programme à venir, ordonnés
+  repeated PlaylistSlot indicative = 13;      // règles au compteur de titres : sans heure
+  string live_dj = 14;              // DJ à l'antenne ; vide = aucun
+  uint32 pending_overrides = 15;
+  bool liquidsoap = 16;             // false = pas de [liquidsoap] : rien n'est diffusé
+  string timezone = 17;             // fuseau de la station (IANA)
+}
+
+message Track {
+  string rel_path = 1;              // relatif à media/ ; URL pour un relais
+  string title = 2;                 // vide = non renseigné (tag absent)
+  string artist = 3;
+  string album = 4;
+  optional uint64 duration_ms = 5;  // absent = inconnue (flux, média non indexé)
+  optional int64 started_at = 6;    // epoch UTC : début réel (antenne, historique)
+  optional int64 estimated_at = 7;  // epoch UTC : début estimé (à suivre) ; absent dès qu'une durée manque
+  string playlist_ref = 8;          // playlist de la règle (un groupe = le groupe)
+  string leaf_ref = 9;              // playlist feuille (membre d'un groupe)
+  string rule_id = 10;
+  string origin = 11;               // AtClockHard | AtClockSoft | Every | DayPart | BaseRotation | Override | Fallback
+  string override_source = 12;      // plugin ou "cli", pour un override
+  Outcome outcome = 13;             // historique uniquement
+  bool stream = 14;                 // relais d'un flux distant (durée inconnue)
+  optional int64 cut_at = 15;       // à suivre : coupé à cet instant par un rendez-vous hard
+
+  enum Outcome {
+    OUTCOME_UNSPECIFIED = 0;        // hors historique, ou pas encore fini
+    AIRED = 1;                      // diffusé jusqu'au bout
+    CUT = 2;                        // parti de l'antenne avant sa fin (suivant, override hard, arrêt…)
+    UNKNOWN = 3;                    // fin non enregistrée (lignes anciennes, durée inconnue)
+  }
+}
+
+message PlaylistSlot {
+  string playlist_ref = 1;
+  string rule_id = 2;
+  string origin = 3;
+  optional int64 from = 4;          // epoch UTC ; absent pour l'indicatif / la playlist en cours
+  string at_local = 5;              // même instant en heure locale nommée (anti-DST)
+}
+
+message HistoryRequest {
+  optional int64 before = 1;        // epoch UTC exclu ; absent = maintenant
+  uint32 limit = 2;                 // 0 → 50 ; plafonné à 500
+}
+
+message HistoryResponse {
+  repeated Track tracks = 1;        // plus récent d'abord
+}

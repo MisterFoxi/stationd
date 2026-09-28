@@ -42,7 +42,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 use crate::plugin::{PluginEvent, PluginHandle};
 use crate::resolver::Epoch;
@@ -246,6 +246,18 @@ pub struct StationControl {
     /// Ordered persistence of state changes (single consumer → writes land in
     /// order). `None` = in-memory only (tests).
     persist: Option<mpsc::UnboundedSender<(BroadcastState, Epoch)>>,
+    /// Change counters for the on-air view (`onair`): who shows the air
+    /// learns WHEN to look again, never what changed.
+    revs: Arc<Revisions>,
+}
+
+/// Two change counters, bumped by whoever changes the air (`bump_air`: a
+/// track boundary, a state change, an override, a live, an apply…) or only
+/// what surrounds it (`bump_meta`: the audience). The on-air view re-runs its
+/// simulation of what comes next on `air` only.
+struct Revisions {
+    air: watch::Sender<u64>,
+    meta: watch::Sender<u64>,
 }
 
 impl StationControl {
@@ -273,7 +285,44 @@ impl StationControl {
             plugins: Arc::new(OnceLock::new()),
             air: Arc::new(OnceLock::new()),
             persist,
+            revs: Arc::new(Revisions { air: watch::Sender::new(0), meta: watch::Sender::new(0) }),
         }
+    }
+
+    /// A detached copy for the on-air simulation: the pending overrides (same
+    /// ids, same expiry), the last audience sample, the station `running`;
+    /// no persistence, no air, no plugins, no manual clock, no live, and its
+    /// own change counters — acting on it never touches the real station.
+    pub fn simulation_copy(&self) -> StationControl {
+        let copy = Self::with_state(BroadcastState::Running, None);
+        {
+            let src = self.lock();
+            let mut g = copy.lock();
+            g.overrides = src.overrides.clone();
+            g.next_id = src.next_id;
+            g.listeners = src.listeners;
+        }
+        copy
+    }
+
+    // ----- change counters (on-air view) ----------------------------------
+
+    /// Something that may change what airs next happened.
+    pub fn bump_air(&self) {
+        self.revs.air.send_modify(|v| *v = v.wrapping_add(1));
+    }
+
+    /// Something around the air changed (the audience), not what comes next.
+    pub fn bump_meta(&self) {
+        self.revs.meta.send_modify(|v| *v = v.wrapping_add(1));
+    }
+
+    pub fn watch_air(&self) -> watch::Receiver<u64> {
+        self.revs.air.subscribe()
+    }
+
+    pub fn watch_meta(&self) -> watch::Receiver<u64> {
+        self.revs.meta.subscribe()
     }
 
     /// Load the persisted broadcast state (absent row → `running`) and start
@@ -349,6 +398,7 @@ impl StationControl {
         if on_air {
             self.wake_if_sleeping("live");
         }
+        self.bump_air();
     }
 
     /// The DJ on air, if any.
@@ -373,6 +423,7 @@ impl StationControl {
     /// Freeze (`Some`) or release (`None`) the manual clock.
     pub fn set_clock(&self, frozen: Option<Epoch>) {
         self.lock().clock = frozen;
+        self.bump_air();
     }
 
     pub fn clock_override(&self) -> Option<Epoch> {
@@ -446,6 +497,7 @@ impl StationControl {
     /// more (every boundary halts). Irreversible for this process.
     pub fn begin_operator_stop(&self) {
         self.lock().stopping = true;
+        self.bump_air();
     }
 
     /// The station woke since the last call (`sleeping → running`): the grid
@@ -474,6 +526,7 @@ impl StationControl {
             let _ = tx.send((t.to, at));
         }
         self.to_air(AirEvent::Transition(t));
+        self.bump_air();
         self.emit(PluginEvent::BroadcastStateChanged {
             from: t.from.as_str().to_string(),
             to: t.to.as_str().to_string(),
@@ -487,6 +540,7 @@ impl StationControl {
     pub fn sample_listeners(&self, count: u32) {
         let at = self.now();
         self.lock().listeners = Some((count, at));
+        self.bump_meta();
         self.emit(PluginEvent::ListenersSampled { count, at: at.0 });
     }
 
@@ -499,6 +553,9 @@ impl StationControl {
     pub fn clear_listeners(&self) -> bool {
         let forgot = self.lock().listeners.take().is_some();
         self.wake_if_sleeping("audience-unknown");
+        if forgot {
+            self.bump_meta();
+        }
         forgot
     }
 
@@ -608,6 +665,7 @@ impl StationControl {
         }
         let mode = if degraded { OverrideMode::Soft } else { req.mode };
         self.to_air(AirEvent::Override { id: outcome.id, mode });
+        self.bump_air();
         Ok(outcome)
     }
 
@@ -618,13 +676,19 @@ impl StationControl {
 
     /// Remove one override (`Some(id)`) or all (`None`). Returns how many.
     pub fn clear_overrides(&self, id: Option<u64>) -> usize {
-        let mut g = self.lock();
-        let before = g.overrides.len();
-        match id {
-            Some(id) => g.overrides.retain(|e| e.id != id),
-            None => g.overrides.clear(),
+        let removed = {
+            let mut g = self.lock();
+            let before = g.overrides.len();
+            match id {
+                Some(id) => g.overrides.retain(|e| e.id != id),
+                None => g.overrides.clear(),
+            }
+            before - g.overrides.len()
+        };
+        if removed > 0 {
+            self.bump_air();
         }
-        before - g.overrides.len()
+        removed
     }
 
     /// The override to air at `now`: stale entries are dropped first (each
@@ -658,27 +722,33 @@ impl StationControl {
 
     /// One track of override `id` aired: decrement, drop when exhausted.
     pub fn consume_override(&self, id: u64) {
-        let mut g = self.lock();
-        if let Some(pos) = g.overrides.iter().position(|e| e.id == id) {
-            let left = {
-                let e = &mut g.overrides[pos];
-                e.remaining = e.remaining.saturating_sub(1);
-                e.remaining
-            };
-            if left == 0 {
-                g.overrides.remove(pos);
+        {
+            let mut g = self.lock();
+            if let Some(pos) = g.overrides.iter().position(|e| e.id == id) {
+                let left = {
+                    let e = &mut g.overrides[pos];
+                    e.remaining = e.remaining.saturating_sub(1);
+                    e.remaining
+                };
+                if left == 0 {
+                    g.overrides.remove(pos);
+                }
             }
         }
+        self.bump_air();
     }
 
     /// Override `id` could not air (missing file, empty pool, bad ref): drop
     /// it, loudly. The grid takes over — never a silent gap.
     pub fn drop_override(&self, id: u64, reason: &str) {
-        let mut g = self.lock();
-        if let Some(pos) = g.overrides.iter().position(|e| e.id == id) {
-            let e = g.overrides.remove(pos).expect("position is valid");
-            tracing::warn!(id, source = %e.source, reason, "override could not air; dropped");
+        {
+            let mut g = self.lock();
+            if let Some(pos) = g.overrides.iter().position(|e| e.id == id) {
+                let e = g.overrides.remove(pos).expect("position is valid");
+                tracing::warn!(id, source = %e.source, reason, "override could not air; dropped");
+            }
         }
+        self.bump_air();
     }
 }
 

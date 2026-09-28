@@ -119,6 +119,22 @@ fn on_air<'a>(store: &Store, s: &Styles, max: usize) -> Line<'a> {
     let head = " à l'antenne : ";
     let room = max.saturating_sub(head.chars().count() + 1);
     let mut v = vec![Span::styled(head, s.label())];
+    // Le flux de l'antenne décrit le morceau (artiste — titre) ; à défaut,
+    // le nom de fichier que donne Liquidsoap.
+    if let Some(t) = store.onair.as_ref().and_then(|o| o.on_air.as_ref()) {
+        let name = match (t.artist.is_empty(), t.title.is_empty()) {
+            (false, false) => format!("{} — {}", t.artist, t.title),
+            (true, false) => t.title.clone(),
+            _ => t.rel_path.rsplit('/').next().unwrap_or(&t.rel_path).to_string(),
+        };
+        let pl = if t.playlist_ref.is_empty() { String::new() } else { format!("  ({})", t.playlist_ref) };
+        let name_room = room.saturating_sub(pl.chars().count().min(room / 3));
+        let name = fit::ellipsize(&name, name_room);
+        let pl = fit::ellipsize(&pl, room.saturating_sub(name.chars().count()));
+        v.push(Span::raw(name));
+        v.push(Span::styled(pl, s.muted()));
+        return Line::from(v);
+    }
     match store.liquidsoap.value.as_ref() {
         Some(ls) if ls.on_air_kind == "track" && !ls.on_air_media.is_empty() => {
             let file = ls.on_air_media.rsplit('/').next().unwrap_or(&ls.on_air_media);

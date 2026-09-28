@@ -30,7 +30,8 @@
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use extism::{host_fn, Function, Manifest, Plugin as ExtismPlugin, PluginBuilder, UserData, Wasm, PTR};
@@ -217,6 +218,10 @@ pub enum HostError {
     Unavailable,
     #[error("no database is open for this plugin")]
     NoDatabase,
+    /// A mutating host call made while the core runs this plugin for a
+    /// SIMULATION (the on-air preview): refused, nothing happens.
+    #[error("`{0}` refused: the core is running a simulation (nothing may change)")]
+    Simulation(&'static str),
     #[error(transparent)]
     Control(#[from] ControlError),
     #[error(transparent)]
@@ -233,6 +238,11 @@ pub struct Host {
     capabilities: Vec<Capability>,
     control: Option<StationControl>,
     db: Option<Arc<PluginDb>>,
+    /// Set by the core around a hook it runs for a simulation: every clone
+    /// of this host (the plugin keeps one, WASM host functions capture one)
+    /// sees it. While set, `control`, `push_override` and database writes
+    /// are refused.
+    simulating: Arc<AtomicBool>,
 }
 
 impl Host {
@@ -242,7 +252,24 @@ impl Host {
             capabilities: capabilities.to_vec(),
             control,
             db: None,
+            simulating: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Enter / leave simulation mode (the core, around a simulated hook):
+    /// mutating calls are refused meanwhile, the database is read-only.
+    fn set_simulating(&self, on: bool) {
+        self.simulating.store(on, Ordering::SeqCst);
+        if let Some(db) = &self.db {
+            db.set_read_only(on);
+        }
+    }
+
+    fn refuse_in_simulation(&self, call: &'static str) -> Result<(), HostError> {
+        if self.simulating.load(Ordering::SeqCst) {
+            return Err(HostError::Simulation(call));
+        }
+        Ok(())
     }
 
     /// Attach the plugin's database (opened by the core in `Slot::start`).
@@ -285,11 +312,13 @@ impl Host {
     /// Pilot the broadcast (first-class station control; the plugin is just
     /// one more emitter). Needs capability `control`.
     pub fn control(&self, action: ControlAction) -> Result<Option<Transition>, HostError> {
+        self.refuse_in_simulation("control")?;
         Ok(self.require(Capability::Control)?.apply(action, &self.plugin)?)
     }
 
     /// Push content ahead of the grid. Needs capability `push_override`.
     pub fn push_override(&self, req: OverrideRequest) -> Result<PushOutcome, HostError> {
+        self.refuse_in_simulation("push_override")?;
         Ok(self
             .require(Capability::PushOverride)?
             .push_override(req, &self.plugin)?)
@@ -451,6 +480,9 @@ struct Slot {
     state: PluginState,
     plugin: Option<Box<dyn Plugin>>,
     failures: VecDeque<Instant>,
+    /// The loaded plugin's host surface (a clone), to switch it into
+    /// simulation mode around a simulated hook. `None` when not loaded.
+    host: Option<Host>,
 }
 
 impl Slot {
@@ -539,8 +571,10 @@ impl Slot {
 
     /// Run `on_load` with the host surface; `Loaded` or `Failed`.
     fn load(&mut self, mut plugin: Box<dyn Plugin>, host: Host) {
+        let kept = host.clone();
         match catch(|| plugin.on_load(host)) {
             Ok(Ok(())) => {
+                self.host = Some(kept);
                 self.plugin = Some(plugin);
                 self.state = PluginState::Loaded;
                 self.failures.clear();
@@ -557,6 +591,7 @@ impl Slot {
         if let Some(mut plugin) = self.plugin.take() {
             let _ = catch(|| plugin.on_unload());
         }
+        self.host = None;
         self.state = PluginState::Disabled;
         self.failures.clear();
     }
@@ -626,7 +661,10 @@ enum Msg {
     Event(PluginEvent),
     FilterPool {
         candidates: Vec<Candidate>,
-        reply: oneshot::Sender<Vec<Candidate>>,
+        /// Run for the on-air simulation: mutations refused, failures not
+        /// counted, reported back instead.
+        simulation: bool,
+        reply: oneshot::Sender<(Vec<Candidate>, Vec<String>)>,
     },
     Scan {
         media: Vec<ScanInput>,
@@ -679,13 +717,37 @@ pub type ScanExtras = std::collections::BTreeMap<String, Vec<String>>;
 #[derive(Clone)]
 pub struct PluginHandle {
     tx: mpsc::Sender<Msg>,
+    /// `Some` = a simulation handle ([`PluginHandle::simulation`]): events are
+    /// not emitted, `filter_pool` runs in simulation mode and what went wrong
+    /// is collected here.
+    sim: Option<Arc<Mutex<Vec<String>>>>,
 }
 
 impl PluginHandle {
     /// Fire-and-forget: emit an event to the plugins. Never blocks the caller;
     /// if the buffer is full the event is dropped (best-effort, as documented).
     pub fn emit(&self, event: PluginEvent) {
+        if self.sim.is_some() {
+            return; // a simulated decision is not a fact: plugins never hear of it
+        }
         let _ = self.tx.try_send(Msg::Event(event));
+    }
+
+    /// A handle for the on-air simulation: same plugins, but no event is ever
+    /// emitted, `filter_pool` runs with every mutating host call refused
+    /// (control, push_override, database writes) and a plugin failing then is
+    /// NOT counted towards quarantine — it is reported in
+    /// [`PluginHandle::simulation_notes`] and its stage passes through.
+    pub fn simulation(&self) -> PluginHandle {
+        PluginHandle { tx: self.tx.clone(), sim: Some(Arc::new(Mutex::new(Vec::new()))) }
+    }
+
+    /// What went wrong in the plugins during this simulation (deduplicated).
+    pub fn simulation_notes(&self) -> Vec<String> {
+        self.sim
+            .as_ref()
+            .map(|n| n.lock().unwrap_or_else(|p| p.into_inner()).clone())
+            .unwrap_or_default()
     }
 
     /// Run the candidate pool through every loaded plugin's `filter_pool`, in
@@ -694,15 +756,29 @@ impl PluginHandle {
     pub async fn filter_pool(&self, candidates: Vec<Candidate>) -> Vec<Candidate> {
         let (reply, rx) = oneshot::channel();
         let fallback = candidates.clone();
+        let simulation = self.sim.is_some();
         if self
             .tx
-            .send(Msg::FilterPool { candidates, reply })
+            .send(Msg::FilterPool { candidates, simulation, reply })
             .await
             .is_err()
         {
             return fallback;
         }
-        rx.await.unwrap_or(fallback)
+        match rx.await {
+            Ok((kept, notes)) => {
+                if let Some(sim) = &self.sim {
+                    let mut all = sim.lock().unwrap_or_else(|p| p.into_inner());
+                    for n in notes {
+                        if !all.contains(&n) {
+                            all.push(n);
+                        }
+                    }
+                }
+                kept
+            }
+            Err(_) => fallback,
+        }
     }
 
     /// Run the scanned batch through every loaded plugin's `on_scan`. Awaits a
@@ -817,6 +893,7 @@ pub fn spawn_env(mut decls: Vec<PluginDecl>, env: PluginEnv) -> PluginHandle {
                 state: PluginState::Disabled,
                 plugin: None,
                 failures: VecDeque::new(),
+            host: None,
             };
             if slot.decl.enabled {
                 slot.start(&env);
@@ -830,8 +907,8 @@ pub fn spawn_env(mut decls: Vec<PluginDecl>, env: PluginEnv) -> PluginHandle {
         while let Some(msg) = rx.recv().await {
             match msg {
                 Msg::Event(event) => dispatch_event(&mut slots, &event),
-                Msg::FilterPool { candidates, reply } => {
-                    let _ = reply.send(run_filters(&mut slots, candidates));
+                Msg::FilterPool { candidates, simulation, reply } => {
+                    let _ = reply.send(run_filters_mode(&mut slots, candidates, simulation));
                 }
                 Msg::Scan { media, reply } => {
                     let _ = reply.send(run_scan(&mut slots, &media));
@@ -869,7 +946,7 @@ pub fn spawn_env(mut decls: Vec<PluginDecl>, env: PluginEnv) -> PluginHandle {
         }
     });
 
-    PluginHandle { tx }
+    PluginHandle { tx, sim: None }
 }
 
 /// A plugin's database location: `(loaded, location)`.
@@ -928,18 +1005,46 @@ fn dispatch_event(slots: &mut [Slot], event: &PluginEvent) {
 /// Chain the candidate pool through every loaded plugin's `filter_pool`, in
 /// slot order (already sorted by `order`, then name). A plugin that panics
 /// degrades to pass-through for that stage and is counted as a failure.
+#[cfg(test)]
 fn run_filters(slots: &mut [Slot], candidates: Vec<Candidate>) -> Vec<Candidate> {
+    run_filters_mode(slots, candidates, false).0
+}
+
+/// [`run_filters`], optionally for a simulation: each plugin's host is put in
+/// simulation mode around its call (mutations refused), a failure is not
+/// counted (no quarantine from a preview) but returned as a note, and nothing
+/// is logged (a preview runs often).
+fn run_filters_mode(
+    slots: &mut [Slot],
+    candidates: Vec<Candidate>,
+    simulation: bool,
+) -> (Vec<Candidate>, Vec<String>) {
+    let mut notes = Vec::new();
     let mut cur = candidates;
     for slot in slots.iter_mut() {
         if !matches!(slot.state, PluginState::Loaded) {
             continue;
         }
         let before = cur.len();
+        if simulation {
+            if let Some(h) = &slot.host {
+                h.set_simulating(true);
+            }
+        }
         let outcome = slot.plugin.as_mut().map(|p| {
             let input = cur.clone();
             catch(move || p.filter_pool(input))
         });
+        if simulation {
+            if let Some(h) = &slot.host {
+                h.set_simulating(false);
+            }
+        }
         match outcome {
+            Some(Ok(kept)) if simulation => cur = kept,
+            Some(Err(reason)) if simulation => {
+                notes.push(format!("plugin `{}` (filter_pool) : {reason}", slot.decl.name));
+            }
             Some(Ok(kept)) => {
                 if kept.len() != before {
                     tracing::info!(
@@ -955,7 +1060,7 @@ fn run_filters(slots: &mut [Slot], candidates: Vec<Candidate>) -> Vec<Candidate>
             None => {}
         }
     }
-    cur
+    (cur, notes)
 }
 
 /// Check a plugin's `on_scan` reply against the batch it was given. A reply
@@ -1776,6 +1881,7 @@ mod tests {
             state: PluginState::Loaded,
             plugin: Some(Box::new(PanicPlugin)),
             failures: VecDeque::new(),
+            host: None,
         }
     }
 
@@ -1842,6 +1948,7 @@ mod tests {
             state: PluginState::Loaded,
             plugin: Some(plugin),
             failures: VecDeque::new(),
+            host: None,
         }
     }
 
@@ -1941,6 +2048,7 @@ mod tests {
             state: PluginState::Loaded,
             plugin: Some(plugin),
             failures: VecDeque::new(),
+            host: None,
         }
     }
 
@@ -2033,7 +2141,7 @@ mod tests {
     fn db_slot(name: &str) -> Slot {
         let mut d = decl(name, true, toml::Table::new());
         d.capabilities = vec![Capability::Db];
-        Slot { decl: d, state: PluginState::Disabled, plugin: None, failures: VecDeque::new() }
+        Slot { decl: d, state: PluginState::Disabled, plugin: None, failures: VecDeque::new(), host: None }
     }
 
     fn db_env(dir: &std::path::Path) -> PluginEnv {
@@ -2184,5 +2292,95 @@ mod tests {
         assert!(validate_decls(&[a.clone()]).is_ok());
         a.name = "a/b".into();
         assert!(validate_decls(&[a]).is_err());
+    }
+
+    // ----- simulation mode (on-air preview) -----------------------------
+
+    /// Tries to act from its filter: push an override every time.
+    struct Pushy {
+        host: Option<Host>,
+    }
+
+    impl Plugin for Pushy {
+        fn name(&self) -> &str {
+            "pushy"
+        }
+        fn on_load(&mut self, host: Host) -> Result<(), String> {
+            self.host = Some(host);
+            Ok(())
+        }
+        fn filter_pool(&mut self, candidates: Vec<Candidate>) -> Vec<Candidate> {
+            if let Some(h) = &self.host {
+                let _ = h.push_override(OverrideRequest {
+                    content: crate::station_control::OverrideContent::Media("a.mp3".into()),
+                    mode: Default::default(),
+                    expiry: None,
+                    tracks: None,
+                });
+                let _ = h.control(ControlAction::Pause);
+            }
+            candidates
+        }
+    }
+
+    #[test]
+    fn a_simulated_filter_cannot_act_and_a_real_one_can() {
+        let control = StationControl::new_in_memory();
+        let host = Host::new("pushy", &[Capability::PushOverride, Capability::Control], Some(control.clone()));
+        let mut p = Pushy { host: None };
+        p.on_load(host.clone()).unwrap();
+        let mut slots = vec![Slot {
+            decl: decl("pushy", true, toml::Table::new()),
+            state: PluginState::Loaded,
+            plugin: Some(Box::new(p)),
+            failures: VecDeque::new(),
+            host: Some(host),
+        }];
+
+        let (kept, notes) = run_filters_mode(&mut slots, vec![cand("x.mp3")], true);
+        assert_eq!(kept.len(), 1);
+        assert!(notes.is_empty(), "a refused call is data for the plugin, not a failure");
+        assert!(control.list_overrides().is_empty(), "no override pushed from a simulation");
+        assert_eq!(control.state(), crate::station_control::BroadcastState::Running, "no pause either");
+
+        // Out of the simulation, the same plugin acts again.
+        run_filters_mode(&mut slots, vec![cand("x.mp3")], false);
+        assert_eq!(control.list_overrides().len(), 1);
+    }
+
+    struct FilterPanic;
+    impl Plugin for FilterPanic {
+        fn name(&self) -> &str {
+            "filter-panic"
+        }
+        fn filter_pool(&mut self, _candidates: Vec<Candidate>) -> Vec<Candidate> {
+            panic!("boom in filter");
+        }
+    }
+
+    #[test]
+    fn a_failure_in_a_simulation_is_a_note_not_a_strike() {
+        let mut slots = vec![Slot {
+            decl: decl("filter-panic", true, toml::Table::new()),
+            state: PluginState::Loaded,
+            plugin: Some(Box::new(FilterPanic)),
+            failures: VecDeque::new(),
+            host: None,
+        }];
+        let (kept, notes) = run_filters_mode(&mut slots, vec![cand("x.mp3")], true);
+        assert_eq!(kept.len(), 1, "the stage passes through");
+        assert_eq!(notes.len(), 1);
+        assert!(notes[0].contains("filter-panic"), "{notes:?}");
+        assert!(slots[0].failures.is_empty(), "not counted towards quarantine");
+        assert!(matches!(slots[0].state, PluginState::Loaded));
+    }
+
+    #[tokio::test]
+    async fn a_simulation_handle_emits_nothing() {
+        let h = spawn(vec![]);
+        let sim = h.simulation();
+        sim.emit(PluginEvent::ListenersSampled { count: 1, at: 0 }); // no-op, no panic
+        assert_eq!(sim.filter_pool(vec![cand("a.mp3")]).await.len(), 1);
+        assert!(sim.simulation_notes().is_empty());
     }
 }

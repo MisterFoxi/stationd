@@ -345,6 +345,18 @@ pub async fn duration_ms_of(pool: &SqlitePool, rel_path: &str) -> Result<Option<
     Ok(row.map(|(d,)| d))
 }
 
+/// Display metadata of an indexed media: `(title, artist, album, duration_ms)`,
+/// or `None` if the path is unknown to the index.
+pub async fn brief(
+    pool: &SqlitePool,
+    rel_path: &str,
+) -> Result<Option<(Option<String>, Option<String>, Option<String>, i64)>, sqlx::Error> {
+    sqlx::query_as("SELECT title, artist, album, duration_ms FROM media WHERE rel_path = ?1")
+        .bind(rel_path)
+        .fetch_optional(pool)
+        .await
+}
+
 /// The `(size_bytes, mtime_ns)` of a media row, or `None` if the path is
 /// unknown. Captured at episode completion as the `unplayed_only` play-once
 /// guard (a later file change invalidates the mark).

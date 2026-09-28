@@ -770,20 +770,41 @@ impl GridEngine {
         aired_s: i64,
         now: Epoch,
     ) -> Result<bool, EngineError> {
+        Ok(self.track_left(None, media, leaf_ref, aired_s, now).await? == Some(true))
+    }
+
+    /// [`GridEngine::on_track_left`], plus the end written on the track's
+    /// `broadcast_log` row (`log_id`, migration 0022) for the on-air history.
+    /// Returns `Some(true)` played to the end, `Some(false)` cut, `None`
+    /// duration unknown.
+    pub async fn track_left(
+        &self,
+        log_id: Option<i64>,
+        media: &str,
+        leaf_ref: Option<&str>,
+        aired_s: i64,
+        now: Epoch,
+    ) -> Result<Option<bool>, EngineError> {
         let duration_ms = crate::media_index::duration_ms_of(&self.pool, media).await?;
-        let Some(duration_ms) = duration_ms.filter(|d| *d > 0) else {
-            tracing::info!(%media, aired_s, "track left the air; duration unknown: not counted as played to the end");
-            return Ok(false);
-        };
-        if !played_to_end(aired_s, duration_ms) {
-            tracing::info!(%media, aired_s, duration_ms, "track cut short: not counted as played to the end");
-            return Ok(false);
+        let verdict = duration_ms.filter(|d| *d > 0).map(|d| played_to_end(aired_s, d));
+        if let Some(id) = log_id {
+            crate::broadcast_log::record_left(&self.pool, id, now, verdict).await?;
         }
-        tracing::debug!(%media, aired_s, duration_ms, "track played to the end");
-        if let Some(leaf) = leaf_ref {
-            self.on_episode_finished(leaf, media, now).await?;
+        match verdict {
+            None => {
+                tracing::info!(%media, aired_s, "track left the air; duration unknown: not counted as played to the end");
+            }
+            Some(false) => {
+                tracing::info!(%media, aired_s, "track cut short: not counted as played to the end");
+            }
+            Some(true) => {
+                tracing::debug!(%media, aired_s, "track played to the end");
+                if let Some(leaf) = leaf_ref {
+                    self.on_episode_finished(leaf, media, now).await?;
+                }
+            }
         }
-        Ok(true)
+        Ok(verdict)
     }
 
     /// Enqueue a media into a `queue` playlist's runtime buffer (audience
@@ -876,6 +897,7 @@ impl GridEngine {
         self.check_refs(&rules).await?;
         grid_index::replace_grid(&self.pool, &rules).await.map_err(EngineError::from)?;
         self.sync_grid().await?;
+        self.control.bump_air();
         Ok(rules.iter().map(|r| r.id.clone()).collect())
     }
 
@@ -2449,6 +2471,19 @@ mode = "dynamic""#;
         assert!(!played_to_end(584, 600_000));
         assert!(!played_to_end(100, 600_000));
         assert!(played_to_end(0, 10_000), "a sting shorter than the slack");
+    }
+
+    #[tokio::test]
+    async fn track_left_writes_the_end_on_its_log_row() {
+        let (_d, eng) = hard_fixture(false).await;
+        let r = eng.next_media(at(9, 3)).await.unwrap();
+        let id = r.log_id.expect("a logged file");
+        let media = r.media_path.clone().unwrap();
+        assert_eq!(eng.track_left(Some(id), &media, None, 20, at(9, 4)).await.unwrap(), Some(false));
+        let row = crate::broadcast_log::row(&eng.pool, id).await.unwrap().unwrap();
+        assert_eq!((row.left_at, row.played_to_end), (Some(at(9, 4).0), Some(false)));
+        // Unindexed media: end written, verdict unknown.
+        assert_eq!(eng.track_left(None, "ghost.mp3", None, 999, at(9, 5)).await.unwrap(), None);
     }
 
     #[tokio::test]
