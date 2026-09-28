@@ -3,6 +3,7 @@
 mod antenne;
 mod planned;
 
+use crate::k;
 use crate::screen::Screen;
 use planned::Planned;
 
@@ -10,71 +11,50 @@ pub fn registry() -> Vec<Box<dyn Screen>> {
     vec![
         Box::new(antenne::Antenne::default()),
         Box::new(Planned {
-            title: "Contrôle",
-            lot: "lot 2",
+            title: k!("screen-control"),
+            lot: 2,
             summary: &[
-                "Diffusion : pause, reprise, suivant, veille, réveil",
-                "Overrides : pousser, lister, vider",
-                "Live : couper le DJ, ouvrir / fermer un créneau",
-                "File queue, scan de la bibliothèque, plugins, arrêt opérateur",
+                k!("planned-control-1"),
+                k!("planned-control-2"),
+                k!("planned-control-3"),
+                k!("planned-control-4"),
             ],
             plugin: None,
         }),
         Box::new(Planned {
-            title: "Playlists",
-            lot: "lot 4",
-            summary: &[
-                "Liste : mode, pool, règles et groupes qui la référencent",
-                "Formulaire par mode, aperçu du pool en direct",
-                "Enregistrement par stationd (révision, conflits)",
-            ],
+            title: k!("screen-playlists"),
+            lot: 4,
+            summary: &[k!("planned-playlists-1"), k!("planned-playlists-2"), k!("planned-playlists-3")],
             plugin: None,
         }),
         Box::new(Planned {
-            title: "Agenda",
-            lot: "lot 6",
-            summary: &[
-                "Jour : timeline, bases, rendez-vous, every projetés",
-                "Semaine : 7 colonnes, pas 15/30/60 min",
-                "Couverture de la grille, édition de règle",
-            ],
+            title: k!("screen-agenda"),
+            lot: 6,
+            summary: &[k!("planned-agenda-1"), k!("planned-agenda-2"), k!("planned-agenda-3")],
             plugin: None,
         }),
         Box::new(Planned {
-            title: "Médias",
-            lot: "lot 4",
-            summary: &[
-                "Recherche, filtres (Type en premier), tri, pagination",
-                "Fiche média, statistiques de diffusion",
-                "Scan avec avancement, Type en lot (touche t)",
-            ],
+            title: k!("screen-media"),
+            lot: 4,
+            summary: &[k!("planned-media-1"), k!("planned-media-2"), k!("planned-media-3")],
             plugin: None,
         }),
         Box::new(Planned {
-            title: "Tags",
-            lot: "lot 8",
-            summary: &[
-                "Types : valeurs déclarées, effectifs, médias sans Type",
-                "Tags libres : créer, renommer, fusionner",
-            ],
+            title: k!("screen-tags"),
+            lot: 8,
+            summary: &[k!("planned-tags-1"), k!("planned-tags-2")],
             plugin: Some("tags"),
         }),
         Box::new(Planned {
-            title: "Système",
-            lot: "lot 8",
-            summary: &[
-                "Santé : stationd, Liquidsoap, Icecast (mounts), live",
-                "Événements en direct, statistiques de diffusion",
-            ],
+            title: k!("screen-system"),
+            lot: 8,
+            summary: &[k!("planned-system-1"), k!("planned-system-2")],
             plugin: None,
         }),
         Box::new(Planned {
-            title: "Plugins",
-            lot: "lot 8",
-            summary: &[
-                "Vues déclarées par les plugins chargés",
-                "Base de chaque plugin (info, requête en lecture seule)",
-            ],
+            title: k!("screen-plugins"),
+            lot: 8,
+            summary: &[k!("planned-plugins-1"), k!("planned-plugins-2")],
             plugin: None,
         }),
     ]

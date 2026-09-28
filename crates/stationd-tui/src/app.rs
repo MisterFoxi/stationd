@@ -27,7 +27,7 @@ use crate::rpc::{self, BannerRead};
 use crate::screen::{Availability, KeyHelp, Screen};
 use crate::store::Store;
 use crate::style::Styles;
-use crate::{Args, banner, fit, screens};
+use crate::{Args, banner, fit, k, screens, tr};
 
 /// Taille minimale utilisable (dossier §2).
 const MIN_W: u16 = 80;
@@ -35,10 +35,10 @@ const MIN_H: u16 = 24;
 
 /// Touches communes à tous les écrans (hors saisie).
 const GLOBAL_KEYS: &[KeyHelp] = &[
-    ("1…8", "changer d'écran"),
-    ("?", "aide de l'écran"),
-    ("q", "quitter (stationd continue)"),
-    ("Ctrl+Q", "quitter, même en saisie"),
+    (k!("key-digits"), k!("help-switch-screen")),
+    (k!("key-help"), k!("help-screen-help")),
+    (k!("key-quit"), k!("help-quit")),
+    (k!("key-force-quit"), k!("help-force-quit")),
 ];
 
 /// Données accessibles partout (rendu et événements).
@@ -135,7 +135,7 @@ pub fn init(state: &mut Scenery, ctx: &mut Global) -> Result<(), Error> {
     state.clock = Some(ctx.add_timer(TimerDef::new().repeat_forever().timer(Duration::from_secs(1))));
     spawn_banner_poll(ctx);
     spawn_onair_watch(ctx);
-    state.status.status(0, "Connexion à stationd…");
+    state.status.status(0, tr!("status-connecting"));
     state.active().enter(ctx)?;
     Ok(())
 }
@@ -181,7 +181,7 @@ fn spawn_onair_watch(ctx: &Global) {
                             }
                             Ok(None) => break,
                             Err(status) => {
-                                let ev = AppEvent::OnAirLost(format!("flux de l'antenne : {}", rpc::status_text(&status)));
+                                let ev = AppEvent::OnAirLost(tr!("onair-stream-error", reason = rpc::status_text(&status)));
                                 if chan.send(Ok(Control::Event(ev))).await.is_err() {
                                     return Ok(Control::Continue);
                                 }
@@ -191,7 +191,7 @@ fn spawn_onair_watch(ctx: &Global) {
                     }
                 }
                 Err(e) => {
-                    let ev = AppEvent::OnAirLost(format!("flux de l'antenne : {e}"));
+                    let ev = AppEvent::OnAirLost(tr!("onair-stream-error", reason = e));
                     if chan.send(Ok(Control::Event(ev))).await.is_err() {
                         return Ok(Control::Continue);
                     }
@@ -204,7 +204,7 @@ fn spawn_onair_watch(ctx: &Global) {
 }
 
 pub fn error(err: Error, state: &mut Scenery, _ctx: &mut Global) -> Result<Control<AppEvent>, Error> {
-    state.status.status(0, format!("Erreur : {err:#}"));
+    state.status.status(0, tr!("status-error", reason = format!("{err:#}")));
     Ok(Control::Changed)
 }
 
@@ -215,9 +215,12 @@ pub fn render(area: Rect, buf: &mut Buffer, state: &mut Scenery, ctx: &mut Globa
     Block::new().style(s.base()).render(area, buf);
 
     if area.width < MIN_W || area.height < MIN_H {
-        let msg = format!(
-            "Terminal trop petit : {}×{} (minimum {MIN_W}×{MIN_H}).\nAgrandir la fenêtre, ou q pour quitter.",
-            area.width, area.height
+        let msg = tr!(
+            "terminal-too-small",
+            width = area.width,
+            height = area.height,
+            min_width = MIN_W,
+            min_height = MIN_H
         );
         Paragraph::new(msg).wrap(Wrap { trim: true }).style(s.warn()).render(area, buf);
         return Ok(());
@@ -267,7 +270,7 @@ fn render_tabs(area: Rect, buf: &mut Buffer, state: &Scenery, ctx: &Global) {
             };
             let title = match density {
                 2 if !active => screen.title().chars().take(4).collect::<String>(),
-                _ => screen.title().to_string(),
+                _ => screen.title(),
             };
             spans.push(Span::styled(format!(" {} ", i + 1), key_style));
             spans.push(Span::styled(format!("{title} "), title_style));
@@ -288,7 +291,12 @@ fn render_keys(area: Rect, buf: &mut Buffer, screen_keys: &[KeyHelp], s: &Styles
     let segs: Vec<Vec<Span>> = screen_keys
         .iter()
         .chain(GLOBAL_KEYS.iter())
-        .map(|(k, what)| vec![Span::styled(format!(" {k} "), s.tab_key()), Span::styled(format!(" {what}"), s.muted())])
+        .map(|(key, what)| {
+            vec![
+                Span::styled(format!(" {} ", crate::i18n::text(key, &[])), s.tab_key()),
+                Span::styled(format!(" {}", crate::i18n::text(what, &[])), s.muted()),
+            ]
+        })
         .collect();
     let line = fit::segments(segs, Span::raw("  "), area.width as usize);
     Paragraph::new(line).style(s.base()).render(area, buf);
@@ -300,14 +308,17 @@ fn render_help(work: Rect, buf: &mut Buffer, screen: &dyn Screen, s: &Styles) {
     let w = 60.min(work.width);
     let area = Rect::new(work.x + (work.width - w) / 2, work.y + (work.height - h) / 2, w, h);
     let mut lines = vec![
-        Line::styled(format!("Écran : {}", screen.title()), s.title()),
+        Line::styled(tr!("help-title-screen", screen = screen.title()), s.title()),
         Line::default(),
     ];
-    for (k, what) in keys {
-        lines.push(Line::from(vec![Span::styled(format!("{k:>10}  "), s.accent()), Span::raw(*what)]));
+    for (key, what) in keys {
+        lines.push(Line::from(vec![
+            Span::styled(format!("{:>10}  ", crate::i18n::text(key, &[])), s.accent()),
+            Span::raw(crate::i18n::text(what, &[])),
+        ]));
     }
     lines.push(Line::default());
-    lines.push(Line::styled("— inconnu · ~ projeté ou ancien", s.muted()));
+    lines.push(Line::styled(tr!("help-legend"), s.muted()));
     Clear.render(area, buf);
     Paragraph::new(lines)
         .style(s.base())
@@ -315,7 +326,7 @@ fn render_help(work: Rect, buf: &mut Buffer, screen: &dyn Screen, s: &Styles) {
             Block::bordered()
                 .border_type(BorderType::Rounded)
                 .border_style(s.accent())
-                .title(Span::styled(" Aide — Échap pour fermer ", s.title())),
+                .title(Span::styled(format!(" {} ", tr!("help-box-title")), s.title())),
         )
         .render(area, buf);
 }
@@ -337,11 +348,11 @@ pub fn event(event: &AppEvent, state: &mut Scenery, ctx: &mut Global) -> Result<
             let was = ctx.store.link.clone();
             let ok = ctx.store.apply_banner((**read).clone());
             if ok && was != ctx.store.link {
-                state.status.status(0, "Connecté à stationd");
+                state.status.status(0, tr!("status-connected"));
             } else if !ok && let crate::store::Link::Lost { error, .. } = &ctx.store.link {
                 state.status.status(0, error.clone());
             }
-            state.status.status(1, format!("écran : {}", state.screens[state.active].title()));
+            state.status.status(1, tr!("status-screen", screen = state.screens[state.active].title()));
             return Ok(Control::Changed);
         }
         AppEvent::OnAir(snap, fresh) => {
@@ -385,7 +396,7 @@ pub fn event(event: &AppEvent, state: &mut Scenery, ctx: &mut Global) -> Result<
                             let idx = (c as usize) - ('1' as usize);
                             if idx < state.screens.len() && idx != state.active {
                                 state.active = idx;
-                                state.status.status(1, format!("écran : {}", state.screens[idx].title()));
+                                state.status.status(1, tr!("status-screen", screen = state.screens[idx].title()));
                                 state.active().enter(ctx)?;
                             }
                             return Ok(Control::Changed);

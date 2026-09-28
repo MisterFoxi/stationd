@@ -187,6 +187,14 @@ et la TUI (120×35, 80×24). **À valider sur devstationd** (vrai Liquidsoap).
   et à venir, préparé + à suivre `~`, notes, joués avec issue ; `+`/`-`),
   bandeau sur le flux, repli sur `Liquidsoap.GetStatus` si le flux manque.
 
+**Traductions (2026-09-28)** — TUI en Fluent (`fr` défaut/repli, `en`, `de`),
+catalogues `crates/stationd-tui/locales/<langue>/tui.ftl`, `--lang` ou
+`LANG` ; aucune chaîne affichée en dur (tests : mêmes clés partout, clés
+utilisées = clés du catalogue). stationd n'envoie plus de texte : les notes
+de l'antenne sont des opcodes `onair_v1.Note.Code` + paramètres (`plugin`,
+`reason`, `dj`, `media`), traduits par chaque client ; `stationctl` les rend
+en anglais. Allemand à faire relire. Dossier D12, §4.4.
+
 **Suivant : lot 2** — écran Contrôle (et actions depuis Antenne).
 
 ### Après l'alpha (non bloquant)

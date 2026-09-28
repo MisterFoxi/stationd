@@ -68,11 +68,33 @@ pub struct SimTrack {
     pub override_source: Option<String>,
 }
 
+/// Why what follows may differ, or stops short. A closed set of OPCODES with
+/// typed parameters — never a sentence: each client words it in its own
+/// language (`onair_v1.proto`, `Note.Code`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Note {
+    StationPaused,
+    StationSleeping,
+    SleepAtTrackEnd,
+    SleepArmed,
+    LiveOnAir { dj: String },
+    NoLiquidsoap,
+    Simulated,
+    PoolEmpty,
+    Fallback,
+    StreamUnknownDuration { media: String },
+    UnknownDuration { media: String },
+    SimulationFailed { reason: String },
+    PluginFilterFailed { plugin: String, reason: String },
+    GridProjectionFailed { reason: String },
+    HistoryUnreadable { reason: String },
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SimOutcome {
     pub tracks: Vec<SimTrack>,
     /// Why it stopped short, and what went wrong in the plugins.
-    pub notes: Vec<String>,
+    pub notes: Vec<Note>,
 }
 
 /// Run the simulation. Never fails: whatever prevents it is a note.
@@ -81,7 +103,8 @@ pub async fn simulate(start: SimStart<'_>) -> SimOutcome {
     let plugins = start.plugins.map(PluginHandle::simulation);
     let mut out = run(&start, plugins.as_ref()).with_subscriber(silent).await;
     if let Some(p) = &plugins {
-        out.notes.extend(p.simulation_notes());
+        out.notes
+            .extend(p.simulation_notes().into_iter().map(|(plugin, reason)| Note::PluginFilterFailed { plugin, reason }));
     }
     out
 }
@@ -94,7 +117,7 @@ async fn run(start: &SimStart<'_>, plugins: Option<&PluginHandle>) -> SimOutcome
     let pool = match crate::db::memory_copy(start.live_db).await {
         Ok(p) => p,
         Err(e) => {
-            out.notes.push(format!("simulation impossible : {e}"));
+            out.notes.push(Note::SimulationFailed { reason: e.to_string() });
             return out;
         }
     };
@@ -113,13 +136,11 @@ async fn run(start: &SimStart<'_>, plugins: Option<&PluginHandle>) -> SimOutcome
             None => match engine.next_media(t).await {
                 Ok(r) => r,
                 Err(EngineError::Selection(SelectionError::PoolEmpty)) => {
-                    out.notes.push(
-                        "plus rien de diffusable dans la grille à ce moment : blanc (Liquidsoap comble)".into(),
-                    );
+                    out.notes.push(Note::PoolEmpty);
                     break;
                 }
                 Err(e) => {
-                    out.notes.push(format!("simulation arrêtée : {e}"));
+                    out.notes.push(Note::SimulationFailed { reason: e.to_string() });
                     break;
                 }
             },
@@ -129,7 +150,7 @@ async fn run(start: &SimStart<'_>, plugins: Option<&PluginHandle>) -> SimOutcome
         }
         let Some(media) = r.media_path.clone() else {
             out.tracks.push(track(&r, String::new(), None, known.then_some(t)));
-            out.notes.push("FALLBACK : aucune règle ne couvre ce moment de la grille".into());
+            out.notes.push(Note::Fallback);
             break;
         };
         let brief = if r.stream {
@@ -142,13 +163,12 @@ async fn run(start: &SimStart<'_>, plugins: Option<&PluginHandle>) -> SimOutcome
         let _ = engine.on_track_completed().await;
 
         let Some(d_ms) = tr.duration_ms.filter(|d| *d > 0) else {
-            let why = if r.stream {
-                "relais d'un flux distant : durée inconnue"
+            out.notes.push(if r.stream {
+                Note::StreamUnknownDuration { media: media.clone() }
             } else {
-                "durée inconnue (média hors index)"
-            };
+                Note::UnknownDuration { media: media.clone() }
+            });
             out.tracks.push(tr);
-            out.notes.push(format!("{why} ; heures estimées impossibles au-delà"));
             known = false;
             // Keep simulating the ORDER from a nominal instant: better than
             // nothing, and every later start stays unestimated.
@@ -418,6 +438,6 @@ mod tests {
         })
         .await;
         assert!(out.tracks.is_empty());
-        assert!(out.notes.iter().any(|n| n.contains("simulation impossible")), "{:?}", out.notes);
+        assert!(matches!(out.notes[..], [Note::SimulationFailed { .. }]), "{:?}", out.notes);
     }
 }

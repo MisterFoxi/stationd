@@ -8,7 +8,7 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
-use crate::onair::{self, OnAirHub, Outcome, Slot, Snapshot, Track};
+use crate::onair::{self, Note, OnAirHub, Outcome, Slot, Snapshot, Track};
 pub use crate::proto::onair as proto;
 use proto::on_air_service_server::OnAirService;
 use proto::{HistoryRequest, HistoryResponse, OnAirSnapshot, WatchRequest};
@@ -89,7 +89,7 @@ fn to_proto(s: &Snapshot, cut: Cut) -> OnAirSnapshot {
         on_air: s.on_air.as_ref().map(track),
         prefetched: s.prefetched.as_ref().map(track),
         upcoming: s.upcoming.iter().take(sim_room).map(track).collect(),
-        notes: s.notes.clone(),
+        notes: s.notes.iter().map(note).collect(),
         history: s.history.iter().take(cut.history).map(track).collect(),
         current_playlist: s.current_playlist.as_ref().map(slot),
         next_playlists: s.next_playlists.iter().take(cut.playlists).map(slot).collect(),
@@ -135,4 +135,51 @@ fn slot(s: &Slot) -> proto::PlaylistSlot {
         from: s.from,
         at_local: s.at_local.clone().unwrap_or_default(),
     }
+}
+
+/// Domain note → opcode + typed parameters (no text leaves stationd).
+fn note(n: &Note) -> proto::Note {
+    use proto::note::Code as C;
+    let mut p = proto::Note::default();
+    let code = match n {
+        Note::StationPaused => C::StationPaused,
+        Note::StationSleeping => C::StationSleeping,
+        Note::SleepAtTrackEnd => C::SleepAtTrackEnd,
+        Note::SleepArmed => C::SleepArmed,
+        Note::LiveOnAir { dj } => {
+            p.dj = dj.clone();
+            C::LiveOnAir
+        }
+        Note::NoLiquidsoap => C::NoLiquidsoap,
+        Note::Simulated => C::Simulated,
+        Note::PoolEmpty => C::PoolEmpty,
+        Note::Fallback => C::Fallback,
+        Note::StreamUnknownDuration { media } => {
+            p.media = media.clone();
+            C::StreamUnknownDuration
+        }
+        Note::UnknownDuration { media } => {
+            p.media = media.clone();
+            C::UnknownDuration
+        }
+        Note::SimulationFailed { reason } => {
+            p.reason = reason.clone();
+            C::SimulationFailed
+        }
+        Note::PluginFilterFailed { plugin, reason } => {
+            p.plugin = plugin.clone();
+            p.reason = reason.clone();
+            C::PluginFilterFailed
+        }
+        Note::GridProjectionFailed { reason } => {
+            p.reason = reason.clone();
+            C::GridProjectionFailed
+        }
+        Note::HistoryUnreadable { reason } => {
+            p.reason = reason.clone();
+            C::HistoryUnreadable
+        }
+    };
+    p.code = code as i32;
+    p
 }

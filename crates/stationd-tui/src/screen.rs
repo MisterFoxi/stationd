@@ -21,12 +21,12 @@ pub enum Availability {
     Unavailable(String),
 }
 
-/// Une ligne d'aide : touche(s), effet.
+/// Une ligne d'aide : clés de traduction de la touche et de son effet.
 pub type KeyHelp = (&'static str, &'static str);
 
 pub trait Screen {
-    /// Libellé de l'onglet.
-    fn title(&self) -> &'static str;
+    /// Libellé de l'onglet (traduit).
+    fn title(&self) -> String;
 
     fn availability(&self, _store: &Store) -> Availability {
         Availability::Available

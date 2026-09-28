@@ -23,6 +23,7 @@ use crate::broadcast_log::{self, LogRow};
 use crate::grid_engine::GridEngine;
 use crate::ls_bridge::{LsBridge, OnAirKind};
 use crate::onair_sim::{self, SimStart, SimTrack};
+pub use crate::onair_sim::Note;
 use crate::plugin::PluginHandle;
 use crate::resolver::Epoch;
 use crate::station_control::{BroadcastState, StationControl};
@@ -87,7 +88,7 @@ pub struct Snapshot {
     pub on_air: Option<Track>,
     pub prefetched: Option<Track>,
     pub upcoming: Vec<Track>,
-    pub notes: Vec<String>,
+    pub notes: Vec<Note>,
     pub history: Vec<Track>,
     pub current_playlist: Option<Slot>,
     pub next_playlists: Vec<Slot>,
@@ -186,7 +187,7 @@ impl OnAirHub {
 #[derive(Default, Clone)]
 struct SimPart {
     upcoming: Vec<Track>,
-    notes: Vec<String>,
+    notes: Vec<Note>,
     next_playlists: Vec<Slot>,
     indicative: Vec<Slot>,
 }
@@ -253,7 +254,7 @@ pub async fn observe(src: &Sources, now: Epoch) -> Snapshot {
                 .map(history_track)
                 .collect();
         }
-        Err(e) => snap.notes.push(format!("historique illisible : {e}")),
+        Err(e) => snap.notes.push(Note::HistoryUnreadable { reason: e.to_string() }),
     }
     snap
 }
@@ -341,37 +342,37 @@ async fn simulate_part(src: &Sources, snap: &Snapshot, now: Epoch) -> SimPart {
                 })
                 .collect();
         }
-        Err(e) => part.notes.push(format!("projection de la grille impossible : {e}")),
+        Err(e) => part.notes.push(Note::GridProjectionFailed { reason: e.to_string() }),
     }
 
     // What follows the prepared track. Nothing to simulate when the station
     // resolves nothing at the next boundary.
     match state {
         Some(BroadcastState::Paused) => {
-            part.notes.push("station en pause : rien ne suit tant qu'elle n'est pas reprise".into());
+            part.notes.push(Note::StationPaused);
             return part;
         }
         Some(BroadcastState::Sleeping) => {
-            part.notes.push("station en veille : rien ne suit avant le réveil".into());
+            part.notes.push(Note::StationSleeping);
             return part;
         }
         Some(BroadcastState::Draining) if snap.listeners == Some(0) => {
-            part.notes.push("veille à la fin du morceau en cours (0 auditeur)".into());
+            part.notes.push(Note::SleepAtTrackEnd);
             return part;
         }
         Some(BroadcastState::Draining) => {
-            part.notes.push("veille armée : la station s'arrêtera dès qu'il n'y aura plus d'auditeur".into());
+            part.notes.push(Note::SleepArmed);
         }
         _ => {}
     }
     if let Some(dj) = &snap.live_dj {
-        part.notes.push(format!("DJ {dj} à l'antenne : la suite dépend de la fin du live"));
+        part.notes.push(Note::LiveOnAir { dj: dj.clone() });
         return part;
     }
 
     let (at, known) = start_of_simulation(snap, now);
     if !snap.liquidsoap {
-        part.notes.push("pas de [liquidsoap] : rien n'est diffusé, la suite montre ce que la grille choisirait".into());
+        part.notes.push(Note::NoLiquidsoap);
     }
     let want = UPCOMING_MAX.saturating_sub(usize::from(snap.prefetched.is_some()));
     let out = onair_sim::simulate(SimStart {
@@ -386,10 +387,7 @@ async fn simulate_part(src: &Sources, snap: &Snapshot, now: Epoch) -> SimPart {
     .await;
     part.upcoming = out.tracks.into_iter().map(sim_track).collect();
     if !part.upcoming.is_empty() {
-        part.notes.push(
-            "suite simulée : une suite possible (ordres aléatoires, overrides, live, grille modifiée peuvent la changer)"
-                .into(),
-        );
+        part.notes.push(Note::Simulated);
     }
     part.notes.extend(out.notes);
     part
@@ -554,7 +552,7 @@ mod tests {
         assert!(!first.liquidsoap);
         assert_eq!(first.upcoming.len(), UPCOMING_MAX, "notes: {:?}", first.notes);
         assert!(first.upcoming[0].title.as_deref().is_some_and(|t| t.starts_with("Titre")));
-        assert!(first.notes.iter().any(|n| n.contains("[liquidsoap]")));
+        assert!(first.notes.contains(&Note::NoLiquidsoap));
         assert!(first.history.is_empty());
 
         // A burst of changes → one new snapshot, not five.
@@ -571,7 +569,7 @@ mod tests {
         let paused = next(&mut rx).await;
         assert_eq!(paused.state, "paused");
         assert!(paused.upcoming.is_empty());
-        assert!(paused.notes.iter().any(|n| n.contains("pause")));
+        assert!(paused.notes.contains(&Note::StationPaused));
     }
 
     #[tokio::test]

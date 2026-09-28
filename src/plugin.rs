@@ -664,7 +664,7 @@ enum Msg {
         /// Run for the on-air simulation: mutations refused, failures not
         /// counted, reported back instead.
         simulation: bool,
-        reply: oneshot::Sender<(Vec<Candidate>, Vec<String>)>,
+        reply: oneshot::Sender<(Vec<Candidate>, Vec<(String, String)>)>,
     },
     Scan {
         media: Vec<ScanInput>,
@@ -720,7 +720,7 @@ pub struct PluginHandle {
     /// `Some` = a simulation handle ([`PluginHandle::simulation`]): events are
     /// not emitted, `filter_pool` runs in simulation mode and what went wrong
     /// is collected here.
-    sim: Option<Arc<Mutex<Vec<String>>>>,
+    sim: Option<Arc<Mutex<Vec<(String, String)>>>>,
 }
 
 impl PluginHandle {
@@ -742,8 +742,9 @@ impl PluginHandle {
         PluginHandle { tx: self.tx.clone(), sim: Some(Arc::new(Mutex::new(Vec::new()))) }
     }
 
-    /// What went wrong in the plugins during this simulation (deduplicated).
-    pub fn simulation_notes(&self) -> Vec<String> {
+    /// What went wrong in the plugins during this simulation, as
+    /// `(plugin, reason)` (deduplicated).
+    pub fn simulation_notes(&self) -> Vec<(String, String)> {
         self.sim
             .as_ref()
             .map(|n| n.lock().unwrap_or_else(|p| p.into_inner()).clone())
@@ -1018,7 +1019,7 @@ fn run_filters_mode(
     slots: &mut [Slot],
     candidates: Vec<Candidate>,
     simulation: bool,
-) -> (Vec<Candidate>, Vec<String>) {
+) -> (Vec<Candidate>, Vec<(String, String)>) {
     let mut notes = Vec::new();
     let mut cur = candidates;
     for slot in slots.iter_mut() {
@@ -1043,7 +1044,7 @@ fn run_filters_mode(
         match outcome {
             Some(Ok(kept)) if simulation => cur = kept,
             Some(Err(reason)) if simulation => {
-                notes.push(format!("plugin `{}` (filter_pool) : {reason}", slot.decl.name));
+                notes.push((slot.decl.name.clone(), reason));
             }
             Some(Ok(kept)) => {
                 if kept.len() != before {
@@ -2370,7 +2371,7 @@ mod tests {
         let (kept, notes) = run_filters_mode(&mut slots, vec![cand("x.mp3")], true);
         assert_eq!(kept.len(), 1, "the stage passes through");
         assert_eq!(notes.len(), 1);
-        assert!(notes[0].contains("filter-panic"), "{notes:?}");
+        assert_eq!(notes[0].0, "filter-panic", "{notes:?}");
         assert!(slots[0].failures.is_empty(), "not counted towards quarantine");
         assert!(matches!(slots[0].state, PluginState::Loaded));
     }

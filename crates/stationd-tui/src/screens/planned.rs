@@ -11,27 +11,32 @@ use ratatui_widgets::borders::BorderType;
 use ratatui_widgets::paragraph::{Paragraph, Wrap};
 
 use crate::app::Global;
+use crate::i18n;
 use crate::screen::{Availability, Screen};
 use crate::store::Store;
 use crate::style::Styles;
+use crate::tr;
 
 pub struct Planned {
+    /// Clé de traduction du titre.
     pub title: &'static str,
-    pub lot: &'static str,
+    /// Lot de réalisation (dossier §7).
+    pub lot: u32,
+    /// Clés de traduction du contenu prévu.
     pub summary: &'static [&'static str],
     /// Plugin dont l'écran dépend (chargé = disponible).
     pub plugin: Option<&'static str>,
 }
 
 impl Screen for Planned {
-    fn title(&self) -> &'static str {
-        self.title
+    fn title(&self) -> String {
+        i18n::text(self.title, &[])
     }
 
     fn availability(&self, store: &Store) -> Availability {
         match self.plugin {
             Some(p) if !store.plugin_loaded(p) => {
-                Availability::Unavailable(format!("plugin « {p} » non chargé"))
+                Availability::Unavailable(tr!("planned-plugin-missing", plugin = p))
             }
             _ => Availability::Available,
         }
@@ -41,15 +46,15 @@ impl Screen for Planned {
         let s = Styles(&ctx.theme);
         let mut lines = vec![
             Line::from(vec![
-                Span::styled("À venir ", s.warn()),
-                Span::styled(format!("({})", self.lot), s.muted()),
+                Span::styled(format!("{} ", tr!("planned-coming")), s.warn()),
+                Span::styled(format!("({})", tr!("planned-lot", lot = self.lot)), s.muted()),
             ]),
             Line::default(),
         ];
-        lines.extend(self.summary.iter().map(|l| Line::from(format!("  · {l}"))));
+        lines.extend(self.summary.iter().map(|key| Line::from(format!("  · {}", i18n::text(key, &[])))));
         if let Availability::Unavailable(why) = self.availability(&ctx.store) {
             lines.push(Line::default());
-            lines.push(Line::styled(format!("Indisponible : {why}"), s.error()));
+            lines.push(Line::styled(tr!("planned-unavailable", reason = why), s.error()));
         }
         Paragraph::new(lines)
             .wrap(Wrap { trim: false })
@@ -58,7 +63,7 @@ impl Screen for Planned {
                 Block::bordered()
                     .border_type(BorderType::Rounded)
                     .border_style(s.border())
-                    .title(Span::styled(format!(" {} ", self.title), s.title())),
+                    .title(Span::styled(format!(" {} ", self.title()), s.title())),
             )
             .render(area, buf);
         Ok(())

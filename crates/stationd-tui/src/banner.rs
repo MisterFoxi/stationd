@@ -12,7 +12,7 @@ use ratatui_widgets::paragraph::Paragraph;
 use stationd_proto::broadcast::State;
 
 use crate::store::{Link, Store, human_duration};
-use crate::fit;
+use crate::{fit, tr};
 use crate::style::Styles;
 
 const SEP: &str = "  │  ";
@@ -32,17 +32,17 @@ pub fn render(area: Rect, buf: &mut Buffer, store: &Store, s: &Styles) {
         .value
         .as_ref()
         .map(|st| st.station_name.clone())
-        .unwrap_or_else(|| "station ?".into());
+        .unwrap_or_else(|| tr!("banner-station-unknown"));
     let mut segs: Vec<Vec<Span>> = vec![
         vec![Span::styled(format!(" {} ", fit::ellipsize(&name, 24)), s.title())],
         broadcast_state(store, now, s, narrow),
         vec![listeners(store, now, s, narrow)],
     ];
     if let Some(dj) = live_dj(store) {
-        segs.push(vec![Span::styled(format!("LIVE {dj}"), s.warn())]);
+        segs.push(vec![Span::styled(tr!("banner-live", dj = dj), s.warn())]);
     }
     if let Some(n) = store.overrides.value.as_ref().map(Vec::len).filter(|n| *n > 0) {
-        let text = if narrow { format!("{n} ovr") } else { format!("{n} override(s) en attente") };
+        let text = if narrow { tr!("banner-overrides-short", n = n) } else { tr!("banner-overrides", n = n) };
         segs.push(vec![Span::styled(text, s.accent())]);
     }
     let left = fit::segments(segs, Span::raw(if narrow { " │ " } else { SEP }), a.width as usize);
@@ -59,20 +59,20 @@ pub fn render(area: Rect, buf: &mut Buffer, store: &Store, s: &Styles) {
 
 fn broadcast_state<'a>(store: &Store, now: Instant, s: &Styles, narrow: bool) -> Vec<Span<'a>> {
     let Some(b) = store.broadcast.value.as_ref() else {
-        return vec![Span::styled("diffusion : inconnue", s.muted())];
+        return vec![Span::styled(tr!("banner-state-unknown"), s.muted())];
     };
     let (text, style) = match State::try_from(b.state).unwrap_or(State::Unspecified) {
-        State::Running => ("RUNNING", s.ok()),
-        State::Paused => ("PAUSED", s.warn()),
-        State::Draining if narrow => ("DRAINING", s.warn()),
-        State::Draining => ("DRAINING (veille à la fin de la piste)", s.warn()),
-        State::Sleeping if narrow => ("SLEEPING", s.calm()),
-        State::Sleeping => ("SLEEPING (en veille)", s.calm()),
-        State::Unspecified => ("état ?", s.muted()),
+        State::Running => (tr!("state-running"), s.ok()),
+        State::Paused => (tr!("state-paused"), s.warn()),
+        State::Draining if narrow => (tr!("state-draining"), s.warn()),
+        State::Draining => (tr!("state-draining-long"), s.warn()),
+        State::Sleeping if narrow => (tr!("state-sleeping"), s.calm()),
+        State::Sleeping => (tr!("state-sleeping-long"), s.calm()),
+        State::Unspecified => (tr!("state-unknown"), s.muted()),
     };
     let mut v = vec![Span::styled(text, style)];
     if store.broadcast.is_stale(now) {
-        v.push(Span::styled(" ~ancien", s.muted()));
+        v.push(Span::styled(format!(" {}", tr!("banner-stale")), s.muted()));
     }
     v
 }
@@ -80,13 +80,13 @@ fn broadcast_state<'a>(store: &Store, now: Instant, s: &Styles, narrow: bool) ->
 /// Auditeurs : `—` si jamais reçu ou inconnu de stationd (jamais 0 à la place
 /// d'inconnu), `~N (ancien)` si la mesure a vieilli.
 fn listeners<'a>(store: &Store, now: Instant, s: &Styles, narrow: bool) -> Span<'a> {
-    let label = if narrow { "aud." } else { "auditeurs" };
+    let label = if narrow { tr!("banner-listeners-short") } else { tr!("banner-listeners") };
     match store.broadcast.value.as_ref().and_then(|b| b.listeners) {
-        None => Span::styled(format!("{label} —"), s.muted()),
+        None => Span::styled(tr!("banner-listeners-unknown", label = label), s.muted()),
         Some(n) if store.broadcast.is_stale(now) => {
-            Span::styled(format!("{label} ~{n} (ancien)"), s.warn())
+            Span::styled(tr!("banner-listeners-stale", label = label, n = n), s.warn())
         }
-        Some(n) => Span::styled(format!("{label} {n}"), s.accent()),
+        Some(n) => Span::styled(tr!("banner-listeners-count", label = label, n = n), s.accent()),
     }
 }
 
@@ -98,27 +98,27 @@ fn live_dj(store: &Store) -> Option<String> {
 fn link<'a>(store: &Store, now: Instant, s: &Styles, narrow: bool) -> Line<'a> {
     let host = store.addr.trim_start_matches("http://").trim_start_matches("https://").to_string();
     match &store.link {
-        Link::Connecting => Line::from(Span::styled(format!("connexion à {host}… "), s.warn())),
-        Link::Connected if narrow => Line::from(Span::styled("● connecté ", s.ok())),
+        Link::Connecting => Line::from(Span::styled(format!("{} ", tr!("link-connecting", host = host)), s.warn())),
+        Link::Connected if narrow => Line::from(Span::styled(format!("● {} ", tr!("link-connected")), s.ok())),
         Link::Connected => Line::from(vec![
             Span::styled("● ", s.ok()),
             Span::styled(format!("stationd {host} "), s.label()),
         ]),
         Link::Lost { since, .. } if narrow => Line::from(Span::styled(
-            format!("✕ injoignable {} ", human_duration(now.saturating_duration_since(*since))),
+            format!("✕ {} ", tr!("link-lost-short", since = human_duration(now.saturating_duration_since(*since)))),
             s.error(),
         )),
         Link::Lost { since, .. } => Line::from(Span::styled(
-            format!("✕ stationd injoignable depuis {} ", human_duration(now.saturating_duration_since(*since))),
+            format!("✕ {} ", tr!("link-lost", since = human_duration(now.saturating_duration_since(*since)))),
             s.error(),
         )),
     }
 }
 
 fn on_air<'a>(store: &Store, s: &Styles, max: usize) -> Line<'a> {
-    let head = " à l'antenne : ";
+    let head = format!(" {} ", tr!("banner-on-air"));
     let room = max.saturating_sub(head.chars().count() + 1);
-    let mut v = vec![Span::styled(head, s.label())];
+    let mut v = vec![Span::styled(head.clone(), s.label())];
     // Le flux de l'antenne décrit le morceau (artiste — titre) ; à défaut,
     // le nom de fichier que donne Liquidsoap.
     if let Some(t) = store.onair.as_ref().and_then(|o| o.on_air.as_ref()) {
@@ -146,8 +146,8 @@ fn on_air<'a>(store: &Store, s: &Styles, max: usize) -> Line<'a> {
             v.push(Span::raw(file));
             v.push(Span::styled(pl, s.muted()));
         }
-        Some(ls) if ls.on_air_kind == "fallback" => v.push(Span::styled("FALLBACK", s.error())),
-        Some(ls) if ls.on_air_kind == "halted" => v.push(Span::styled("à l'arrêt", s.calm())),
+        Some(ls) if ls.on_air_kind == "fallback" => v.push(Span::styled(tr!("kind-fallback"), s.error())),
+        Some(ls) if ls.on_air_kind == "halted" => v.push(Span::styled(tr!("kind-halted"), s.calm())),
         _ => v.push(Span::styled("—", s.muted())),
     }
     Line::from(v)
@@ -163,15 +163,19 @@ fn clock_line<'a>(store: &Store, now: Instant, s: &Styles, narrow: bool) -> Line
             v.push(Span::styled(format!(" {name}"), s.label()));
         }
         (None, Some(name)) => {
-            v.push(Span::styled(format!("fuseau « {name} » introuvable"), s.error()));
+            v.push(Span::styled(tr!("banner-tz-unknown", tz = name.clone()), s.error()));
         }
-        _ => v.push(Span::styled("fuseau —", s.muted())),
+        _ => v.push(Span::styled(tr!("banner-tz-none"), s.muted())),
     }
     v.push(Span::raw(if narrow { " │ " } else { SEP }));
     match store.uptime(now) {
-        Some(u) if narrow => v.push(Span::styled(format!("up {} ", human_duration(u)), s.label())),
-        Some(u) => v.push(Span::styled(format!("uptime {} ", human_duration(u)), s.label())),
-        None => v.push(Span::styled(if narrow { "up — " } else { "uptime — " }, s.muted())),
+        Some(u) if narrow => v.push(Span::styled(format!("{} ", tr!("banner-uptime-short", t = human_duration(u))), s.label())),
+        Some(u) => v.push(Span::styled(format!("{} ", tr!("banner-uptime", t = human_duration(u))), s.label())),
+        None => {
+            let t = "—".to_string();
+            let txt = if narrow { tr!("banner-uptime-short", t = t) } else { tr!("banner-uptime", t = t) };
+            v.push(Span::styled(format!("{txt} "), s.muted()));
+        }
     }
     Line::from(v)
 }

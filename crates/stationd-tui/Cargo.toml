@@ -26,3 +26,9 @@ rat-theme4 = "4.5.3"
 ratatui-core = "0.1.2"
 ratatui-widgets = "0.3.2"
 ratatui-crossterm = "0.1.2"
+# Traductions (Fluent) : catalogues locales/<langue>/*.ftl intégrés au binaire.
+fluent-templates = "0.15"
+unic-langid = "0.9"
+
+[dev-dependencies]
+regex = "1"

@@ -96,7 +96,7 @@ impl Store {
             tz: None,
             tz_name: None,
             onair: None,
-            onair_link: Err("flux de l'antenne : ouverture…".into()),
+            onair_link: Err(crate::tr!("onair-stream-opening")),
         }
     }
 
@@ -169,16 +169,17 @@ pub fn local_hms(tz: Option<&TimeZone>, epoch_s: i64) -> Option<String> {
     })
 }
 
-/// `2j 04h 18m`, `4h 02m`, `12m 05s`.
+/// `2j 04h 18m`, `4h 02m`, `12m 05s` (unités traduites).
 pub fn human_duration(d: Duration) -> String {
     let s = d.as_secs();
     let (days, hours, mins, secs) = (s / 86_400, (s / 3600) % 24, (s / 60) % 60, s % 60);
+    let p2 = |v: u64| format!("{v:02}");
     if days > 0 {
-        format!("{days}j {hours:02}h {mins:02}m")
+        crate::tr!("duration-days", d = days.to_string(), h = p2(hours), m = p2(mins))
     } else if hours > 0 {
-        format!("{hours}h {mins:02}m")
+        crate::tr!("duration-hours", h = hours.to_string(), m = p2(mins))
     } else {
-        format!("{mins}m {secs:02}s")
+        crate::tr!("duration-minutes", m = mins.to_string(), s = p2(secs))
     }
 }
 

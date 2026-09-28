@@ -11,6 +11,11 @@
 //
 // No-silent-failure : inconnu = champ absent (optional), jamais 0 ; une
 // simulation impossible ou tronquée le dit dans `notes`.
+//
+// Aucun texte à afficher ne sort d'ici : les notes sont des OPCODES
+// (`Note.Code`) avec leurs paramètres typés ; chaque client traduit dans sa
+// langue. Un code inconnu d'un client plus ancien reste affichable (« note
+// inconnue (code N) »), jamais silencieux.
 
 syntax = "proto3";
 
@@ -42,7 +47,7 @@ message OnAirSnapshot {
   Track on_air = 6;                 // absent si rien d'identifiable à l'antenne
   Track prefetched = 7;             // déjà remis à Liquidsoap : certain
   repeated Track upcoming = 8;      // simulés, après le préchargé
-  repeated string notes = 9;        // pourquoi la suite peut différer / est tronquée
+  repeated Note notes = 9;          // pourquoi la suite peut différer / est tronquée
   repeated Track history = 10;      // plus récent d'abord
   PlaylistSlot current_playlist = 11;
   repeated PlaylistSlot next_playlists = 12;  // changements de programme à venir, ordonnés
@@ -75,6 +80,35 @@ message Track {
     AIRED = 1;                      // diffusé jusqu'au bout
     CUT = 2;                        // parti de l'antenne avant sa fin (suivant, override hard, arrêt…)
     UNKNOWN = 3;                    // fin non enregistrée (lignes anciennes, durée inconnue)
+  }
+}
+
+// Pourquoi la suite affichée peut différer, ou s'arrête. Liste fermée ;
+// chaque code dit quels paramètres il remplit (les autres restent vides).
+message Note {
+  Code code = 1;
+  string plugin = 2;   // PLUGIN_FILTER_FAILED
+  string reason = 3;   // PLUGIN_FILTER_FAILED, SIMULATION_FAILED, GRID_PROJECTION_FAILED, HISTORY_UNREADABLE
+  string dj = 4;       // LIVE_ON_AIR
+  string media = 5;    // UNKNOWN_DURATION, STREAM_UNKNOWN_DURATION
+
+  enum Code {
+    CODE_UNSPECIFIED = 0;
+    STATION_PAUSED = 1;          // en pause : rien ne suit avant la reprise
+    STATION_SLEEPING = 2;        // en veille : rien ne suit avant le réveil
+    SLEEP_AT_TRACK_END = 3;      // veille à la fin du morceau (0 auditeur)
+    SLEEP_ARMED = 4;             // veille armée : dès qu'il n'y aura plus d'auditeur
+    LIVE_ON_AIR = 5;             // un DJ tient l'antenne : la suite dépend de la fin du live
+    NO_LIQUIDSOAP = 6;           // pas de [liquidsoap] : rien n'est diffusé, suite = ce que choisirait la grille
+    SIMULATED = 7;               // suite simulée : une suite possible
+    POOL_EMPTY = 8;              // plus rien de diffusable dans la grille : blanc
+    FALLBACK = 9;                // aucune règle ne couvre ce moment
+    STREAM_UNKNOWN_DURATION = 10;// relais d'un flux : durée inconnue, heures estimées impossibles au-delà
+    UNKNOWN_DURATION = 11;       // média de durée inconnue (hors index) : idem
+    SIMULATION_FAILED = 12;      // simulation impossible / arrêtée (reason)
+    PLUGIN_FILTER_FAILED = 13;   // un plugin a échoué pendant la simulation (plugin, reason)
+    GRID_PROJECTION_FAILED = 14; // projection des playlists à venir impossible (reason)
+    HISTORY_UNREADABLE = 15;     // historique illisible (reason)
   }
 }
 

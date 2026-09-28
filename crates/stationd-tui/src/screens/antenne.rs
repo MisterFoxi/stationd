@@ -3,7 +3,8 @@
 //! Tout vient du flux `OnAirService.Watch` : morceau à l'antenne et sa
 //! progression, playlist en cours et playlists à suivre, morceau préchargé
 //! (certain) puis morceaux théoriques (simulés, `~`), derniers joués avec leur
-//! issue, et les notes qui disent pourquoi la suite peut changer.
+//! issue, et les notes qui disent pourquoi la suite peut changer — reçues en
+//! opcodes, traduites ici.
 //!
 //! Sans ce flux (stationd trop ancien, coupure), la vue retombe sur ce que dit
 //! `Liquidsoap.GetStatus` — et le dit.
@@ -24,13 +25,14 @@ use ratatui_widgets::borders::BorderType;
 use ratatui_widgets::gauge::LineGauge;
 use ratatui_widgets::paragraph::{Paragraph, Wrap};
 use ratatui_widgets::table::{Cell, Row, Table};
-use stationd_proto::onair::{track::Outcome, OnAirSnapshot, PlaylistSlot, Track};
+use stationd_proto::onair::{Note, OnAirSnapshot, PlaylistSlot, Track, note, track::Outcome};
 
 use crate::app::{AppEvent, Global};
 use crate::fit;
 use crate::screen::{KeyHelp, Screen};
 use crate::store::{human_duration, local_hms};
 use crate::style::Styles;
+use crate::{k, tr};
 
 const UPCOMING_DEFAULT: usize = 10;
 const UPCOMING_MAX: usize = 30;
@@ -54,9 +56,9 @@ fn label(t: &Track) -> String {
     match (t.artist.is_empty(), t.title.is_empty()) {
         (false, false) => format!("{} — {}", t.artist, t.title),
         (true, false) => t.title.clone(),
-        _ if t.stream => format!("relais {}", t.rel_path),
+        _ if t.stream => tr!("track-relay", url = t.rel_path.clone()),
         _ if file.is_empty() => "—".into(),
-        _ => format!("{file} (titre non renseigné)"),
+        _ => tr!("track-untitled", file = file.to_string()),
     }
 }
 
@@ -78,7 +80,7 @@ fn hm(tz: Option<&TimeZone>, epoch: i64) -> String {
     local_hms(tz, epoch).map(|s| s.chars().take(5).collect()).unwrap_or_else(|| "—".into())
 }
 
-/// Provenance courte : playlist (› membre) · origine règle.
+/// Provenance courte : playlist (› membre) · origine règle · par source.
 fn provenance(t: &Track) -> String {
     let mut v = Vec::new();
     if !t.playlist_ref.is_empty() {
@@ -93,29 +95,60 @@ fn provenance(t: &Track) -> String {
         v.push(format!("· {origin}{rule}"));
     }
     if !t.override_source.is_empty() {
-        v.push(format!("par {}", t.override_source));
+        v.push(tr!("track-pushed-by", source = t.override_source.clone()));
     }
     v.join(" ")
 }
 
-fn origin_label(o: &str) -> &'static str {
+/// Origine (code envoyé par stationd) → libellé traduit.
+fn origin_label(o: &str) -> String {
     match o {
-        "AtClockHard" => "rendez-vous (coupe)",
-        "AtClockSoft" => "rendez-vous",
-        "Every" => "every",
-        "DayPart" => "tranche",
-        "BaseRotation" => "base",
-        "Override" => "override",
-        "Fallback" => "FALLBACK",
-        "" => "",
-        _ => "?",
+        "AtClockHard" => tr!("origin-at-clock-hard"),
+        "AtClockSoft" => tr!("origin-at-clock-soft"),
+        "Every" => tr!("origin-every"),
+        "DayPart" => tr!("origin-day-part"),
+        "BaseRotation" => tr!("origin-base-rotation"),
+        "Override" => tr!("origin-override"),
+        "Fallback" => tr!("origin-fallback"),
+        "" => String::new(),
+        other => other.to_string(),
+    }
+}
+
+/// Note (opcode + paramètres) → phrase traduite. La correspondance est
+/// exhaustive : un opcode ajouté au contrat sans traduction ne compile pas ;
+/// un opcode inconnu (stationd plus récent) reste affiché avec son numéro.
+fn note_text(n: &Note) -> String {
+    use note::Code as C;
+    let Ok(code) = C::try_from(n.code) else {
+        return tr!("note-unknown", code = n.code);
+    };
+    match code {
+        C::StationPaused => tr!("note-station-paused"),
+        C::StationSleeping => tr!("note-station-sleeping"),
+        C::SleepAtTrackEnd => tr!("note-sleep-at-track-end"),
+        C::SleepArmed => tr!("note-sleep-armed"),
+        C::LiveOnAir => tr!("note-live-on-air", dj = n.dj.clone()),
+        C::NoLiquidsoap => tr!("note-no-liquidsoap"),
+        C::Simulated => tr!("note-simulated"),
+        C::PoolEmpty => tr!("note-pool-empty"),
+        C::Fallback => tr!("note-fallback"),
+        C::StreamUnknownDuration => tr!("note-stream-unknown-duration", media = n.media.clone()),
+        C::UnknownDuration => tr!("note-unknown-duration", media = n.media.clone()),
+        C::SimulationFailed => tr!("note-simulation-failed", reason = n.reason.clone()),
+        C::PluginFilterFailed => {
+            tr!("note-plugin-filter-failed", plugin = n.plugin.clone(), reason = n.reason.clone())
+        }
+        C::GridProjectionFailed => tr!("note-grid-projection-failed", reason = n.reason.clone()),
+        C::HistoryUnreadable => tr!("note-history-unreadable", reason = n.reason.clone()),
+        C::Unspecified => tr!("note-unknown", code = n.code),
     }
 }
 
 fn slot_line<'a>(p: &PlaylistSlot, tz: Option<&TimeZone>, s: &Styles, width: usize) -> Line<'a> {
     let when = p.from.map(|e| hm(tz, e)).unwrap_or_else(|| "     ".into());
     let origin = origin_label(&p.origin);
-    let name = fit::ellipsize(&p.playlist_ref, width.saturating_sub(8 + origin.len() + 2));
+    let name = fit::ellipsize(&p.playlist_ref, width.saturating_sub(8 + origin.chars().count() + 2));
     Line::from(vec![
         Span::styled(format!(" {when}  "), s.label()),
         Span::raw(name),
@@ -123,7 +156,7 @@ fn slot_line<'a>(p: &PlaylistSlot, tz: Option<&TimeZone>, s: &Styles, width: usi
     ])
 }
 
-fn titled<'a>(title: &'a str, s: &Styles) -> Block<'a> {
+fn titled<'a>(title: String, s: &Styles) -> Block<'a> {
     Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(s.border())
@@ -136,17 +169,17 @@ impl Antenne {
     fn render_on_air(&self, area: Rect, buf: &mut Buffer, snap: &OnAirSnapshot, ctx: &Global) {
         let s = Styles(&ctx.theme);
         let tz = ctx.store.tz.as_ref();
-        let block = titled("À l'antenne", &s);
+        let block = titled(tr!("onair-title"), &s);
         let inner = block.inner(area);
         block.render(area, buf);
         let [l1, l2, l3] = Layout::vertical([Constraint::Length(1); 3]).areas(inner);
 
         let (state_txt, state_style) = match snap.state.as_str() {
-            "running" => ("▶ EN COURS", s.ok()),
-            "paused" => ("❚❚ PAUSE", s.warn()),
-            "draining" => ("▶ VEILLE ARMÉE", s.warn()),
-            "sleeping" => ("■ VEILLE", s.calm()),
-            _ => ("état ?", s.muted()),
+            "running" => (format!("▶ {}", tr!("onair-state-running")), s.ok()),
+            "paused" => (format!("❚❚ {}", tr!("onair-state-paused")), s.warn()),
+            "draining" => (format!("▶ {}", tr!("onair-state-draining")), s.warn()),
+            "sleeping" => (format!("■ {}", tr!("onair-state-sleeping")), s.calm()),
+            _ => (tr!("state-unknown"), s.muted()),
         };
         let right = Span::styled(format!(" {state_txt} "), state_style);
         let [a, b] =
@@ -178,13 +211,16 @@ impl Antenne {
                             .render(l2, buf);
                     }
                     (Some(e), _) => {
-                        let txt = if t.stream { "flux continu" } else { "durée inconnue" };
+                        let txt = if t.stream { tr!("onair-stream-continuous") } else { tr!("onair-duration-unknown") };
                         Paragraph::new(Span::styled(format!("{} · {txt}", mmss(Some(e))), s.muted()))
                             .render(l2, buf);
                     }
                     _ => {}
                 }
-                let since = t.started_at.map(|e| format!("depuis {} · ", hm(tz, e))).unwrap_or_default();
+                let since = t
+                    .started_at
+                    .map(|e| format!("{} · ", tr!("onair-since", time = hm(tz, e))))
+                    .unwrap_or_default();
                 Paragraph::new(Span::styled(
                     fit::ellipsize(&format!("{since}{}", provenance(t)), l3.width as usize),
                     s.muted(),
@@ -193,12 +229,12 @@ impl Antenne {
             }
             None => {
                 let what = match (snap.on_air_kind.as_str(), snap.live_dj.is_empty(), snap.liquidsoap) {
-                    (_, false, _) => format!("LIVE — {}", snap.live_dj),
-                    ("fallback", ..) => "FALLBACK (filet de sécurité)".into(),
-                    ("halted", ..) => "à l'arrêt (bruit de fond)".into(),
-                    (_, _, false) => "pas de [liquidsoap] : rien n'est diffusé".into(),
-                    ("", ..) => "rien reçu de Liquidsoap".into(),
-                    (k, ..) => k.to_string(),
+                    (_, false, _) => tr!("onair-live", dj = snap.live_dj.clone()),
+                    ("fallback", ..) => tr!("onair-fallback"),
+                    ("halted", ..) => tr!("onair-halted"),
+                    (_, _, false) => tr!("onair-no-liquidsoap"),
+                    ("", ..) => tr!("onair-nothing-reported"),
+                    (other, ..) => other.to_string(),
                 };
                 let style = if snap.on_air_kind == "fallback" { s.error() } else { s.muted() };
                 Paragraph::new(Span::styled(what, style)).render(a, buf);
@@ -209,7 +245,7 @@ impl Antenne {
     fn render_playlists(&self, area: Rect, buf: &mut Buffer, snap: &OnAirSnapshot, ctx: &Global) {
         let s = Styles(&ctx.theme);
         let tz = ctx.store.tz.as_ref();
-        let block = titled("Playlists", &s);
+        let block = titled(tr!("playlists-title"), &s);
         let inner = block.inner(area);
         block.render(area, buf);
         let w = inner.width as usize;
@@ -225,7 +261,7 @@ impl Antenne {
             lines.push(slot_line(p, tz, &s, w));
         }
         if !snap.indicative.is_empty() {
-            lines.push(Line::styled(" au compteur de titres :", s.label()));
+            lines.push(Line::styled(format!(" {}", tr!("playlists-by-track-count")), s.label()));
             for p in &snap.indicative {
                 lines.push(Line::styled(
                     format!("   {}  ({})", fit::ellipsize(&p.playlist_ref, w.saturating_sub(6)), p.rule_id),
@@ -239,7 +275,7 @@ impl Antenne {
     fn render_next(&self, area: Rect, buf: &mut Buffer, snap: &OnAirSnapshot, ctx: &Global) {
         let s = Styles(&ctx.theme);
         let tz = ctx.store.tz.as_ref();
-        let block = titled("À suivre", &s);
+        let block = titled(tr!("next-title"), &s);
         let inner = block.inner(area);
         block.render(area, buf);
 
@@ -248,9 +284,13 @@ impl Antenne {
             Layout::vertical([Constraint::Fill(1), Constraint::Length(notes_h)]).areas(inner);
 
         let mut rows: Vec<Row> = Vec::new();
+        // Première colonne à la largeur de ce qu'elle contient (le libellé
+        // « préparé » varie selon la langue), jamais coupée.
+        let prepared = tr!("next-prepared");
+        let first_w = (Span::raw(prepared.as_str()).width().max("~ 00:00".len())) as u16;
         if let Some(t) = &snap.prefetched {
             rows.push(Row::new(vec![
-                Cell::from(Span::styled("préparé", s.ok())),
+                Cell::from(Span::styled(prepared.clone(), s.ok())),
                 Cell::from(label(t)),
                 Cell::from(Span::styled(mmss(t.duration_ms), s.label())),
                 Cell::from(Span::styled(provenance(t), s.muted())),
@@ -261,7 +301,7 @@ impl Antenne {
             let when = t.estimated_at.map(|e| format!("~ {}", hm(tz, e))).unwrap_or_else(|| "~ —".into());
             let mut from = provenance(t);
             if let Some(c) = t.cut_at {
-                from = format!("coupé {} · {from}", hm(tz, c));
+                from = format!("{} · {from}", tr!("next-cut-at", time = hm(tz, c)));
             }
             rows.push(Row::new(vec![
                 Cell::from(Span::styled(when, s.warn())),
@@ -271,13 +311,13 @@ impl Antenne {
             ]));
         }
         if rows.is_empty() {
-            Paragraph::new(Span::styled(" rien", s.muted())).render(table_a, buf);
+            Paragraph::new(Span::styled(format!(" {}", tr!("next-nothing")), s.muted())).render(table_a, buf);
         } else {
             let wide = table_a.width >= 70;
             let widths: Vec<Constraint> = if wide {
-                vec![Constraint::Length(8), Constraint::Fill(3), Constraint::Length(7), Constraint::Fill(2)]
+                vec![Constraint::Length(first_w), Constraint::Fill(3), Constraint::Length(7), Constraint::Fill(2)]
             } else {
-                vec![Constraint::Length(8), Constraint::Fill(1), Constraint::Length(6), Constraint::Length(0)]
+                vec![Constraint::Length(first_w), Constraint::Fill(1), Constraint::Length(6), Constraint::Length(0)]
             };
             Table::new(rows, widths).column_spacing(1).render(table_a, buf);
         }
@@ -285,7 +325,12 @@ impl Antenne {
             .notes
             .iter()
             .take(3)
-            .map(|n| Line::styled(format!(" ⚠ {}", fit::ellipsize(n, notes_a.width.saturating_sub(4) as usize)), s.warn()))
+            .map(|n| {
+                Line::styled(
+                    format!(" ⚠ {}", fit::ellipsize(&note_text(n), notes_a.width.saturating_sub(4) as usize)),
+                    s.warn(),
+                )
+            })
             .collect();
         Paragraph::new(notes).render(notes_a, buf);
     }
@@ -293,22 +338,28 @@ impl Antenne {
     fn render_history(&self, area: Rect, buf: &mut Buffer, snap: &OnAirSnapshot, ctx: &Global) {
         let s = Styles(&ctx.theme);
         let tz = ctx.store.tz.as_ref();
-        let block = titled("Joués", &s);
+        let block = titled(tr!("played-title"), &s);
         let inner = block.inner(area);
         block.render(area, buf);
         if snap.history.is_empty() {
-            Paragraph::new(Span::styled(" rien encore", s.muted())).render(inner, buf);
+            Paragraph::new(Span::styled(format!(" {}", tr!("played-nothing")), s.muted())).render(inner, buf);
             return;
         }
+        // Colonne « issue » à la largeur du plus long libellé traduit.
+        let end_w = [tr!("played-aired"), tr!("played-cut"), tr!("played-end-unknown")]
+            .iter()
+            .map(|l| Span::raw(l.as_str()).width())
+            .max()
+            .unwrap_or(8) as u16;
         let rows: Vec<Row> = snap
             .history
             .iter()
             .take(inner.height as usize)
             .map(|t| {
-                let (end, style): (&str, Style) = match Outcome::try_from(t.outcome).unwrap_or(Outcome::Unspecified) {
-                    Outcome::Aired => ("diffusé", s.ok()),
-                    Outcome::Cut => ("coupé", s.warn()),
-                    Outcome::Unknown | Outcome::Unspecified => ("fin ?", s.muted()),
+                let (end, style): (String, Style) = match Outcome::try_from(t.outcome).unwrap_or(Outcome::Unspecified) {
+                    Outcome::Aired => (tr!("played-aired"), s.ok()),
+                    Outcome::Cut => (tr!("played-cut"), s.warn()),
+                    Outcome::Unknown | Outcome::Unspecified => (tr!("played-end-unknown"), s.muted()),
                 };
                 Row::new(vec![
                     Cell::from(Span::styled(t.started_at.map(|e| hm(tz, e)).unwrap_or_default(), s.label())),
@@ -324,7 +375,7 @@ impl Antenne {
                 Constraint::Length(5),
                 Constraint::Fill(3),
                 Constraint::Length(7),
-                Constraint::Length(8),
+                Constraint::Length(end_w),
                 Constraint::Fill(2),
             ]
         } else {
@@ -332,7 +383,7 @@ impl Antenne {
                 Constraint::Length(5),
                 Constraint::Fill(1),
                 Constraint::Length(6),
-                Constraint::Length(8),
+                Constraint::Length(end_w),
                 Constraint::Length(0),
             ]
         };
@@ -343,40 +394,48 @@ impl Antenne {
     fn render_fallback(&self, area: Rect, buf: &mut Buffer, why: &str, ctx: &Global) {
         let s = Styles(&ctx.theme);
         let store = &ctx.store;
+        let field = |key: String| Span::styled(format!(" {:<13}", key), s.label());
         let mut lines = vec![Line::styled(format!(" {why}"), s.warn()), Line::default()];
         match store.liquidsoap.value.as_ref() {
             Some(ls) if ls.enabled => {
                 let at = |e: i64| local_hms(store.tz.as_ref(), e).unwrap_or_default();
                 lines.push(Line::from(vec![
-                    Span::styled(" À l'antenne  ", s.label()),
+                    field(tr!("fallback-on-air")),
                     Span::raw(if ls.on_air_media.is_empty() { ls.on_air_kind.clone() } else { ls.on_air_media.clone() }),
                 ]));
                 if ls.on_air_since > 0 {
                     let wall = (jiff::Timestamp::now().as_second() - ls.on_air_since).max(0) as u64;
                     lines.push(Line::from(vec![
-                        Span::styled(" Depuis       ", s.label()),
-                        Span::raw(format!("{} (il y a {})", at(ls.on_air_since), human_duration(Duration::from_secs(wall)))),
+                        field(tr!("fallback-since")),
+                        Span::raw(tr!(
+                            "fallback-since-value",
+                            time = at(ls.on_air_since),
+                            ago = human_duration(Duration::from_secs(wall))
+                        )),
                     ]));
                 }
                 lines.push(Line::from(vec![
-                    Span::styled(" Préparé      ", s.label()),
+                    field(tr!("fallback-prepared")),
                     Span::raw(if ls.next_media.is_empty() { "—".to_string() } else { ls.next_media.clone() }),
                 ]));
             }
-            Some(_) => lines.push(Line::styled(" Liquidsoap non configuré", s.muted())),
-            None => lines.push(Line::styled(" Antenne inconnue", s.muted())),
+            Some(_) => lines.push(Line::styled(format!(" {}", tr!("fallback-no-liquidsoap")), s.muted())),
+            None => lines.push(Line::styled(format!(" {}", tr!("fallback-unknown")), s.muted())),
         }
-        Paragraph::new(lines).wrap(Wrap { trim: false }).block(titled("À l'antenne (repli)", &s)).render(area, buf);
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(titled(tr!("fallback-title"), &s))
+            .render(area, buf);
     }
 }
 
 impl Screen for Antenne {
-    fn title(&self) -> &'static str {
-        "Antenne"
+    fn title(&self) -> String {
+        tr!("screen-antenne")
     }
 
     fn help(&self) -> &'static [KeyHelp] {
-        &[("+ / -", "morceaux à suivre affichés")]
+        &[(k!("key-plus-minus"), k!("help-upcoming-count"))]
     }
 
     fn event(&mut self, event: &AppEvent, _ctx: &mut Global) -> Result<Control<AppEvent>, Error> {
@@ -404,11 +463,12 @@ impl Screen for Antenne {
         let snap = match (&ctx.store.onair, &ctx.store.onair_link) {
             (Some(snap), _) => snap.clone(),
             (None, Err(why)) => {
-                self.render_fallback(area, buf, why, ctx);
+                let why = why.clone();
+                self.render_fallback(area, buf, &why, ctx);
                 return Ok(());
             }
             (None, Ok(())) => {
-                self.render_fallback(area, buf, "en attente du premier instantané…", ctx);
+                self.render_fallback(area, buf, &tr!("onair-waiting"), ctx);
                 return Ok(());
             }
         };
@@ -449,7 +509,8 @@ impl Screen for Antenne {
             self.render_history(bottom, buf, &snap, ctx);
         }
         if let Err(why) = &ctx.store.onair_link {
-            Paragraph::new(Span::styled(format!(" ~ {why} — dernier instantané affiché"), s.warn())).render(link_a, buf);
+            Paragraph::new(Span::styled(format!(" ~ {}", tr!("onair-link-lost", reason = why.clone())), s.warn()))
+                .render(link_a, buf);
         }
         Ok(())
     }

@@ -23,7 +23,7 @@ pub type Read<T> = Result<T, String>;
 /// seule après une coupure (tonic). Aucun appel n'est fait ici.
 pub fn lazy_channel(addr: &str) -> anyhow::Result<Channel> {
     let endpoint = Endpoint::from_shared(addr.to_string())
-        .map_err(|e| anyhow::anyhow!("adresse gRPC invalide « {addr} » : {e}"))?
+        .map_err(|e| anyhow::anyhow!(crate::tr!("rpc-bad-address", addr = addr.to_string(), reason = e.to_string())))?
         .connect_timeout(Duration::from_secs(3))
         .timeout(READ_TIMEOUT);
     Ok(endpoint.connect_lazy())
@@ -36,7 +36,7 @@ async fn bounded<T>(
     match tokio::time::timeout(READ_TIMEOUT, call).await {
         Ok(Ok(reply)) => Ok(reply.into_inner()),
         Ok(Err(status)) => Err(status_text(&status)),
-        Err(_) => Err(format!("pas de réponse en {} s", READ_TIMEOUT.as_secs())),
+        Err(_) => Err(crate::tr!("rpc-timeout", s = READ_TIMEOUT.as_secs())),
     }
 }
 
@@ -44,8 +44,8 @@ async fn bounded<T>(
 /// dite comme telle plutôt que par le code brut `Unavailable`.
 pub fn status_text(status: &tonic::Status) -> String {
     match status.code() {
-        tonic::Code::Unavailable => format!("stationd injoignable ({})", status.message()),
-        code => format!("{code:?} : {}", status.message()),
+        tonic::Code::Unavailable => crate::tr!("rpc-unreachable", reason = status.message().to_string()),
+        code => crate::tr!("rpc-status", code = format!("{code:?}"), reason = status.message().to_string()),
     }
 }
 
@@ -104,10 +104,10 @@ pub async fn watch_onair(
     match tokio::time::timeout(READ_TIMEOUT, cli.watch(ONAIR_REQUEST)).await {
         Ok(Ok(r)) => Ok(r.into_inner()),
         Ok(Err(status)) if status.code() == tonic::Code::Unimplemented => {
-            Err("ce stationd ne sert pas OnAirService (à mettre à jour)".into())
+            Err(crate::tr!("rpc-no-onair"))
         }
         Ok(Err(status)) => Err(status_text(&status)),
-        Err(_) => Err(format!("pas de réponse en {} s", READ_TIMEOUT.as_secs())),
+        Err(_) => Err(crate::tr!("rpc-timeout", s = READ_TIMEOUT.as_secs())),
     }
 }
 

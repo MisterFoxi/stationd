@@ -10,6 +10,7 @@
 mod app;
 mod banner;
 mod fit;
+mod i18n;
 mod rpc;
 mod screen;
 mod screens;
@@ -21,24 +22,31 @@ use clap::Parser;
 use rat_salsa::poll::{PollCrossterm, PollRendered, PollTimers, PollTokio};
 use rat_salsa::{RunConfig, run_tui};
 
+// L'aide de la ligne de commande (`--help`) reste en anglais, comme celle de
+// stationctl : l'interface, elle, est traduite (`i18n`, `--lang`).
 #[derive(Parser, Debug)]
-#[command(name = "stationd-tui", about = "Administration de stationd en terminal")]
+#[command(name = "stationd-tui", about = "stationd administration in a terminal")]
 pub struct Args {
-    /// Adresse gRPC de stationd (même défaut que stationctl)
+    /// stationd gRPC address (same default as stationctl)
     #[arg(long, default_value = "http://127.0.0.1:50051")]
     pub addr: String,
 
-    /// Thème rat-theme4 (ex. « Imperial », « Nord », « Imperial Shell »)
+    /// Interface language: fr (default), en, de. Default: from LC_ALL / LC_MESSAGES / LANG
+    #[arg(long)]
+    pub lang: Option<String>,
+
+    /// rat-theme4 theme (e.g. "Imperial", "Nord", "Imperial Shell")
     #[arg(long, default_value = "Imperial")]
     pub theme: String,
 
-    /// Liste les thèmes disponibles et quitte
+    /// List the available themes and exit
     #[arg(long)]
     pub list_themes: bool,
 }
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    i18n::init(args.lang.as_deref());
     if args.list_themes {
         for name in rat_theme4::salsa_themes() {
             println!("{name}");

@@ -1,6 +1,6 @@
 # StationD — Dossier technique de la TUI
 
-Version 2.3 — 28 septembre 2026
+Version 2.4 — 28 septembre 2026
 Statut : refonte complète (remplace la v1.0 du 25/09). Document vivant : il suit les besoins, pas l'inverse.
 Socle : Rust + Ratatui + rat-salsa / rat-widget, client gRPC pur de `stationd`.
 
@@ -19,6 +19,7 @@ Socle : Rust + Ratatui + rat-salsa / rat-widget, client gRPC pur de `stationd`.
 | D9 | Le login est implémenté **une seule fois, dans stationd** (`AuthService`, §3.9). La TUI l'appelle directement ; le futur webadmin passe par `api`, qui appelle ce même service et transmet le jeton. `api` n'a pas de base d'utilisateurs. |
 | D10 | Les TOML (playlists, grille) sont **enregistrés par stationd**, avec contrôle de révision : un client distant ne peut pas écrire dans les dossiers du nœud. |
 | D11 | Socle d'interface : **rat-salsa** (boucle d'application), **rat-widget** (widgets), **rat-focus** (focus des formulaires), **rat-theme** (palettes). |
+| D12 | **Aucune chaîne affichée en dur** : la TUI passe par des catalogues **Fluent** (`fr` par défaut et repli, `en`, `de`). stationd n'envoie **aucun texte à afficher** : ce qu'il signale arrive en **opcodes** (énumérations proto) avec paramètres typés, chaque client traduit. |
 
 ## 1. Les quatre manques à combler
 
@@ -225,7 +226,16 @@ Un plugin décrit ses vues en données, la TUI les rend avec des widgets génér
 
 L'onglet « Plugins » liste les vues des plugins chargés. `stationctl plugin view <plugin> <view>` affiche la même chose en texte (complétude CLI). L'écran Tags (§5.6) est un écran natif de la TUI qui parle au plugin via `Call` ; les vues déclaratives servent aux plugins plus simples (`play-stats`, `stop-when-idle`).
 
-### 4.4 Widgets
+### 4.4 Langues (D12)
+
+- Catalogues `crates/stationd-tui/locales/<langue>/tui.ftl`, intégrés au binaire (`fluent-templates`). Langue : `--lang`, sinon `LC_ALL` / `LC_MESSAGES` / `LANG` (« de_DE.UTF-8 » → `de`), sinon français. Clé absente d'une langue → français ; absente partout → `⟦clé⟧` affiché, jamais un vide.
+- Dans le code : `tr!("cle", var = valeur)` ; une clé rangée dans une table est marquée `k!("cle")`.
+- Tests : les trois catalogues ont exactement les mêmes clés ; toute clé utilisée dans le code existe, toute clé du catalogue est utilisée ; pluriels et variables se résolvent dans chaque langue.
+- Opcodes : `onair_v1.Note.Code` (+ `plugin`, `reason`, `dj`, `media`). Un `match` exhaustif côté client : un code ajouté sans traduction ne compile pas ; un code inconnu d'un client plus ancien s'affiche « note inconnue (code N) ». Les états (`running`…), origines (`AtClockHard`…) et issues (`Outcome`) sont aussi des codes, traduits côté client.
+- Ne se traduisent pas : les noms (playlists, titres, DJ, règles), les messages d'erreur techniques relayés tels quels, l'aide `--help` de la ligne de commande (affichée avant le choix de la langue), les journaux de stationd (anglais, destinés au développeur). `stationctl` reste en anglais (hors périmètre pour l'instant).
+- L'allemand est à faire relire par un germanophone.
+
+### 4.5 Widgets
 
 Base : **rat-widget** pour tout ce qui est saisie et structure, **rat-focus** pour l'ordre de tabulation et le focus des formulaires et dialogues, **rat-theme** pour les palettes (thème sombre par défaut, couleur toujours doublée d'un texte). Widgets ratatui standard et quelques widgets maison pour le reste.
 

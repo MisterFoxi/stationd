@@ -1701,6 +1701,29 @@ fn onair_history_line(t: &onair::Track, tz: &jiff::tz::TimeZone, secs: bool) -> 
     format!("  {when}  {:<44} {:>7}  {:<11} {}", onair_label(t), mmss(t.duration_ms), end, onair_from(t))
 }
 
+/// An on-air note (opcode + parameters), worded for the CLI.
+fn onair_note(n: &onair::Note) -> String {
+    use onair::note::Code as C;
+    match C::try_from(n.code) {
+        Ok(C::StationPaused) => "station paused: nothing follows until it resumes".into(),
+        Ok(C::StationSleeping) => "station asleep: nothing follows until it wakes".into(),
+        Ok(C::SleepAtTrackEnd) => "falls asleep at the end of this track (0 listeners)".into(),
+        Ok(C::SleepArmed) => "sleep armed: the station stops as soon as nobody listens".into(),
+        Ok(C::LiveOnAir) => format!("DJ {} on air: what follows depends on the end of the live", n.dj),
+        Ok(C::NoLiquidsoap) => "no [liquidsoap]: nothing airs; this is what the grid would pick".into(),
+        Ok(C::Simulated) => "simulated: one possible sequence (shuffles, overrides, a live, a new grid can change it)".into(),
+        Ok(C::PoolEmpty) => "nothing left to air in the grid at that point: dead air (Liquidsoap fills it)".into(),
+        Ok(C::Fallback) => "FALLBACK: no rule covers that moment".into(),
+        Ok(C::StreamUnknownDuration) => format!("relay {}: unknown duration, no estimated time beyond", n.media),
+        Ok(C::UnknownDuration) => format!("{}: unknown duration (not indexed), no estimated time beyond", n.media),
+        Ok(C::SimulationFailed) => format!("simulation failed: {}", n.reason),
+        Ok(C::PluginFilterFailed) => format!("plugin `{}` failed in the simulation: {}", n.plugin, n.reason),
+        Ok(C::GridProjectionFailed) => format!("grid projection failed: {}", n.reason),
+        Ok(C::HistoryUnreadable) => format!("history unreadable: {}", n.reason),
+        Ok(C::Unspecified) | Err(_) => format!("unknown note (code {})", n.code),
+    }
+}
+
 fn print_onair(s: &onair::OnAirSnapshot) {
     let tz = onair_tz(&s.timezone);
     let listeners = s.listeners.map_or("listeners —".to_string(), |n| format!("listeners {n}"));
@@ -1772,7 +1795,7 @@ fn print_onair(s: &onair::OnAirSnapshot) {
     if !s.notes.is_empty() {
         println!("\nNOTES");
         for n in &s.notes {
-            println!("  - {n}");
+            println!("  - {}", onair_note(n));
         }
     }
 }
