@@ -168,10 +168,6 @@ planned-coming = À venir
 planned-lot = lot { $lot }
 planned-plugin-missing = plugin « { $plugin } » non chargé
 planned-unavailable = Indisponible : { $reason }
-planned-control-1 = Diffusion : pause, reprise, suivant, veille, réveil
-planned-control-2 = Overrides : pousser, lister, vider
-planned-control-3 = Live : couper le DJ, ouvrir / fermer un créneau
-planned-control-4 = File queue, scan de la bibliothèque, plugins, arrêt opérateur
 planned-playlists-1 = Liste : mode, pool, règles et groupes qui la référencent
 planned-playlists-2 = Formulaire par mode, aperçu du pool en direct
 planned-playlists-3 = Enregistrement par stationd (révision, conflits)
@@ -187,3 +183,215 @@ planned-system-1 = Santé : stationd, Liquidsoap, Icecast (mounts), live
 planned-system-2 = Événements en direct, statistiques de diffusion
 planned-plugins-1 = Vues déclarées par les plugins chargés
 planned-plugins-2 = Base de chaque plugin (info, requête en lecture seule)
+
+## Incidents de grille (notes de l'antenne)
+note-rendezvous-will-not-cut = prévu : le rendez-vous { $rule } de { $time } ne coupera pas — « { $playlist } » n'a rien à diffuser
+note-source-will-be-empty = prévu : { $time }, « { $playlist } » ({ $rule }) n'aura rien à diffuser — la priorité inférieure prendra le relais
+note-rendezvous-not-cut = constaté : le rendez-vous { $rule } n'a pas coupé à { $time } — « { $playlist } » n'avait rien à diffuser ({ $count ->
+    [one] 1 fois
+   *[other] { $count } fois
+})
+note-source-was-empty = constaté : « { $playlist } » ({ $rule }) n'avait rien à diffuser à { $time } ({ $count ->
+    [one] 1 fois
+   *[other] { $count } fois
+})
+slot-pool-empty = pool vide : rien ne passera
+slot-nothing-playable = rien de jouable (contraintes, plugins)
+
+## Touches (actions)
+key-space = Espace
+key-tab = Tab
+key-up-down = ↑ / ↓
+key-a = a
+key-shift-a = A
+key-c = c
+key-d = d
+key-shift-d = D
+key-e = e
+key-k = k
+key-l = l
+key-n = n
+key-o = o
+key-r = r
+key-s = s
+key-v = v
+key-w = w
+key-x = x
+help-pause-resume = pause / reprise / réveil
+help-skip = passer au suivant
+help-override = pousser un override
+help-drain = veille dès 0 auditeur
+help-wake = réveiller
+help-section = section suivante
+help-select = choisir la ligne
+help-override-remove = retirer l'override choisi
+help-override-clear = vider la file
+help-live-kick = couper le DJ
+help-live-open = ouvrir un créneau
+help-live-close = fermer l'ouverture choisie
+help-enqueue = ajouter à une file queue
+help-scan = scanner la bibliothèque
+help-shutdown = arrêt opérateur
+help-shutdown-force = arrêt forcé (coupe le DJ)
+
+## Actions : ligne de statut
+status-action-running = action en cours…
+status-action-failed = échec : { $reason }
+status-cancelled = annulé
+done-state = diffusion : { $from } → { $to }
+done-state-unchanged = diffusion déjà { $state }
+done-skip = passage au suivant demandé
+done-override = override #{ $id } en file ({ $pending } en attente)
+done-override-degraded = override #{ $id } en file, joué en SOFT (pas de coupe possible) — { $pending } en attente
+done-overrides-cleared = { $n ->
+    [one] 1 override retiré
+   *[other] { $n } overrides retirés
+}
+done-live-kicked = DJ { $dj } coupé
+done-live-opened = créneau ouvert pour { $dj } jusqu'à { $until }
+done-live-closed = ouverture de { $dj } fermée
+done-enqueued = ajouté à « { $playlist } » ({ $len } en file)
+done-enqueue-full = file « { $playlist } » pleine ({ $len }) : rien ajouté
+done-scan = scan : { $found } trouvés, { $skipped } écartés, { $unavailable } disparus
+done-plugin = plugin { $name } : { $state }
+done-plugin-reason = plugin { $name } : { $state } ({ $reason })
+done-shutdown = arrêt opérateur : Liquidsoap garé sur le bruit de fond, stationd s'arrête
+done-shutdown-fallback = arrêt opérateur : stationd s'arrête, le filet de sécurité de Liquidsoap prend l'antenne
+
+## Dialogues
+dialog-cancel = Annuler
+dialog-confirm-keys = ←/→ choisir · Entrée valider · Échap annuler
+dialog-form-keys = Tab/↑↓ champ · ←/→ choix · Entrée valider · Échap annuler
+form-required = « { $field } » est obligatoire
+form-positive-integer = « { $field } » : un entier ≥ 1
+confirm-pause-title = Mettre en pause
+confirm-pause-body = L'antenne s'arrête sur « { $track } » jusqu'à la reprise.
+confirm-pause-yes = Mettre en pause
+confirm-skip-title = Passer au suivant
+confirm-skip-body = Coupe « { $track } » maintenant.
+confirm-skip-next = Suivant prévu : « { $track } ».
+confirm-skip-yes = Passer au suivant
+confirm-drain-title = Veille dès 0 auditeur
+confirm-drain-body = La station passera en veille dès qu'il n'y aura plus d'auditeur (bruit de fond, plus de grille).
+confirm-drain-yes = Armer la veille
+form-override-title = Pousser un override
+form-override-kind = Contenu
+form-override-kind-media = Média
+form-override-kind-playlist = Playlist
+form-override-target = Chemin sous media/ ou référence de playlist
+form-override-mode = Mode
+form-override-soft = SOFT : au prochain morceau
+form-override-hard = HARD : coupe maintenant
+form-override-expiry = Péremption (30s, 5m, 2h ; vide = jamais)
+form-override-tracks = Pistes tenues (playlist)
+override-media = Média : { $path }
+override-playlist = Playlist : { $playlist }
+confirm-override-title = Pousser cet override ?
+confirm-override-soft = Passe au prochain bord de morceau.
+confirm-override-hard = Coupe le morceau en cours MAINTENANT.
+confirm-override-tracks = { $n ->
+    [one] Tient 1 piste.
+   *[other] Tient { $n } pistes.
+}
+confirm-override-no-expiry = Sans péremption.
+confirm-override-expiry = Périmé s'il n'est pas passé dans { $expiry }.
+confirm-override-yes = Pousser
+confirm-clear-one-title = Retirer l'override
+confirm-clear-one-body = Retirer l'override #{ $id } ({ $what }) de la file ?
+confirm-clear-all-title = Vider la file d'overrides
+confirm-clear-all-body = { $n ->
+    [one] Retirer l'override en attente ?
+   *[other] Retirer les { $n } overrides en attente ?
+}
+confirm-clear-yes = Retirer
+confirm-kick-title = Couper le DJ
+confirm-kick-body = Déconnecter { $dj } maintenant ? Il sera refusé jusqu'à la fin de son créneau.
+confirm-kick-yes = Couper
+form-live-open-title = Ouvrir un créneau live
+form-live-dj = DJ
+form-live-duration = Durée (30m, 2h, 1d)
+confirm-live-close-title = Fermer l'ouverture
+confirm-live-close-body = Fermer maintenant l'ouverture de { $dj } ?
+confirm-live-close-yes = Fermer
+form-enqueue-title = Ajouter à une file queue
+form-enqueue-playlist = Playlist (mode queue)
+form-enqueue-media = Chemin sous media/
+confirm-scan-title = Scanner la bibliothèque
+confirm-scan-body = Relit tout media/ : peut durer sur un gros disque ou un montage NFS. L'antenne n'est pas touchée.
+confirm-scan-yes = Scanner
+plugin-verb-start = démarrer
+plugin-verb-stop = arrêter
+plugin-verb-restart = redémarrer
+plugin-verb-reload = recharger
+confirm-plugin-start = Démarrer le plugin { $name }
+confirm-plugin-stop = Arrêter le plugin { $name }
+confirm-plugin-restart = Redémarrer le plugin { $name }
+confirm-plugin-reload = Recharger le plugin { $name }
+confirm-plugin-body = Le nouvel état se lit dans la liste des plugins.
+confirm-shutdown-title = Arrêt opérateur
+confirm-shutdown-body = stationd s'arrête et Liquidsoap est garé sur le bruit de fond. Pour relancer : stationctl station start.
+confirm-shutdown-kicks = Le DJ { $dj } sera déconnecté.
+confirm-shutdown-refused-live = Le DJ { $dj } est à l'antenne : l'arrêt sera refusé (A pour forcer).
+confirm-shutdown-continue = Continuer
+confirm-shutdown-again-title = Confirmer l'arrêt
+confirm-shutdown-again-body = Dernière confirmation : la station cesse de diffuser la grille.
+confirm-shutdown-yes = Arrêter la station
+
+## Écran Contrôle
+control-broadcast = Diffusion
+control-overrides = Overrides
+control-live = Live
+control-queue = File queue
+control-library = Bibliothèque
+control-plugins = Plugins
+control-station = Station
+control-state = État
+control-listeners = Auditeurs
+control-on-air = À l'antenne
+control-broadcast-hint = Espace met en pause ou reprend, n passe au suivant, v arme la veille (dès 0 auditeur), w réveille.
+control-read-failed = lecture impossible : { $reason }
+control-not-read = pas encore lu
+control-more = … et { $n } de plus
+control-overrides-none = aucun override en attente
+control-overrides-hint = o pousse un média ou une playlist devant la grille.
+control-col-content = Contenu
+control-col-mode = Mode
+control-col-left = Reste
+control-col-expires = Périme
+control-col-source = Par
+control-col-plugin = Plugin
+control-col-state = État
+control-col-failures = Échecs
+control-col-reason = Raison
+control-live-disabled = live non configuré (pas de section [live])
+control-live-on-air = À l'antenne
+control-live-nobody = personne
+control-live-session = accès { $access }, depuis { $since }, { $address }
+control-live-accounts = Comptes DJ
+control-live-djs = { $n } déclarés
+control-live-djs-error = fichier des DJ illisible : { $reason }
+control-live-urgent = Droit urgent
+control-live-cooldown = Refroidissement
+control-live-until = { $dj } jusqu'à { $time }
+control-live-refused = Refusé
+control-live-last-refusal = Dernier refus
+control-live-refusal = { $dj } à { $time } : { $reason }
+control-live-openings = Ouvertures :
+control-live-no-opening = aucune
+control-live-cut = coupé
+control-queue-hint = e ajoute un média au tampon d'une playlist en mode queue (demandes d'auditeurs, dédicaces). La playlist doit exister et être en mode queue ; stationd refuse sinon, et le dit.
+control-scan-none = aucun scan lancé depuis cette TUI
+control-scan-hint = s relit media/ et met l'index à jour (fichiers ajoutés, retirés, modifiés).
+control-scan-last = Dernier scan :
+control-scan-found = Trouvés
+control-scan-present = Disponibles
+control-scan-unavailable = Disparus
+control-scan-skipped = Écartés
+scan-skip-unreadable = illisible
+scan-skip-zero-duration = durée nulle
+scan-skip-walk-error = parcours
+scan-skip-unknown = ?
+control-plugins-none = aucun plugin déclaré
+control-plugin-off = désactivé
+control-shutdown-hint = a : arrêt opérateur. stationd s'arrête, Liquidsoap est garé sur le bruit de fond ; rien ne repart avant « stationctl station start ». A : idem en coupant le DJ à l'antenne. Deux confirmations.
+control-shutdown-live = DJ { $dj } à l'antenne : a sera refusé, A le coupe.

@@ -207,6 +207,36 @@ pub struct PushOutcome {
     pub pending: usize,
 }
 
+/// Cap on remembered grid incidents (one per rule and kind, the latest).
+pub const MAX_INCIDENTS: usize = 64;
+
+/// What went wrong in the grid, as the engine saw it (never a sentence).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IncidentKind {
+    /// A hard rendez-vous was due but its source produced nothing: no cut.
+    HardNotCut,
+    /// A grid source was due but produced nothing: the engine fell through
+    /// to a lower priority (empty pool, or emptied by the constraints).
+    SourceEmpty,
+}
+
+/// A grid incident: which rule, which playlist, when (latest), how often.
+/// Kept in memory for the on-air view: an operator must SEE that a rule
+/// airs nothing, not find it in the logs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Incident {
+    pub kind: IncidentKind,
+    pub rule_id: Option<String>,
+    pub playlist_ref: String,
+    /// `AtClockHard`, `Every`, `DayPart`…
+    pub origin: String,
+    /// Latest occurrence (epoch UTC).
+    pub at: Epoch,
+    /// First occurrence of this run of the same incident.
+    pub first_at: Epoch,
+    pub count: u32,
+}
+
 // ---------------------------------------------------------------------------
 // The control handle
 // ---------------------------------------------------------------------------
@@ -232,6 +262,8 @@ struct Inner {
     /// rather than preparing a track stationd will not be there to report.
     /// In memory only: the stop itself is the marker file.
     stopping: bool,
+    /// Grid incidents, one entry per (kind, rule), latest last.
+    incidents: VecDeque<Incident>,
 }
 
 /// Cheap, clonable handle. One per station; shared by the grid engine, the
@@ -281,6 +313,7 @@ impl StationControl {
                 live: None,
                 woken: false,
                 stopping: false,
+                incidents: VecDeque::new(),
             })),
             plugins: Arc::new(OnceLock::new()),
             air: Arc::new(OnceLock::new()),
@@ -303,6 +336,49 @@ impl StationControl {
             g.listeners = src.listeners;
         }
         copy
+    }
+
+    // ----- grid incidents (on-air view) ------------------------------------
+
+    /// Remember a grid incident. The same (kind, rule) again updates its
+    /// entry (latest instant, count) rather than piling up: an `every` due
+    /// with an empty pool falls through at every boundary.
+    pub fn record_incident(
+        &self,
+        kind: IncidentKind,
+        rule_id: Option<&str>,
+        playlist_ref: &str,
+        origin: &str,
+        at: Epoch,
+    ) {
+        {
+            let mut g = self.lock();
+            let same = |i: &Incident| i.kind == kind && i.rule_id.as_deref() == rule_id && i.playlist_ref == playlist_ref;
+            let mut entry = match g.incidents.iter().position(same) {
+                Some(pos) => g.incidents.remove(pos).expect("position is valid"),
+                None => Incident {
+                    kind,
+                    rule_id: rule_id.map(str::to_string),
+                    playlist_ref: playlist_ref.to_string(),
+                    origin: origin.to_string(),
+                    at,
+                    first_at: at,
+                    count: 0,
+                },
+            };
+            entry.at = at;
+            entry.count += 1;
+            g.incidents.push_back(entry);
+            while g.incidents.len() > MAX_INCIDENTS {
+                g.incidents.pop_front();
+            }
+        }
+        self.bump_meta();
+    }
+
+    /// Incidents whose latest occurrence is at or after `since`, oldest first.
+    pub fn incidents_since(&self, since: Epoch) -> Vec<Incident> {
+        self.lock().incidents.iter().filter(|i| i.at.0 >= since.0).cloned().collect()
     }
 
     // ----- change counters (on-air view) ----------------------------------
@@ -1145,5 +1221,19 @@ mod tests {
             .execute(&pool)
             .await
             .is_err());
+    }
+
+    #[test]
+    fn incidents_merge_per_rule_and_kind() {
+        let c = StationControl::new_in_memory();
+        c.record_incident(IncidentKind::SourceEmpty, Some("jingle"), "jingles", "Every", Epoch(10));
+        c.record_incident(IncidentKind::SourceEmpty, Some("jingle"), "jingles", "Every", Epoch(20));
+        c.record_incident(IncidentKind::HardNotCut, Some("toph"), "toph", "AtClockHard", Epoch(30));
+        let all = c.incidents_since(Epoch(0));
+        assert_eq!(all.len(), 2);
+        assert_eq!((all[0].count, all[0].first_at, all[0].at), (2, Epoch(10), Epoch(20)));
+        assert_eq!(all[1].rule_id.as_deref(), Some("toph"));
+        assert_eq!(c.incidents_since(Epoch(25)).len(), 1);
+        assert!(c.simulation_copy().incidents_since(Epoch(0)).is_empty(), "a simulation starts clean");
     }
 }

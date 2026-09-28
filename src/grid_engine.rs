@@ -829,11 +829,10 @@ impl GridEngine {
         let pl = crate::playlist::Playlist::parse(&toml)
             .map_err(|e| EngineError::Selection(crate::selection::SelectionError::Parse(e)))?;
         if pl.selection.mode != crate::playlist::Mode::Queue {
-            return Err(EngineError::Selection(
-                crate::selection::SelectionError::Unsupported(format!(
-                    "`{playlist_ref}` is not a queue playlist"
-                )),
-            ));
+            return Err(EngineError::Selection(crate::selection::SelectionError::NotAQueue(
+                playlist_ref.to_string(),
+                pl.selection.mode,
+            )));
         }
         crate::queue_state::push(&self.pool, &key, media_path, pl.selection.max_len, real_now())
             .await
@@ -1203,6 +1202,13 @@ impl GridEngine {
                 origin = ?decision.origin,
                 "grid source produced no usable media; falling through to lower priority"
             );
+            self.control.record_incident(
+                crate::station_control::IncidentKind::SourceEmpty,
+                decision.rule_id.as_deref(),
+                &playlist_ref,
+                &format!("{:?}", decision.origin),
+                now,
+            );
         }
 
         if had_candidates {
@@ -1460,6 +1466,13 @@ impl GridEngine {
                 rule = decision.rule_id.as_deref().unwrap_or("-"),
                 playlist = %playlist_ref,
                 "AtClock hard: its source produced nothing, no cut"
+            );
+            self.control.record_incident(
+                crate::station_control::IncidentKind::HardNotCut,
+                decision.rule_id.as_deref(),
+                &playlist_ref,
+                "AtClockHard",
+                mark,
             );
             return Ok(None);
         };
@@ -2587,7 +2600,11 @@ mode = "dynamic""#;
         let rtoml = "name = \"R\"\n[selection]\nmode = \"dynamic\"\norder = \"shuffle\"\n";
         let rpl = crate::playlist::Playlist::parse(rtoml).unwrap();
         crate::store::upsert(&eng.pool, "rot", &rpl, rtoml, Some("rot")).await.unwrap();
-        assert!(eng.enqueue("rot", "x.mp3").await.is_err());
+        assert!(matches!(
+            eng.enqueue("rot", "x.mp3").await,
+            Err(EngineError::Selection(crate::selection::SelectionError::NotAQueue(r, crate::playlist::Mode::Dynamic)))
+                if r == "rot"
+        ));
     }
 
     // ----- A2: broadcast gate + override layer ----------------------------

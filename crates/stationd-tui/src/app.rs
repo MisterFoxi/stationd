@@ -23,6 +23,8 @@ use ratatui_widgets::clear::Clear;
 use ratatui_widgets::paragraph::{Paragraph, Wrap};
 use tonic::transport::Channel;
 
+use crate::action::{Action, Done};
+use crate::dialog::{Modal, Outcome};
 use crate::rpc::{self, BannerRead};
 use crate::screen::{Availability, KeyHelp, Screen};
 use crate::store::Store;
@@ -46,7 +48,13 @@ pub struct Global {
     ctx: SalsaAppContext<AppEvent, Error>,
     pub theme: SalsaTheme,
     pub channel: Channel,
+    /// Même adresse, sans délai maximal : opérations longues (scan).
+    pub long_channel: Channel,
     pub store: Store,
+    /// Modale demandée par un écran (ouverte par l'application).
+    pending_modal: Option<Modal>,
+    /// Action demandée par un écran sans confirmation (lecture, scan…).
+    pending_action: Option<Action>,
 }
 
 impl SalsaContext<AppEvent, Error> for Global {
@@ -60,13 +68,26 @@ impl SalsaContext<AppEvent, Error> for Global {
 }
 
 impl Global {
-    pub fn new(args: &Args, channel: Channel) -> Self {
+    pub fn new(args: &Args, channel: Channel, long_channel: Channel) -> Self {
         Self {
             ctx: Default::default(),
             theme: create_salsa_theme(&args.theme),
             channel,
+            long_channel,
             store: Store::new(&args.addr),
+            pending_modal: None,
+            pending_action: None,
         }
+    }
+
+    /// Un écran ouvre une modale (confirmation, formulaire).
+    pub fn open(&mut self, modal: Modal) {
+        self.pending_modal = Some(modal);
+    }
+
+    /// Un écran lance une action sans confirmation.
+    pub fn request(&mut self, action: Action) {
+        self.pending_action = Some(action);
     }
 }
 
@@ -82,6 +103,8 @@ pub enum AppEvent {
     OnAir(Box<stationd_proto::onair::OnAirSnapshot>, bool),
     /// Le flux de l'antenne est fermé ou n'a pas pu s'ouvrir.
     OnAirLost(String),
+    /// Une action est terminée (message traduit, ou erreur).
+    ActionDone(Result<Done, String>),
 }
 
 impl From<RenderedEvent> for AppEvent {
@@ -107,9 +130,13 @@ pub struct Scenery {
     screens: Vec<Box<dyn Screen>>,
     active: usize,
     help_open: bool,
+    /// stationd s'arrête à notre demande : la perte de liaison est attendue.
+    expect_exit: bool,
     status: StatusLineState,
     /// Tick d'une seconde (horloge, progression).
     clock: Option<TimerHandle>,
+    /// Modale ouverte : elle capture toutes les entrées.
+    modal: Option<Modal>,
 }
 
 impl Scenery {
@@ -118,8 +145,10 @@ impl Scenery {
             screens: screens::registry(),
             active: 0,
             help_open: false,
+            expect_exit: false,
             status: StatusLineState::default(),
             clock: None,
+            modal: None,
         }
     }
 
@@ -203,6 +232,17 @@ fn spawn_onair_watch(ctx: &Global) {
     });
 }
 
+/// Lance une action en tâche de fond ; son résultat revient en `ActionDone`.
+fn spawn_action(ctx: &Global, state: &mut Scenery, action: Action) {
+    let channel = if action.is_long() { ctx.long_channel.clone() } else { ctx.channel.clone() };
+    let tz = ctx.store.tz.clone();
+    state.status.status(0, tr!("status-action-running"));
+    ctx.spawn_async(async move {
+        let r = crate::action::run(action, channel, tz).await;
+        Ok(Control::Event(AppEvent::ActionDone(r)))
+    });
+}
+
 pub fn error(err: Error, state: &mut Scenery, _ctx: &mut Global) -> Result<Control<AppEvent>, Error> {
     state.status.status(0, tr!("status-error", reason = format!("{err:#}")));
     Ok(Control::Changed)
@@ -248,6 +288,10 @@ pub fn render(area: Rect, buf: &mut Buffer, state: &mut Scenery, ctx: &mut Globa
 
     if state.help_open {
         render_help(work_a, buf, state.screens[state.active].as_ref(), &s);
+    }
+    ctx.set_screen_cursor(None);
+    if let Some(m) = state.modal.as_mut() {
+        m.render(work_a, buf, ctx);
     }
     Ok(())
 }
@@ -347,9 +391,16 @@ pub fn event(event: &AppEvent, state: &mut Scenery, ctx: &mut Global) -> Result<
         AppEvent::Banner(read) => {
             let was = ctx.store.link.clone();
             let ok = ctx.store.apply_banner((**read).clone());
+            let was_lost = matches!(was, crate::store::Link::Lost { .. });
             if ok && was != ctx.store.link {
+                state.expect_exit = false;
                 state.status.status(0, tr!("status-connected"));
-            } else if !ok && let crate::store::Link::Lost { error, .. } = &ctx.store.link {
+            } else if !ok
+                && !was_lost
+                && !state.expect_exit
+                && let crate::store::Link::Lost { error, .. } = &ctx.store.link
+            {
+                // Une fois, à la perte : le bandeau dit ensuite depuis quand.
                 state.status.status(0, error.clone());
             }
             state.status.status(1, tr!("status-screen", screen = state.screens[state.active].title()));
@@ -361,6 +412,19 @@ pub fn event(event: &AppEvent, state: &mut Scenery, ctx: &mut Global) -> Result<
         }
         AppEvent::OnAirLost(why) => {
             ctx.store.onair_link = Err(why.clone());
+            return Ok(Control::Changed);
+        }
+        AppEvent::ActionDone(r) => {
+            match r {
+                Ok(done) => {
+                    state.expect_exit = done.exits;
+                    state.status.status(0, done.message.clone());
+                    if let Some(scan) = &done.scan {
+                        ctx.store.last_scan = Some(scan.clone());
+                    }
+                }
+                Err(e) => state.status.status(0, tr!("status-action-failed", reason = e.clone())),
+            }
             return Ok(Control::Changed);
         }
         AppEvent::Rendered => {
@@ -377,6 +441,23 @@ pub fn event(event: &AppEvent, state: &mut Scenery, ctx: &mut Global) -> Result<
                     && matches!(k.code, KeyCode::Char('q') | KeyCode::Char('c'))
                 {
                     return Ok(Control::Quit);
+                }
+                // Une modale capture tout.
+                if let Some(m) = state.modal.as_mut() {
+                    match m.handle(e) {
+                        Outcome::Unchanged => return Ok(Control::Unchanged),
+                        Outcome::Changed => return Ok(Control::Changed),
+                        Outcome::Cancel => {
+                            state.modal = None;
+                            state.status.status(0, tr!("status-cancelled"));
+                        }
+                        Outcome::Submit(action) => {
+                            state.modal = None;
+                            spawn_action(ctx, state, action);
+                        }
+                        Outcome::Replace(next) => state.modal = Some(*next),
+                    }
+                    return Ok(Control::Changed);
                 }
                 // L'aide ouverte capture tout (modale).
                 if state.help_open {
@@ -408,5 +489,14 @@ pub fn event(event: &AppEvent, state: &mut Scenery, ctx: &mut Global) -> Result<
         }
     }
     let active = state.active;
-    state.screens[active].event(event, ctx)
+    let r = state.screens[active].event(event, ctx)?;
+    if let Some(m) = ctx.pending_modal.take() {
+        state.modal = Some(m);
+        return Ok(Control::Changed);
+    }
+    if let Some(a) = ctx.pending_action.take() {
+        spawn_action(ctx, state, a);
+        return Ok(Control::Changed);
+    }
+    Ok(r)
 }

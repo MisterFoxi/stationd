@@ -80,6 +80,8 @@ pub struct Store {
     pub onair: Option<onair::OnAirSnapshot>,
     /// Le flux de l'antenne est-il ouvert ? `Err` = pourquoi il ne l'est pas.
     pub onair_link: Result<(), String>,
+    /// Rapport du dernier scan lancé depuis cette TUI.
+    pub last_scan: Option<stationd_proto::library::ScanResponse>,
 }
 
 impl Store {
@@ -97,6 +99,7 @@ impl Store {
             tz_name: None,
             onair: None,
             onair_link: Err(crate::tr!("onair-stream-opening")),
+            last_scan: None,
         }
     }
 

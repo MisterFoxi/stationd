@@ -26,7 +26,7 @@ use crate::onair_sim::{self, SimStart, SimTrack};
 pub use crate::onair_sim::Note;
 use crate::plugin::PluginHandle;
 use crate::resolver::Epoch;
-use crate::station_control::{BroadcastState, StationControl};
+use crate::station_control::{BroadcastState, Incident, IncidentKind, StationControl};
 
 /// What one snapshot holds at most; each watcher gets its own cut.
 pub const UPCOMING_MAX: usize = 30;
@@ -76,7 +76,24 @@ pub struct Slot {
     pub origin: Option<String>,
     pub from: Option<i64>,
     pub at_local: Option<String>,
+    /// This slot will air nothing (the faulty line).
+    pub issue: SlotIssue,
 }
+
+/// Why a slot to come will air nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SlotIssue {
+    #[default]
+    None,
+    /// No media at all in its pool (seen by the projection).
+    PoolEmpty,
+    /// A pool, but nothing playable then (seen by the simulation:
+    /// constraints, plugins, unavailable files…).
+    NothingPlayable,
+}
+
+/// How far back incidents seen on the air are shown.
+const INCIDENTS_SHOWN_S: i64 = 3600;
 
 #[derive(Debug, Clone, Default)]
 pub struct Snapshot {
@@ -172,7 +189,9 @@ impl OnAirHub {
                 sim_for = Some(air_rev);
             }
             snap.upcoming = sim.upcoming.clone();
+            let seen = std::mem::take(&mut snap.notes);
             snap.notes = sim.notes.clone();
+            snap.notes.extend(seen);
             snap.next_playlists = sim.next_playlists.clone();
             snap.indicative = sim.indicative.clone();
             revision += 1;
@@ -245,6 +264,7 @@ pub async fn observe(src: &Sources, now: Epoch) -> Snapshot {
         }
         snap.prefetched = Some(t);
     }
+    snap.notes.extend(seen_notes(&control.incidents_since(Epoch(now.0 - INCIDENTS_SHOWN_S))));
     match broadcast_log::aired_before(&src.pool, now.0 + 1, HISTORY_MAX as u32 + 1).await {
         Ok(rows) => {
             snap.history = rows
@@ -326,6 +346,7 @@ async fn simulate_part(src: &Sources, snap: &Snapshot, now: Epoch) -> SimPart {
                     origin: Some(format!("{:?}", o.origin)),
                     from: Some(o.epoch.0),
                     at_local: Some(o.at_local.clone()),
+                    issue: if o.pool.selected_count == Some(0) { SlotIssue::PoolEmpty } else { SlotIssue::None },
                 });
                 if part.next_playlists.len() >= PLAYLISTS_MAX {
                     break;
@@ -386,11 +407,79 @@ async fn simulate_part(src: &Sources, snap: &Snapshot, now: Epoch) -> SimPart {
     })
     .await;
     part.upcoming = out.tracks.into_iter().map(sim_track).collect();
+    mark_faulty_slots(&mut part.next_playlists, &out.incidents);
+    part.notes.extend(predicted_notes(&out.incidents));
     if !part.upcoming.is_empty() {
         part.notes.push(Note::Simulated);
     }
     part.notes.extend(out.notes);
     part
+}
+
+/// A hard-not-cut and a source-empty for the same rule are one problem (the
+/// soft retry after the missed cut): keep the hard one.
+fn dedup_incidents(incidents: &[Incident]) -> Vec<&Incident> {
+    incidents
+        .iter()
+        .filter(|i| {
+            i.kind == IncidentKind::HardNotCut
+                || !incidents
+                    .iter()
+                    .any(|h| h.kind == IncidentKind::HardNotCut && h.rule_id == i.rule_id && h.playlist_ref == i.playlist_ref)
+        })
+        .collect()
+}
+
+/// Incidents the simulation ran into → notes « will not … ».
+fn predicted_notes(incidents: &[Incident]) -> Vec<Note> {
+    dedup_incidents(incidents)
+        .into_iter()
+        .map(|i| {
+            let (rule, playlist, at) = (i.rule_id.clone().unwrap_or_default(), i.playlist_ref.clone(), i.first_at.0);
+            match i.kind {
+                IncidentKind::HardNotCut => Note::RendezvousWillNotCut { rule, playlist, at },
+                IncidentKind::SourceEmpty => Note::SourceWillBeEmpty { rule, playlist, at },
+            }
+        })
+        .collect()
+}
+
+/// Incidents seen on the air → notes « did not … ».
+fn seen_notes(incidents: &[Incident]) -> Vec<Note> {
+    dedup_incidents(incidents)
+        .into_iter()
+        .map(|i| {
+            let (rule, playlist, at, count) =
+                (i.rule_id.clone().unwrap_or_default(), i.playlist_ref.clone(), i.at.0, i.count);
+            match i.kind {
+                IncidentKind::HardNotCut => Note::RendezvousNotCut { rule, playlist, at, count },
+                IncidentKind::SourceEmpty => Note::SourceWasEmpty { rule, playlist, at, count },
+            }
+        })
+        .collect()
+}
+
+/// A slot to come is faulty when the simulation met an incident of ITS rule
+/// while that slot was in force (from its start to the next slot's).
+fn mark_faulty_slots(slots: &mut [Slot], incidents: &[Incident]) {
+    let bounds: Vec<(Option<i64>, Option<i64>)> = (0..slots.len())
+        .map(|k| (slots[k].from, slots.get(k + 1).and_then(|n| n.from)))
+        .collect();
+    for (slot, (from, until)) in slots.iter_mut().zip(bounds) {
+        if slot.issue != SlotIssue::None {
+            continue;
+        }
+        let (Some(rule), Some(from)) = (slot.rule_id.as_deref(), from) else { continue };
+        let hit = incidents.iter().any(|i| {
+            i.rule_id.as_deref() == Some(rule)
+                && i.playlist_ref == slot.playlist_ref
+                && i.at.0 >= from
+                && until.is_none_or(|u| i.first_at.0 < u)
+        });
+        if hit {
+            slot.issue = SlotIssue::NothingPlayable;
+        }
+    }
 }
 
 /// When the first simulated track would start: after the prepared track,
@@ -436,7 +525,7 @@ fn sim_track(s: SimTrack) -> Track {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn snap_with(on_air: Option<Track>, prefetched: Option<Track>) -> Snapshot {
@@ -490,7 +579,7 @@ mod tests {
     }
 
     /// A station with only a music floor (60 s tracks), no Liquidsoap.
-    async fn hub() -> (tempfile::TempDir, OnAirHub, StationControl) {
+    pub(crate) async fn hub() -> (tempfile::TempDir, OnAirHub, StationControl) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("live.db");
         let pool = crate::db::init(&path).await.unwrap();
@@ -581,5 +670,49 @@ mod tests {
         let second = next(&mut rx).await;
         assert_eq!(second.listeners, Some(7));
         assert_eq!(second.upcoming, first.upcoming, "same simulation reused");
+    }
+
+    fn incident(kind: IncidentKind, rule: &str, playlist: &str, first: i64, last: i64) -> Incident {
+        Incident {
+            kind,
+            rule_id: Some(rule.into()),
+            playlist_ref: playlist.into(),
+            origin: String::new(),
+            at: Epoch(last),
+            first_at: Epoch(first),
+            count: 1,
+        }
+    }
+
+    fn slot(pl: &str, rule: &str, from: i64) -> Slot {
+        Slot { playlist_ref: pl.into(), rule_id: Some(rule.into()), from: Some(from), ..Default::default() }
+    }
+
+    #[test]
+    fn the_faulty_slot_is_the_one_whose_rule_failed_while_in_force() {
+        let mut slots = vec![slot("toph", "toph", 1000), slot("rotation", "floor", 1060), slot("toph", "toph", 4600)];
+        let inc = [incident(IncidentKind::HardNotCut, "toph", "toph", 1000, 1000)];
+        mark_faulty_slots(&mut slots, &inc);
+        assert_eq!(slots[0].issue, SlotIssue::NothingPlayable);
+        assert_eq!(slots[1].issue, SlotIssue::None);
+        assert_eq!(slots[2].issue, SlotIssue::None, "the next hour was not reached by the simulation");
+    }
+
+    #[test]
+    fn a_missed_cut_and_its_soft_retry_are_one_note() {
+        let inc = [
+            incident(IncidentKind::HardNotCut, "toph", "toph", 1000, 1000),
+            incident(IncidentKind::SourceEmpty, "toph", "toph", 1233, 1233),
+            incident(IncidentKind::SourceEmpty, "jingle", "jingles", 1500, 1600),
+        ];
+        let notes = predicted_notes(&inc);
+        assert_eq!(
+            notes,
+            vec![
+                Note::RendezvousWillNotCut { rule: "toph".into(), playlist: "toph".into(), at: 1000 },
+                Note::SourceWillBeEmpty { rule: "jingle".into(), playlist: "jingles".into(), at: 1500 },
+            ]
+        );
+        assert!(matches!(seen_notes(&inc)[1], Note::SourceWasEmpty { at: 1600, .. }), "seen = latest occurrence");
     }
 }

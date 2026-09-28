@@ -1,6 +1,6 @@
 # StationD — Dossier technique de la TUI
 
-Version 2.4 — 28 septembre 2026
+Version 2.5 — 28 septembre 2026
 Statut : refonte complète (remplace la v1.0 du 25/09). Document vivant : il suit les besoins, pas l'inverse.
 Socle : Rust + Ratatui + rat-salsa / rat-widget, client gRPC pur de `stationd`.
 
@@ -109,6 +109,31 @@ veille imminente (0 auditeur), ou qu'un DJ est à l'antenne. Sans Liquidsoap,
 la simulation montre ce que la grille choisirait (note). Les ordres aléatoires
 sont retirés à chaque simulation : la liste peut changer d'un instantané à
 l'autre, c'est dit en note.
+
+### 3.3 bis Incidents de grille — fait au lot 2
+
+Une source de la grille qui ne donne rien (pool vide, ou pool vidé par
+l'anti-répétition / les plugins) n'est plus silencieuse. Le moteur note
+l'incident dans `StationControl` (`record_incident`, fusion par règle et
+type, compteur et première/dernière heure) :
+- `HardNotCut` : un rendez-vous hard n'a pas coupé faute de contenu ;
+- `SourceEmpty` : la source est passée à la priorité inférieure.
+
+Deux usages, en opcodes `Note.Code` (paramètres `rule`, `playlist`, `at`,
+`count`) :
+- **prévu** (la simulation, sur sa copie) : `RENDEZVOUS_WILL_NOT_CUT`,
+  `SOURCE_WILL_BE_EMPTY` ;
+- **constaté** (l'antenne réelle, dernière heure) : `RENDEZVOUS_NOT_CUT`,
+  `SOURCE_WAS_EMPTY`.
+
+`PlaylistSlot.issue` marque la **ligne fautive** du panneau Playlists :
+`POOL_EMPTY` (vu dès la projection : aucun média) ou `NOTHING_PLAYABLE` (vu
+seulement par la simulation : le pool compte les médias avant
+l'anti-répétition). `stationctl onair` : `!! EMPTY POOL` / `!! NOTHING
+PLAYABLE`.
+
+Arrêt de stationd : les flux `Watch` se terminent dès la demande d'arrêt,
+sinon l'arrêt propre attendrait indéfiniment une TUI restée ouverte.
 
 ### 3.4 À ajouter — Médias
 
@@ -304,7 +329,8 @@ Onglets : `1` Antenne · `2` Contrôle · `3` Playlists · `4` Agenda · `5` Mé
 - **Playlists** : en cours (●) puis les suivantes avec heure (issue de `Preview`) ; règles au compteur à part, sans heure.
 - **À suivre** : 1re ligne = préchargé (certain, sans `~`), puis théoriques `~` ; notes d'incertitude en pied. Heure estimée absente dès qu'une durée est inconnue.
 - **Joués** : 20 derniers, issue (diffusé / coupé / sauté) ; `PageDown` en bas de liste charge la suite via `History`.
-- Actions : `Espace` pause/reprise · `n` suivant (confirmation nommant le morceau) · `o` pousser un override · `Entrée` détail (fiche média + pourquoi ce titre) · `p` aller à la playlist · `+`/`-` changer X.
+- **Incidents** : une ligne de playlist fautive est en rouge, suivie de sa raison (« pool vide : rien ne passera », « rien de jouable ») ; en pied d'« À suivre », les incidents prévus et constatés passent avant les autres notes, en rouge (§3.3 bis).
+- Actions : `Espace` pause (confirmée) / reprise / réveil · `n` suivant (confirmation nommant le morceau et le suivant prévu) · `o` pousser un override (formulaire, puis confirmation) · `+`/`-` changer X — faits au lot 2. `Entrée` détail (fiche média + pourquoi ce titre) · `p` aller à la playlist : plus tard.
 - 80×24 : À l'antenne + onglets Playlists / À suivre / Joués au lieu de trois panneaux.
 
 ### 5.2 Contrôle (`2`)
@@ -323,6 +349,18 @@ Tout ce qui agit sur la station, regroupé, avec l'état actuel à côté de cha
 | Utilisateurs (`Owner`) | Nom, rôle, actif, dernière connexion | créer, changer le rôle, désactiver, supprimer, réinitialiser le mot de passe |
 
 Toute action qui touche l'antenne : dialogue qui nomme l'objet exact, « Annuler » sélectionné par défaut. Résultat affiché (`from → to`, `changed`, `degraded`), l'état réel confirmé par le prochain instantané.
+
+**Fait au lot 2** (`screens/controle.rs`, `screens/ops.rs`, `action.rs`, `dialog.rs`) : sections à gauche (`Tab` / `Maj+Tab`), détail à droite, touches de la section sur la ligne du bas et dans `?`.
+- Diffusion : `Espace` pause/reprise/réveil, `n` suivant, `v` veille dès 0 auditeur, `w` réveil.
+- Overrides : tableau (n°, contenu, mode, reste, péremption, source), `↑↓` choisir, `o` pousser, `d` retirer, `D` vider.
+- Live : DJ à l'antenne (accès, depuis, adresse), comptes, droit urgent, refroidissements, refusés, dernier refus, ouvertures ; `k` couper, `o` ouvrir (DJ, durée), `c` fermer l'ouverture choisie.
+- File `queue` : `e` (playlist, chemin) ; stationd refuse une playlist qui n'est pas en mode `queue` (`FAILED_PRECONDITION`).
+- Bibliothèque : `s` scan (confirmé, canal sans délai maximal), rapport du dernier scan lancé depuis la TUI et fichiers écartés avec leur raison.
+- Plugins : tableau, `s` / `x` / `r` / `l` = start / stop / restart / reload (confirmés).
+- Station : `a` arrêt opérateur, `A` forcé (coupe le DJ) — deux confirmations ; la perte de liaison qui suit ne masque pas le résultat.
+- Hors lot 2 : sélecteur de média (lot 4, `SearchMedia`), liste des playlists `queue` et de leur tampon, jauge de scan (`ScanWatch`, lot 7), Utilisateurs (lot A).
+
+Dialogues : confirmation (« Annuler » par défaut, `←/→`, cadre rouge si dangereuse, enchaînement pour la double confirmation) et formulaire (texte / choix fermé, `Tab`/`↑↓`, erreur de saisie affichée sans fermer, confirmation optionnelle après validation). Une modale capture tout. Une action mutante n'est jamais rejouée.
 
 ### 5.3 Playlists (`3`)
 
@@ -400,7 +438,7 @@ Vues déclaratives des plugins chargés (§4.3). Base de chaque plugin : `DbInfo
 | 0 | Crate proto partagée, squelette TUI (rat-salsa, `Screen`, registre, connexion socket Unix, bandeau), vérification des crates rat-* | — |
 | A | stationd : `AuthService`, intercepteur de droits sur tous les RPC, écoute TCP + TLS auto-signé, `stationctl login/user` ; TUI : écran de login, profils, empreintes | Avant tout usage distant ; indépendant des lots 1–8 en local |
 | 1 ✅ | stationd : `OnAirService` (Watch + History + simulation §3.3), `stationctl onair`, TUI : écran Antenne | — |
-| 2 | TUI : Contrôle (+ actions depuis Antenne : pause, suivant, override) | 1 |
+| 2 ✅ | TUI : Contrôle (+ actions depuis Antenne : pause, suivant, override) ; stationd : incidents de grille (prévus / constatés, ligne fautive) | 1 |
 | 3 | stationd : playlists `Validate` / `PreviewPool` / `Save` (écriture + révision) — service à trancher (§3.5), `SearchMedia` | — |
 | 4 | TUI : Playlists (liste + éditeur) + Médias | 3 |
 | 5 | stationd : diagnostics de grille, `SaveGrid` | — |

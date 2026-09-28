@@ -1701,8 +1701,12 @@ fn onair_history_line(t: &onair::Track, tz: &jiff::tz::TimeZone, secs: bool) -> 
     format!("  {when}  {:<44} {:>7}  {:<11} {}", onair_label(t), mmss(t.duration_ms), end, onair_from(t))
 }
 
+fn onair_when(at: Option<i64>, tz: &jiff::tz::TimeZone) -> String {
+    at.map(|e| hm(e, tz, false)).unwrap_or_else(|| "?".into())
+}
+
 /// An on-air note (opcode + parameters), worded for the CLI.
-fn onair_note(n: &onair::Note) -> String {
+fn onair_note(n: &onair::Note, tz: &jiff::tz::TimeZone) -> String {
     use onair::note::Code as C;
     match C::try_from(n.code) {
         Ok(C::StationPaused) => "station paused: nothing follows until it resumes".into(),
@@ -1720,6 +1724,22 @@ fn onair_note(n: &onair::Note) -> String {
         Ok(C::PluginFilterFailed) => format!("plugin `{}` failed in the simulation: {}", n.plugin, n.reason),
         Ok(C::GridProjectionFailed) => format!("grid projection failed: {}", n.reason),
         Ok(C::HistoryUnreadable) => format!("history unreadable: {}", n.reason),
+        Ok(C::RendezvousWillNotCut) => format!(
+            "rendez-vous `{}` ({}) will NOT cut at {}: its playlist will produce nothing",
+            n.rule, n.playlist, onair_when(n.at, tz)
+        ),
+        Ok(C::SourceWillBeEmpty) => format!(
+            "rule `{}` ({}) will produce nothing at {}: empty pool or emptied by the constraints",
+            n.rule, n.playlist, onair_when(n.at, tz)
+        ),
+        Ok(C::RendezvousNotCut) => format!(
+            "rendez-vous `{}` ({}) did NOT cut at {}: its playlist produced nothing",
+            n.rule, n.playlist, onair_when(n.at, tz)
+        ),
+        Ok(C::SourceWasEmpty) => format!(
+            "rule `{}` ({}) produced nothing ({}×, last at {}): the grid fell through",
+            n.rule, n.playlist, n.count, onair_when(n.at, tz)
+        ),
         Ok(C::Unspecified) | Err(_) => format!("unknown note (code {})", n.code),
     }
 }
@@ -1777,7 +1797,13 @@ fn print_onair(s: &onair::OnAirSnapshot) {
         println!("\nPLAYLISTS AHEAD");
         for p in &s.next_playlists {
             let when = p.from.map(|e| hm(e, &tz, false)).unwrap_or_else(|| "—".into());
-            println!("  {when}  {:<24} [{} {}]", p.playlist_ref, p.origin, p.rule_id);
+            use onair::playlist_slot::Issue;
+            let issue = match Issue::try_from(p.issue).unwrap_or(Issue::None) {
+                Issue::None => "",
+                Issue::PoolEmpty => "  !! EMPTY POOL",
+                Issue::NothingPlayable => "  !! NOTHING PLAYABLE",
+            };
+            println!("  {when}  {:<24} [{} {}]{issue}", p.playlist_ref, p.origin, p.rule_id);
         }
         for p in &s.indicative {
             println!("  (by track count)  {:<24} [{}]", p.playlist_ref, p.rule_id);
@@ -1795,7 +1821,7 @@ fn print_onair(s: &onair::OnAirSnapshot) {
     if !s.notes.is_empty() {
         println!("\nNOTES");
         for n in &s.notes {
-            println!("  - {}", onair_note(n));
+            println!("  - {}", onair_note(n, &tz));
         }
     }
 }

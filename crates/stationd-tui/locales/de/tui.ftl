@@ -168,10 +168,6 @@ planned-coming = Demnächst
 planned-lot = Paket { $lot }
 planned-plugin-missing = Plugin „{ $plugin }“ nicht geladen
 planned-unavailable = Nicht verfügbar: { $reason }
-planned-control-1 = Sendung: Pause, Fortsetzen, Weiter, Ruhe, Aufwecken
-planned-control-2 = Overrides: einreihen, auflisten, leeren
-planned-control-3 = Live: DJ trennen, Zeitfenster öffnen / schließen
-planned-control-4 = Warteschlangen, Bibliotheksscan, Plugins, Betreiber-Stopp
 planned-playlists-1 = Liste: Modus, Pool, verweisende Regeln und Gruppen
 planned-playlists-2 = Formular je Modus, Live-Vorschau des Pools
 planned-playlists-3 = Speichern durch stationd (Revision, Konflikte)
@@ -187,3 +183,215 @@ planned-system-1 = Zustand: stationd, Liquidsoap, Icecast (Mounts), Live
 planned-system-2 = Ereignisse live, Sendestatistiken
 planned-plugins-1 = Von geladenen Plugins deklarierte Ansichten
 planned-plugins-2 = Datenbank jedes Plugins (Info, Nur-Lese-Abfrage)
+
+## Rasterstörungen (Sendehinweise)
+note-rendezvous-will-not-cut = erwartet: Termin { $rule } um { $time } schneidet nicht — „{ $playlist }“ hat nichts zu senden
+note-source-will-be-empty = erwartet: um { $time } hat „{ $playlist }“ ({ $rule }) nichts zu senden — die niedrigere Priorität übernimmt
+note-rendezvous-not-cut = festgestellt: Termin { $rule } hat um { $time } nicht geschnitten — „{ $playlist }“ hatte nichts zu senden ({ $count ->
+    [one] 1 Mal
+   *[other] { $count } Mal
+})
+note-source-was-empty = festgestellt: „{ $playlist }“ ({ $rule }) hatte um { $time } nichts zu senden ({ $count ->
+    [one] 1 Mal
+   *[other] { $count } Mal
+})
+slot-pool-empty = leerer Pool: nichts wird gesendet
+slot-nothing-playable = nichts spielbar (Regeln, Plugins)
+
+## Tasten (Aktionen)
+key-space = Leertaste
+key-tab = Tab
+key-up-down = ↑ / ↓
+key-a = a
+key-shift-a = A
+key-c = c
+key-d = d
+key-shift-d = D
+key-e = e
+key-k = k
+key-l = l
+key-n = n
+key-o = o
+key-r = r
+key-s = s
+key-v = v
+key-w = w
+key-x = x
+help-pause-resume = Pause / Fortsetzen / Wecken
+help-skip = zum nächsten springen
+help-override = Override einreihen
+help-drain = Ruhe bei 0 Hörern
+help-wake = aufwecken
+help-section = nächster Abschnitt
+help-select = Zeile wählen
+help-override-remove = gewählten Override entfernen
+help-override-clear = Warteschlange leeren
+help-live-kick = DJ trennen
+help-live-open = Slot öffnen
+help-live-close = gewählte Öffnung schließen
+help-enqueue = zu einer Queue-Playlist hinzufügen
+help-scan = Bibliothek scannen
+help-shutdown = Bedienerstopp
+help-shutdown-force = erzwungener Stopp (trennt den DJ)
+
+## Aktionen: Statuszeile
+status-action-running = Aktion läuft…
+status-action-failed = fehlgeschlagen: { $reason }
+status-cancelled = abgebrochen
+done-state = Sendung: { $from } → { $to }
+done-state-unchanged = Sendung bereits { $state }
+done-skip = Sprung angefordert
+done-override = Override #{ $id } eingereiht ({ $pending } wartend)
+done-override-degraded = Override #{ $id } eingereiht, SOFT gespielt (kein Schnitt möglich) — { $pending } wartend
+done-overrides-cleared = { $n ->
+    [one] 1 Override entfernt
+   *[other] { $n } Overrides entfernt
+}
+done-live-kicked = DJ { $dj } getrennt
+done-live-opened = Slot für { $dj } geöffnet bis { $until }
+done-live-closed = Öffnung für { $dj } geschlossen
+done-enqueued = zu „{ $playlist }“ hinzugefügt ({ $len } in der Queue)
+done-enqueue-full = Queue „{ $playlist }“ ist voll ({ $len }): nichts hinzugefügt
+done-scan = Scan: { $found } gefunden, { $skipped } übersprungen, { $unavailable } verschwunden
+done-plugin = Plugin { $name }: { $state }
+done-plugin-reason = Plugin { $name }: { $state } ({ $reason })
+done-shutdown = Bedienerstopp: Liquidsoap auf Hintergrundrauschen geparkt, stationd beendet sich
+done-shutdown-fallback = Bedienerstopp: stationd beendet sich, das Sicherheitsnetz von Liquidsoap übernimmt
+
+## Dialoge
+dialog-cancel = Abbrechen
+dialog-confirm-keys = ←/→ wählen · Enter bestätigen · Esc abbrechen
+dialog-form-keys = Tab/↑↓ Feld · ←/→ Auswahl · Enter bestätigen · Esc abbrechen
+form-required = „{ $field }“ ist erforderlich
+form-positive-integer = „{ $field }“: eine ganze Zahl ≥ 1
+confirm-pause-title = Pausieren
+confirm-pause-body = Die Sendung hält bei „{ $track }“ an, bis sie fortgesetzt wird.
+confirm-pause-yes = Pausieren
+confirm-skip-title = Zum nächsten springen
+confirm-skip-body = Schneidet „{ $track }“ jetzt ab.
+confirm-skip-next = Voraussichtlich als nächstes: „{ $track }“.
+confirm-skip-yes = Springen
+confirm-drain-title = Ruhe bei 0 Hörern
+confirm-drain-body = Der Sender geht in Ruhe, sobald kein Hörer mehr da ist (Hintergrundrauschen, kein Raster).
+confirm-drain-yes = Ruhe scharf schalten
+form-override-title = Override einreihen
+form-override-kind = Inhalt
+form-override-kind-media = Medium
+form-override-kind-playlist = Playlist
+form-override-target = Pfad unter media/ oder Playlist-Referenz
+form-override-mode = Modus
+form-override-soft = SOFT: beim nächsten Titel
+form-override-hard = HARD: schneidet sofort
+form-override-expiry = Verfall (30s, 5m, 2h; leer = nie)
+form-override-tracks = Gehaltene Titel (Playlist)
+override-media = Medium: { $path }
+override-playlist = Playlist: { $playlist }
+confirm-override-title = Diesen Override einreihen?
+confirm-override-soft = Läuft an der nächsten Titelgrenze.
+confirm-override-hard = Schneidet den laufenden Titel SOFORT ab.
+confirm-override-tracks = { $n ->
+    [one] Hält 1 Titel.
+   *[other] Hält { $n } Titel.
+}
+confirm-override-no-expiry = Ohne Verfall.
+confirm-override-expiry = Verfällt, wenn nicht innerhalb von { $expiry } gesendet.
+confirm-override-yes = Einreihen
+confirm-clear-one-title = Override entfernen
+confirm-clear-one-body = Override #{ $id } ({ $what }) aus der Warteschlange entfernen?
+confirm-clear-all-title = Override-Warteschlange leeren
+confirm-clear-all-body = { $n ->
+    [one] Den wartenden Override entfernen?
+   *[other] Die { $n } wartenden Overrides entfernen?
+}
+confirm-clear-yes = Entfernen
+confirm-kick-title = DJ trennen
+confirm-kick-body = { $dj } jetzt trennen? Bis zum Ende des Slots wird er abgewiesen.
+confirm-kick-yes = Trennen
+form-live-open-title = Live-Slot öffnen
+form-live-dj = DJ
+form-live-duration = Dauer (30m, 2h, 1d)
+confirm-live-close-title = Öffnung schließen
+confirm-live-close-body = Die Öffnung für { $dj } jetzt schließen?
+confirm-live-close-yes = Schließen
+form-enqueue-title = Zu einer Queue-Playlist hinzufügen
+form-enqueue-playlist = Playlist (Queue-Modus)
+form-enqueue-media = Pfad unter media/
+confirm-scan-title = Bibliothek scannen
+confirm-scan-body = Liest ganz media/ neu ein: kann auf einer großen Platte oder einem NFS-Mount dauern. Die Sendung bleibt unberührt.
+confirm-scan-yes = Scannen
+plugin-verb-start = starten
+plugin-verb-stop = stoppen
+plugin-verb-restart = neu starten
+plugin-verb-reload = neu laden
+confirm-plugin-start = Plugin { $name } starten
+confirm-plugin-stop = Plugin { $name } stoppen
+confirm-plugin-restart = Plugin { $name } neu starten
+confirm-plugin-reload = Plugin { $name } neu laden
+confirm-plugin-body = Der neue Zustand erscheint in der Plugin-Liste.
+confirm-shutdown-title = Bedienerstopp
+confirm-shutdown-body = stationd beendet sich und Liquidsoap wird auf Hintergrundrauschen geparkt. Neustart: stationctl station start.
+confirm-shutdown-kicks = DJ { $dj } wird getrennt.
+confirm-shutdown-refused-live = DJ { $dj } ist auf Sendung: der Stopp wird abgewiesen (A erzwingt).
+confirm-shutdown-continue = Weiter
+confirm-shutdown-again-title = Stopp bestätigen
+confirm-shutdown-again-body = Letzte Bestätigung: der Sender hört auf, das Raster zu senden.
+confirm-shutdown-yes = Sender stoppen
+
+## Bildschirm Steuerung
+control-broadcast = Sendung
+control-overrides = Overrides
+control-live = Live
+control-queue = Queue
+control-library = Bibliothek
+control-plugins = Plugins
+control-station = Sender
+control-state = Zustand
+control-listeners = Hörer
+control-on-air = Auf Sendung
+control-broadcast-hint = Leertaste pausiert oder setzt fort, n springt weiter, v schaltet die Ruhe scharf (bei 0 Hörern), w weckt auf.
+control-read-failed = nicht lesbar: { $reason }
+control-not-read = noch nicht gelesen
+control-more = … und { $n } weitere
+control-overrides-none = kein wartender Override
+control-overrides-hint = o reiht ein Medium oder eine Playlist vor dem Raster ein.
+control-col-content = Inhalt
+control-col-mode = Modus
+control-col-left = Rest
+control-col-expires = Verfällt
+control-col-source = Von
+control-col-plugin = Plugin
+control-col-state = Zustand
+control-col-failures = Fehler
+control-col-reason = Grund
+control-live-disabled = Live nicht konfiguriert (kein Abschnitt [live])
+control-live-on-air = Auf Sendung
+control-live-nobody = niemand
+control-live-session = Zugang { $access }, seit { $since }, { $address }
+control-live-accounts = DJ-Konten
+control-live-djs = { $n } angelegt
+control-live-djs-error = DJ-Datei nicht lesbar: { $reason }
+control-live-urgent = Notfallrecht
+control-live-cooldown = Sperrzeit
+control-live-until = { $dj } bis { $time }
+control-live-refused = Abgewiesen
+control-live-last-refusal = Letzte Abweisung
+control-live-refusal = { $dj } um { $time }: { $reason }
+control-live-openings = Öffnungen:
+control-live-no-opening = keine
+control-live-cut = getrennt
+control-queue-hint = e fügt ein Medium in den Puffer einer Playlist im Queue-Modus ein (Hörerwünsche, Widmungen). Die Playlist muss existieren und im Queue-Modus sein; sonst lehnt stationd ab und sagt es.
+control-scan-none = kein Scan aus dieser TUI gestartet
+control-scan-hint = s liest media/ neu ein und aktualisiert den Index (Dateien hinzugefügt, entfernt, geändert).
+control-scan-last = Letzter Scan:
+control-scan-found = Gefunden
+control-scan-present = Verfügbar
+control-scan-unavailable = Verschwunden
+control-scan-skipped = Übersprungen
+scan-skip-unreadable = unlesbar
+scan-skip-zero-duration = Länge null
+scan-skip-walk-error = Durchlauf
+scan-skip-unknown = ?
+control-plugins-none = kein Plugin angelegt
+control-plugin-off = deaktiviert
+control-shutdown-hint = a: Bedienerstopp. stationd beendet sich, Liquidsoap wird auf Hintergrundrauschen geparkt; nichts startet vor „stationctl station start“ neu. A: dasselbe, der DJ auf Sendung wird getrennt. Zwei Bestätigungen.
+control-shutdown-live = DJ { $dj } auf Sendung: a wird abgewiesen, A trennt ihn.

@@ -338,6 +338,9 @@ async fn main() -> anyhow::Result<()> {
     // All three converge on the same shutdown — `serve_with_shutdown` waits
     // for this future to resolve before tearing down the server.
     let mut sigterm = signal(SignalKind::terminate())?;
+    // Raised as soon as a shutdown is requested: the endless streams (on-air
+    // `Watch`) end, so the graceful shutdown does not wait for their clients.
+    let (stopping_tx, stopping_rx) = tokio::sync::watch::channel(false);
     let shutdown_signal = async move {
         tokio::select! {
             _ = shutdown_rx => {
@@ -350,6 +353,7 @@ async fn main() -> anyhow::Result<()> {
                 info!("shutdown requested (SIGTERM, e.g. systemctl stop)");
             }
         }
+        let _ = stopping_tx.send(true);
     };
 
     Server::builder()
@@ -362,7 +366,7 @@ async fn main() -> anyhow::Result<()> {
         .add_service(IcecastServiceServer::new(icecast_service))
         .add_service(LiveServiceServer::new(live_service))
         .add_service(StatsServiceServer::new(StatsGrpc::new(db_pool.clone())))
-        .add_service(OnAirServiceServer::new(OnAirGrpc::new(onair)))
+        .add_service(OnAirServiceServer::new(OnAirGrpc::new(onair, stopping_rx)))
         .serve_with_shutdown(addr, shutdown_signal)
         .await?;
 

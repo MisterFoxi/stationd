@@ -52,6 +52,10 @@ pub enum SelectionError {
     UnsupportedOrder(Order),
     #[error("{0} is not supported yet")]
     Unsupported(String),
+    /// `Enqueue` on a playlist that is not in `queue` mode (the request is
+    /// wrong, not the daemon: `failed_precondition`).
+    #[error("`{0}` is not a queue playlist (mode `{1:?}`): only a `queue` playlist takes enqueued media")]
+    NotAQueue(String, Mode),
     #[error("unsupported filter: field `{field}` op `{op}`")]
     UnsupportedFilter { field: String, op: String },
     #[error("bad value for filter `{field}`: {reason}")]

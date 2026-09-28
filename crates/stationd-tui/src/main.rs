@@ -7,8 +7,10 @@
 //! Lot 0 : socle (boucle rat-salsa + tokio, registre d'écrans, bandeau,
 //! connexion). Les écrans sont des emplacements remplis lot par lot.
 
+mod action;
 mod app;
 mod banner;
+mod dialog;
 mod fit;
 mod i18n;
 mod rpc;
@@ -57,12 +59,12 @@ fn main() -> Result<()> {
     let rt = tokio::runtime::Runtime::new()?;
     // Le canal tonic se crée dans le contexte du runtime (connexion paresseuse :
     // stationd absent au lancement n'empêche pas la TUI de démarrer).
-    let channel = {
+    let (channel, long_channel) = {
         let _guard = rt.enter();
-        rpc::lazy_channel(&args.addr)?
+        (rpc::lazy_channel(&args.addr)?, rpc::lazy_channel_long(&args.addr)?)
     };
 
-    let mut global = app::Global::new(&args, channel);
+    let mut global = app::Global::new(&args, channel, long_channel);
     let mut state = app::Scenery::new();
 
     run_tui(

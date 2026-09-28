@@ -88,11 +88,24 @@ pub enum Note {
     PluginFilterFailed { plugin: String, reason: String },
     GridProjectionFailed { reason: String },
     HistoryUnreadable { reason: String },
+    /// Predicted by the simulation: a hard rendez-vous will not cut (its
+    /// source will produce nothing), first at `at`.
+    RendezvousWillNotCut { rule: String, playlist: String, at: i64 },
+    /// Predicted: a due rule will produce nothing (empty pool, or emptied by
+    /// the constraints / plugins), first at `at`.
+    SourceWillBeEmpty { rule: String, playlist: String, at: i64 },
+    /// Seen on the air (last hour): a hard rendez-vous did not cut.
+    RendezvousNotCut { rule: String, playlist: String, at: i64, count: u32 },
+    /// Seen on the air (last hour): a due rule produced nothing.
+    SourceWasEmpty { rule: String, playlist: String, at: i64, count: u32 },
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SimOutcome {
     pub tracks: Vec<SimTrack>,
+    /// Grid incidents met on the way (predicted): a rule that will produce
+    /// nothing, a hard rendez-vous that will not cut.
+    pub incidents: Vec<crate::station_control::Incident>,
     /// Why it stopped short, and what went wrong in the plugins.
     pub notes: Vec<Note>,
 }
@@ -121,7 +134,8 @@ async fn run(start: &SimStart<'_>, plugins: Option<&PluginHandle>) -> SimOutcome
             return out;
         }
     };
-    let mut engine = GridEngine::new(pool.clone(), start.tz).with_control(start.control.simulation_copy());
+    let control = start.control.simulation_copy();
+    let mut engine = GridEngine::new(pool.clone(), start.tz).with_control(control.clone());
     if let Some(p) = plugins {
         engine = engine.with_plugins(p.clone());
     }
@@ -202,6 +216,7 @@ async fn run(start: &SimStart<'_>, plugins: Option<&PluginHandle>) -> SimOutcome
             .await;
         t = end;
     }
+    out.incidents = control.incidents_since(Epoch(0));
     pool.close().await;
     out
 }
@@ -439,5 +454,35 @@ mod tests {
         .await;
         assert!(out.tracks.is_empty());
         assert!(matches!(out.notes[..], [Note::SimulationFailed { .. }]), "{:?}", out.notes);
+    }
+
+    #[tokio::test]
+    async fn a_rendez_vous_with_nothing_to_air_is_predicted() {
+        // 7-minute music; the news playlist points at a file that is not
+        // there (unavailable): the 09:15 hard mark will not cut.
+        let (_d, path, pool) = station(420).await;
+        sqlx::query("UPDATE media SET available = 0 WHERE rel_path = 'news/n.mp3'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let control = StationControl::new_in_memory();
+        let out = simulate(SimStart {
+            live_db: &path,
+            tz: "UTC",
+            control: &control,
+            plugins: None,
+            at: at(9, 10),
+            at_known: true,
+            count: 3,
+        })
+        .await;
+        assert!(out.tracks.iter().all(|t| t.cut_at.is_none()), "no cut");
+        let hard = out
+            .incidents
+            .iter()
+            .find(|i| i.kind == crate::station_control::IncidentKind::HardNotCut)
+            .expect("predicted");
+        assert_eq!((hard.rule_id.as_deref(), hard.playlist_ref.as_str(), hard.first_at), (Some("news"), "news", at(9, 15)));
+        assert!(control.incidents_since(Epoch(0)).is_empty(), "nothing recorded on the real station");
     }
 }

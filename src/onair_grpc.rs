@@ -3,23 +3,29 @@
 //! Thin translator over `onair::OnAirHub`: each `Watch` stream follows the
 //! hub's snapshots and cuts them to what its client asked for; `History`
 //! reads the broadcast log. Read-only.
+//!
+//! A `Watch` stream never ends on its own: it ends when the daemon starts to
+//! shut down (`stopping`), otherwise the server's graceful shutdown would
+//! wait for the watching clients (a TUI left open) forever.
 
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
-use crate::onair::{self, Note, OnAirHub, Outcome, Slot, Snapshot, Track};
+use crate::onair::{self, Note, OnAirHub, Outcome, Slot, SlotIssue, Snapshot, Track};
 pub use crate::proto::onair as proto;
 use proto::on_air_service_server::OnAirService;
 use proto::{HistoryRequest, HistoryResponse, OnAirSnapshot, WatchRequest};
 
 pub struct OnAirGrpc {
     hub: OnAirHub,
+    /// `true` once the daemon shuts down: open `Watch` streams end.
+    stopping: watch::Receiver<bool>,
 }
 
 impl OnAirGrpc {
-    pub fn new(hub: OnAirHub) -> Self {
-        Self { hub }
+    pub fn new(hub: OnAirHub, stopping: watch::Receiver<bool>) -> Self {
+        Self { hub, stopping }
     }
 }
 
@@ -44,12 +50,23 @@ impl OnAirService for OnAirGrpc {
         // snapshot the subscription triggered.
         rx.borrow_and_update();
         let (tx, out) = mpsc::channel(4);
+        let mut stopping = self.stopping.clone();
         tokio::spawn(async move {
-            while rx.changed().await.is_ok() {
-                let snap = rx.borrow_and_update().clone();
-                if let Some(s) = snap {
-                    if tx.send(Ok(to_proto(&s, cut))).await.is_err() {
-                        break; // client gone
+            loop {
+                tokio::select! {
+                    // Shutdown: end the stream (its sender dropped), the
+                    // client sees a clean end and reconnects later.
+                    _ = async { stopping.wait_for(|s| *s).await.is_ok() } => break,
+                    r = rx.changed() => {
+                        if r.is_err() {
+                            break;
+                        }
+                        let snap = rx.borrow_and_update().clone();
+                        if let Some(s) = snap {
+                            if tx.send(Ok(to_proto(&s, cut))).await.is_err() {
+                                break; // client gone
+                            }
+                        }
                     }
                 }
             }
@@ -134,6 +151,11 @@ fn slot(s: &Slot) -> proto::PlaylistSlot {
         origin: s.origin.clone().unwrap_or_default(),
         from: s.from,
         at_local: s.at_local.clone().unwrap_or_default(),
+        issue: match s.issue {
+            SlotIssue::None => proto::playlist_slot::Issue::None,
+            SlotIssue::PoolEmpty => proto::playlist_slot::Issue::PoolEmpty,
+            SlotIssue::NothingPlayable => proto::playlist_slot::Issue::NothingPlayable,
+        } as i32,
     }
 }
 
@@ -179,7 +201,49 @@ fn note(n: &Note) -> proto::Note {
             p.reason = reason.clone();
             C::HistoryUnreadable
         }
+        Note::RendezvousWillNotCut { rule, playlist, at } => {
+            (p.rule, p.playlist, p.at) = (rule.clone(), playlist.clone(), Some(*at));
+            C::RendezvousWillNotCut
+        }
+        Note::SourceWillBeEmpty { rule, playlist, at } => {
+            (p.rule, p.playlist, p.at) = (rule.clone(), playlist.clone(), Some(*at));
+            C::SourceWillBeEmpty
+        }
+        Note::RendezvousNotCut { rule, playlist, at, count } => {
+            (p.rule, p.playlist, p.at, p.count) = (rule.clone(), playlist.clone(), Some(*at), *count);
+            C::RendezvousNotCut
+        }
+        Note::SourceWasEmpty { rule, playlist, at, count } => {
+            (p.rule, p.playlist, p.at, p.count) = (rule.clone(), playlist.clone(), Some(*at), *count);
+            C::SourceWasEmpty
+        }
     };
     p.code = code as i32;
     p
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use tokio_stream::StreamExt;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn a_watch_stream_ends_when_the_daemon_shuts_down() {
+        let (_d, hub, _control) = crate::onair::tests::hub().await;
+        let (stop, stopping) = watch::channel(false);
+        let svc = OnAirGrpc::new(hub, stopping);
+        let req = WatchRequest { upcoming: 1, history: 1, playlists_ahead: 1 };
+        let mut stream = svc.watch(Request::new(req)).await.unwrap().into_inner();
+        let first = tokio::time::timeout(Duration::from_secs(10), stream.next()).await.expect("a snapshot");
+        assert!(matches!(first, Some(Ok(_))));
+        stop.send(true).unwrap();
+        let end = tokio::time::timeout(Duration::from_secs(5), async {
+            while stream.next().await.is_some() {}
+        })
+        .await;
+        assert!(end.is_ok(), "the stream must end at shutdown, not hold the server");
+    }
 }

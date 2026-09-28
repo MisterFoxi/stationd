@@ -167,10 +167,6 @@ planned-coming = Coming
 planned-lot = batch { $lot }
 planned-plugin-missing = plugin “{ $plugin }” not loaded
 planned-unavailable = Unavailable: { $reason }
-planned-control-1 = Broadcast: pause, resume, next, sleep, wake
-planned-control-2 = Overrides: push, list, clear
-planned-control-3 = Live: cut the DJ, open / close a slot
-planned-control-4 = Queue playlists, library scan, plugins, operator stop
 planned-playlists-1 = List: mode, pool, rules and groups referencing it
 planned-playlists-2 = Form per mode, live pool preview
 planned-playlists-3 = Saved by stationd (revision, conflicts)
@@ -186,3 +182,215 @@ planned-system-1 = Health: stationd, Liquidsoap, Icecast (mounts), live
 planned-system-2 = Live events, broadcast statistics
 planned-plugins-1 = Views declared by the loaded plugins
 planned-plugins-2 = Each plugin's database (info, read-only query)
+
+## Grid incidents (on-air notes)
+note-rendezvous-will-not-cut = expected: rendez-vous { $rule } at { $time } will not cut — "{ $playlist }" has nothing to air
+note-source-will-be-empty = expected: at { $time }, "{ $playlist }" ({ $rule }) will have nothing to air — the lower priority takes over
+note-rendezvous-not-cut = seen: rendez-vous { $rule } did not cut at { $time } — "{ $playlist }" had nothing to air ({ $count ->
+    [one] once
+   *[other] { $count } times
+})
+note-source-was-empty = seen: "{ $playlist }" ({ $rule }) had nothing to air at { $time } ({ $count ->
+    [one] once
+   *[other] { $count } times
+})
+slot-pool-empty = empty pool: nothing will air
+slot-nothing-playable = nothing playable (constraints, plugins)
+
+## Keys (actions)
+key-space = Space
+key-tab = Tab
+key-up-down = ↑ / ↓
+key-a = a
+key-shift-a = A
+key-c = c
+key-d = d
+key-shift-d = D
+key-e = e
+key-k = k
+key-l = l
+key-n = n
+key-o = o
+key-r = r
+key-s = s
+key-v = v
+key-w = w
+key-x = x
+help-pause-resume = pause / resume / wake
+help-skip = skip to next
+help-override = push an override
+help-drain = sleep at 0 listeners
+help-wake = wake up
+help-section = next section
+help-select = pick a row
+help-override-remove = remove the picked override
+help-override-clear = clear the queue
+help-live-kick = kick the DJ
+help-live-open = open a slot
+help-live-close = close the picked opening
+help-enqueue = add to a queue playlist
+help-scan = scan the library
+help-shutdown = operator stop
+help-shutdown-force = forced stop (kicks the DJ)
+
+## Actions: status line
+status-action-running = action running…
+status-action-failed = failed: { $reason }
+status-cancelled = cancelled
+done-state = broadcast: { $from } → { $to }
+done-state-unchanged = broadcast already { $state }
+done-skip = skip requested
+done-override = override #{ $id } queued ({ $pending } pending)
+done-override-degraded = override #{ $id } queued, played SOFT (no cut possible) — { $pending } pending
+done-overrides-cleared = { $n ->
+    [one] 1 override removed
+   *[other] { $n } overrides removed
+}
+done-live-kicked = DJ { $dj } kicked
+done-live-opened = slot opened for { $dj } until { $until }
+done-live-closed = opening for { $dj } closed
+done-enqueued = added to "{ $playlist }" ({ $len } queued)
+done-enqueue-full = queue "{ $playlist }" is full ({ $len }): nothing added
+done-scan = scan: { $found } found, { $skipped } skipped, { $unavailable } gone
+done-plugin = plugin { $name }: { $state }
+done-plugin-reason = plugin { $name }: { $state } ({ $reason })
+done-shutdown = operator stop: Liquidsoap parked on the background noise, stationd exits
+done-shutdown-fallback = operator stop: stationd exits, Liquidsoap's safety fallback takes the air
+
+## Dialogs
+dialog-cancel = Cancel
+dialog-confirm-keys = ←/→ choose · Enter confirm · Esc cancel
+dialog-form-keys = Tab/↑↓ field · ←/→ choice · Enter confirm · Esc cancel
+form-required = "{ $field }" is required
+form-positive-integer = "{ $field }": an integer ≥ 1
+confirm-pause-title = Pause
+confirm-pause-body = The air stops on "{ $track }" until resumed.
+confirm-pause-yes = Pause
+confirm-skip-title = Skip to next
+confirm-skip-body = Cuts "{ $track }" now.
+confirm-skip-next = Expected next: "{ $track }".
+confirm-skip-yes = Skip
+confirm-drain-title = Sleep at 0 listeners
+confirm-drain-body = The station will go to sleep as soon as there is no listener left (background noise, no grid).
+confirm-drain-yes = Arm sleep
+form-override-title = Push an override
+form-override-kind = Content
+form-override-kind-media = Media
+form-override-kind-playlist = Playlist
+form-override-target = Path under media/ or playlist reference
+form-override-mode = Mode
+form-override-soft = SOFT: at the next track
+form-override-hard = HARD: cuts now
+form-override-expiry = Expiry (30s, 5m, 2h; empty = never)
+form-override-tracks = Tracks held (playlist)
+override-media = Media: { $path }
+override-playlist = Playlist: { $playlist }
+confirm-override-title = Push this override?
+confirm-override-soft = Airs at the next track boundary.
+confirm-override-hard = Cuts the current track NOW.
+confirm-override-tracks = { $n ->
+    [one] Holds 1 track.
+   *[other] Holds { $n } tracks.
+}
+confirm-override-no-expiry = No expiry.
+confirm-override-expiry = Dropped if not aired within { $expiry }.
+confirm-override-yes = Push
+confirm-clear-one-title = Remove the override
+confirm-clear-one-body = Remove override #{ $id } ({ $what }) from the queue?
+confirm-clear-all-title = Clear the override queue
+confirm-clear-all-body = { $n ->
+    [one] Remove the pending override?
+   *[other] Remove the { $n } pending overrides?
+}
+confirm-clear-yes = Remove
+confirm-kick-title = Kick the DJ
+confirm-kick-body = Disconnect { $dj } now? They will be refused until the end of their slot.
+confirm-kick-yes = Kick
+form-live-open-title = Open a live slot
+form-live-dj = DJ
+form-live-duration = Duration (30m, 2h, 1d)
+confirm-live-close-title = Close the opening
+confirm-live-close-body = Close the opening for { $dj } now?
+confirm-live-close-yes = Close
+form-enqueue-title = Add to a queue playlist
+form-enqueue-playlist = Playlist (queue mode)
+form-enqueue-media = Path under media/
+confirm-scan-title = Scan the library
+confirm-scan-body = Rereads all of media/: can take a while on a big disk or an NFS mount. The air is not touched.
+confirm-scan-yes = Scan
+plugin-verb-start = start
+plugin-verb-stop = stop
+plugin-verb-restart = restart
+plugin-verb-reload = reload
+confirm-plugin-start = Start plugin { $name }
+confirm-plugin-stop = Stop plugin { $name }
+confirm-plugin-restart = Restart plugin { $name }
+confirm-plugin-reload = Reload plugin { $name }
+confirm-plugin-body = The new state shows in the plugin list.
+confirm-shutdown-title = Operator stop
+confirm-shutdown-body = stationd exits and Liquidsoap is parked on the background noise. To restart: stationctl station start.
+confirm-shutdown-kicks = DJ { $dj } will be disconnected.
+confirm-shutdown-refused-live = DJ { $dj } is on air: the stop will be refused (A to force).
+confirm-shutdown-continue = Continue
+confirm-shutdown-again-title = Confirm the stop
+confirm-shutdown-again-body = Last confirmation: the station stops airing the grid.
+confirm-shutdown-yes = Stop the station
+
+## Control screen
+control-broadcast = Broadcast
+control-overrides = Overrides
+control-live = Live
+control-queue = Queue
+control-library = Library
+control-plugins = Plugins
+control-station = Station
+control-state = State
+control-listeners = Listeners
+control-on-air = On air
+control-broadcast-hint = Space pauses or resumes, n skips, v arms sleep (at 0 listeners), w wakes up.
+control-read-failed = cannot read: { $reason }
+control-not-read = not read yet
+control-more = … and { $n } more
+control-overrides-none = no pending override
+control-overrides-hint = o pushes a media or a playlist ahead of the grid.
+control-col-content = Content
+control-col-mode = Mode
+control-col-left = Left
+control-col-expires = Expires
+control-col-source = By
+control-col-plugin = Plugin
+control-col-state = State
+control-col-failures = Fails
+control-col-reason = Reason
+control-live-disabled = live not configured (no [live] section)
+control-live-on-air = On air
+control-live-nobody = nobody
+control-live-session = { $access } access, since { $since }, { $address }
+control-live-accounts = DJ accounts
+control-live-djs = { $n } declared
+control-live-djs-error = DJ file unreadable: { $reason }
+control-live-urgent = Urgent right
+control-live-cooldown = Cooldown
+control-live-until = { $dj } until { $time }
+control-live-refused = Refused
+control-live-last-refusal = Last refusal
+control-live-refusal = { $dj } at { $time }: { $reason }
+control-live-openings = Openings:
+control-live-no-opening = none
+control-live-cut = cut
+control-queue-hint = e adds a media to the buffer of a queue-mode playlist (listener requests, dedications). The playlist must exist and be in queue mode; stationd refuses otherwise, and says so.
+control-scan-none = no scan started from this TUI
+control-scan-hint = s rereads media/ and updates the index (files added, removed, changed).
+control-scan-last = Last scan:
+control-scan-found = Found
+control-scan-present = Available
+control-scan-unavailable = Gone
+control-scan-skipped = Skipped
+scan-skip-unreadable = unreadable
+scan-skip-zero-duration = zero length
+scan-skip-walk-error = walk
+scan-skip-unknown = ?
+control-plugins-none = no plugin declared
+control-plugin-off = disabled
+control-shutdown-hint = a: operator stop. stationd exits, Liquidsoap is parked on the background noise; nothing restarts before "stationctl station start". A: the same, kicking the DJ on air. Two confirmations.
+control-shutdown-live = DJ { $dj } on air: a will be refused, A kicks them.

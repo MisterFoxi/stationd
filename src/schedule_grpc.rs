@@ -59,7 +59,9 @@ fn map_grid_op_error(e: GridOpError) -> Status {
 fn map_next_error(e: EngineError) -> Status {
     use crate::selection::SelectionError as S;
     match &e {
-        EngineError::Selection(S::PlaylistNotFound(_)) | EngineError::Selection(S::PoolEmpty) => {
+        EngineError::Selection(S::PlaylistNotFound(_))
+        | EngineError::Selection(S::PoolEmpty)
+        | EngineError::Selection(S::NotAQueue(..)) => {
             Status::failed_precondition(e.to_string())
         }
         EngineError::Selection(S::UnsupportedMode(_))

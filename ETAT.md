@@ -5,7 +5,7 @@ sans reconstruire le contexte. À distinguer des docs de `Doc/` (décisions
 d'architecture durables) : ce fichier-ci est volatil, à mettre à jour à
 chaque session.
 
-Dernière mise à jour : 2026-09-28 (A4 lot 1).
+Dernière mise à jour : 2026-09-28 (A4 lot 2).
 
 
 ## Où on en est en une phrase
@@ -195,7 +195,32 @@ de l'antenne sont des opcodes `onair_v1.Note.Code` + paramètres (`plugin`,
 `reason`, `dj`, `media`), traduits par chaque client ; `stationctl` les rend
 en anglais. Allemand à faire relire. Dossier D12, §4.4.
 
-**Suivant : lot 2** — écran Contrôle (et actions depuis Antenne).
+**Lot 2 fait (2026-09-28)** — 455 tests daemon + 20 TUI verts, clippy sans
+nouvel avertissement ; essayé en réel dans l'env de préparation (stationd +
+Liquidsoap émulé par un script qui tire `/next`, rapporte `/track` et répond
+au socket de contrôle ; TUI en 130×40 et 100×32, fr/en/de). **À valider sur
+devstationd.**
+- Incidents de grille (suite du « TOPH en hard ne passe plus », qui était un
+  pool vide) : `StationControl::record_incident` (`HardNotCut` /
+  `SourceEmpty`, fusion par règle), notes `Note.Code` 16–19 prévues
+  (simulation) et constatées (dernière heure), `PlaylistSlot.issue`
+  (`POOL_EMPTY` / `NOTHING_PLAYABLE`). Dossier §3.3 bis.
+- TUI Antenne : ligne fautive en rouge + raison, incidents en tête des notes ;
+  `Espace` pause (confirmée) / reprise / réveil, `n` suivant, `o` override.
+- TUI Contrôle : Diffusion, Overrides, Live, File queue, Bibliothèque,
+  Plugins, Station (arrêt opérateur, double confirmation). Dossier §5.2.
+- Corrigé en route (daemon) : les flux `OnAirService.Watch` se terminent à
+  la demande d'arrêt (sinon `station stop` / `quit` restaient bloqués tant
+  qu'une TUI était ouverte — testé) ; `Enqueue` sur une playlist non `queue`
+  → `FAILED_PRECONDITION` avec un message clair (était `INTERNAL` « … is not
+  supported yet »).
+- Test ajouté : chaque entrée de chaque catalogue Fluent se résout (une
+  entrée mal formée faisait paniquer la TUI au démarrage).
+- Reste de §5.2 : sélecteur de média (lot 4), tampon des playlists `queue`,
+  jauge de scan (lot 7), Utilisateurs (lot A).
+
+**Suivant : lot 3** — stationd : playlists `Validate` / `PreviewPool` /
+`Save`, `SearchMedia` (service à trancher, §3.5).
 
 ### Après l'alpha (non bloquant)
 

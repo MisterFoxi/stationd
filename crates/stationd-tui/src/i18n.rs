@@ -169,6 +169,36 @@ mod tests {
         }
     }
 
+    /// Une entrée mal formée est écartée en silence par Fluent : chaque clé
+    /// de chaque catalogue doit se résoudre.
+    #[test]
+    fn every_entry_of_every_catalog_parses() {
+        let var = regex::Regex::new(r"\{\s*\$([a-z_]+)").unwrap();
+        for lang in LANGUAGES {
+            let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("locales").join(lang);
+            for e in std::fs::read_dir(&dir).unwrap() {
+                let text = std::fs::read_to_string(e.unwrap().path()).unwrap();
+                if let Err((_, errors)) = fluent_templates::fluent_bundle::FluentResource::try_new(text) {
+                    panic!("{lang}: catalogue mal formé : {errors:?}");
+                }
+            }
+            // Toutes les variables des catalogues, avec une valeur numérique
+            // (valable aussi pour les sélecteurs de pluriel).
+            let mut names = BTreeSet::new();
+            for e in std::fs::read_dir(&dir).unwrap() {
+                let text = std::fs::read_to_string(e.unwrap().path()).unwrap();
+                names.extend(var.captures_iter(&text).map(|c| c[1].to_string()));
+            }
+            let args: Vec<Arg> =
+                names.into_iter().map(|n| (&*Box::leak(n.into_boxed_str()), arg(2))).collect();
+            let l: LanguageIdentifier = lang.parse().unwrap();
+            for id in ids(lang) {
+                let t = text_in(&l, &id, &args);
+                assert!(!t.contains('⟦'), "{lang}: « {id} » ne se résout pas");
+            }
+        }
+    }
+
     #[test]
     fn language_is_picked_from_the_locale_name() {
         assert_eq!(supported("de_DE.UTF-8"), "de");

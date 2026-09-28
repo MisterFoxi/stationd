@@ -29,6 +29,15 @@ pub fn lazy_channel(addr: &str) -> anyhow::Result<Channel> {
     Ok(endpoint.connect_lazy())
 }
 
+/// Canal pour les opérations longues (scan de la bibliothèque) : même
+/// adresse, sans délai maximal par appel.
+pub fn lazy_channel_long(addr: &str) -> anyhow::Result<Channel> {
+    let endpoint = Endpoint::from_shared(addr.to_string())
+        .map_err(|e| anyhow::anyhow!(crate::tr!("rpc-bad-address", addr = addr.to_string(), reason = e.to_string())))?
+        .connect_timeout(Duration::from_secs(3));
+    Ok(endpoint.connect_lazy())
+}
+
 /// Borne un appel et aplatit l'erreur en texte lisible (code + message).
 async fn bounded<T>(
     call: impl Future<Output = Result<tonic::Response<T>, tonic::Status>>,

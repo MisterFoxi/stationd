@@ -25,8 +25,10 @@ use ratatui_widgets::borders::BorderType;
 use ratatui_widgets::gauge::LineGauge;
 use ratatui_widgets::paragraph::{Paragraph, Wrap};
 use ratatui_widgets::table::{Cell, Row, Table};
+use stationd_proto::onair::playlist_slot::Issue;
 use stationd_proto::onair::{Note, OnAirSnapshot, PlaylistSlot, Track, note, track::Outcome};
 
+use super::ops;
 use crate::app::{AppEvent, Global};
 use crate::fit;
 use crate::screen::{KeyHelp, Screen};
@@ -36,6 +38,8 @@ use crate::{k, tr};
 
 const UPCOMING_DEFAULT: usize = 10;
 const UPCOMING_MAX: usize = 30;
+/// Notes affichées sous « À suivre ».
+const NOTES_MAX: usize = 4;
 
 pub struct Antenne {
     /// Morceaux à suivre affichés (préchargé compris).
@@ -51,7 +55,7 @@ impl Default for Antenne {
 // --- mise en forme -------------------------------------------------------------
 
 /// `Artiste — Titre` ; le nom de fichier quand les tags manquent (dit).
-fn label(t: &Track) -> String {
+pub(super) fn label(t: &Track) -> String {
     let file = t.rel_path.rsplit('/').next().unwrap_or(&t.rel_path);
     match (t.artist.is_empty(), t.title.is_empty()) {
         (false, false) => format!("{} — {}", t.artist, t.title),
@@ -118,8 +122,9 @@ fn origin_label(o: &str) -> String {
 /// Note (opcode + paramètres) → phrase traduite. La correspondance est
 /// exhaustive : un opcode ajouté au contrat sans traduction ne compile pas ;
 /// un opcode inconnu (stationd plus récent) reste affiché avec son numéro.
-fn note_text(n: &Note) -> String {
+fn note_text(n: &Note, tz: Option<&TimeZone>) -> String {
     use note::Code as C;
+    let at = || n.at.map(|e| hm(tz, e)).unwrap_or_else(|| "—".into());
     let Ok(code) = C::try_from(n.code) else {
         return tr!("note-unknown", code = n.code);
     };
@@ -141,19 +146,73 @@ fn note_text(n: &Note) -> String {
         }
         C::GridProjectionFailed => tr!("note-grid-projection-failed", reason = n.reason.clone()),
         C::HistoryUnreadable => tr!("note-history-unreadable", reason = n.reason.clone()),
+        C::RendezvousWillNotCut => tr!(
+            "note-rendezvous-will-not-cut",
+            rule = n.rule.clone(),
+            playlist = n.playlist.clone(),
+            time = at()
+        ),
+        C::SourceWillBeEmpty => tr!(
+            "note-source-will-be-empty",
+            rule = n.rule.clone(),
+            playlist = n.playlist.clone(),
+            time = at()
+        ),
+        C::RendezvousNotCut => tr!(
+            "note-rendezvous-not-cut",
+            rule = n.rule.clone(),
+            playlist = n.playlist.clone(),
+            time = at(),
+            count = n.count
+        ),
+        C::SourceWasEmpty => tr!(
+            "note-source-was-empty",
+            rule = n.rule.clone(),
+            playlist = n.playlist.clone(),
+            time = at(),
+            count = n.count
+        ),
         C::Unspecified => tr!("note-unknown", code = n.code),
     }
 }
 
-fn slot_line<'a>(p: &PlaylistSlot, tz: Option<&TimeZone>, s: &Styles, width: usize) -> Line<'a> {
+/// Incident de grille (prévu ou constaté) : affiché en rouge.
+fn is_incident(n: &Note) -> bool {
+    use note::Code as C;
+    matches!(
+        C::try_from(n.code),
+        Ok(C::RendezvousWillNotCut | C::SourceWillBeEmpty | C::RendezvousNotCut | C::SourceWasEmpty)
+    )
+}
+
+/// Créneau fautif (ce créneau ne diffusera rien) → texte traduit.
+fn slot_issue(p: &PlaylistSlot) -> Option<String> {
+    match Issue::try_from(p.issue).unwrap_or(Issue::None) {
+        Issue::None => None,
+        Issue::PoolEmpty => Some(tr!("slot-pool-empty")),
+        Issue::NothingPlayable => Some(tr!("slot-nothing-playable")),
+    }
+}
+
+/// Une ligne par créneau ; un créneau fautif gagne une seconde ligne en
+/// rouge qui dit pourquoi (dossier §5.1 : la ligne fautive est marquée).
+fn slot_lines<'a>(p: &PlaylistSlot, tz: Option<&TimeZone>, s: &Styles, width: usize) -> Vec<Line<'a>> {
     let when = p.from.map(|e| hm(tz, e)).unwrap_or_else(|| "     ".into());
-    let origin = origin_label(&p.origin);
-    let name = fit::ellipsize(&p.playlist_ref, width.saturating_sub(8 + origin.chars().count() + 2));
-    Line::from(vec![
-        Span::styled(format!(" {when}  "), s.label()),
-        Span::raw(name),
+    // Le nom passe avant l'origine : c'est lui qu'on cherche.
+    let room = width.saturating_sub(8);
+    let name = fit::ellipsize(&p.playlist_ref, room);
+    let origin = fit::ellipsize(&origin_label(&p.origin), room.saturating_sub(name.chars().count() + 2));
+    let issue = slot_issue(p);
+    let name_style = if issue.is_some() { s.error() } else { Style::default() };
+    let mut v = vec![Line::from(vec![
+        Span::styled(format!(" {when}  "), if issue.is_some() { s.error() } else { s.label() }),
+        Span::styled(name, name_style),
         Span::styled(format!("  {origin}"), s.muted()),
-    ])
+    ])];
+    if let Some(why) = issue {
+        v.push(Line::styled(format!("   ⚠ {}", fit::ellipsize(&why, width.saturating_sub(5))), s.error()));
+    }
+    v
 }
 
 fn titled<'a>(title: String, s: &Styles) -> Block<'a> {
@@ -251,14 +310,23 @@ impl Antenne {
         let w = inner.width as usize;
         let mut lines: Vec<Line> = Vec::new();
         match &snap.current_playlist {
-            Some(p) => lines.push(Line::from(vec![
-                Span::styled(" ● ", s.ok()),
-                Span::styled(fit::ellipsize(&p.playlist_ref, w.saturating_sub(4)), s.accent()),
-            ])),
+            Some(p) => {
+                let issue = slot_issue(p);
+                lines.push(Line::from(vec![
+                    Span::styled(" ● ", if issue.is_some() { s.error() } else { s.ok() }),
+                    Span::styled(
+                        fit::ellipsize(&p.playlist_ref, w.saturating_sub(4)),
+                        if issue.is_some() { s.error() } else { s.accent() },
+                    ),
+                ]));
+                if let Some(why) = issue {
+                    lines.push(Line::styled(format!("   ⚠ {}", fit::ellipsize(&why, w.saturating_sub(5))), s.error()));
+                }
+            }
             None => lines.push(Line::styled(" ● —", s.muted())),
         }
         for p in &snap.next_playlists {
-            lines.push(slot_line(p, tz, &s, w));
+            lines.extend(slot_lines(p, tz, &s, w));
         }
         if !snap.indicative.is_empty() {
             lines.push(Line::styled(format!(" {}", tr!("playlists-by-track-count")), s.label()));
@@ -279,7 +347,7 @@ impl Antenne {
         let inner = block.inner(area);
         block.render(area, buf);
 
-        let notes_h = if snap.notes.is_empty() { 0 } else { (snap.notes.len() as u16).min(3) };
+        let notes_h = (snap.notes.len() as u16).min(NOTES_MAX as u16);
         let [table_a, notes_a] =
             Layout::vertical([Constraint::Fill(1), Constraint::Length(notes_h)]).areas(inner);
 
@@ -321,14 +389,16 @@ impl Antenne {
             };
             Table::new(rows, widths).column_spacing(1).render(table_a, buf);
         }
-        let notes: Vec<Line> = snap
-            .notes
-            .iter()
-            .take(3)
+        // Les incidents de grille d'abord : c'est ce qu'il faut corriger.
+        let (incidents, others): (Vec<&Note>, Vec<&Note>) = snap.notes.iter().partition(|n| is_incident(n));
+        let notes: Vec<Line> = incidents
+            .into_iter()
+            .chain(others)
+            .take(NOTES_MAX)
             .map(|n| {
                 Line::styled(
-                    format!(" ⚠ {}", fit::ellipsize(&note_text(n), notes_a.width.saturating_sub(4) as usize)),
-                    s.warn(),
+                    format!(" ⚠ {}", fit::ellipsize(&note_text(n, tz), notes_a.width.saturating_sub(4) as usize)),
+                    if is_incident(n) { s.error() } else { s.warn() },
                 )
             })
             .collect();
@@ -435,10 +505,15 @@ impl Screen for Antenne {
     }
 
     fn help(&self) -> &'static [KeyHelp] {
-        &[(k!("key-plus-minus"), k!("help-upcoming-count"))]
+        &[
+            (k!("key-space"), k!("help-pause-resume")),
+            (k!("key-n"), k!("help-skip")),
+            (k!("key-o"), k!("help-override")),
+            (k!("key-plus-minus"), k!("help-upcoming-count")),
+        ]
     }
 
-    fn event(&mut self, event: &AppEvent, _ctx: &mut Global) -> Result<Control<AppEvent>, Error> {
+    fn event(&mut self, event: &AppEvent, ctx: &mut Global) -> Result<Control<AppEvent>, Error> {
         if let AppEvent::Event(Event::Key(k)) = event
             && k.kind == KeyEventKind::Press
         {
@@ -449,6 +524,22 @@ impl Screen for Antenne {
                 }
                 KeyCode::Char('-') => {
                     self.upcoming = self.upcoming.saturating_sub(5).max(1);
+                    return Ok(Control::Changed);
+                }
+                KeyCode::Char(' ') => {
+                    match ops::toggle_pause(&ctx.store) {
+                        Some(ops::Outcome::Open(m)) => ctx.open(m),
+                        Some(ops::Outcome::Run(a)) => ctx.request(a),
+                        None => return Ok(Control::Continue),
+                    }
+                    return Ok(Control::Changed);
+                }
+                KeyCode::Char('n') => {
+                    ctx.open(ops::skip(&ctx.store));
+                    return Ok(Control::Changed);
+                }
+                KeyCode::Char('o') => {
+                    ctx.open(ops::push_override());
                     return Ok(Control::Changed);
                 }
                 _ => {}
@@ -484,7 +575,8 @@ impl Screen for Antenne {
         if area.width >= 100 {
             let [middle, bottom] =
                 Layout::vertical([Constraint::Percentage(55), Constraint::Percentage(45)]).areas(rest);
-            let [pl, next] = Layout::horizontal([Constraint::Length(34), Constraint::Fill(1)]).areas(middle);
+            let pl_w = (area.width * 3 / 10).max(34);
+            let [pl, next] = Layout::horizontal([Constraint::Length(pl_w), Constraint::Fill(1)]).areas(middle);
             self.render_playlists(pl, buf, &snap, ctx);
             self.render_next(next, buf, &snap, ctx);
             self.render_history(bottom, buf, &snap, ctx);
@@ -497,7 +589,10 @@ impl Screen for Antenne {
             let then = snap
                 .next_playlists
                 .first()
-                .map(|p| format!("  → {} {}", p.from.map(|e| hm(ctx.store.tz.as_ref(), e)).unwrap_or_default(), p.playlist_ref))
+                .map(|p| {
+                    let warn = if slot_issue(p).is_some() { " ⚠" } else { "" };
+                    format!("  → {} {}{warn}", p.from.map(|e| hm(ctx.store.tz.as_ref(), e)).unwrap_or_default(), p.playlist_ref)
+                })
                 .unwrap_or_default();
             Paragraph::new(Line::from(vec![
                 Span::styled(" ● ", s.ok()),

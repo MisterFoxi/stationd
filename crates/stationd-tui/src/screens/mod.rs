@@ -1,6 +1,8 @@
 //! Registre des écrans. L'ordre donne les touches d'accès `1`..`8`.
 
 mod antenne;
+mod controle;
+mod ops;
 mod planned;
 
 use crate::k;
@@ -10,17 +12,7 @@ use planned::Planned;
 pub fn registry() -> Vec<Box<dyn Screen>> {
     vec![
         Box::new(antenne::Antenne::default()),
-        Box::new(Planned {
-            title: k!("screen-control"),
-            lot: 2,
-            summary: &[
-                k!("planned-control-1"),
-                k!("planned-control-2"),
-                k!("planned-control-3"),
-                k!("planned-control-4"),
-            ],
-            plugin: None,
-        }),
+        Box::new(controle::Controle::default()),
         Box::new(Planned {
             title: k!("screen-playlists"),
             lot: 4,

@@ -91,6 +91,11 @@ message Note {
   string reason = 3;   // PLUGIN_FILTER_FAILED, SIMULATION_FAILED, GRID_PROJECTION_FAILED, HISTORY_UNREADABLE
   string dj = 4;       // LIVE_ON_AIR
   string media = 5;    // UNKNOWN_DURATION, STREAM_UNKNOWN_DURATION
+  // Incidents de grille (codes 16 à 19) : la règle, sa playlist, quand.
+  string rule = 6;
+  string playlist = 7;
+  optional int64 at = 8;   // epoch UTC : dernière occurrence (constaté) / prévue (prévu)
+  uint32 count = 9;        // constaté : nombre d'occurrences de la série
 
   enum Code {
     CODE_UNSPECIFIED = 0;
@@ -109,6 +114,12 @@ message Note {
     PLUGIN_FILTER_FAILED = 13;   // un plugin a échoué pendant la simulation (plugin, reason)
     GRID_PROJECTION_FAILED = 14; // projection des playlists à venir impossible (reason)
     HISTORY_UNREADABLE = 15;     // historique illisible (reason)
+    // Prévu par la simulation (rule, playlist, at) :
+    RENDEZVOUS_WILL_NOT_CUT = 16; // un rendez-vous hard ne coupera pas : sa source ne produira rien
+    SOURCE_WILL_BE_EMPTY = 17;    // une règle due ne produira rien (pool vide ou vidé par les contraintes)
+    // Constaté sur l'antenne dans la dernière heure (rule, playlist, at, count) :
+    RENDEZVOUS_NOT_CUT = 18;      // un rendez-vous hard n'a pas coupé : sa source n'a rien produit
+    SOURCE_WAS_EMPTY = 19;        // une règle due n'a rien produit, la grille est passée à la suivante
   }
 }
 
@@ -118,6 +129,13 @@ message PlaylistSlot {
   string origin = 3;
   optional int64 from = 4;          // epoch UTC ; absent pour l'indicatif / la playlist en cours
   string at_local = 5;              // même instant en heure locale nommée (anti-DST)
+  Issue issue = 6;                  // ligne fautive : ce créneau ne diffusera rien
+
+  enum Issue {
+    ISSUE_NONE = 0;
+    POOL_EMPTY = 1;                 // aucun média dans le pool (vu dès la projection)
+    NOTHING_PLAYABLE = 2;           // pool non vide mais rien de diffusable à ce moment (vu par la simulation : contraintes, plugins…)
+  }
 }
 
 message HistoryRequest {
