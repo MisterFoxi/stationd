@@ -65,12 +65,15 @@ Réveils automatiques (core) : audience devenue inconnue, DJ qui prend l'antenne
 
 | Commande | Effet | Paramètres |
 | --- | --- | --- |
-| `playlist add <PATH>` | Enregistre un fichier playlist TOML : validé, UUID attribué, fichier réécrit sur place avec l'id | `<PATH>` : fichier `.toml` |
+| `playlist validate <PATH>` | Vérifie un TOML sans rien appliquer ni écrire : chaque problème avec son champ (`selection.order`, `selection.members[2].ref`…), la valeur rejetée et les valeurs admises ; références de groupe et cycles jugés avec la vue actuelle ; erreur = code ≠ 0 | `<PATH>` : fichier `.toml` local ; `--as <ref>` (où il serait enregistré : refs `./x` d'un groupe, cycles) |
+| `playlist preview <PATH>` | Pool du TOML sans l'appliquer : nombre de médias disponibles, durée, artistes, échantillon ; par membre pour un groupe ; pool vide = avertissement | `--as <ref>` ; `--sample <n>` (défaut 20, max 100) |
+| `playlist save <REF> <PATH>` | stationd valide, **écrit le fichier** sous `[playlist] path` (écriture atomique, relue) et l'applique. Crée si absent ; remplacer un fichier existant demande sa révision. L'id est conservé (un `id` différent est refusé). Invalide = rien d'écrit, diagnostics, code ≠ 0 | `<REF>` : ref cible (`emission/intro`) ; `--revision <rev>` (de `export --file`) ou `--force` |
+| `playlist add <PATH>` | Enregistre dans la vue un fichier TOML qui vit **ailleurs** que sous `[playlist] path` (entrée sans chemin, désignée par son UUID) ; le fichier donné est réécrit sur place avec l'id. Pour la racine des playlists : `save` | `<PATH>` : fichier `.toml` |
 | `playlist sync` | Réconcilie tous les `*.toml` sous `[playlist] path` (récursif). Un fichier invalide est signalé, pas bloquant | — |
 | `playlist list` | Playlists connues de stationd | — |
 | `playlist reload` | La vue devient exactement le répertoire : `sync` + retrait des playlists dont le fichier a disparu. Une playlist disparue mais encore référencée (règle de grille, groupe qui reste) est gardée et signalée ; erreur = code ≠ 0 | — |
-| `playlist export <REF>` | Affiche le TOML que stationd applique pour cette playlist | `<REF>` : ref (`emission/intro`) ou UUID ; `--out <fichier>` (défaut stdout) |
-| `playlist remove <REF> --yes` | Supprime la playlist : son fichier sous `[playlist] path` et son entrée. Refusé tant qu'une règle de grille ou un groupe la référence. L'état de lecture (curseur, épisodes joués, file) est gardé | `<REF>` : ref ou UUID ; `--yes` obligatoire |
+| `playlist export <REF>` | Affiche le TOML que stationd applique pour cette playlist (signale sur stderr si le fichier en diffère) ; `--file` : le fichier lui-même, commentaires compris, et sa révision (stderr) | `<REF>` : ref (`emission/intro`) ou UUID ; `--out <fichier>` (défaut stdout) ; `--file` |
+| `playlist remove <REF> --yes` | Supprime la playlist : son fichier sous `[playlist] path` et son entrée. Refusé tant qu'une règle de grille ou un groupe la référence. L'état de lecture (curseur, épisodes joués, file) est gardé | `<REF>` : ref ou UUID ; `--yes` obligatoire ; `--revision <rev>` (refus si le fichier a changé depuis) |
 | `schedule validate <PATH>` | Valide une grille sans l'installer ; rejet = code ≠ 0 | `<PATH>` : `grid.toml` |
 | `schedule apply <PATH>` | Valide et installe la grille (atomique) ; l'état de lecture est conservé | `<PATH>` |
 | `schedule export` | Réécrit la grille courante en TOML | `--rule <id>` (répétable) ; `--out <fichier>` (défaut stdout) |
@@ -93,6 +96,7 @@ Réveils automatiques (core) : audience devenue inconnue, DJ qui prend l'antenne
 | `library scan` | Scanne `[media] library_path` et réconcilie l'index ; un fichier illisible est signalé, pas bloquant | — |
 | `library list` | Index des médias (disponibles seulement par défaut) | `--all` (inclut les fichiers disparus) ; `--genre <g>` (répétable, OU) ; `--by-genre` (groupé par genre) |
 | `library genres` | Nombre de médias par genre + sans genre | `--all` |
+| `library search [MOTS]` | Recherche par page : chaque mot doit apparaître dans le titre, l'artiste, l'album ou le chemin (casse ignorée, majuscules accentuées comprises) ; tri stable (clé puis chemin) ; affiche le curseur de la page suivante | `--genre <g>` (répétable, OU) ; `--folder <dossier>` ; `--missing title\|artist\|album\|year\|genre` (répétable : manque tout) ; `--sort path\|title\|artist\|album\|year\|duration` ; `--desc` ; `--limit <n>` (défaut 50, max 500) ; `--cursor <c>` ; `--all` |
 | `stats` | Diffusions groupées ; `aired` = réellement démarré par Liquidsoap, `picked` = choisi par stationd | `--since <durée>` (défaut 24h) ; `--by playlist\|leaf\|rule\|origin\|media\|artist` (défaut playlist) ; `--limit <n>` (défaut 20, 0 = tout) |
 
 Pour `--by` : `playlist` = playlist de la règle ou de l'override (un groupe compte comme le groupe) ; `leaf` = playlist membre qui a fourni le fichier ; `origin` = `AtClockHard`, `Every`, `BaseRotation`, `Override`…

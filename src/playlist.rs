@@ -261,134 +261,400 @@ impl Playlist {
     }
 
     /// Business-logic validation. Lives here (in stationd) so every client
-    /// gets the same rules. Covers the clear-cut rules from the doc; the
-    /// heavier cross-playlist checks (group cycle detection, referential
-    /// integrity of `members`/`files`) need the whole set loaded and are
-    /// left as explicit TODOs for the reconciliation pass.
+    /// gets the same rules. The first problem found, as an error — see
+    /// [`Playlist::diagnostics`] for all of them, each tied to its field.
+    /// Cross-playlist checks (group cycles, member refs) need the whole set:
+    /// [`validate_set`].
     pub fn validate(&self) -> Result<(), PlaylistError> {
-        let err = |msg: &str| PlaylistError::Validation(msg.to_string());
+        match self.diagnostics().into_iter().next() {
+            Some(d) => Err(PlaylistError::Validation(d.message)),
+            None => Ok(()),
+        }
+    }
+
+    /// Every per-file rule broken by this playlist, in a stable order (the
+    /// order of the checks), each tied to the field that carries it. Empty =
+    /// valid on its own.
+    pub fn diagnostics(&self) -> Vec<Diag> {
+        let sel = &self.selection;
+        let mut out = Vec::new();
+        let mode_name = mode_name(sel.mode);
+        let order_text = |o: Order| order_name(o).to_string();
 
         // `order` valid values depend on `mode`.
-        match self.selection.mode {
-            Mode::Static => {
-                self.check_order_in(&[Order::Shuffle, Order::Sequential], "static")?;
-            }
-            Mode::Dynamic => {
-                self.check_order_in(
-                    &[Order::Shuffle, Order::Sequential, Order::Newest, Order::Oldest],
-                    "dynamic",
-                )?;
-            }
-            Mode::Remote => {
-                if self.selection.order.is_some() {
-                    return Err(err("`order` is not allowed for a remote (a relayed stream has no internal order)"));
-                }
-            }
-            Mode::Queue => {
-                self.check_order_in(&[Order::Fifo, Order::Lifo], "queue")?;
-            }
-            Mode::Group => {
-                if self.selection.order.is_some() {
-                    return Err(err("`order` is not allowed for a group (use `strategy`)"));
-                }
-                if self.selection.strategy.is_none() {
-                    return Err(err("a group requires `strategy`"));
-                }
-            }
+        let allowed: &[Order] = match sel.mode {
+            Mode::Static => &[Order::Shuffle, Order::Sequential],
+            Mode::Dynamic => &[Order::Shuffle, Order::Sequential, Order::Newest, Order::Oldest],
+            Mode::Queue => &[Order::Fifo, Order::Lifo],
+            Mode::Remote | Mode::Group => &[],
+        };
+        match (sel.mode, sel.order) {
+            (Mode::Remote, Some(o)) => out.push(
+                Diag::error(DiagCode::NotAllowed, "selection.order", "`order` is not allowed for a remote (a relayed stream has no internal order)")
+                    .rejected(order_text(o)),
+            ),
+            (Mode::Group, Some(o)) => out.push(
+                Diag::error(DiagCode::NotAllowed, "selection.order", "`order` is not allowed for a group (use `strategy`)")
+                    .rejected(order_text(o)),
+            ),
+            (_, Some(o)) if !allowed.contains(&o) => out.push(
+                Diag::error(
+                    DiagCode::BadValue,
+                    "selection.order",
+                    &format!("`order = {}` is not valid for mode `{mode_name}`", order_name(o)),
+                )
+                .rejected(order_text(o))
+                .expected(allowed.iter().map(|o| order_name(*o)).collect::<Vec<_>>().join(", ")),
+            ),
+            _ => {}
+        }
+        if sel.mode == Mode::Group && sel.strategy.is_none() {
+            out.push(
+                Diag::error(DiagCode::RequiredForMode, "selection.strategy", "a group requires `strategy`")
+                    .expected("weighted, rotate, sequence, shuffle"),
+            );
         }
 
         // `unplayed_only` (play-once) only makes sense on a dated order: it
         // dequeues a growing series oldest/newest-first. On any other order it
         // is a loud error, never silently ignored.
-        if self.selection.unplayed_only == Some(true)
-            && !matches!(self.selection.order, Some(Order::Newest) | Some(Order::Oldest))
-        {
-            return Err(err("`unplayed_only` requires `order = newest` or `order = oldest`"));
+        if sel.unplayed_only == Some(true) && !matches!(sel.order, Some(Order::Newest) | Some(Order::Oldest)) {
+            out.push(
+                Diag::error(
+                    DiagCode::Conflict,
+                    "selection.unplayed_only",
+                    "`unplayed_only` requires `order = newest` or `order = oldest`",
+                )
+                .rejected("true"),
+            );
         }
 
         // Per-member quotas. `weight` is for a `weighted` group; `take`
         // (tracks) and `runtime` (time budget) are per-member quotas for a
         // `sequence` or `shuffle` group, and are mutually exclusive.
-        let quota_group = matches!(
-            self.selection.strategy,
-            Some(Strategy::Sequence) | Some(Strategy::Shuffle)
-        );
-        for m in &self.selection.members {
+        let quota_group = matches!(sel.strategy, Some(Strategy::Sequence) | Some(Strategy::Shuffle));
+        for (i, m) in sel.members.iter().enumerate() {
+            let at = |f: &str| format!("selection.members[{}].{f}", i + 1);
             if m.take.is_some() && m.runtime.is_some() {
-                return Err(err(
+                out.push(Diag::error(
+                    DiagCode::Conflict,
+                    &at("runtime"),
                     "a member cannot have both `take` and `runtime` (tracks XOR time budget)",
                 ));
             }
-            if m.take.is_some() && !quota_group {
-                return Err(err("`take` on a member requires a `sequence` or `shuffle` group"));
-            }
-            if m.runtime.is_some() && !quota_group {
-                return Err(err(
-                    "`runtime` on a member requires a `sequence` or `shuffle` group",
-                ));
+            if let (Some(t), false) = (m.take, quota_group) {
+                out.push(
+                    Diag::error(DiagCode::NotAllowed, &at("take"), "`take` on a member requires a `sequence` or `shuffle` group")
+                        .rejected(t.to_string()),
+                );
             }
             if let Some(r) = &m.runtime {
-                parse_duration_secs(r).map_err(|e| {
-                    PlaylistError::Validation(format!(
-                        "member `{}` has an invalid `runtime`: {e}",
-                        m.r#ref
-                    ))
-                })?;
+                if !quota_group {
+                    out.push(
+                        Diag::error(DiagCode::NotAllowed, &at("runtime"), "`runtime` on a member requires a `sequence` or `shuffle` group")
+                            .rejected(r.clone()),
+                    );
+                }
+                if let Err(e) = parse_duration_secs(r) {
+                    out.push(
+                        Diag::error(
+                            DiagCode::BadDuration,
+                            &at("runtime"),
+                            &format!("member `{}` has an invalid `runtime`: {e}", m.r#ref),
+                        )
+                        .rejected(r.clone())
+                        .expected("30s, 15m, 2h, 1d"),
+                    );
+                }
             }
-            if m.weight.is_some() && self.selection.strategy != Some(Strategy::Weighted) {
-                return Err(err("`weight` on a member requires a `weighted` group"));
+            if let (Some(w), true) = (m.weight, sel.strategy != Some(Strategy::Weighted)) {
+                out.push(
+                    Diag::error(DiagCode::NotAllowed, &at("weight"), "`weight` on a member requires a `weighted` group")
+                        .rejected(w.to_string()),
+                );
             }
         }
 
         // Mode-shape sanity: the right fields for the right mode, and no
         // field that belongs to another mode (no-silent-failure: a stray
         // field must be a loud error, never quietly ignored).
-        match self.selection.mode {
-            Mode::Static if self.selection.files.is_empty() => {
-                return Err(err("a static playlist needs `files`"));
+        match sel.mode {
+            Mode::Static if sel.files.is_empty() => {
+                out.push(Diag::error(DiagCode::RequiredForMode, "selection.files", "a static playlist needs `files`"));
             }
-            Mode::Remote if self.selection.url.is_none() => {
-                return Err(err("a remote playlist needs `url`"));
+            Mode::Remote if sel.url.is_none() => {
+                out.push(Diag::error(DiagCode::RequiredForMode, "selection.url", "a remote playlist needs `url`"));
             }
-            Mode::Group if self.selection.members.is_empty() => {
-                return Err(err("a group needs `members`"));
+            Mode::Group if sel.members.is_empty() => {
+                out.push(Diag::error(DiagCode::RequiredForMode, "selection.members", "a group needs `members`"));
             }
             _ => {}
         }
 
         // `url` only belongs to a remote.
-        if self.selection.url.is_some() && self.selection.mode != Mode::Remote {
-            return Err(err("`url` is only valid for mode `remote`"));
+        if let (Some(u), true) = (&sel.url, sel.mode != Mode::Remote) {
+            out.push(
+                Diag::error(DiagCode::NotAllowed, "selection.url", "`url` is only valid for mode `remote`").rejected(u.clone()),
+            );
         }
 
         // Dynamic-selection filters: each `field`/`op`/`value` must be a valid
         // catalogue entry. Checked here with the same pure check the resolver
         // uses, so a malformed filter — e.g. `has_any` with a bare string
         // instead of a list — is a loud error at apply/validate, never on air.
-        for (i, f) in self.selection.filter.iter().enumerate() {
-            crate::selection::validate_filter(f).map_err(|e| {
-                PlaylistError::Validation(format!("selection.filter[{}]: {e}", i + 1))
-            })?;
-        }
-
-        // Cross-playlist checks (group cycle detection, referential
-        // integrity of member `ref`s) are NOT done here — a single file
-        // cannot see the whole set. They live in `validate_set`, called by
-        // the sync pass once every file is loaded.
-
-        Ok(())
-    }
-
-    fn check_order_in(&self, allowed: &[Order], mode_name: &str) -> Result<(), PlaylistError> {
-        if let Some(order) = self.selection.order {
-            if !allowed.contains(&order) {
-                return Err(PlaylistError::Validation(format!(
-                    "`order = {order:?}` is not valid for mode `{mode_name}`"
-                )));
+        for (i, f) in sel.filter.iter().enumerate() {
+            if let Err(e) = crate::selection::validate_filter(f) {
+                let (field, rejected) = match &e {
+                    crate::selection::SelectionError::BadFilterValue { .. } => {
+                        (format!("selection.filter[{}].value", i + 1), f.value.to_string())
+                    }
+                    _ => (format!("selection.filter[{}]", i + 1), format!("{} {}", f.field, f.op)),
+                };
+                out.push(
+                    Diag::error(DiagCode::BadFilter, &field, &format!("selection.filter[{}]: {e}", i + 1)).rejected(rejected),
+                );
             }
         }
-        Ok(())
+
+        // Anti-repetition windows: same duration grammar. Checked here so a
+        // typo is reported on its field, not when the playlist first airs.
+        if let Some(c) = self.broadcast.as_ref().and_then(|b| b.constraints.as_ref()) {
+            for (name, v) in [
+                ("no_same_artist_within", &c.no_same_artist_within),
+                ("no_same_track_within", &c.no_same_track_within),
+                ("no_same_title_within", &c.no_same_title_within),
+            ] {
+                if let Some((v, Err(e))) = v.as_ref().map(|v| (v, parse_duration_secs(v))) {
+                    out.push(
+                        Diag::error(DiagCode::BadDuration, &format!("broadcast.constraints.{name}"), &format!("`{name}`: {e}"))
+                            .rejected(v.clone())
+                            .expected("30s, 15m, 2h, 1d"),
+                    );
+                }
+            }
+        }
+
+        out
     }
+}
+
+fn mode_name(m: Mode) -> &'static str {
+    match m {
+        Mode::Static => "static",
+        Mode::Dynamic => "dynamic",
+        Mode::Remote => "remote",
+        Mode::Queue => "queue",
+        Mode::Group => "group",
+    }
+}
+
+fn order_name(o: Order) -> &'static str {
+    match o {
+        Order::Shuffle => "shuffle",
+        Order::Sequential => "sequential",
+        Order::Newest => "newest",
+        Order::Oldest => "oldest",
+        Order::Fifo => "fifo",
+        Order::Lifo => "lifo",
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Diagnostics: a problem tied to the field that carries it
+// ---------------------------------------------------------------------------
+
+/// Nature of a problem (mirrors `playlist_v1.Diagnostic.Code`): clients
+/// translate by code, never by parsing the message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiagCode {
+    Syntax,
+    UnknownField,
+    MissingField,
+    BadValue,
+    NotAllowed,
+    RequiredForMode,
+    Conflict,
+    BadFilter,
+    BadDuration,
+    UnknownRef,
+    BadRef,
+    Cycle,
+    IdChanged,
+    EmptyPool,
+}
+
+/// One problem. `field` follows the TOML grammar (`selection.order`,
+/// `selection.filter[2].value`, 1-based indexes); empty = the whole file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Diag {
+    /// `false` = warning: does not block a save.
+    pub error: bool,
+    pub code: DiagCode,
+    pub field: String,
+    pub rejected: String,
+    pub expected: String,
+    pub message: String,
+}
+
+impl Diag {
+    pub fn error(code: DiagCode, field: &str, message: &str) -> Self {
+        Self { error: true, code, field: field.to_string(), rejected: String::new(), expected: String::new(), message: message.to_string() }
+    }
+
+    pub fn warning(code: DiagCode, field: &str, message: &str) -> Self {
+        Self { error: false, ..Self::error(code, field, message) }
+    }
+
+    pub fn rejected(mut self, v: impl Into<String>) -> Self {
+        self.rejected = v.into();
+        self
+    }
+
+    pub fn expected(mut self, v: impl Into<String>) -> Self {
+        self.expected = v.into();
+        self
+    }
+}
+
+/// Parse a playlist, or say precisely why not: a TOML syntax error (with its
+/// line), an unknown or missing field, a value of the wrong type — each tied
+/// to the field path, found from the error's position in the text.
+pub fn parse_with_diagnostics(text: &str) -> Result<Playlist, Diag> {
+    let doc = match toml_edit::ImDocument::parse(text) {
+        Ok(d) => d,
+        Err(e) => {
+            let at = e.span().map(|s| line_col(text, s.start)).map(|(l, c)| format!(" (line {l}, column {c})")).unwrap_or_default();
+            return Err(Diag::error(DiagCode::Syntax, "", &format!("invalid TOML{at}: {}", e.message().trim())));
+        }
+    };
+    match toml::from_str::<Playlist>(text) {
+        Ok(p) => Ok(p),
+        Err(e) => {
+            let msg = e.message().trim().to_string();
+            let (code, name, expected) = classify_serde_error(&msg);
+            let field = match (code, name.as_deref(), e.span()) {
+                // Missing: the span is the table that lacks it.
+                // An empty span = the document itself (root field).
+                (DiagCode::MissingField, Some(n), Some(s)) if s.is_empty() => n.to_string(),
+                (DiagCode::MissingField, Some(n), Some(s)) => join_path(&path_at(&doc, s.start, s.end), n),
+                (DiagCode::MissingField, Some(n), None) => n.to_string(),
+                (_, _, Some(s)) => path_at(&doc, s.start, s.start + 1),
+                _ => String::new(),
+            };
+            let mut d = Diag::error(code, &field, &msg);
+            if let (DiagCode::UnknownField | DiagCode::BadValue, Some(n)) = (code, name) {
+                d = d.rejected(n);
+            }
+            if let Some(x) = expected {
+                d = d.expected(x);
+            }
+            Err(d)
+        }
+    }
+}
+
+fn join_path(base: &str, name: &str) -> String {
+    if base.is_empty() { name.to_string() } else { format!("{base}.{name}") }
+}
+
+/// `unknown field `x`, expected one of `a`, `b`` → (UnknownField, x, "a, b");
+/// `missing field `x`` → (MissingField, x, -); anything else → BadValue.
+fn classify_serde_error(msg: &str) -> (DiagCode, Option<String>, Option<String>) {
+    let quoted = |s: &str| -> Option<String> {
+        let a = s.find('`')?;
+        let b = s[a + 1..].find('`')?;
+        Some(s[a + 1..a + 1 + b].to_string())
+    };
+    if let Some(rest) = msg.strip_prefix("unknown field ") {
+        let expected = rest.split_once("expected ").map(|(_, x)| {
+            x.trim_start_matches("one of ").replace('`', "").trim().to_string()
+        });
+        return (DiagCode::UnknownField, quoted(rest), expected);
+    }
+    if let Some(rest) = msg.strip_prefix("missing field ") {
+        return (DiagCode::MissingField, quoted(rest), None);
+    }
+    if let Some(rest) = msg.strip_prefix("unknown variant ") {
+        let expected = rest.split_once("expected ").map(|(_, x)| {
+            x.trim_start_matches("one of ").replace('`', "").trim().to_string()
+        });
+        return (DiagCode::BadValue, quoted(rest), expected);
+    }
+    (DiagCode::BadValue, None, None)
+}
+
+fn line_col(text: &str, offset: usize) -> (usize, usize) {
+    let before = &text[..offset.min(text.len())];
+    let line = before.matches('\n').count() + 1;
+    let col = before.rsplit('\n').next().map_or(0, |l| l.chars().count()) + 1;
+    (line, col)
+}
+
+/// The field path of the innermost key / table whose text contains the byte
+/// range `start..end` of the document (1-based indexes for arrays of
+/// tables). Empty = root.
+fn path_at(doc: &toml_edit::ImDocument<&str>, start: usize, end: usize) -> String {
+    let offset = start;
+    // (path, start, end) of every key/value and table header; the smallest
+    // range containing `offset` wins, else the last header before it.
+    let mut spans: Vec<(String, usize, usize)> = Vec::new();
+    fn walk(table: &toml_edit::Table, prefix: &str, spans: &mut Vec<(String, usize, usize)>) {
+        for (k, item) in table.iter() {
+            let path = join_path(prefix, k);
+            let key_span = table.key(k).and_then(|key| key.span());
+            match item {
+                toml_edit::Item::Value(v) => {
+                    if let (Some(ks), Some(vs)) = (key_span.clone(), v.span()) {
+                        spans.push((path.clone(), ks.start, vs.end));
+                    } else if let Some(vs) = v.span() {
+                        spans.push((path.clone(), vs.start, vs.end));
+                    }
+                    if let toml_edit::Value::InlineTable(t) = v {
+                        for (ik, iv) in t.iter() {
+                            if let Some(vs) = iv.span() {
+                                spans.push((join_path(&path, ik), vs.start, vs.end));
+                            }
+                        }
+                    }
+                }
+                toml_edit::Item::Table(t) => {
+                    if let Some(s) = t.span() {
+                        spans.push((path.clone(), s.start, s.end));
+                    }
+                    walk(t, &path, spans);
+                }
+                toml_edit::Item::ArrayOfTables(a) => {
+                    for (i, t) in a.iter().enumerate() {
+                        let p = format!("{path}[{}]", i + 1);
+                        if let Some(s) = t.span() {
+                            spans.push((p.clone(), s.start, s.end));
+                        }
+                        walk(t, &p, spans);
+                    }
+                }
+                toml_edit::Item::None => {}
+            }
+        }
+    }
+    walk(doc.as_table(), "", &mut spans);
+    let inside = spans
+        .iter()
+        .filter(|(_, a, b)| *a <= offset && end <= (*b).max(*a + 1))
+        .min_by_key(|(_, a, b)| b - a);
+    if let Some((p, _, _)) = inside {
+        return p.clone();
+    }
+    if end > start + 1 {
+        // A range no single key holds (the whole document): the root.
+        return String::new();
+    }
+    // Between keys of a table body: the last header / key that starts before.
+    spans
+        .iter()
+        .filter(|(_, a, _)| *a <= offset)
+        .max_by_key(|(_, a, _)| *a)
+        .map(|(p, _, _)| p.rsplit_once('.').map(|(t, _)| t.to_string()).unwrap_or_default())
+        .unwrap_or_default()
 }
 
 /// Parse a duration in the playlist/grid grammar `[1-9][0-9]*(s|m|h|d)` into
@@ -646,10 +912,20 @@ pub struct SetEntry {
     pub playlist: Playlist,
 }
 
-/// An error tied to one playlist within the set.
+/// An error tied to one playlist within the set, and to the field that
+/// carries it (`selection.members[2].ref`; empty for a cycle).
 pub struct SetError {
     pub key: String,
     pub message: String,
+    pub field: String,
+    pub code: DiagCode,
+    pub rejected: String,
+}
+
+impl SetError {
+    pub fn diag(&self) -> Diag {
+        Diag::error(self.code, &self.field, &self.message).rejected(self.rejected.clone())
+    }
 }
 
 /// Validate the whole set of playlists together: every group member `ref`
@@ -675,19 +951,29 @@ pub fn validate_set(entries: &[SetEntry]) -> Vec<SetError> {
             continue;
         }
         let mut targets = Vec::new();
-        for m in &e.playlist.selection.members {
+        for (i, m) in e.playlist.selection.members.iter().enumerate() {
+            let field = format!("selection.members[{}].ref", i + 1);
             match resolve_member_ref(&e.key, &m.r#ref) {
                 Ok(key) => {
                     if !known.contains(&key) {
                         errors.push(SetError {
                             key: e.key.clone(),
                             message: format!("member `{}` refers to unknown playlist `{key}`", m.r#ref),
+                            field,
+                            code: DiagCode::UnknownRef,
+                            rejected: m.r#ref.clone(),
                         });
                     }
                     targets.push(key);
                 }
                 Err(msg) => {
-                    errors.push(SetError { key: e.key.clone(), message: msg });
+                    errors.push(SetError {
+                        key: e.key.clone(),
+                        message: msg,
+                        field,
+                        code: DiagCode::BadRef,
+                        rejected: m.r#ref.clone(),
+                    });
                 }
             }
         }
@@ -740,10 +1026,15 @@ pub fn validate_set(entries: &[SetEntry]) -> Vec<SetError> {
             dfs(node, &edges, &mut marks, &mut on_cycle);
         }
     }
+    let mut on_cycle: Vec<String> = on_cycle.into_iter().collect();
+    on_cycle.sort();
     for key in on_cycle {
         errors.push(SetError {
             key: key.clone(),
             message: "is part of a group cycle (a group cannot reference itself, directly or transitively)".to_string(),
+            field: "selection.members".to_string(),
+            code: DiagCode::Cycle,
+            rejected: String::new(),
         });
     }
 
@@ -753,6 +1044,85 @@ pub fn validate_set(entries: &[SetEntry]) -> Vec<SetError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ----- diagnostics -------------------------------------------------------
+
+    fn parse_err(text: &str) -> Diag {
+        parse_with_diagnostics(text).expect_err("should not parse")
+    }
+
+    #[test]
+    fn a_syntax_error_says_where() {
+        let d = parse_err("name = \"x\"\n[selection\nmode = \"static\"\n");
+        assert_eq!(d.code, DiagCode::Syntax);
+        assert!(d.message.contains("line 2"), "{}", d.message);
+    }
+
+    #[test]
+    fn an_unknown_field_is_tied_to_its_path() {
+        let d = parse_err("name = \"x\"\n[selection]\nmode = \"static\"\nfiles = [\"a.mp3\"]\norderr = \"shuffle\"\n");
+        assert_eq!(d.code, DiagCode::UnknownField);
+        assert_eq!(d.field, "selection.orderr");
+        assert_eq!(d.rejected, "orderr");
+        assert!(d.expected.contains("order"), "{}", d.expected);
+    }
+
+    #[test]
+    fn a_bad_value_is_tied_to_its_path() {
+        let d = parse_err("name = \"x\"\n[selection]\nmode = \"statik\"\n");
+        assert_eq!(d.code, DiagCode::BadValue);
+        assert_eq!(d.field, "selection.mode");
+        assert_eq!(d.rejected, "statik");
+        assert!(d.expected.contains("dynamic"), "{}", d.expected);
+        let d = parse_err("name = \"x\"\n[selection]\nmode = \"dynamic\"\n[broadcast]\nlimit = \"deux\"\n");
+        assert_eq!(d.field, "broadcast.limit");
+    }
+
+    #[test]
+    fn a_missing_field_names_it() {
+        let d = parse_err("[selection]\nmode = \"dynamic\"\n");
+        assert_eq!(d.code, DiagCode::MissingField);
+        assert_eq!(d.field, "name");
+        let d = parse_err("name = \"x\"\n[selection]\norder = \"shuffle\"\n");
+        assert_eq!(d.field, "selection.mode");
+    }
+
+    #[test]
+    fn an_array_of_tables_is_indexed_from_one() {
+        let d = parse_err(
+            "name = \"x\"\n[selection]\nmode = \"dynamic\"\n[[selection.filter]]\nfield = \"genre\"\nop = \"=\"\nvalue = \"a\"\n[[selection.filter]]\nfield = \"genre\"\nopp = \"=\"\nvalue = \"b\"\n",
+        );
+        assert_eq!(d.field, "selection.filter[2].opp");
+    }
+
+    #[test]
+    fn diagnostics_collect_every_problem_with_its_field() {
+        let p = Playlist::parse(
+            "name = \"x\"\n[selection]\nmode = \"queue\"\norder = \"shuffle\"\nurl = \"http://a\"\n[broadcast.constraints]\nno_same_track_within = \"1 h\"\n",
+        )
+        .unwrap();
+        let d = p.diagnostics();
+        let fields: Vec<&str> = d.iter().map(|d| d.field.as_str()).collect();
+        assert_eq!(fields, ["selection.order", "selection.url", "broadcast.constraints.no_same_track_within"]);
+        assert_eq!(d[0].expected, "fifo, lifo");
+        assert_eq!(d[0].rejected, "shuffle");
+        assert_eq!(d[2].code, DiagCode::BadDuration);
+        // validate() = the first one, same message as before.
+        assert_eq!(p.validate().unwrap_err().to_string(), format!("validation failed: {}", d[0].message));
+    }
+
+    #[test]
+    fn set_errors_point_at_the_member() {
+        let g = Playlist::parse(
+            "name = \"g\"\n[selection]\nmode = \"group\"\nstrategy = \"rotate\"\n[[selection.members]]\nref = \"a\"\n[[selection.members]]\nref = \"nope\"\n",
+        )
+        .unwrap();
+        let a = Playlist::parse("name = \"a\"\n[selection]\nmode = \"remote\"\nurl = \"http://x\"\n").unwrap();
+        let errs = validate_set(&[SetEntry { key: "g".into(), playlist: g }, SetEntry { key: "a".into(), playlist: a }]);
+        assert_eq!(errs.len(), 1);
+        let d = errs[0].diag();
+        assert_eq!((d.code, d.field.as_str(), d.rejected.as_str()), (DiagCode::UnknownRef, "selection.members[2].ref", "nope"));
+    }
 
     const DYNAMIC: &str = r#"
         name = "Hits récents"

@@ -14,7 +14,7 @@ pub use crate::proto::library;
 use library::library_service_server::LibraryService;
 use library::{
     GenreCount, ListGenresRequest, ListGenresResponse, ListMediaRequest, ListMediaResponse, Media,
-    ScanRequest, ScanResponse, Skip,
+    ScanRequest, ScanResponse, SearchMediaRequest, SearchMediaResponse, Skip,
 };
 
 pub struct LibraryGrpc {
@@ -69,8 +69,55 @@ fn map_media(m: crate::media_index::MediaRow) -> Media {
     }
 }
 
+fn search_field(v: i32) -> crate::media_index::SearchField {
+    use crate::media_index::SearchField as F;
+    use library::search_media_request::Field as P;
+    match P::try_from(v).unwrap_or(P::Unspecified) {
+        P::Unspecified | P::Path => F::Path,
+        P::Title => F::Title,
+        P::Artist => F::Artist,
+        P::Album => F::Album,
+        P::Year => F::Year,
+        P::Duration => F::Duration,
+        P::Genre => F::Genre,
+    }
+}
+
 #[tonic::async_trait]
 impl LibraryService for LibraryGrpc {
+    async fn search_media(
+        &self,
+        request: Request<SearchMediaRequest>,
+    ) -> Result<Response<SearchMediaResponse>, Status> {
+        use crate::media_index::{SearchCursor, SearchQuery};
+        let r = request.into_inner();
+        let cursor = if r.cursor.trim().is_empty() {
+            None
+        } else {
+            Some(SearchCursor::decode(&r.cursor).ok_or_else(|| Status::invalid_argument("invalid cursor"))?)
+        };
+        let page = self
+            .handle
+            .search(SearchQuery {
+                query: r.query,
+                genres: r.genres,
+                folder: r.folder,
+                include_unavailable: r.include_unavailable,
+                missing: r.missing.into_iter().map(search_field).collect(),
+                sort: search_field(r.sort),
+                descending: r.descending,
+                limit: r.limit as usize,
+                cursor,
+            })
+            .await
+            .map_err(map_error)?;
+        Ok(Response::new(SearchMediaResponse {
+            media: page.media.into_iter().map(map_media).collect(),
+            total: page.total,
+            next_cursor: page.next.map(|c| c.encode()).unwrap_or_default(),
+        }))
+    }
+
     async fn scan(&self, _request: Request<ScanRequest>) -> Result<Response<ScanResponse>, Status> {
         let outcome = self.handle.scan().await.map_err(map_error)?;
         let report = outcome.report;

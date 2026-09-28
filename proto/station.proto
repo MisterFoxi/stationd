@@ -17,22 +17,7 @@ service Station {
   // failed_precondition while a DJ is on air, unless `force` (the DJ is
   // disconnected first).
   rpc Shutdown (ShutdownRequest) returns (ShutdownReply);
-  rpc PlaylistAdd (PlaylistAddRequest) returns (PlaylistAddReply);
-  rpc PlaylistSync (PlaylistSyncRequest) returns (PlaylistSyncReply);
-  rpc PlaylistList (PlaylistListRequest) returns (PlaylistListReply);
-  // `playlist remove`: delete a playlist — its file under the playlist root
-  // AND its row in the view (file-first: removing only the row would come
-  // back at the next sync). Refused (failed_precondition) while a grid rule
-  // or a group still references it; not_found for an unknown ref.
-  rpc PlaylistRemove (PlaylistRemoveRequest) returns (PlaylistRemoveReply);
-  // `playlist export`: the TOML stationd holds for one playlist (what it
-  // applied — may differ from the file if it was edited since).
-  rpc PlaylistExport (PlaylistExportRequest) returns (PlaylistExportReply);
-  // `playlist reload`: the view becomes exactly the playlist root — `sync`
-  // (add / update, best-effort) PLUS the removal of the rows whose file is
-  // gone. A row whose file is gone but that a grid rule or a surviving group
-  // still references is kept and reported (never a dangling reference).
-  rpc PlaylistReload (PlaylistReloadRequest) returns (PlaylistReloadReply);
+  // Playlists: `PlaylistService` (playlist_v1.proto).
 }
 
 message StatusRequest {}
@@ -56,82 +41,4 @@ message ShutdownReply {
   string marker = 1;     // the marker written (path as stationd sees it)
   bool   kicked = 2;     // a DJ was disconnected (force)
   bool   parked = 3;     // Liquidsoap parked on the noise (false: the safety fallback will air)
-}
-
-// `playlist add`: the CLI ships the raw TOML content (it does only a
-// syntactic pre-check locally, then delegates the I/O of *sending*).
-// stationd parses, validates, generates the UUID, updates its SQLite view
-// (single writer), and returns the losslessly-rewritten TOML plus the id.
-// The CLI then writes that content back to disk.
-message PlaylistAddRequest {
-  string toml_content = 1;
-}
-
-message PlaylistAddReply {
-  string toml_content = 1; // rewritten TOML, with the id injected
-  string id = 2;           // the effective UUID
-}
-
-// `playlist sync`: stationd scans its own playlist root (recursively, from
-// `[playlist] path` in its config) and reconciles every *.toml into the
-// SQLite view. Best-effort: a bad file is reported, not fatal — the valid
-// ones are still applied. stationd reads its own root here (it is the
-// legitimate reader of its source-of-truth directory, and will watch it),
-// so the CLI passes no path.
-message PlaylistSyncRequest {}
-
-message PlaylistSyncReply {
-  uint32 added = 1;               // files successfully reconciled
-  repeated PlaylistSyncError errors = 2; // files rejected, with reason
-}
-
-message PlaylistSyncError {
-  string path = 1;    // file that failed (relative to the playlist root)
-  string message = 2; // why it was rejected
-}
-
-// `playlist list`: read-only listing of what is currently in the view.
-message PlaylistListRequest {}
-
-message PlaylistListReply {
-  repeated PlaylistSummary playlists = 1;
-}
-
-message PlaylistSummary {
-  string id = 1;        // internal UUID
-  string rel_path = 2;  // human handle (canonical relative path); may be empty for an add-only entry
-  string name = 3;      // display name
-  string mode = 4;      // selection mode (static/dynamic/remote/queue/group)
-  bool enabled = 5;
-}
-
-// A playlist is designated by its ref (canonical relative path, e.g.
-// `emission/intro`, case-insensitive, `.toml` optional) or by its UUID (the
-// only handle of an add-only entry, which has no path).
-message PlaylistRemoveRequest {
-  string reference = 1;
-}
-
-message PlaylistRemoveReply {
-  string id = 1;
-  string rel_path = 2;   // empty for an add-only entry
-  string file = 3;       // file deleted (relative to the playlist root); empty = none on disk
-}
-
-message PlaylistExportRequest {
-  string reference = 1;
-}
-
-message PlaylistExportReply {
-  string id = 1;
-  string rel_path = 2;
-  string toml_content = 3;
-}
-
-message PlaylistReloadRequest {}
-
-message PlaylistReloadReply {
-  uint32 added = 1;                      // files successfully reconciled
-  repeated string removed = 2;           // refs dropped from the view (file gone)
-  repeated PlaylistSyncError errors = 3; // rejected files, and gone-but-referenced rows kept
 }

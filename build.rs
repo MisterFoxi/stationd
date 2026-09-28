@@ -33,6 +33,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     tonic_build::configure()
         .protoc_arg("--experimental_allow_proto3_optional")
         .compile_protos(&["proto/onair_v1.proto"], &["proto"])?;
+    // The playlists (list, export, validate, pool preview, save, remove,
+    // sync, reload, add). Uses proto3 `optional` (pool counts).
+    tonic_build::configure()
+        .protoc_arg("--experimental_allow_proto3_optional")
+        .compile_protos(&["proto/playlist_v1.proto"], &["proto"])?;
 
     // Force a rebuild whenever a migration file is added, changed, or
     // removed. `sqlx::migrate!` embeds the migrations into the binary at
@@ -54,6 +59,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-changed=proto/live_v1.proto");
     println!("cargo:rerun-if-changed=proto/stats_v1.proto");
     println!("cargo:rerun-if-changed=proto/onair_v1.proto");
+    println!("cargo:rerun-if-changed=proto/playlist_v1.proto");
 
     Ok(())
 }

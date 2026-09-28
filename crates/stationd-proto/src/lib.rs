@@ -40,3 +40,7 @@ pub mod stats {
 pub mod onair {
     tonic::include_proto!("webradio.onair.v1");
 }
+
+pub mod playlist {
+    tonic::include_proto!("webradio.playlist.v1");
+}

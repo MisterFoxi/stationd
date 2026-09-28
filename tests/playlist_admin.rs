@@ -51,7 +51,7 @@ async fn remove_deletes_the_file_and_the_row_and_survives_a_sync() {
     write(root, "jingles.toml", DYNAMIC);
     sync::sync_root(&pool, root).await;
 
-    let r = sync::remove(&pool, root, "rock/hits").await.unwrap();
+    let r = sync::remove(&pool, root, "rock/hits", None).await.unwrap();
     assert_eq!(r.rel_path.as_deref(), Some("rock/hits"));
     assert_eq!(r.file.as_deref(), Some(Path::new("Rock").join("Hits.toml").to_str().unwrap()));
     assert!(!root.join("Rock/Hits.toml").exists());
@@ -61,7 +61,7 @@ async fn remove_deletes_the_file_and_the_row_and_survives_a_sync() {
     assert_eq!(keys(&pool).await, ["jingles"]);
     // By UUID too.
     let id = store::find(&pool, "jingles").await.unwrap().unwrap().id;
-    sync::remove(&pool, root, &id).await.unwrap();
+    sync::remove(&pool, root, &id, None).await.unwrap();
     assert!(keys(&pool).await.is_empty());
 }
 
@@ -76,19 +76,19 @@ async fn remove_is_refused_while_referenced_and_unknown_is_not_found() {
     sync::sync_root(&pool, root).await;
     base_rule(&pool, "floor", "Music").await;
 
-    match sync::remove(&pool, root, "music").await {
+    match sync::remove(&pool, root, "music", None).await {
         Err(RemoveError::Referenced { by, .. }) => assert_eq!(by, ["grid rule `floor`"]),
         other => panic!("{other:?}"),
     }
-    match sync::remove(&pool, root, "shows/intro").await {
+    match sync::remove(&pool, root, "shows/intro", None).await {
         Err(RemoveError::Referenced { by, .. }) => assert_eq!(by, ["group `shows/main`"]),
         other => panic!("{other:?}"),
     }
     assert!(root.join("music.toml").exists() && root.join("shows/intro.toml").exists(), "nothing touched");
-    assert!(matches!(sync::remove(&pool, root, "nope").await, Err(RemoveError::NotFound(_))));
+    assert!(matches!(sync::remove(&pool, root, "nope", None).await, Err(RemoveError::NotFound(_))));
     // The group goes first, then its member is free.
-    sync::remove(&pool, root, "shows/main").await.unwrap();
-    sync::remove(&pool, root, "shows/intro").await.unwrap();
+    sync::remove(&pool, root, "shows/main", None).await.unwrap();
+    sync::remove(&pool, root, "shows/intro", None).await.unwrap();
 }
 
 #[tokio::test]
@@ -97,7 +97,7 @@ async fn remove_of_an_add_only_entry_touches_no_file() {
     let tree = tempfile::tempdir().unwrap();
     let pl = stationd::playlist::Playlist::parse(DYNAMIC).unwrap();
     store::upsert(&pool, "11111111-1111-1111-1111-111111111111", &pl, DYNAMIC, None).await.unwrap();
-    let r = sync::remove(&pool, tree.path(), "11111111-1111-1111-1111-111111111111").await.unwrap();
+    let r = sync::remove(&pool, tree.path(), "11111111-1111-1111-1111-111111111111", None).await.unwrap();
     assert_eq!((r.rel_path, r.file), (None, None));
     assert!(store::list(&pool).await.unwrap().is_empty());
 }

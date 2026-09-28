@@ -241,6 +241,185 @@ pub async fn list(
     Ok(out)
 }
 
+// ---------------------------------------------------------------------------
+// Search (paginated): the Media screen and the media picker
+// ---------------------------------------------------------------------------
+
+/// A sort key or a "missing metadata" criterion of [`search`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SearchField {
+    #[default]
+    Path,
+    Title,
+    Artist,
+    Album,
+    Year,
+    Duration,
+    /// For `missing` only (not a sort key: sorts by path).
+    Genre,
+}
+
+/// Where the previous page ended, in sort order: opaque to clients
+/// ([`SearchCursor::encode`]).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SearchCursor {
+    num: i64,
+    text: String,
+    path: String,
+}
+
+impl SearchCursor {
+    pub fn encode(&self) -> String {
+        use base64::Engine;
+        let json = serde_json::to_vec(&(self.num, &self.text, &self.path)).unwrap_or_default();
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json)
+    }
+
+    pub fn decode(s: &str) -> Option<Self> {
+        use base64::Engine;
+        let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(s.trim()).ok()?;
+        let (num, text, path): (i64, String, String) = serde_json::from_slice(&bytes).ok()?;
+        Some(Self { num, text, path })
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SearchQuery {
+    /// Words, each of which must appear (case-insensitive, Unicode) in the
+    /// title, artist, album or path.
+    pub query: String,
+    /// At least one of these genres (case-insensitive). Empty = any.
+    pub genres: Vec<String>,
+    /// Path prefix (a folder), case-insensitive. Empty = everything.
+    pub folder: String,
+    pub include_unavailable: bool,
+    /// Keep media missing ALL of these.
+    pub missing: Vec<SearchField>,
+    pub sort: SearchField,
+    pub descending: bool,
+    pub limit: usize,
+    pub cursor: Option<SearchCursor>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SearchPage {
+    pub media: Vec<MediaRow>,
+    /// Matches across every page.
+    pub total: u64,
+    /// `None` = last page.
+    pub next: Option<SearchCursor>,
+}
+
+/// rel_path, title, artist, album, year, duration_ms, size_bytes,
+/// available, genres (joined by U+001F).
+type SearchRow = (String, Option<String>, Option<String>, Option<String>, Option<i64>, i64, i64, i64, Option<String>);
+
+pub const SEARCH_LIMIT_DEFAULT: usize = 50;
+pub const SEARCH_LIMIT_MAX: usize = 500;
+
+fn fold(s: &str) -> String {
+    s.to_lowercase()
+}
+
+fn sort_key(m: &MediaRow, by: SearchField) -> (i64, String) {
+    let text = |v: &Option<String>| v.as_deref().map(fold).unwrap_or_default();
+    match by {
+        SearchField::Path | SearchField::Genre => (0, fold(&m.rel_path)),
+        SearchField::Title => (0, text(&m.title)),
+        SearchField::Artist => (0, text(&m.artist)),
+        SearchField::Album => (0, text(&m.album)),
+        SearchField::Year => (m.year.unwrap_or(0), String::new()),
+        SearchField::Duration => (m.duration_ms, String::new()),
+    }
+}
+
+/// Search the media view. Filtering and folding are done in Rust (SQLite
+/// only folds ASCII: « Électro » must match « électro »), over one query
+/// that fetches every row with its genres. Order: the sort key, then the
+/// path — stable, so a cursor (the last key seen) resumes exactly after it.
+pub async fn search(pool: &SqlitePool, q: &SearchQuery) -> Result<SearchPage, sqlx::Error> {
+    let rows: Vec<SearchRow> =
+        sqlx::query_as(
+            "SELECT m.rel_path, m.title, m.artist, m.album, m.year, m.duration_ms, m.size_bytes, m.available,
+                    GROUP_CONCAT(g.genre, char(31))
+             FROM media m LEFT JOIN media_genre g ON g.rel_path = m.rel_path
+             GROUP BY m.rel_path",
+        )
+        .fetch_all(pool)
+        .await?;
+
+    let words: Vec<String> = q.query.split_whitespace().map(fold).collect();
+    let wanted: std::collections::HashSet<String> = q.genres.iter().map(|g| genre_key(g)).collect();
+    let folder = {
+        let f = fold(q.folder.trim().trim_matches('/'));
+        if f.is_empty() { f } else { format!("{f}/") }
+    };
+
+    let mut hits: Vec<MediaRow> = rows
+        .into_iter()
+        .map(|(rel_path, title, artist, album, year, duration_ms, size_bytes, available, genres)| {
+            let mut genres: Vec<String> =
+                genres.map(|g| g.split('\u{1f}').map(str::to_string).collect()).unwrap_or_default();
+            genres.sort();
+            MediaRow { rel_path, title, artist, album, year, duration_ms, size_bytes, available: available != 0, genres }
+        })
+        .filter(|m| q.include_unavailable || m.available)
+        .filter(|m| folder.is_empty() || fold(&m.rel_path).starts_with(&folder))
+        .filter(|m| wanted.is_empty() || m.genres.iter().any(|g| wanted.contains(&genre_key(g))))
+        .filter(|m| {
+            q.missing.iter().all(|f| match f {
+                SearchField::Title => m.title.as_deref().is_none_or(|s| s.trim().is_empty()),
+                SearchField::Artist => m.artist.as_deref().is_none_or(|s| s.trim().is_empty()),
+                SearchField::Album => m.album.as_deref().is_none_or(|s| s.trim().is_empty()),
+                SearchField::Year => m.year.is_none(),
+                SearchField::Genre => m.genres.is_empty(),
+                SearchField::Path | SearchField::Duration => false,
+            })
+        })
+        .filter(|m| {
+            if words.is_empty() {
+                return true;
+            }
+            let hay = [m.title.as_deref(), m.artist.as_deref(), m.album.as_deref(), Some(m.rel_path.as_str())]
+                .into_iter()
+                .flatten()
+                .map(fold)
+                .collect::<Vec<_>>()
+                .join("\u{1f}");
+            words.iter().all(|w| hay.contains(w.as_str()))
+        })
+        .collect();
+
+    let key = |m: &MediaRow| {
+        let (num, text) = sort_key(m, q.sort);
+        (num, text, m.rel_path.clone())
+    };
+    hits.sort_by_cached_key(key);
+    if q.descending {
+        hits.reverse();
+    }
+    let total = hits.len() as u64;
+    let start = match &q.cursor {
+        None => 0,
+        Some(c) => {
+            let at = (c.num, c.text.clone(), c.path.clone());
+            // First row strictly after the cursor, in the page order.
+            hits.partition_point(|m| if q.descending { key(m) >= at } else { key(m) <= at })
+        }
+    };
+    let limit = if q.limit == 0 { SEARCH_LIMIT_DEFAULT } else { q.limit.min(SEARCH_LIMIT_MAX) };
+    let page: Vec<MediaRow> = hits.into_iter().skip(start).take(limit).collect();
+    let next = if start + page.len() < total as usize {
+        page.last().map(|m| {
+            let (num, text, path) = key(m);
+            SearchCursor { num, text, path }
+        })
+    } else {
+        None
+    };
+    Ok(SearchPage { media: page, total, next })
+}
+
 /// One genre bucket of the inventory: case-folded, with every spelling seen.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GenreCount {
@@ -417,6 +596,83 @@ mod tests {
         assert_eq!(song_keys("Trance/Passang 2.mp3", None), vec!["passang 2"]);
         assert_eq!(song_keys("a/_1.mp3", Some("  ")), vec!["1"]);
         assert_eq!(song_keys("a/Électro Été.mp3", None), vec!["électro été"]);
+    }
+
+    async fn searchable() -> (tempfile::TempDir, SqlitePool) {
+        let (dir, pool) = fresh_db().await;
+        let m = |rel: &str, title: Option<&str>, artist: Option<&str>, year: Option<u32>, genres: &[&str], ms: u64| ScannedMedia {
+            rel_path: rel.into(),
+            title: title.map(Into::into),
+            artist: artist.map(Into::into),
+            album: None,
+            year,
+            genres: genres.iter().map(|s| s.to_string()).collect(),
+            duration_ms: ms,
+            size_bytes: 1,
+            mtime_ns: 0,
+        };
+        let lib = vec![
+            m("Rock/Été indien.mp3", Some("Été indien"), Some("Joe Dassin"), Some(1975), &["Chanson"], 200_000),
+            m("Rock/b.mp3", Some("Bohemian"), Some("Queen"), Some(1975), &["Rock"], 350_000),
+            m("Électro/c.mp3", None, Some("Daft Punk"), None, &[], 300_000),
+            m("Électro/d.mp3", Some("Da Funk"), Some("Daft Punk"), Some(1995), &["électro"], 330_000),
+            m("Jingles/j1.mp3", Some("ID"), None, None, &[], 8_000),
+        ];
+        replace_library(&pool, &lib, 1000).await.unwrap();
+        (dir, pool)
+    }
+
+    fn paths(p: &SearchPage) -> Vec<&str> {
+        p.media.iter().map(|m| m.rel_path.as_str()).collect()
+    }
+
+    #[tokio::test]
+    async fn search_folds_case_and_accents_on_every_word() {
+        let (_d, pool) = searchable().await;
+        let q = |s: &str| SearchQuery { query: s.into(), ..Default::default() };
+        assert_eq!(paths(&search(&pool, &q("été DASSIN")).await.unwrap()), ["Rock/Été indien.mp3"]);
+        assert_eq!(paths(&search(&pool, &q("daft")).await.unwrap()), ["Électro/c.mp3", "Électro/d.mp3"]);
+        assert_eq!(search(&pool, &q("daft queen")).await.unwrap().total, 0, "every word must match");
+        let g = SearchQuery { genres: vec!["ÉLECTRO".into()], ..Default::default() };
+        assert_eq!(paths(&search(&pool, &g).await.unwrap()), ["Électro/d.mp3"]);
+        let f = SearchQuery { folder: "électro/".into(), ..Default::default() };
+        assert_eq!(search(&pool, &f).await.unwrap().total, 2);
+    }
+
+    #[tokio::test]
+    async fn search_finds_missing_metadata() {
+        let (_d, pool) = searchable().await;
+        let q = SearchQuery { missing: vec![SearchField::Title], ..Default::default() };
+        assert_eq!(paths(&search(&pool, &q).await.unwrap()), ["Électro/c.mp3"]);
+        let q = SearchQuery { missing: vec![SearchField::Artist, SearchField::Genre], ..Default::default() };
+        assert_eq!(paths(&search(&pool, &q).await.unwrap()), ["Jingles/j1.mp3"]);
+    }
+
+    #[tokio::test]
+    async fn search_pages_follow_a_stable_order_with_a_cursor() {
+        let (_d, pool) = searchable().await;
+        for descending in [false, true] {
+            let mut seen = Vec::new();
+            let mut cursor = None;
+            loop {
+                let q = SearchQuery { sort: SearchField::Year, descending, limit: 2, cursor: cursor.clone(), ..Default::default() };
+                let page = search(&pool, &q).await.unwrap();
+                assert_eq!(page.total, 5);
+                seen.extend(page.media.iter().map(|m| m.rel_path.clone()));
+                match page.next {
+                    Some(c) => cursor = Some(SearchCursor::decode(&c.encode()).unwrap()),
+                    None => break,
+                }
+            }
+            // Year, then path: same-year rows keep a stable order.
+            let mut want =
+                vec!["Jingles/j1.mp3", "Électro/c.mp3", "Rock/b.mp3", "Rock/Été indien.mp3", "Électro/d.mp3"];
+            if descending {
+                want.reverse();
+            }
+            assert_eq!(seen, want, "descending = {descending}");
+        }
+        assert!(SearchCursor::decode("pas un curseur").is_none());
     }
 
     #[tokio::test]

@@ -1,6 +1,6 @@
 //! Génère les clients gRPC depuis les .proto de la racine du dépôt.
 //! Seuls les contrats réellement servis par stationd sont compilés (même liste
-//! que le build.rs du daemon) ; `playlist_v1.proto` n'est pas servi.
+//! que le build.rs du daemon).
 
 const PROTO_DIR: &str = "../../proto";
 
@@ -17,6 +17,7 @@ const PROTOS: &[(&str, bool)] = &[
     ("live_v1.proto", false),
     ("stats_v1.proto", false),
     ("onair_v1.proto", true),
+    ("playlist_v1.proto", true),
 ];
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

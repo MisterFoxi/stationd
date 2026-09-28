@@ -41,6 +41,8 @@ pub mod media_index;
 pub mod operator_stop;
 pub mod playlist;
 pub mod playlist_cursor;
+pub mod playlist_edit;
+pub mod playlist_grpc;
 pub mod pool_inspection;
 pub mod plugin;
 pub mod plugin_db;

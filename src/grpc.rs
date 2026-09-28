@@ -2,7 +2,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
-use sqlx::SqlitePool;
 use tokio::sync::{oneshot, Mutex};
 use tonic::{Request, Response, Status as TonicStatus};
 
@@ -10,30 +9,17 @@ use tonic::{Request, Response, Status as TonicStatus};
 pub use crate::proto::station;
 
 use station::station_server::Station;
-use station::{
-    PlaylistAddReply, PlaylistAddRequest, PlaylistExportReply, PlaylistExportRequest,
-    PlaylistListReply, PlaylistListRequest, PlaylistReloadReply, PlaylistReloadRequest,
-    PlaylistRemoveReply, PlaylistRemoveRequest, PlaylistSummary, PlaylistSyncError,
-    PlaylistSyncReply, PlaylistSyncRequest, QuitReply, QuitRequest,
-    ShutdownReply, ShutdownRequest, StatusReply, StatusRequest,
-};
-
-use crate::playlist::{self, Playlist};
-use crate::store;
+use station::{QuitReply, QuitRequest, ShutdownReply, ShutdownRequest, StatusReply, StatusRequest};
 
 /// Implementation of the `Station` gRPC service.
 ///
-/// Status, `quit` (restart-style exit), the operator's stop (`shutdown`,
+/// Status, `quit` (restart-style exit) and the operator's stop (`shutdown`,
 /// which parks Liquidsoap through its control socket before exiting — see
-/// `operator_stop`) and the playlist view.
-/// Future RPCs (playlists, roles...) will grow this same service over time,
-/// starting in proto/station.proto.
+/// `operator_stop`). Playlists have their own service (`playlist_grpc`).
 pub struct StationService {
     station_name: String,
     timezone: String,
     started_at: Instant,
-    db: SqlitePool,
-    playlist_root: PathBuf,
     // A `oneshot::Sender` only fires once. The `Mutex<Option<_>>` lets us
     // "consume" it (`.take()`) on the first `quit` received without
     // panicking if a misbehaving client calls `quit` twice.
@@ -56,16 +42,12 @@ impl StationService {
     pub fn new(
         station_name: String,
         timezone: String,
-        db: SqlitePool,
-        playlist_root: PathBuf,
         shutdown: oneshot::Sender<()>,
     ) -> Self {
         Self {
             station_name,
             timezone,
             started_at: Instant::now(),
-            db,
-            playlist_root,
             shutdown: Arc::new(Mutex::new(Some(shutdown))),
             operator_stop: None,
         }
@@ -75,13 +57,6 @@ impl StationService {
     pub fn with_operator_stop(mut self, stop: OperatorStop) -> Self {
         self.operator_stop = Some(stop);
         self
-    }
-
-    /// The playlist view changed: what airs next may differ (on-air view).
-    fn playlists_changed(&self) {
-        if let Some(stop) = &self.operator_stop {
-            stop.control.bump_air();
-        }
     }
 
     /// The operator's stop, minus the exit itself (testable): refuse during a
@@ -133,21 +108,6 @@ impl StationService {
             parked,
         })
     }
-
-    /// Upsert one already-parsed playlist into the SQLite view. Thin
-    /// wrapper over `store::upsert` (the metier lives there so it can be
-    /// tested without a gRPC server). stationd is the single writer.
-    async fn upsert_view(
-        &self,
-        id: &str,
-        playlist: &Playlist,
-        rewritten: &str,
-        rel_path: Option<&str>,
-    ) -> Result<(), String> {
-        store::upsert(&self.db, id, playlist, rewritten, rel_path)
-            .await
-            .map_err(|e| format!("could not update playlist view: {e}"))
-    }
 }
 
 #[tonic::async_trait]
@@ -189,156 +149,6 @@ impl Station for StationService {
         }
         Ok(Response::new(reply))
     }
-
-    async fn playlist_add(
-        &self,
-        request: Request<PlaylistAddRequest>,
-    ) -> Result<Response<PlaylistAddReply>, TonicStatus> {
-        let toml_content = request.into_inner().toml_content;
-
-        // Per-file metier: parse (strict) + validate (business rules).
-        // Cross-playlist checks (refs/cycles) are NOT done here — a single
-        // file cannot see the whole set; that is `sync`'s job.
-        let playlist = Playlist::parse(&toml_content)
-            .map_err(|e| TonicStatus::invalid_argument(e.to_string()))?;
-        playlist
-            .validate()
-            .map_err(|e| TonicStatus::invalid_argument(e.to_string()))?;
-
-        let (rewritten, id) = playlist::assign_id(&toml_content)
-            .map_err(|e| TonicStatus::invalid_argument(e.to_string()))?;
-
-        // A file brought in from outside has no position in the tree → no
-        // rel_path. A later `sync` will set it if the file lives under the
-        // root.
-        self.upsert_view(&id.to_string(), &playlist, &rewritten, None)
-            .await
-            .map_err(TonicStatus::internal)?;
-        self.playlists_changed();
-
-        Ok(Response::new(PlaylistAddReply {
-            toml_content: rewritten,
-            id: id.to_string(),
-        }))
-    }
-
-    async fn playlist_sync(
-        &self,
-        _request: Request<PlaylistSyncRequest>,
-    ) -> Result<Response<PlaylistSyncReply>, TonicStatus> {
-        // The whole reconciliation (walk the root, per-file load+validate,
-        // whole-set validate, persist survivors, write ids back) lives in
-        // `sync::sync_root` — a plain function with no tonic dependency, so
-        // it can be driven directly by an integration test. This handler is
-        // a thin translator: run it, map the metier errors to the proto.
-        let outcome = crate::sync::sync_root(&self.db, &self.playlist_root).await;
-        self.playlists_changed();
-
-        let errors = outcome
-            .errors
-            .into_iter()
-            .map(|e| PlaylistSyncError {
-                path: e.path,
-                message: e.message,
-            })
-            .collect();
-
-        Ok(Response::new(PlaylistSyncReply {
-            added: outcome.added,
-            errors,
-        }))
-    }
-
-    async fn playlist_list(
-        &self,
-        _request: Request<PlaylistListRequest>,
-    ) -> Result<Response<PlaylistListReply>, TonicStatus> {
-        // Read from the view via `store::list`; the handler only maps the
-        // metier rows to the proto message.
-        let rows = store::list(&self.db)
-            .await
-            .map_err(|e| TonicStatus::internal(format!("could not read playlist view: {e}")))?;
-
-        let playlists = rows
-            .into_iter()
-            .map(|r| PlaylistSummary {
-                id: r.id,
-                rel_path: r.rel_path.unwrap_or_default(),
-                name: r.name,
-                mode: r.mode,
-                enabled: r.enabled,
-            })
-            .collect();
-
-        Ok(Response::new(PlaylistListReply { playlists }))
-    }
-
-    async fn playlist_remove(
-        &self,
-        request: Request<PlaylistRemoveRequest>,
-    ) -> Result<Response<PlaylistRemoveReply>, TonicStatus> {
-        use crate::sync::RemoveError;
-        let reference = request.into_inner().reference;
-        match crate::sync::remove(&self.db, &self.playlist_root, &reference).await {
-            Ok(r) => {
-                self.playlists_changed();
-                tracing::info!(
-                    id = %r.id,
-                    rel_path = r.rel_path.as_deref().unwrap_or("-"),
-                    file = r.file.as_deref().unwrap_or("-"),
-                    "playlist removed"
-                );
-                Ok(Response::new(PlaylistRemoveReply {
-                    id: r.id,
-                    rel_path: r.rel_path.unwrap_or_default(),
-                    file: r.file.unwrap_or_default(),
-                }))
-            }
-            Err(e @ RemoveError::NotFound(_)) => Err(TonicStatus::not_found(e.to_string())),
-            Err(e @ (RemoveError::Referenced { .. } | RemoveError::Ambiguous { .. })) => {
-                Err(TonicStatus::failed_precondition(e.to_string()))
-            }
-            Err(e @ RemoveError::Failed(_)) => Err(TonicStatus::internal(e.to_string())),
-        }
-    }
-
-    async fn playlist_export(
-        &self,
-        request: Request<PlaylistExportRequest>,
-    ) -> Result<Response<PlaylistExportReply>, TonicStatus> {
-        let reference = request.into_inner().reference;
-        let row = store::find(&self.db, &reference)
-            .await
-            .map_err(|e| TonicStatus::internal(format!("could not read playlist view: {e}")))?
-            .ok_or_else(|| {
-                TonicStatus::not_found(format!("no playlist `{reference}` (neither a ref nor an id of the view)"))
-            })?;
-        Ok(Response::new(PlaylistExportReply {
-            id: row.id,
-            rel_path: row.rel_path.unwrap_or_default(),
-            toml_content: row.toml,
-        }))
-    }
-
-    async fn playlist_reload(
-        &self,
-        _request: Request<PlaylistReloadRequest>,
-    ) -> Result<Response<PlaylistReloadReply>, TonicStatus> {
-        let outcome = crate::sync::reload_root(&self.db, &self.playlist_root).await;
-        self.playlists_changed();
-        for r in &outcome.removed {
-            tracing::info!(playlist = %r, "playlist file gone: dropped from the view");
-        }
-        Ok(Response::new(PlaylistReloadReply {
-            added: outcome.added,
-            removed: outcome.removed,
-            errors: outcome
-                .errors
-                .into_iter()
-                .map(|e| PlaylistSyncError { path: e.path, message: e.message })
-                .collect(),
-        }))
-    }
 }
 
 #[cfg(test)]
@@ -377,11 +187,12 @@ mod tests {
         dir: &std::path::Path,
         ls: Option<crate::ls_control::LsControl>,
     ) -> (StationService, StationControl, PathBuf, oneshot::Receiver<()>) {
-        let pool = crate::db::init(&dir.join("data").join("t.db")).await.unwrap();
+        // Creates data/, where the marker goes.
+        let _pool = crate::db::init(&dir.join("data").join("t.db")).await.unwrap();
         let control = StationControl::new_in_memory();
         let marker = crate::operator_stop::marker_under(dir);
         let (tx, rx) = oneshot::channel();
-        let svc = StationService::new("r".into(), "UTC".into(), pool, dir.join("pl"), tx)
+        let svc = StationService::new("r".into(), "UTC".into(), tx)
             .with_operator_stop(OperatorStop { control: control.clone(), ls, marker: marker.clone() });
         (svc, control, marker, rx)
     }

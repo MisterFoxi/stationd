@@ -5,7 +5,7 @@ sans reconstruire le contexte. À distinguer des docs de `Doc/` (décisions
 d'architecture durables) : ce fichier-ci est volatil, à mettre à jour à
 chaque session.
 
-Dernière mise à jour : 2026-09-28 (A4 lot 2).
+Dernière mise à jour : 2026-09-28 (A4 lot 3).
 
 
 ## Où on en est en une phrase
@@ -219,8 +219,30 @@ devstationd.**
 - Reste de §5.2 : sélecteur de média (lot 4), tampon des playlists `queue`,
   jauge de scan (lot 7), Utilisateurs (lot A).
 
-**Suivant : lot 3** — stationd : playlists `Validate` / `PreviewPool` /
-`Save`, `SearchMedia` (service à trancher, §3.5).
+**Lot 3 fait (2026-09-28)** — 526 tests verts, clippy sans nouvel
+avertissement ; essayé en réel dans l'env de préparation (stationctl contre
+stationd : validate, preview, save, conflit, export --file, remove
+--revision, groupe relatif, cycle, library search). **À valider sur
+devstationd.** Dossier §3.4, §3.5 ; `Doc/admin.md`.
+- Tranché : `PlaylistService` dédié (`proto/playlist_v1.proto` réécrit, 5
+  modes, TOML comme format d'échange) ; les six `Station.Playlist*` y
+  déménagent, `Station` = `Status` / `Quit` / `Shutdown`. `stationctl`
+  migré (mêmes commandes, sorties identiques hors diagnostics).
+- Diagnostics par champ (`Playlist::diagnostics`, `parse_with_diagnostics`,
+  `SetError` avec champ et code) : tous les problèmes, pas le premier ;
+  `validate()` garde ses messages. Les fenêtres anti-répétition sont
+  vérifiées à la validation (une faute de frappe était vue à la diffusion).
+- `src/playlist_edit.rs` : révision = sha256 du contenu, `Save` (création /
+  conflit / id conservé / écriture atomique relue), `PreviewPool` (pool
+  d'un brouillon, par membre, avertissement pool vide y compris sur un
+  membre), `Export` (appliqué + fichier + révision).
+- `LibraryService.SearchMedia` + `stationctl library search` (repli de
+  casse Unicode en Rust, tri stable, curseur).
+- Dépendance : `sha2` (déjà dans l'arbre via sqlx ; `Cargo.lock` : une ligne).
+- Pour le lot 4 (TUI) : lire/écrire le TOML du formulaire avec `toml_edit`,
+  traduire les diagnostics par `Code`.
+
+**Suivant : lot 4** — TUI : Playlists (liste + éditeur) + Médias.
 
 ### Après l'alpha (non bloquant)
 

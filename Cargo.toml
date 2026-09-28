@@ -32,6 +32,7 @@ sqlx = { version = "0.7", default-features = false, features = ["runtime-tokio",
 uuid = { version = "1", features = ["v4", "serde"] }
 toml_edit = "0.22"
 walkdir = "2"
+sha2 = "0.10"          # révision d'un fichier de playlist (empreinte du contenu) ; déjà dans l'arbre via sqlx
 jiff = "0.2"
 lofty = "0.24"          # lecture tags + durée (mp3/flac/ogg/opus/m4a/wav…), pur-Rust
 rand = "0.8"            # tirage shuffle en mémoire (pool matérialisé, filtrable)

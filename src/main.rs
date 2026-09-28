@@ -20,6 +20,7 @@ use stationd::live_grpc::live::live_service_server::LiveServiceServer;
 use stationd::stats_grpc::{stats::stats_service_server::StatsServiceServer, StatsGrpc};
 use stationd::live_grpc::LiveGrpc;
 use stationd::onair_grpc::{proto::on_air_service_server::OnAirServiceServer, OnAirGrpc};
+use stationd::playlist_grpc::{proto::playlist_service_server::PlaylistServiceServer, PlaylistGrpc};
 use stationd::grid_engine::GridEngine;
 use stationd::station_control::StationControl;
 use stationd::library_grpc::LibraryGrpc;
@@ -317,8 +318,6 @@ async fn main() -> anyhow::Result<()> {
     let service = grpc::StationService::new(
         cfg.station.name.clone(),
         cfg.station.timezone.clone(),
-        db_pool.clone(),
-        cfg.playlist.path.clone(),
         shutdown_tx,
     )
     .with_operator_stop(grpc::OperatorStop {
@@ -327,7 +326,11 @@ async fn main() -> anyhow::Result<()> {
         marker,
     });
 
-    info!(%addr, "gRPC server listening (status, quit, schedule, library, plugin, broadcast, liquidsoap, icecast, live, stats, onair)");
+    // Playlists: view, root reconciliation, validation, pool preview, save.
+    let playlist_service =
+        PlaylistGrpc::new(db_pool.clone(), cfg.playlist.path.clone(), Some(control.clone()));
+
+    info!(%addr, "gRPC server listening (status, quit, playlist, schedule, library, plugin, broadcast, liquidsoap, icecast, live, stats, onair)");
 
     // Three ways to shut down cleanly: via `stationctl quit` or `stationctl
     // station stop` (shutdown_rx, triggered by the service's `quit` /
@@ -358,6 +361,7 @@ async fn main() -> anyhow::Result<()> {
 
     Server::builder()
         .add_service(StationServer::new(service))
+        .add_service(PlaylistServiceServer::new(playlist_service))
         .add_service(ScheduleServiceServer::new(schedule_service))
         .add_service(LibraryServiceServer::new(library_service))
         .add_service(PluginServiceServer::new(plugin_service))

@@ -5,13 +5,11 @@
 
 use clap::{Parser, Subcommand};
 
-use stationd::proto::{broadcast, icecast, library, liquidsoap, live, onair, plugin, schedule, station, stats};
+use stationd::proto::{broadcast, icecast, library, liquidsoap, live, onair, playlist, plugin, schedule, station, stats};
 
 use station::station_client::StationClient;
-use station::{
-    PlaylistAddRequest, PlaylistExportRequest, PlaylistListRequest, PlaylistReloadRequest, PlaylistRemoveRequest,
-    PlaylistSyncRequest, QuitRequest, ShutdownRequest, StatusRequest,
-};
+use station::{QuitRequest, ShutdownRequest, StatusRequest};
+use playlist::playlist_service_client::PlaylistServiceClient;
 use schedule::schedule_service_client::ScheduleServiceClient;
 use schedule::{ApplyGridRequest, CheckCoverageRequest, EnqueueRequest, ExportGridRequest, GridFile, PreviewRequest, ResolveNextRequest, SetClockRequest};
 use library::library_service_client::LibraryServiceClient;
@@ -357,6 +355,38 @@ enum LibraryCommand {
         #[arg(long)]
         all: bool,
     },
+    /// Search the index, one page at a time: words (title, artist, album,
+    /// path; case-insensitive, accented capitals included), filters, stable sort.
+    Search {
+        /// Words that must all appear
+        #[arg(default_value = "")]
+        query: String,
+        /// Keep media carrying this genre (repeatable: any of them)
+        #[arg(long = "genre", value_name = "GENRE")]
+        genres: Vec<String>,
+        /// Folder (path prefix), e.g. `Musique/Rock`
+        #[arg(long)]
+        folder: Option<String>,
+        /// Media missing this metadata (repeatable: missing all of them):
+        /// title, artist, album, year, genre
+        #[arg(long = "missing", value_name = "FIELD")]
+        missing: Vec<String>,
+        /// Sort key: path, title, artist, album, year, duration
+        #[arg(long, default_value = "path")]
+        sort: String,
+        /// Reverse order
+        #[arg(long)]
+        desc: bool,
+        /// Page size (default 50, max 500)
+        #[arg(long, default_value_t = 50)]
+        limit: u32,
+        /// Resume after this cursor (printed at the end of a page)
+        #[arg(long)]
+        cursor: Option<String>,
+        /// Include vanished-but-known files.
+        #[arg(long)]
+        all: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -446,13 +476,18 @@ enum PlaylistCommand {
     /// the playlists whose file is gone. One still referenced by a grid rule
     /// or a group is kept and reported.
     Reload,
-    /// Print (or write) the TOML stationd holds for one playlist.
+    /// Print (or write) the TOML stationd holds for one playlist (what it
+    /// applied), or with --file the playlist's file and its revision.
     Export {
         /// Playlist ref (e.g. `emission/intro`) or UUID
         reference: String,
         /// Write to this file instead of stdout.
         #[arg(long)]
         out: Option<PathBuf>,
+        /// The file under the playlist root (comments included) instead of
+        /// what is applied; its revision goes to stderr.
+        #[arg(long)]
+        file: bool,
     },
     /// Delete a playlist: its file under the playlist root and its entry in
     /// the view. Refused while a grid rule or a group references it.
@@ -462,6 +497,46 @@ enum PlaylistCommand {
         /// Confirm the deletion (the file is deleted)
         #[arg(long)]
         yes: bool,
+        /// Refuse if the file changed since this revision (from `export --file`)
+        #[arg(long)]
+        revision: Option<String>,
+    },
+    /// Check a playlist TOML without applying or writing anything: every
+    /// problem, tied to its field. Exit 1 if there is an error.
+    Validate {
+        /// Local .toml file to check
+        path: PathBuf,
+        /// Ref it would be saved as (resolves `./` member refs, detects cycles)
+        #[arg(long = "as")]
+        as_ref: Option<String>,
+    },
+    /// Evaluate the pool of a playlist TOML without applying it: media
+    /// count, duration, a sample; per member for a group.
+    Preview {
+        /// Local .toml file to evaluate
+        path: PathBuf,
+        /// Ref it would be saved as (base of `./` member refs)
+        #[arg(long = "as")]
+        as_ref: Option<String>,
+        /// Sample size (default 20, max 100)
+        #[arg(long, default_value_t = 20)]
+        sample: u32,
+    },
+    /// Save a playlist into stationd's playlist root: stationd validates,
+    /// writes the file (atomically) and applies it. Creates it if it does not
+    /// exist; replacing an existing file needs its revision (--revision, from
+    /// `export --file`) or --force.
+    Save {
+        /// Target ref under the playlist root (e.g. `emission/intro`)
+        reference: String,
+        /// Local .toml file to send
+        path: PathBuf,
+        /// Revision the change starts from (the file's, from `export --file`)
+        #[arg(long)]
+        revision: Option<String>,
+        /// Replace the current file whatever its revision
+        #[arg(long, conflicts_with = "revision")]
+        force: bool,
     },
 }
 
@@ -498,130 +573,7 @@ async fn main() -> anyhow::Result<()> {
             client.quit(QuitRequest {}).await?;
             println!("shutdown requested");
         }
-        Command::Playlist(PlaylistCommand::Add { path }) => {
-            // Syntactic pre-check only: is this readable, well-formed TOML?
-            // The business validation happens in stationd. Failing fast here
-            // avoids a pointless round-trip on an obviously broken file.
-            let content = std::fs::read_to_string(&path)
-                .map_err(|e| anyhow::anyhow!("cannot read {}: {e}", path.display()))?;
-            content
-                .parse::<toml::Table>()
-                .map_err(|e| anyhow::anyhow!("{} is not well-formed TOML: {e}", path.display()))?;
-
-            let reply = client
-                .playlist_add(PlaylistAddRequest {
-                    toml_content: content,
-                })
-                .await?
-                .into_inner();
-
-            // stationd is authoritative on the content; write back what it
-            // returned (the id-injected, losslessly-rewritten TOML).
-            std::fs::write(&path, &reply.toml_content)
-                .map_err(|e| anyhow::anyhow!("cannot write {}: {e}", path.display()))?;
-
-            println!("added:  {}", path.display());
-            println!("id:     {}", reply.id);
-        }
-        Command::Playlist(PlaylistCommand::Sync) => {
-            // No path argument: stationd scans its own configured playlist
-            // root. The report is best-effort — successes counted, failures
-            // listed loudly (no-silent-failure).
-            let reply = client
-                .playlist_sync(PlaylistSyncRequest {})
-                .await?
-                .into_inner();
-
-            println!("synced: {} playlist(s)", reply.added);
-            if reply.errors.is_empty() {
-                println!("errors: none");
-            } else {
-                println!("errors: {}", reply.errors.len());
-                for e in &reply.errors {
-                    println!("  - {}: {}", e.path, e.message);
-                }
-                // Non-zero exit so scripts / CI notice something was rejected.
-                std::process::exit(1);
-            }
-        }
-        Command::Playlist(PlaylistCommand::List) => {
-            let reply = client
-                .playlist_list(PlaylistListRequest {})
-                .await?
-                .into_inner();
-
-            if reply.playlists.is_empty() {
-                println!("(no playlists in the view)");
-            } else {
-                for p in &reply.playlists {
-                    let handle = if p.rel_path.is_empty() {
-                        "(no path)"
-                    } else {
-                        &p.rel_path
-                    };
-                    let state = if p.enabled { "enabled" } else { "disabled" };
-                    println!("{handle}  [{}]  {}  ({state})  {}", p.mode, p.name, p.id);
-                }
-            }
-        }
-        Command::Playlist(PlaylistCommand::Reload) => {
-            let reply = client
-                .playlist_reload(PlaylistReloadRequest {})
-                .await?
-                .into_inner();
-            println!("synced:  {} playlist(s)", reply.added);
-            if reply.removed.is_empty() {
-                println!("removed: none");
-            } else {
-                println!("removed: {} (file gone)", reply.removed.len());
-                for r in &reply.removed {
-                    println!("  - {r}");
-                }
-            }
-            if reply.errors.is_empty() {
-                println!("errors:  none");
-            } else {
-                println!("errors:  {}", reply.errors.len());
-                for e in &reply.errors {
-                    println!("  - {}: {}", e.path, e.message);
-                }
-                std::process::exit(1);
-            }
-        }
-        Command::Playlist(PlaylistCommand::Export { reference, out }) => {
-            let reply = client
-                .playlist_export(PlaylistExportRequest { reference })
-                .await?
-                .into_inner();
-            match out {
-                Some(path) => {
-                    std::fs::write(&path, &reply.toml_content)
-                        .map_err(|e| anyhow::anyhow!("cannot write {}: {e}", path.display()))?;
-                    let handle = if reply.rel_path.is_empty() { &reply.id } else { &reply.rel_path };
-                    println!("exported {handle} → {}", path.display());
-                }
-                None => print!("{}", reply.toml_content),
-            }
-        }
-        Command::Playlist(PlaylistCommand::Remove { reference, yes }) => {
-            if !yes {
-                anyhow::bail!(
-                    "this deletes playlist `{reference}` (its file and its entry): re-run with --yes \
-                     (`playlist export {reference} --out <file>` keeps a copy)"
-                );
-            }
-            let reply = client
-                .playlist_remove(PlaylistRemoveRequest { reference })
-                .await?
-                .into_inner();
-            let handle = if reply.rel_path.is_empty() { "(no path)" } else { &reply.rel_path };
-            println!("removed: {handle}  {}", reply.id);
-            if reply.file.is_empty() {
-                println!("file:    none on disk");
-            } else {
-                println!("file:    {} (deleted)", reply.file);
-            }
-        }
+        Command::Playlist(cmd) => playlist_command(&args.addr, cmd).await?,
         Command::Schedule(ScheduleCommand::List) => {
             let mut sched = ScheduleServiceClient::connect(args.addr.clone()).await?;
             let reply = sched.list_rules(schedule::ListRulesRequest {}).await?.into_inner();
@@ -915,6 +867,48 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
             // A skipped audio file is diagnostic, not a failure: exit zero.
+        }
+        Command::Library(LibraryCommand::Search { query, genres, folder, missing, sort, desc, limit, cursor, all }) => {
+            use library::search_media_request::Field;
+            let field = |s: &str| -> anyhow::Result<Field> {
+                Ok(match s.to_ascii_lowercase().as_str() {
+                    "path" => Field::Path,
+                    "title" => Field::Title,
+                    "artist" => Field::Artist,
+                    "album" => Field::Album,
+                    "year" => Field::Year,
+                    "duration" => Field::Duration,
+                    "genre" => Field::Genre,
+                    other => anyhow::bail!("unknown field `{other}` (path, title, artist, album, year, duration, genre)"),
+                })
+            };
+            let sort = field(&sort)?;
+            if sort == Field::Genre {
+                anyhow::bail!("`genre` is not a sort key (path, title, artist, album, year, duration)");
+            }
+            let missing = missing.iter().map(|m| field(m).map(|f| f as i32)).collect::<anyhow::Result<Vec<_>>>()?;
+            let mut lib = LibraryServiceClient::connect(args.addr.clone()).await?;
+            let r = lib
+                .search_media(library::SearchMediaRequest {
+                    query,
+                    genres,
+                    folder: folder.unwrap_or_default(),
+                    include_unavailable: all,
+                    missing,
+                    sort: sort as i32,
+                    descending: desc,
+                    limit,
+                    cursor: cursor.unwrap_or_default(),
+                })
+                .await?
+                .into_inner();
+            for m in &r.media {
+                println!("{}", fmt_media_line(m));
+            }
+            println!("({} shown, {} matching)", r.media.len(), r.total);
+            if !r.next_cursor.is_empty() {
+                println!("next page: --cursor {}", r.next_cursor);
+            }
         }
         Command::Library(LibraryCommand::List { all, genres, by_genre }) => {
             let mut lib = LibraryServiceClient::connect(args.addr.clone()).await?;
@@ -2021,6 +2015,259 @@ fn verdict_glyph(v: schedule::Verdict) -> &'static str {
         schedule::Verdict::Thin => "\u{26a0}",         // ⚠
         schedule::Verdict::Insufficient => "\u{2717}", // ✗
         _ => "?",
+    }
+}
+
+// ---------------------------------------------------------------------------
+// playlist
+// ---------------------------------------------------------------------------
+
+fn severity_label(d: &playlist::Diagnostic) -> &'static str {
+    match playlist::diagnostic::Severity::try_from(d.severity) {
+        Ok(playlist::diagnostic::Severity::Warning) => "warning",
+        _ => "error",
+    }
+}
+
+/// `error   selection.order: `order = shuffle` is not valid… (got: shuffle; expected: fifo, lifo)`
+fn print_diagnostics(ds: &[playlist::Diagnostic]) {
+    for d in ds {
+        let field = if d.field_path.is_empty() { "(file)" } else { d.field_path.as_str() };
+        let mut extra = Vec::new();
+        if !d.rejected.is_empty() {
+            extra.push(format!("got: {}", d.rejected));
+        }
+        if !d.expected.is_empty() {
+            extra.push(format!("expected: {}", d.expected));
+        }
+        let extra = if extra.is_empty() { String::new() } else { format!(" ({})", extra.join("; ")) };
+        println!("  {:<7} {field}: {}{extra}", severity_label(d), d.message);
+    }
+}
+
+fn read_toml(path: &std::path::Path) -> anyhow::Result<String> {
+    std::fs::read_to_string(path).map_err(|e| anyhow::anyhow!("cannot read {}: {e}", path.display()))
+}
+
+fn fmt_ms(ms: u64) -> String {
+    let s = ms / 1000;
+    if s >= 3600 {
+        format!("{}h{:02}m{:02}s", s / 3600, (s / 60) % 60, s % 60)
+    } else {
+        format!("{}m{:02}s", s / 60, s % 60)
+    }
+}
+
+async fn playlist_command(addr: &str, cmd: PlaylistCommand) -> anyhow::Result<()> {
+    use playlist::*;
+    let mut pl = PlaylistServiceClient::connect(addr.to_string()).await?;
+    match cmd {
+        PlaylistCommand::Add { path } => {
+            // Syntactic pre-check only: is this readable, well-formed TOML?
+            // The business validation happens in stationd. Failing fast here
+            // avoids a pointless round-trip on an obviously broken file.
+            let content = read_toml(&path)?;
+            content
+                .parse::<toml::Table>()
+                .map_err(|e| anyhow::anyhow!("{} is not well-formed TOML: {e}", path.display()))?;
+            let reply = pl.add(AddRequest { toml: content }).await?.into_inner();
+            // stationd is authoritative on the content; write back what it
+            // returned (the id-injected, losslessly-rewritten TOML) into the
+            // file the user named (not stationd's playlist root: use `save`).
+            std::fs::write(&path, &reply.toml).map_err(|e| anyhow::anyhow!("cannot write {}: {e}", path.display()))?;
+            println!("added:  {}", path.display());
+            println!("id:     {}", reply.id);
+        }
+        PlaylistCommand::Sync => {
+            // No path argument: stationd scans its own configured playlist
+            // root. The report is best-effort — successes counted, failures
+            // listed loudly (no-silent-failure).
+            let reply = pl.sync(SyncRequest {}).await?.into_inner();
+            println!("synced: {} playlist(s)", reply.added);
+            if reply.errors.is_empty() {
+                println!("errors: none");
+            } else {
+                println!("errors: {}", reply.errors.len());
+                print_file_errors(&reply.errors);
+                // Non-zero exit so scripts / CI notice something was rejected.
+                std::process::exit(1);
+            }
+        }
+        PlaylistCommand::List => {
+            let reply = pl.list(ListRequest {}).await?.into_inner();
+            if reply.playlists.is_empty() {
+                println!("(no playlists in the view)");
+            }
+            for p in &reply.playlists {
+                let handle = if p.rel_path.is_empty() { "(no path)" } else { &p.rel_path };
+                let state = if p.enabled { "enabled" } else { "disabled" };
+                println!("{handle}  [{}]  {}  ({state})  {}", p.mode, p.name, p.id);
+            }
+        }
+        PlaylistCommand::Reload => {
+            let reply = pl.reload(ReloadRequest {}).await?.into_inner();
+            println!("synced:  {} playlist(s)", reply.added);
+            if reply.removed.is_empty() {
+                println!("removed: none");
+            } else {
+                println!("removed: {} (file gone)", reply.removed.len());
+                for r in &reply.removed {
+                    println!("  - {r}");
+                }
+            }
+            if reply.errors.is_empty() {
+                println!("errors:  none");
+            } else {
+                println!("errors:  {}", reply.errors.len());
+                print_file_errors(&reply.errors);
+                std::process::exit(1);
+            }
+        }
+        PlaylistCommand::Export { reference, out, file } => {
+            let reply = pl.export(ExportRequest { reference }).await?.into_inner();
+            let handle = if reply.rel_path.is_empty() { reply.id.clone() } else { reply.rel_path.clone() };
+            let content = if file {
+                if reply.file.is_empty() {
+                    anyhow::bail!("playlist `{handle}` has no file under the playlist root (added with `playlist add`)");
+                }
+                eprintln!("file:     {}", reply.file);
+                eprintln!("revision: {}", reply.revision);
+                &reply.file_toml
+            } else {
+                if reply.file_differs {
+                    eprintln!(
+                        "note: {} differs from what is applied (edited since, or invalid): `export --file` shows it",
+                        reply.file
+                    );
+                }
+                &reply.applied_toml
+            };
+            match out {
+                Some(path) => {
+                    std::fs::write(&path, content).map_err(|e| anyhow::anyhow!("cannot write {}: {e}", path.display()))?;
+                    println!("exported {handle} → {}", path.display());
+                }
+                None => print!("{content}"),
+            }
+        }
+        PlaylistCommand::Remove { reference, yes, revision } => {
+            if !yes {
+                anyhow::bail!(
+                    "this deletes playlist `{reference}` (its file and its entry): re-run with --yes \
+                     (`playlist export {reference} --out <file>` keeps a copy)"
+                );
+            }
+            let reply = pl
+                .remove(RemoveRequest { reference, expected_revision: revision.unwrap_or_default() })
+                .await?
+                .into_inner();
+            let handle = if reply.rel_path.is_empty() { "(no path)" } else { &reply.rel_path };
+            println!("removed: {handle}  {}", reply.id);
+            if reply.file.is_empty() {
+                println!("file:    none on disk");
+            } else {
+                println!("file:    {} (deleted)", reply.file);
+            }
+        }
+        PlaylistCommand::Validate { path, as_ref } => {
+            let toml = read_toml(&path)?;
+            let r = pl.validate(ValidateRequest { toml, reference: as_ref.unwrap_or_default() }).await?.into_inner();
+            if r.diagnostics.is_empty() {
+                println!("valid");
+            } else {
+                println!("{}", if r.ok { "valid, with warnings:" } else { "invalid:" });
+                print_diagnostics(&r.diagnostics);
+            }
+            if !r.ok {
+                std::process::exit(1);
+            }
+        }
+        PlaylistCommand::Preview { path, as_ref, sample } => {
+            let toml = read_toml(&path)?;
+            let r = pl
+                .preview_pool(PreviewPoolRequest { toml, reference: as_ref.unwrap_or_default(), sample })
+                .await?
+                .into_inner();
+            if !r.ok {
+                println!("invalid:");
+                print_diagnostics(&r.diagnostics);
+                std::process::exit(1);
+            }
+            match (r.count, r.duration_ms) {
+                (Some(c), Some(d)) => println!("pool:     {c} media, {}", fmt_ms(d)),
+                (Some(c), None) => println!("pool:     {c} media, duration unknown"),
+                _ => println!("pool:     not measurable (remote / queue: no indexed media)"),
+            }
+            if let Some(a) = r.artists {
+                println!("artists:  {a}");
+            }
+            for m in &r.members {
+                let what = match (&m.error, m.count, m.duration_ms) {
+                    (e, _, _) if !e.is_empty() => format!("!! {e}"),
+                    (_, Some(c), Some(d)) => format!("{c} media, {}", fmt_ms(d)),
+                    (_, Some(c), None) => format!("{c} media"),
+                    _ => "not measurable".into(),
+                };
+                let resolved = if m.resolved.is_empty() || m.resolved == m.r#ref { String::new() } else { format!(" → {}", m.resolved) };
+                println!("  member {}{resolved}: {what}", m.r#ref);
+            }
+            for m in &r.sample {
+                let label = match (m.artist.is_empty(), m.title.is_empty()) {
+                    (false, false) => format!("{} — {}", m.artist, m.title),
+                    (true, false) => m.title.clone(),
+                    _ => m.rel_path.clone(),
+                };
+                println!("  {:>7}  {label}  ({})", fmt_ms(m.duration_ms), m.rel_path);
+            }
+            if !r.diagnostics.is_empty() {
+                print_diagnostics(&r.diagnostics);
+            }
+        }
+        PlaylistCommand::Save { reference, path, revision, force } => {
+            let toml = read_toml(&path)?;
+            let mut req = SaveRequest { reference: reference.clone(), toml, expected_revision: revision.unwrap_or_default() };
+            let mut r = pl.save(req.clone()).await?.into_inner();
+            if r.conflict && force && !r.revision.is_empty() {
+                // --force: take the current revision and try once more (a
+                // second conflict means someone is writing right now).
+                req.expected_revision = r.revision.clone();
+                r = pl.save(req).await?.into_inner();
+            }
+            if r.conflict {
+                if r.revision.is_empty() {
+                    anyhow::bail!("playlist `{reference}` has no file any more: save it without --revision to create it");
+                }
+                anyhow::bail!(
+                    "playlist `{reference}` exists ({}, revision {}): pass --revision <rev> (from `playlist export {reference} --file`) \
+                     or --force to replace it",
+                    r.file,
+                    r.revision
+                );
+            }
+            if !r.ok {
+                println!("not saved:");
+                print_diagnostics(&r.diagnostics);
+                std::process::exit(1);
+            }
+            println!("{} {}", if r.created { "created:" } else { "saved:  " }, r.file);
+            println!("id:       {}", r.id);
+            println!("revision: {}", r.revision);
+            if !r.diagnostics.is_empty() {
+                print_diagnostics(&r.diagnostics);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn print_file_errors(errors: &[playlist::FileError]) {
+    for e in errors {
+        if e.diagnostics.is_empty() {
+            println!("  - {}: {}", e.path, e.message);
+        } else {
+            println!("  - {}:", e.path);
+            print_diagnostics(&e.diagnostics);
+        }
     }
 }
 

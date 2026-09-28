@@ -28,7 +28,22 @@ use crate::store;
 pub struct SyncError {
     /// Path as shown to the user (relative to the root when possible).
     pub path: String,
+    /// Summary: the first diagnostic, or why the file could not be handled.
     pub message: String,
+    /// Every validation problem, tied to its field (empty when the file was
+    /// rejected for another reason: unreadable, path collision…).
+    pub diagnostics: Vec<playlist::Diag>,
+}
+
+impl SyncError {
+    fn plain(path: String, message: String) -> Self {
+        Self { path, message, diagnostics: Vec::new() }
+    }
+
+    fn from_diags(path: String, diagnostics: Vec<playlist::Diag>) -> Self {
+        let message = diagnostics.first().map(|d| d.message.clone()).unwrap_or_default();
+        Self { path, message, diagnostics }
+    }
 }
 
 /// Outcome of a reconciliation pass: how many playlists were persisted, and
@@ -83,46 +98,44 @@ pub async fn sync_root(db: &SqlitePool, root: &Path) -> SyncOutcome {
         let key = match playlist::normalize_ref(&rel.to_string_lossy()) {
             Ok(k) => k,
             Err(msg) => {
-                errors.push(SyncError { path: rel_display, message: msg });
+                errors.push(SyncError::plain(rel_display, msg));
                 continue;
             }
         };
 
         // Two files normalizing to the same key = conflict (e.g. case).
         if let Some(prev) = seen_keys.get(&key) {
-            errors.push(SyncError {
-                path: rel_display.clone(),
-                message: format!("path collides with `{prev}` (same normalized key `{key}`)"),
-            });
+            errors.push(SyncError::plain(
+                rel_display.clone(),
+                format!("path collides with `{prev}` (same normalized key `{key}`)"),
+            ));
             continue;
         }
 
         let content = match std::fs::read_to_string(path) {
             Ok(c) => c,
             Err(e) => {
-                errors.push(SyncError {
-                    path: rel_display,
-                    message: format!("cannot read: {e}"),
-                });
+                errors.push(SyncError::plain(rel_display, format!("cannot read: {e}")));
                 continue;
             }
         };
 
-        let playlist = match Playlist::parse(&content) {
+        let playlist = match playlist::parse_with_diagnostics(&content) {
             Ok(p) => p,
-            Err(e) => {
-                errors.push(SyncError { path: rel_display, message: e.to_string() });
+            Err(d) => {
+                errors.push(SyncError::from_diags(rel_display, vec![d]));
                 continue;
             }
         };
-        if let Err(e) = playlist.validate() {
-            errors.push(SyncError { path: rel_display, message: e.to_string() });
+        let diags = playlist.diagnostics();
+        if !diags.is_empty() {
+            errors.push(SyncError::from_diags(rel_display, diags));
             continue;
         }
         let (rewritten, id) = match playlist::assign_id(&content) {
             Ok(r) => r,
             Err(e) => {
-                errors.push(SyncError { path: rel_display, message: e.to_string() });
+                errors.push(SyncError::plain(rel_display, e.to_string()));
                 continue;
             }
         };
@@ -151,16 +164,20 @@ pub async fn sync_root(db: &SqlitePool, root: &Path) -> SyncOutcome {
         .collect();
     let set_errors = playlist::validate_set(&set_entries);
 
+    // One report per file, with all its set-level diagnostics.
     let mut bad_keys: HashSet<String> = HashSet::new();
+    let mut by_key: Vec<(String, Vec<playlist::Diag>)> = Vec::new();
     for se in set_errors {
         bad_keys.insert(se.key.clone());
+        match by_key.iter_mut().find(|(k, _)| *k == se.key) {
+            Some((_, v)) => v.push(se.diag()),
+            None => by_key.push((se.key.clone(), vec![se.diag()])),
+        }
+    }
+    for (key, diags) in by_key {
         // Map the key back to a displayable path for the report.
-        let path = loaded
-            .iter()
-            .find(|l| l.key == se.key)
-            .map(|l| l.rel_display.clone())
-            .unwrap_or(se.key);
-        errors.push(SyncError { path, message: se.message });
+        let path = loaded.iter().find(|l| l.key == key).map(|l| l.rel_display.clone()).unwrap_or(key);
+        errors.push(SyncError::from_diags(path, diags));
     }
 
     // ---- Pass 3: persist the survivors -------------------------------
@@ -172,20 +189,17 @@ pub async fn sync_root(db: &SqlitePool, root: &Path) -> SyncOutcome {
             continue;
         }
         if let Err(e) = store::upsert(db, &l.id, &l.playlist, &l.rewritten, Some(&l.key)).await {
-            errors.push(SyncError {
-                path: l.rel_display.clone(),
-                message: format!("could not update playlist view: {e}"),
-            });
+            errors.push(SyncError::plain(l.rel_display.clone(), format!("could not update playlist view: {e}")));
             continue;
         }
         // Write the id back only if assign_id changed the file (avoids
         // churning git on files that already carry an id).
         if l.rewritten != l.content {
             if let Err(e) = std::fs::write(&l.disk_path, &l.rewritten) {
-                errors.push(SyncError {
-                    path: l.rel_display.clone(),
-                    message: format!("reconciled but could not write id back: {e}"),
-                });
+                errors.push(SyncError::plain(
+                    l.rel_display.clone(),
+                    format!("reconciled but could not write id back: {e}"),
+                ));
                 continue;
             }
         }
@@ -201,7 +215,7 @@ pub async fn sync_root(db: &SqlitePool, root: &Path) -> SyncOutcome {
 
 /// The playlist files under `root`, by canonical key (every `*.toml`,
 /// valid or not: an invalid file still exists — its last valid row stays).
-fn files_by_key(root: &Path) -> HashMap<String, Vec<PathBuf>> {
+pub(crate) fn files_by_key(root: &Path) -> HashMap<String, Vec<PathBuf>> {
     let mut map: HashMap<String, Vec<PathBuf>> = HashMap::new();
     for entry in walkdir::WalkDir::new(root).into_iter().filter_map(Result::ok) {
         let path = entry.path();
@@ -267,6 +281,8 @@ pub enum RemoveError {
     Ambiguous { key: String, files: Vec<String> },
     /// The file could not be deleted / the view could not be read or written.
     Failed(String),
+    /// The file changed since the revision the caller read: nothing removed.
+    Conflict { key: String, revision: String },
 }
 
 impl std::fmt::Display for RemoveError {
@@ -280,6 +296,11 @@ impl std::fmt::Display for RemoveError {
                 write!(f, "several files map to `{key}` ({}): rename or delete one by hand", files.join(", "))
             }
             RemoveError::Failed(m) => f.write_str(m),
+            RemoveError::Conflict { key, revision } => write!(
+                f,
+                "playlist `{key}` changed since it was read (file now at {}): nothing removed",
+                if revision.is_empty() { "no file" } else { revision.as_str() }
+            ),
         }
     }
 }
@@ -298,7 +319,14 @@ pub struct Removed {
 /// then its row. File-first: removing the row alone would bring it back at
 /// the next sync. Refused while referenced (no dangling ref in the grid or a
 /// group). A file that can't be deleted leaves everything as it was.
-pub async fn remove(db: &SqlitePool, root: &Path, reference: &str) -> Result<Removed, RemoveError> {
+/// `expected_revision` (when given) must still be the file's: otherwise
+/// nothing is removed (someone changed it since it was read).
+pub async fn remove(
+    db: &SqlitePool,
+    root: &Path,
+    reference: &str,
+    expected_revision: Option<&str>,
+) -> Result<Removed, RemoveError> {
     let row = store::find(db, reference)
         .await
         .map_err(|e| RemoveError::Failed(format!("could not read the playlist view: {e}")))?
@@ -314,6 +342,17 @@ pub async fn remove(db: &SqlitePool, root: &Path, reference: &str) -> Result<Rem
         let display = |p: &PathBuf| p.strip_prefix(root).unwrap_or(p).display().to_string();
         if files.len() > 1 {
             return Err(RemoveError::Ambiguous { key: key.clone(), files: files.iter().map(display).collect() });
+        }
+        if let Some(expected) = expected_revision {
+            let current = match files.first() {
+                Some(p) => std::fs::read(p)
+                    .map(|c| crate::playlist_edit::revision(&c))
+                    .map_err(|e| RemoveError::Failed(format!("cannot read {}: {e}", display(p))))?,
+                None => String::new(),
+            };
+            if current != expected.trim() {
+                return Err(RemoveError::Conflict { key: key.clone(), revision: current });
+            }
         }
         if let Some(path) = files.first() {
             std::fs::remove_file(path)
@@ -349,7 +388,7 @@ pub async fn reload_root(db: &SqlitePool, root: &Path) -> ReloadOutcome {
     let rows = match store::all(db).await {
         Ok(r) => r,
         Err(e) => {
-            errors.push(SyncError { path: "(view)".into(), message: format!("could not read the playlist view: {e}") });
+            errors.push(SyncError::plain("(view)".into(), format!("could not read the playlist view: {e}")));
             return ReloadOutcome { added, removed, errors };
         }
     };
@@ -377,7 +416,7 @@ pub async fn reload_root(db: &SqlitePool, root: &Path) -> ReloadOutcome {
                 }
                 Err(e) => {
                     leaving.remove(key);
-                    errors.push(SyncError { path: key.clone(), message: e });
+                    errors.push(SyncError::plain(key.clone(), e));
                     changed = true;
                 }
             }
@@ -389,17 +428,14 @@ pub async fn reload_root(db: &SqlitePool, root: &Path) -> ReloadOutcome {
 
     for (id, key) in gone {
         if let Some(by) = kept.remove(&key) {
-            errors.push(SyncError {
-                path: key,
-                message: format!("file gone but still referenced by {}: kept in the view", by.join(", ")),
-            });
+            errors.push(SyncError::plain(
+                key,
+                format!("file gone but still referenced by {}: kept in the view", by.join(", ")),
+            ));
         } else if leaving.contains(&key) {
             match store::delete(db, &id).await {
                 Ok(_) => removed.push(key),
-                Err(e) => errors.push(SyncError {
-                    path: key,
-                    message: format!("file gone, could not drop it from the view: {e}"),
-                }),
+                Err(e) => errors.push(SyncError::plain(key, format!("file gone, could not drop it from the view: {e}"))),
             }
         }
     }

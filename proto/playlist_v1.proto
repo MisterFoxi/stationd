@@ -1,319 +1,258 @@
 // playlist_v1.proto
 // ─────────────────────────────────────────────────────────────────────────
-// Slice « Homestone chronicles » du contrat playlist.
+// Les PLAYLISTS : un fichier TOML par playlist sous la racine des playlists
+// du nœud (`[playlist] path`), source de vérité ; la table SQLite n'est qu'une
+// vue reconstructible. stationd est le seul à écrire cette racine (Save,
+// Remove, id réécrit par Sync) : un client, local ou distant, n'écrit jamais
+// de fichier de playlist.
 //
-// Périmètre (cf. proposition §10, « premier périmètre recommandé ») :
-//   format individuel · identité 3 étages · static · dynamic (newest +
-//   order_by + path/prefix) · group/sequence · member · activate manuel.
+// Le format d'échange est le TOML lui-même (la grammaire des fichiers, 5
+// modes : static, dynamic, remote, queue, group — cf. examples/ et
+// Doc/playlists.md). Pas de message typé par mode : le client qui présente un
+// formulaire lit et écrit du TOML, stationd seul valide.
 //
-// HORS slice, volontairement absents (ajoutés quand leur contrat est stable) :
-//   modes queue / remote · stratégies group rotate / weighted (présentes en
-//   enum pour ne pas renuméroter plus tard, mais non couvertes) · le « QUAND »
-//   (general/interval/scheduled) qui vit désormais dans la GRILLE, pas ici.
+// Référence d'une playlist (`reference`) : son ref (chemin relatif canonique
+// sous la racine, ex. `emission/intro`, insensible à la casse, `.toml`
+// facultatif) ou son UUID (seule prise d'une entrée ajoutée par Add, sans
+// fichier).
 //
-// Décisions gravées dans ce proto :
-//   1. Le « quand » a quitté la playlist. `Broadcast` ne porte plus que le
-//      COMMENT intrinsèque (quota, répétition, épuisement, anti-répétition) +
-//      l'adressabilité. Le déclenchement est une règle de grille (2e proto)
-//      qui référence la playlist par son référent humain.
-//   2. Identité 3 étages : `uuid` interne immuable (jointures/historique/
-//      arêtes de groupe) · `name` requis · `handle` optionnel. Le service
-//      calcule ref_effective = handle ?? name ; c'est LUI le référent des
-//      membres et des futures règles. Une ref non résolue = erreur bruyante,
-//      jamais un repli (cas A, pas B).
-//   3. `oneof mode` : un mode = un message. Poser un champ d'un autre mode
-//      devient STRUCTURELLEMENT impossible — remonte au type toute une classe
-//      des rejets « champ inapplicable » de §9. Idem `order` : une enum par
-//      mode, donc `newest` sur `static` n'existe pas dans le type.
+// Révision : empreinte du CONTENU du fichier sur le disque (`sha256:<hex>`),
+// pas sa date (plus fiable sur NFS). Vide = pas de fichier.
 
 syntax = "proto3";
 
 package webradio.playlist.v1;
 
-import "google/protobuf/duration.proto";
-
-// NB codegen : `static`/`dynamic`/`group` sont des mots-clés dans certains
-// langages cibles (Rust → r#static). Choix assumé pour l'alignement 1:1 avec
-// `mode = "..."` du TOML ; le mangling est géré par prost.
-
-// ─────────────────────────────────────────────────────────────────────────
-// Racine
-// ─────────────────────────────────────────────────────────────────────────
-
-message Playlist {
-  // Identité interne. Immuable. Vide à la création (attribué par le système),
-  // stable ensuite. Un renommage de fichier / de `name` ne le change JAMAIS :
-  // c'est lui qui permet au service de réécrire atomiquement les référenceurs.
-  string uuid = 1;
-
-  // Référent humain par défaut + affichage. Requis, non blanc.
-  // Tant qu'aucun `handle` n'est fourni, `name` EST le référent → il hérite
-  // des contraintes de clé (unique par station, sobre). Il n'est librement
-  // renommable/traduisible que si un `handle` explicite le libère.
-  string name = 2;
-
-  // Référent explicite. Présent → l'emporte sur `name` comme ref_effective.
-  // Absent (cas A) → le référent est `name`.
-  optional string handle = 3;
-
-  // Absent → true (défaut appliqué par le service, pas par le schéma).
-  optional bool enabled = 4;
-
-  Selection selection = 5;   // le QUOI
-  Broadcast broadcast = 6;   // le COMMENT (plus le QUAND)
-
-  // schema_version vit au niveau du TOML (garde-fou format historique),
-  // vérifié à la frontière Apply. Pas de champ proto : le proto est versionné
-  // par le package (v1) et son évolution.
-}
-
-// ─────────────────────────────────────────────────────────────────────────
-// Sélection — le QUOI
-// ─────────────────────────────────────────────────────────────────────────
-
-message Selection {
-  oneof mode {
-    StaticSelection  static  = 1;
-    DynamicSelection dynamic = 2;
-    GroupSelection   group   = 3;
-    // queue, remote : hors slice.
-  }
-}
-
-message StaticSelection {
-  // Non vide, sans doublon. Chemins relatifs à media/, séparateur `/`,
-  // pas de `..`/absolu/NUL (validé service). Casse conservée.
-  repeated string files = 1;
-  // UNSPECIFIED → SEQUENTIAL.
-  StaticOrder order = 2;
-}
-
-message DynamicSelection {
-  // Non vide (validé service). Pas de filtre ≠ « toute la biblio » :
-  // pour tout prendre, filtre explicite path/prefix "".
-  repeated Filter filter = 1;
-  // UNSPECIFIED → ALL.
-  MatchMode match = 2;
-  // UNSPECIFIED → SHUFFLE.
-  DynamicOrder order = 3;
-  // Requis ssi order ∈ {NEWEST, OLDEST} ; interdit sinon (règle croisée →
-  // service, le proto ne peut pas lier deux champs).
-  OrderBy order_by = 4;
-  // Défaut false. Autorisé ssi order daté. Anti-répétition à expiration
-  // infinie, keyé par identité d'épisode (SQLite, état durable).
-  bool unplayed_only = 5;
-}
-
-message GroupSelection {
-  GroupStrategy strategy = 1;
-  // Non vide. `ref` = ref_effective d'une autre playlist. Cycles + refs
-  // inconnues rejetés avant apply (graphe validé comme DAG).
-  repeated GroupMember members = 2;
-  // UNSPECIFIED → ABORT.
-  OnMemberUnavailable on_member_unavailable = 3;
-}
-
-message GroupMember {
-  string ref = 1;
-  // sequence uniquement. Défaut 1. Interdit ailleurs (validé service).
-  // Sur un membre-groupe : N activations complètes (ne coupe pas l'outro).
-  optional uint32 take = 2;
-  // weighted uniquement. 0..50, défaut 15. 0 = exclu du tirage (≠ désactivé),
-  // d'où `optional` : distinguer 0 (sémantique) de l'absence (→ 15).
-  optional uint32 weight = 3;
-}
-
-message Filter {
-  FilterField field = 1;
-  FilterOp    op    = 2;
-  oneof value {
-    string     string_value = 3;   // path/prefix, title/contains…
-    int64      int_value    = 4;   // year/>=…
-    StringList string_list  = 5;   // genre/has_any|has_all|has_none, in/not_in textuel…
-    Int64List  int_list     = 6;   // year/in…
-  }
-}
-message StringList { repeated string values = 1; }
-message Int64List  { repeated int64  values = 1; }
-
-// ─────────────────────────────────────────────────────────────────────────
-// Broadcast — le COMMENT intrinsèque (le QUAND est parti dans la grille)
-// ─────────────────────────────────────────────────────────────────────────
-
-message Broadcast {
-  // static/dynamic/queue. Défaut 1. `optional` : 0 n'est pas un quota valide,
-  // l'absence → 1 appliqué par le service.
-  optional uint32 limit = 1;
-  // static/dynamic. Défaut false. Interdit avec unplayed_only=true (service).
-  bool repeat = 2;
-  // UNSPECIFIED → FALLTHROUGH. (stop/hold retirés en v1.)
-  OnExhausted on_exhausted = 3;
-  // Historique STATION-GLOBAL, jamais relâché implicitement. Reste global même
-  // quand la grille bascule la base active — invariant à préserver.
-  Constraints constraints = 4;
-  // Remplace l'ancien type="member". true → brique de groupe uniquement,
-  // NON adressable par une règle de grille. Défaut false (adressable).
-  bool member_only = 5;
-}
-
-message Constraints {
-  google.protobuf.Duration no_same_artist_within = 1;
-  google.protobuf.Duration no_same_track_within  = 2;
-}
-
-// ─────────────────────────────────────────────────────────────────────────
-// Enums (UNSPECIFIED = 0 = « omis » → défaut appliqué par le service)
-// ─────────────────────────────────────────────────────────────────────────
-
-enum MatchMode {
-  MATCH_MODE_UNSPECIFIED = 0;   // → ALL
-  MATCH_MODE_ALL = 1;           // ET
-  MATCH_MODE_ANY = 2;           // OU
-}
-
-enum StaticOrder {
-  STATIC_ORDER_UNSPECIFIED = 0; // → SEQUENTIAL
-  STATIC_ORDER_SEQUENTIAL = 1;
-  STATIC_ORDER_SHUFFLE = 2;
-}
-
-enum DynamicOrder {
-  DYNAMIC_ORDER_UNSPECIFIED = 0; // → SHUFFLE
-  DYNAMIC_ORDER_SEQUENTIAL = 1;
-  DYNAMIC_ORDER_SHUFFLE = 2;
-  DYNAMIC_ORDER_NEWEST = 3;      // exige order_by
-  DYNAMIC_ORDER_OLDEST = 4;      // exige order_by
-}
-
-enum OrderBy {
-  ORDER_BY_UNSPECIFIED = 0;
-  ORDER_BY_FILENAME = 1;         // défaut recommandé (local) ; tri lexical
-  ORDER_BY_MTIME = 2;
-  ORDER_BY_PUBLISHED = 3;        // source feed uniquement
-}
-
-enum GroupStrategy {
-  GROUP_STRATEGY_UNSPECIFIED = 0;
-  GROUP_STRATEGY_SEQUENCE = 1;   // slice
-  GROUP_STRATEGY_ROTATE = 2;     // hors slice
-  GROUP_STRATEGY_WEIGHTED = 3;   // hors slice
-}
-
-enum OnMemberUnavailable {
-  ON_MEMBER_UNAVAILABLE_UNSPECIFIED = 0; // → ABORT
-  ON_MEMBER_UNAVAILABLE_ABORT = 1;       // abandonne le reste + diagnostic
-  ON_MEMBER_UNAVAILABLE_SKIP  = 2;       // membre suivant
-}
-
-enum OnExhausted {
-  ON_EXHAUSTED_UNSPECIFIED = 0;  // → FALLTHROUGH
-  ON_EXHAUSTED_FALLTHROUGH = 1;  // termine l'activation, rend la main
-  ON_EXHAUSTED_DISABLE = 2;      // suspend (état d'exécution, NE réécrit PAS enabled)
-}
-
-// Catalogue minimal du slice + quelques entrées pour montrer le motif.
-// S'étend (proposition §4.1) ; l'ajout est additif tant que les numéros ne
-// bougent pas.
-enum FilterField {
-  FILTER_FIELD_UNSPECIFIED = 0;
-  FILTER_FIELD_PATH = 1;         // slice : path/prefix
-  FILTER_FIELD_TITLE = 2;
-  FILTER_FIELD_ARTIST = 3;
-  FILTER_FIELD_ALBUM = 4;
-  FILTER_FIELD_GENRE = 5;
-  FILTER_FIELD_YEAR = 6;
-  FILTER_FIELD_DURATION = 7;
-}
-
-enum FilterOp {
-  FILTER_OP_UNSPECIFIED = 0;
-  FILTER_OP_EQ = 1;
-  FILTER_OP_NE = 2;
-  FILTER_OP_PREFIX = 3;          // slice : littéral, ni glob ni regex
-  FILTER_OP_CONTAINS = 4;
-  FILTER_OP_IN = 5;
-  FILTER_OP_NOT_IN = 6;
-  FILTER_OP_HAS = 7;
-  FILTER_OP_HAS_ANY = 8;
-  FILTER_OP_HAS_ALL = 9;
-  FILTER_OP_HAS_NONE = 14;       // additif : n° postérieur aux comparateurs (LT..GE = 10..13)
-  FILTER_OP_LT = 10;
-  FILTER_OP_LE = 11;
-  FILTER_OP_GT = 12;
-  FILTER_OP_GE = 13;
-  // Couple field/op/value validé au service (§9) : le proto ne peut pas
-  // interdire genre/`>=` ni year/`prefix`.
-}
-
-// ─────────────────────────────────────────────────────────────────────────
-// Diagnostics — format d'erreur §9 (fichier + chemin logique + rejeté + attendu)
-// ─────────────────────────────────────────────────────────────────────────
-
-message Diagnostic {
-  enum Severity { SEVERITY_UNSPECIFIED = 0; ERROR = 1; WARNING = 2; }
-  Severity severity = 1;
-  string file = 2;         // fichier concerné
-  string field_path = 3;   // ex. "selection.order"
-  string rejected = 4;     // valeur rejetée
-  string expected = 5;     // valeurs attendues quand finies
-  string message = 6;      // ex. `"shuffle" interdit pour mode "queue"`
-}
-
-// ─────────────────────────────────────────────────────────────────────────
-// Service (CLI-first : tout ici est atteignable en `stationctl`)
-// ─────────────────────────────────────────────────────────────────────────
-
 service PlaylistService {
-  // Réconcilie un lot de fichiers TOML vers l'index (kubectl apply).
-  // Parse dans stationd → CLI mince, parsing centralisé. N'écrit QUE l'index
-  // reconstructible, JAMAIS l'état durable (compteurs, déjà-joué, historique).
-  rpc Apply(ApplyRequest) returns (ApplyResponse);
+  // Ce que la vue contient (lecture seule).
+  rpc List(ListRequest) returns (ListResponse);
 
-  // Même entrée, ne persiste rien : renvoie les diagnostics.
-  rpc Validate(ApplyRequest) returns (ValidateResponse);
-
-  // Redéverse l'état courant en TOML (round-trip lossless côté impl).
+  // Une playlist : le TOML appliqué (la vue) et celui du fichier, avec sa
+  // révision (à renvoyer dans Save / Remove).
   rpc Export(ExportRequest) returns (ExportResponse);
 
-  rpc GetPlaylist(GetPlaylistRequest) returns (Playlist);
-  rpc ListPlaylists(ListPlaylistsRequest) returns (ListPlaylistsResponse);
+  // Valide un brouillon sans rien appliquer ni écrire : diagnostics par
+  // champ, y compris les références de groupe et les cycles vus avec la vue
+  // actuelle. `reference` (facultatif) = où il serait enregistré : sert aux
+  // refs relatives (`./x`) d'un groupe et à la détection de cycle.
+  rpc Validate(ValidateRequest) returns (ValidateResponse);
 
-  // STUB de slice : déclenche une activation à la main pour tester sélection +
-  // composition end-to-end SANS la grille. Remplacé par la règle de grille
-  // (AtClock soft, etc.) au 2e proto.
-  rpc Activate(ActivateRequest) returns (ActivateResponse);
+  // Évalue le pool d'un brouillon sans l'appliquer : nombre de médias,
+  // durée, échantillon ; par membre pour un groupe. Diagnostics si invalide.
+  rpc PreviewPool(PreviewPoolRequest) returns (PreviewPoolResponse);
+
+  // Valide, écrit le fichier (écriture atomique, relue), applique à la vue.
+  // `expected_revision` vide = création (refusée si le fichier existe) ;
+  // différente de la révision sur le disque = conflit, rien n'est écrit.
+  // Invalide = `ok = false` + diagnostics, rien n'est écrit (pas une erreur
+  // gRPC : c'est la réponse attendue d'un formulaire).
+  rpc Save(SaveRequest) returns (SaveResponse);
+
+  // Supprime le fichier PUIS la ligne (fichier d'abord : sinon le prochain
+  // Sync la ferait revenir). Refusé (failed_precondition) tant qu'une règle
+  // de grille ou un groupe la référence ; not_found pour une référence
+  // inconnue ; aborted si `expected_revision` ne correspond plus au fichier.
+  rpc Remove(RemoveRequest) returns (RemoveResponse);
+
+  // Relit toute la racine : ajoute / met à jour (au mieux : un fichier
+  // invalide est signalé, les autres passent), id réécrit dans les fichiers
+  // qui n'en ont pas.
+  rpc Sync(SyncRequest) returns (SyncResponse);
+
+  // Sync + retrait des lignes dont le fichier a disparu (sauf si une règle ou
+  // un groupe restant les référence : gardées, signalées).
+  rpc Reload(ReloadRequest) returns (ReloadResponse);
+
+  // Enregistre dans la vue un TOML venu d'ailleurs, SANS fichier (entrée
+  // « ajoutée », désignée par son UUID) ; renvoie le TOML avec son id. Pour
+  // une playlist qui vit dans la racine, utiliser Save.
+  rpc Add(AddRequest) returns (AddResponse);
 }
 
-message PlaylistFile {
-  string path = 1;   // chemin relatif racine playlists (sans extension = référent fichier)
-  string toml = 2;   // contenu brut
+// ─────────────────────────────────────────────────────────────────────────
+// Diagnostics
+// ─────────────────────────────────────────────────────────────────────────
+
+// Un problème, rattaché au champ qui le porte. `field_path` suit la
+// grammaire TOML : `selection.order`, `broadcast.constraints.no_same_track_within`,
+// `selection.filter[2].value`, `selection.members[1].ref` — index à partir
+// de 1 (« le 2e filtre »). Vide = le fichier entier (TOML illisible, champ
+// racine manquant).
+message Diagnostic {
+  enum Severity {
+    SEVERITY_UNSPECIFIED = 0;
+    ERROR   = 1;   // bloque Save
+    WARNING = 2;   // n'empêche pas l'enregistrement (ex. pool vide)
+  }
+  Severity severity = 1;
+  string file       = 2;   // ref de la playlist concernée (vide = le brouillon)
+  string field_path = 3;
+  string rejected   = 4;   // valeur rejetée, telle qu'écrite (vide si absente)
+  string expected   = 5;   // valeurs admises quand elles sont finies
+  string message    = 6;   // phrase anglaise (stationctl) ; les clients traduisent par `code`
+  Code   code       = 7;
+
+  // Nature du problème : un client traduit par ce code, jamais en analysant
+  // `message`.
+  enum Code {
+    CODE_UNSPECIFIED     = 0;
+    SYNTAX               = 1;   // TOML illisible
+    UNKNOWN_FIELD        = 2;   // champ inconnu (grammaire stricte)
+    MISSING_FIELD        = 3;   // champ obligatoire absent
+    BAD_VALUE            = 4;   // valeur d'un type ou d'une forme invalide
+    NOT_ALLOWED          = 5;   // champ interdit dans ce mode / cette stratégie
+    REQUIRED_FOR_MODE    = 6;   // champ requis par ce mode / cette stratégie
+    CONFLICT             = 7;   // champs incompatibles entre eux
+    BAD_FILTER           = 8;   // filtre dynamique invalide (champ, opérateur, valeur)
+    BAD_DURATION         = 9;   // durée hors grammaire (30s, 15m, 2h, 1d)
+    UNKNOWN_REF          = 10;  // membre qui ne désigne aucune playlist
+    BAD_REF              = 11;  // ref invalide (`..` au-dessus de la racine, dossier…)
+    CYCLE                = 12;  // groupe qui se contient, directement ou non
+    ID_CHANGED           = 13;  // `id` différent de celui du fichier existant
+    EMPTY_POOL           = 14;  // (avertissement) aucun média ne correspond aujourd'hui
+  }
 }
 
-message ApplyRequest  { repeated PlaylistFile files = 1; }
-message ApplyResponse {
-  bool ok = 1;
-  repeated Diagnostic diagnostics = 2;
-  repeated string applied_uuids = 3;
+// ─────────────────────────────────────────────────────────────────────────
+// List / Export
+// ─────────────────────────────────────────────────────────────────────────
+
+message ListRequest {}
+
+message ListResponse {
+  repeated PlaylistSummary playlists = 1;
 }
+
+message PlaylistSummary {
+  string id       = 1;   // UUID interne
+  string rel_path = 2;   // ref ; vide pour une entrée ajoutée (sans fichier)
+  string name     = 3;
+  string mode     = 4;   // static | dynamic | remote | queue | group
+  bool   enabled  = 5;
+}
+
+message ExportRequest {
+  string reference = 1;
+}
+
+message ExportResponse {
+  string id           = 1;
+  string rel_path     = 2;
+  string applied_toml = 3;   // ce que stationd a appliqué (la vue)
+  string file         = 4;   // fichier, relatif à la racine ; vide = aucun
+  string file_toml    = 5;   // contenu du fichier (commentaires compris) ; vide = aucun
+  string revision     = 6;   // révision du fichier ; vide = aucun
+  // Le fichier diffère de ce qui est appliqué (modifié à la main depuis le
+  // dernier Sync / Save, ou invalide).
+  bool   file_differs = 7;
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Validate / PreviewPool / Save
+// ─────────────────────────────────────────────────────────────────────────
+
+message ValidateRequest {
+  string toml      = 1;
+  string reference = 2;   // facultatif : où il serait enregistré
+}
+
 message ValidateResponse {
-  bool ok = 1;
+  bool ok = 1;                          // aucun diagnostic ERROR
   repeated Diagnostic diagnostics = 2;
 }
 
-message ExportRequest  { repeated string refs = 1; }  // vide → tout
-message ExportResponse { repeated PlaylistFile files = 1; }
-
-message GetPlaylistRequest  { string ref = 1; }        // ref_effective
-message ListPlaylistsRequest {}
-message ListPlaylistsResponse { repeated Playlist playlists = 1; }
-
-message ActivateRequest  { string ref = 1; }
-message ActivateResponse {
-  // Ce que la sélection/composition produit, à plat, pour inspection.
-  repeated ResolvedTrack tracks = 1;
-  repeated Diagnostic diagnostics = 2;
+message PreviewPoolRequest {
+  string toml      = 1;
+  string reference = 2;   // facultatif : base des refs relatives d'un groupe
+  uint32 sample    = 3;   // taille de l'échantillon (0 = 20, plafonné à 100)
 }
-message ResolvedTrack {
-  string media_path = 1;
-  string source_ref = 2;   // quelle playlist/membre a produit la piste (debug composition)
+
+message PreviewPoolResponse {
+  bool ok = 1;                          // brouillon valide et pool évalué
+  repeated Diagnostic diagnostics = 2;
+  // Absents quand le pool n'est pas mesurable (remote, queue, brouillon
+  // invalide).
+  optional uint64 count       = 3;      // médias disponibles retenus
+  optional uint64 duration_ms = 4;      // durée totale connue
+  optional uint64 artists     = 5;      // artistes distincts (feuille seulement)
+  repeated PoolMedia sample   = 6;      // premiers médias, triés par chemin
+  repeated MemberPool members = 7;      // groupe : un par membre, dans l'ordre
+}
+
+message PoolMedia {
+  string rel_path    = 1;
+  string title       = 2;
+  string artist      = 3;
+  uint64 duration_ms = 4;
+}
+
+message MemberPool {
+  string ref                  = 1;   // tel qu'écrit dans le groupe
+  string resolved             = 2;   // ref canonique ; vide si non résolu
+  optional uint64 count       = 3;
+  optional uint64 duration_ms = 4;
+  string error                = 5;   // pourquoi ce membre n'est pas mesuré
+}
+
+message SaveRequest {
+  string reference         = 1;   // ref cible (chemin relatif sous la racine)
+  string toml              = 2;
+  string expected_revision = 3;   // vide = création
+}
+
+message SaveResponse {
+  bool ok = 1;                          // écrit et appliqué
+  repeated Diagnostic diagnostics = 2;  // erreurs (rien écrit) ou avertissements
+  bool conflict = 3;                    // révision attendue ≠ fichier : rien écrit
+  string revision = 4;                  // révision après écriture (ou actuelle si conflit)
+  string toml = 5;                      // contenu écrit (id injecté si absent)
+  string id = 6;
+  string file = 7;                      // fichier, relatif à la racine
+  bool created = 8;
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Remove / Sync / Reload / Add
+// ─────────────────────────────────────────────────────────────────────────
+
+message RemoveRequest {
+  string reference         = 1;
+  string expected_revision = 2;   // facultatif : refuse si le fichier a changé
+}
+
+message RemoveResponse {
+  string id       = 1;
+  string rel_path = 2;   // vide pour une entrée ajoutée
+  string file     = 3;   // fichier supprimé ; vide = aucun sur le disque
+}
+
+message SyncRequest {}
+
+message SyncResponse {
+  uint32 added = 1;                 // fichiers réconciliés
+  repeated FileError errors = 2;    // fichiers écartés, avec leurs diagnostics
+}
+
+message ReloadRequest {}
+
+message ReloadResponse {
+  uint32 added = 1;
+  repeated string removed = 2;      // refs retirées de la vue (fichier disparu)
+  repeated FileError errors = 3;
+}
+
+// Un fichier écarté par Sync / Reload.
+message FileError {
+  string path = 1;                  // relatif à la racine
+  string message = 2;               // résumé (premier diagnostic, ou raison hors validation)
+  repeated Diagnostic diagnostics = 3;
+}
+
+message AddRequest {
+  string toml = 1;
+}
+
+message AddResponse {
+  string toml = 1;   // TOML avec l'id injecté
+  string id   = 2;
 }

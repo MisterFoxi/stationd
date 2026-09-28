@@ -1,6 +1,6 @@
 # StationD — Dossier technique de la TUI
 
-Version 2.5 — 28 septembre 2026
+Version 2.6 — 28 septembre 2026
 Statut : refonte complète (remplace la v1.0 du 25/09). Document vivant : il suit les besoins, pas l'inverse.
 Socle : Rust + Ratatui + rat-salsa / rat-widget, client gRPC pur de `stationd`.
 
@@ -50,13 +50,13 @@ La TUI v1 ne permettait ni de piloter la station, ni de créer une playlist corr
 | `LiveService` | `GetStatus`, `Kick`, `Open`, `Close` | Panneau live |
 | `LiquidsoapService` | `GetStatus` | Système (et repli de l'Antenne tant que §3.2 n'existe pas) |
 | `IcecastService` | `GetStatus` | Système, auditeurs par mount |
-| `Station` | `PlaylistList`, `PlaylistExport`, `PlaylistAdd`, `PlaylistSync`, `PlaylistRemove`, `PlaylistReload` | Playlists (TOML brut ; pas de validation à blanc, erreurs en texte libre) |
+| `PlaylistService` (lot 3) | `List`, `Export`, `Validate`, `PreviewPool`, `Save`, `Remove`, `Sync`, `Reload`, `Add` | Playlists (§3.5) |
 | `ScheduleService` | `ListRules`, `Preview`, `CheckCoverage`, `ExportGrid`, `ValidateGrid`, `ApplyGrid`, `Enqueue` | Agenda, playlists `queue` |
 | `LibraryService` | `Scan`, `ListMedia`, `ListGenres` | Médias |
 | `StatsService` | `Plays` | Statistiques |
 | `PluginService` | `List`, `Control`, `DbInfo`, `DbQuery` | Plugins |
 
-**Attention** : `proto/playlist_v1.proto` (`PlaylistService` : `Validate`, `Apply`, `GetPlaylist`, `Diagnostic` structuré…) est un contrat de conception, **ni compilé ni servi** par stationd. Le contrat réel des playlists est celui de `Station` ci-dessus.
+`Station` ne garde que `Status`, `Quit`, `Shutdown` : ses six RPC `Playlist*` ont déménagé dans `PlaylistService` au lot 3. L'ancien `playlist_v1.proto` (contrat de conception jamais servi, 3 modes sur 5) a été réécrit.
 
 ### 3.2 `OnAirService` (vue principale) — fait au lot 1
 
@@ -135,19 +135,23 @@ PLAYABLE`.
 Arrêt de stationd : les flux `Watch` se terminent dès la demande d'arrêt,
 sinon l'arrêt propre attendrait indéfiniment une TUI restée ouverte.
 
-### 3.4 À ajouter — Médias
+### 3.4 Médias
 
-- `LibraryService.SearchMedia` : recherche texte (titre/artiste/album/chemin), filtres (genre, dossier, disponible, champs manquants), tri stable (clé + `rel_path`), pagination par curseur, total. `ListMedia` reste pour le CLI.
-- `LibraryService.Scan` avec avancement : `ScanWatch` en flux (`found/skipped/total_estimé/fichier courant`, puis le `ScanResponse` final). Un seul scan à la fois, déjà garanti.
+- **Fait au lot 3** — `LibraryService.SearchMedia` : mots cherchés dans titre/artiste/album/chemin (chaque mot doit apparaître ; repli de casse Unicode, fait en Rust car SQLite ne replie que l'ASCII), filtres genre (au moins un), dossier (préfixe), disponibilité, métadonnées manquantes (`missing` : titre, artiste, album, année, genre), tri par chemin/titre/artiste/album/année/durée, croissant ou non, **stable** (clé puis chemin), page de 50 (max 500), curseur opaque (dernière clé vue), total. `ListMedia` reste pour le CLI. CLI : `stationctl library search`.
+- À ajouter (lot 7) — `LibraryService.Scan` avec avancement : `ScanWatch` en flux (`found/skipped/total_estimé/fichier courant`, puis le `ScanResponse` final). Un seul scan à la fois, déjà garanti.
 
-### 3.5 À ajouter — Playlists
+### 3.5 Playlists — fait au lot 3
 
-Aujourd'hui `Station.PlaylistAdd` prend le TOML brut, valide, met à jour la vue et renvoie le TOML réécrit : **c'est le client qui écrit le fichier**. Il n'existe ni validation à blanc, ni diagnostic par champ, ni aperçu de pool d'un brouillon. À ajouter :
+Tranché : **`PlaylistService` dédié** (`proto/playlist_v1.proto`, réécrit), qui reprend les six RPC `Playlist*` de `Station` (`List`, `Export`, `Add`, `Sync`, `Remove`, `Reload`) et ajoute `Validate`, `PreviewPool`, `Save`. `stationctl` migré dans le même lot. Métier : `src/playlist_edit.rs` ; transport : `src/playlist_grpc.rs`.
 
-- `Validate(toml)` : valide sans rien appliquer ni écrire → diagnostics structurés (fichier, chemin de champ, valeur rejetée, attendu, message), le format de `Diagnostic` de `playlist_v1.proto`.
-- `PreviewPool(toml)` : évalue un **brouillon** sans l'appliquer → nombre de médias, durée connue, nombre de durées inconnues, une page d'échantillon, diagnostics. Sert au formulaire en direct.
-- `Save { ref, toml, expected_revision }` : valide, **écrit le fichier dans le dossier des playlists du nœud** (écriture atomique), applique, renvoie `{ ok, diagnostics, revision, toml }`. `expected_revision` absent = création (refus si le fichier existe) ; différent de la révision sur disque = conflit, rien n'est écrit. `PlaylistExport` renvoie la révision courante ; `PlaylistRemove` prend une révision attendue. CLI : `stationctl playlist validate|save`.
-- **À trancher au lot 3** : ajouter ces RPC à `Station` (à côté des `Playlist*` existants) **ou** mettre en service `PlaylistService` (`playlist_v1.proto`) après l'avoir aligné sur le modèle réel (5 modes : static, dynamic, remote, queue, group ; son `Selection` n'en porte que 3) et y déplacer les `Playlist*` de `Station`.
+- **Format d'échange = le TOML** (la grammaire des 5 modes), pas de message typé par mode : le client qui présente un formulaire lit et écrit du TOML (`toml_edit` côté TUI pour garder les commentaires), stationd seul valide.
+- **Diagnostics** (`Diagnostic`) : sévérité (erreur / avertissement), `field_path` dans la grammaire TOML (`selection.order`, `selection.filter[2].value`, `selection.members[1].ref` — index à partir de 1 ; vide = le fichier), valeur rejetée, valeurs admises, message anglais, et un **`Code`** (`SYNTAX`, `UNKNOWN_FIELD`, `MISSING_FIELD`, `BAD_VALUE`, `NOT_ALLOWED`, `REQUIRED_FOR_MODE`, `CONFLICT`, `BAD_FILTER`, `BAD_DURATION`, `UNKNOWN_REF`, `BAD_REF`, `CYCLE`, `ID_CHANGED`, `EMPTY_POOL`) : la TUI traduit par code, jamais en analysant le message. La validation collecte **tous** les problèmes (elle s'arrêtait au premier) ; une erreur de lecture TOML ou de grammaire est rattachée à son champ par sa position dans le texte (ligne/colonne pour une erreur de syntaxe). Les fenêtres anti-répétition (`30m`, `2h`) sont désormais vérifiées à la validation, plus seulement à la diffusion.
+- `Validate { toml, reference? }` : rien n'est appliqué ni écrit ; références de groupe et cycles jugés avec la **vue actuelle**, le brouillon à la place de `reference` (qui sert aussi de base aux refs `./x`).
+- `PreviewPool { toml, reference?, sample }` : ce que l'index offre **aujourd'hui** (médias disponibles, avant anti-répétition et plugins) — nombre, durée, artistes distincts, échantillon trié par chemin (20, max 100) ; groupe : un bilan par membre. Pool vide = avertissement `EMPTY_POOL`, sur le pool entier ou **sur la ligne du membre vide** (le cas TOPH).
+- `Save { reference, toml, expected_revision }` : révision = **empreinte du contenu** du fichier (`sha256:…`), pas sa date (fiable sur NFS). Révision attendue vide = création (conflit si le fichier existe) ; différente = conflit, rien n'est écrit. Invalide = `ok = false` + diagnostics (une réponse, pas une erreur gRPC). L'id est conservé (brouillon sans `id` → celui du fichier ou de la vue ; `id` différent → `ID_CHANGED`). Écriture atomique (fichier temporaire du même dossier, `fsync`, renommage) puis **relecture** comparée (NFS). Les écritures de la racine (`Save`, `Remove`, `Sync`, `Reload`) sont sérialisées.
+- `Export` rend le TOML appliqué **et** le fichier (commentaires compris) avec sa révision, et dit s'ils diffèrent. `Remove` accepte une révision attendue (`ABORTED` si le fichier a changé). `Sync` / `Reload` rendent les diagnostics de chaque fichier écarté.
+- `Add` reste pour un TOML qui vit hors de la racine (entrée sans chemin, désignée par son UUID) ; le client réécrit **son** fichier avec l'id. Pour la racine : `Save`.
+- CLI : `stationctl playlist validate|preview|save`, `export --file`, `remove --revision`.
 
 ### 3.6 À ajouter — Grille
 
@@ -439,7 +443,7 @@ Vues déclaratives des plugins chargés (§4.3). Base de chaque plugin : `DbInfo
 | A | stationd : `AuthService`, intercepteur de droits sur tous les RPC, écoute TCP + TLS auto-signé, `stationctl login/user` ; TUI : écran de login, profils, empreintes | Avant tout usage distant ; indépendant des lots 1–8 en local |
 | 1 ✅ | stationd : `OnAirService` (Watch + History + simulation §3.3), `stationctl onair`, TUI : écran Antenne | — |
 | 2 ✅ | TUI : Contrôle (+ actions depuis Antenne : pause, suivant, override) ; stationd : incidents de grille (prévus / constatés, ligne fautive) | 1 |
-| 3 | stationd : playlists `Validate` / `PreviewPool` / `Save` (écriture + révision) — service à trancher (§3.5), `SearchMedia` | — |
+| 3 ✅ | stationd : `PlaylistService` (`Validate` / `PreviewPool` / `Save`, écriture + révision, diagnostics par champ), `SearchMedia` | — |
 | 4 | TUI : Playlists (liste + éditeur) + Médias | 3 |
 | 5 | stationd : diagnostics de grille, `SaveGrid` | — |
 | 6 | TUI : Agenda (jour, semaine, couverture, édition) | 5 pour l'édition |

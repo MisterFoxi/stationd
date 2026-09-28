@@ -31,6 +31,11 @@ service LibraryService {
   // Inventaire des genres : nombre de médias par genre, insensible à la casse
   // (repli Unicode, « Électro » = « électro »), + nombre de médias sans genre.
   rpc ListGenres(ListGenresRequest) returns (ListGenresResponse);
+
+  // Recherche paginée (écran Médias, sélecteur de médias) : texte, filtres,
+  // tri stable (clé puis chemin), pagination par curseur, total. Lecture
+  // seule ; ListMedia reste pour le CLI (tout d'un coup).
+  rpc SearchMedia(SearchMediaRequest) returns (SearchMediaResponse);
 }
 
 message ScanRequest {}
@@ -96,4 +101,45 @@ message Media {
   uint64 size_bytes      = 7;
   bool   available       = 8;
   repeated string genres = 9;   // ensemble (0..n)
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// SearchMedia
+// ─────────────────────────────────────────────────────────────────────────
+
+message SearchMediaRequest {
+  // Mots cherchés dans titre, artiste, album et chemin, insensible à la casse
+  // (Unicode) : un média est gardé si CHAQUE mot apparaît dans l'un d'eux.
+  // Vide = pas de filtre texte.
+  string query = 1;
+  // Genres (au moins un, insensible à la casse). Vide = pas de filtre.
+  repeated string genres = 2;
+  // Dossier : préfixe du chemin (`Musique/Rock`), insensible à la casse ;
+  // un `/` final est ajouté s'il manque. Vide = toute la bibliothèque.
+  string folder = 3;
+  // Inclure les médias disparus du disque (available = false).
+  bool include_unavailable = 4;
+  // Métadonnées manquantes : garde les médias à qui il manque TOUTES celles-ci.
+  repeated Field missing = 5;
+  Field sort = 6;          // FIELD_UNSPECIFIED = chemin
+  bool descending = 7;
+  uint32 limit = 8;        // 0 = 50, plafonné à 500
+  string cursor = 9;       // `next_cursor` de la page précédente ; vide = début
+
+  enum Field {
+    FIELD_UNSPECIFIED = 0;
+    PATH     = 1;
+    TITLE    = 2;
+    ARTIST   = 3;
+    ALBUM    = 4;
+    YEAR     = 5;
+    DURATION = 6;
+    GENRE    = 7;          // pour `missing` seulement (pas un tri)
+  }
+}
+
+message SearchMediaResponse {
+  repeated Media media = 1;
+  uint64 total = 2;          // médias correspondant aux filtres (toutes pages)
+  string next_cursor = 3;    // vide = dernière page
 }

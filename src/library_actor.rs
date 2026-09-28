@@ -24,7 +24,7 @@ use sqlx::SqlitePool;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::media::{self, ScanError, ScanReport};
-use crate::media_index::{self, GenreInventory, MediaRow, ReplaceStats};
+use crate::media_index::{self, GenreInventory, MediaRow, ReplaceStats, SearchPage, SearchQuery};
 use crate::plugin::{PluginHandle, ScanInput};
 
 #[derive(Debug, thiserror::Error)]
@@ -70,6 +70,10 @@ enum Command {
         only_available: bool,
         reply: oneshot::Sender<Result<GenreInventory, LibraryError>>,
     },
+    Search {
+        query: Box<SearchQuery>,
+        reply: oneshot::Sender<Result<SearchPage, LibraryError>>,
+    },
 }
 
 /// Cheap, clonable handle to the library actor. Every caller (gRPC handler,
@@ -106,6 +110,20 @@ impl LibraryHandle {
         let (reply, rx) = oneshot::channel();
         self.tx
             .send(Command::List { only_available, genres, reply })
+            .await
+            .map_err(|_| LibraryError::ActorGone)?;
+        rx.await.map_err(|_| LibraryError::ActorGone)?
+    }
+
+    /// One page of a search (filters, stable sort, cursor). A blank genre is
+    /// a loud `BadFilter`, like in [`list`](Self::list).
+    pub async fn search(&self, query: SearchQuery) -> Result<SearchPage, LibraryError> {
+        if query.genres.iter().any(|g| g.trim().is_empty()) {
+            return Err(LibraryError::BadFilter("empty genre".into()));
+        }
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::Search { query: Box::new(query), reply })
             .await
             .map_err(|_| LibraryError::ActorGone)?;
         rx.await.map_err(|_| LibraryError::ActorGone)?
@@ -150,6 +168,10 @@ pub fn spawn_with(pool: SqlitePool, root: PathBuf, plugins: Option<PluginHandle>
                     let out = media_index::genres(&pool, only_available)
                         .await
                         .map_err(LibraryError::from);
+                    let _ = reply.send(out);
+                }
+                Command::Search { query, reply } => {
+                    let out = media_index::search(&pool, &query).await.map_err(LibraryError::from);
                     let _ = reply.send(out);
                 }
             }
