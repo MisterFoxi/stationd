@@ -5,7 +5,7 @@ sans reconstruire le contexte. À distinguer des docs de `Doc/` (décisions
 d'architecture durables) : ce fichier-ci est volatil, à mettre à jour à
 chaque session.
 
-Dernière mise à jour : 2026-09-28 (A4 lot 3).
+Dernière mise à jour : 2026-09-28 (A4 lot 4a).
 
 
 ## Où on en est en une phrase
@@ -242,7 +242,29 @@ devstationd.** Dossier §3.4, §3.5 ; `Doc/admin.md`.
 - Pour le lot 4 (TUI) : lire/écrire le TOML du formulaire avec `toml_edit`,
   traduire les diagnostics par `Code`.
 
-**Suivant : lot 4** — TUI : Playlists (liste + éditeur) + Médias.
+**Lot 4a fait (2026-09-28)** — écran Médias (`5`,
+`crates/stationd-tui/src/screens/medias.rs`) sur `SearchMedia` : barre de
+recherche **incrémentale** (`/`, mots + préfixes `genre:x` / `dossier:x` ;
+relancée 250 ms après la dernière frappe, sans le préfixe en cours de
+frappe ; Entrée garde, Échap revient à la recherche d'avant), tri `s` (chemin, artiste, titre, album, année, durée), `d` ordre,
+`m` filtre « sans titre / artiste / genre / année », `a` disparus inclus,
+`r` recharger, pages de 100 chargées en descendant (curseur serveur), `o`
+override du média choisi (formulaire pré-rempli). Titre absent = nom de
+fichier en orange ; disparus grisés. Traductions fr/en/de. 21 tests TUI.
+Essayé en réel (120×32 fr, 90×24 de).
+- Au passage : le curseur de saisie d'un écran n'est plus effacé par
+  l'application (seule une modale le reprend).
+
+**Suivant : lot 4b** — écran Playlists (`3`) : liste (`PlaylistService.List`
++ `Export` pour l'état du fichier), éditeur par mode (formulaire à gauche,
+TOML + diagnostics à droite, `toml_edit` pour garder les commentaires,
+diagnostics traduits par `Diagnostic.Code`), aperçu du pool en direct
+(`PreviewPool`, 300 ms après la frappe), `Ctrl+S` = `Save` avec la révision
+lue à l'ouverture (conflit → dialogue comparer / recharger / garder),
+sélecteur de médias pour `static` (réutiliser la recherche de
+`medias.rs`), `d` supprimer (avec révision). Puis, reste de Médias :
+fiche (`Entrée`), statistiques, Type/tags quand le plugin `tags` existera
+(lot 8).
 
 ### Après l'alpha (non bloquant)
 

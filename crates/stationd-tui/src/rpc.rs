@@ -7,7 +7,7 @@
 use std::future::Future;
 use std::time::{Duration, Instant};
 
-use stationd_proto::{broadcast, liquidsoap, live, onair, plugin, station};
+use stationd_proto::{broadcast, library, liquidsoap, live, onair, plugin, station};
 use tonic::transport::{Channel, Endpoint};
 
 /// Délai maximal d'une lecture simple (dossier §18 de la v1, conservé).
@@ -98,6 +98,12 @@ pub async fn read_banner(channel: Channel) -> BannerRead {
         overrides: overrides.map(|r| r.overrides),
         plugins: plugins.map(|r| r.plugins),
     }
+}
+
+/// Une page de `LibraryService.SearchMedia`.
+pub async fn search_media(channel: Channel, req: library::SearchMediaRequest) -> Read<library::SearchMediaResponse> {
+    let mut cli = library::library_service_client::LibraryServiceClient::new(channel);
+    bounded(cli.search_media(req)).await
 }
 
 /// Ce que la TUI demande au flux de l'antenne : le maximum servi, chaque

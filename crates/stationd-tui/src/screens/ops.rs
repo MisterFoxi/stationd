@@ -89,12 +89,17 @@ fn content_text(c: &OverrideContent) -> String {
 
 /// Formulaire d'override, puis confirmation qui dit quoi et comment.
 pub fn push_override() -> Modal {
+    push_override_with(None)
+}
+
+/// Idem, pré-rempli avec un média (écran Médias).
+pub fn push_override_with(media: Option<&str>) -> Modal {
     let fields = vec![
         Field::choice(
             tr!("form-override-kind"),
             vec![(tr!("form-override-kind-media"), "media".into()), (tr!("form-override-kind-playlist"), "playlist".into())],
         ),
-        Field::text(tr!("form-override-target"), ""),
+        Field::text(tr!("form-override-target"), media.unwrap_or("")),
         Field::choice(
             tr!("form-override-mode"),
             vec![(tr!("form-override-soft"), "soft".into()), (tr!("form-override-hard"), "hard".into())],

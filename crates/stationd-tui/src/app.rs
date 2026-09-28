@@ -105,6 +105,11 @@ pub enum AppEvent {
     OnAirLost(String),
     /// Une action est terminée (message traduit, ou erreur).
     ActionDone(Result<Done, String>),
+    /// Une page de la recherche de médias (n° de requête, page ou erreur,
+    /// `true` = page suivante à ajouter).
+    Media(u64, Result<stationd_proto::library::SearchMediaResponse, String>, bool),
+    /// Écran Médias : fin du délai après une frappe (n° de la frappe).
+    MediaTyped(u64),
 }
 
 impl From<RenderedEvent> for AppEvent {
@@ -277,6 +282,8 @@ pub fn render(area: Rect, buf: &mut Buffer, state: &mut Scenery, ctx: &mut Globa
 
     banner::render(banner_a, buf, &ctx.store, &s);
     render_tabs(tabs_a, buf, state, ctx);
+    // Un écran avec un champ de saisie place lui-même le curseur.
+    ctx.set_screen_cursor(None);
     state.screens[state.active].render(work_a, buf, ctx)?;
 
     let s = Styles(&ctx.theme);
@@ -289,8 +296,8 @@ pub fn render(area: Rect, buf: &mut Buffer, state: &mut Scenery, ctx: &mut Globa
     if state.help_open {
         render_help(work_a, buf, state.screens[state.active].as_ref(), &s);
     }
-    ctx.set_screen_cursor(None);
     if let Some(m) = state.modal.as_mut() {
+        ctx.set_screen_cursor(None);
         m.render(work_a, buf, ctx);
     }
     Ok(())
@@ -433,6 +440,8 @@ pub fn event(event: &AppEvent, state: &mut Scenery, ctx: &mut Global) -> Result<
             ctx.set_focus(b.build());
             return Ok(Control::Continue);
         }
+        // Réponse destinée à l'écran qui l'a demandée (plus bas).
+        AppEvent::Media(..) | AppEvent::MediaTyped(..) => {}
         AppEvent::Event(Event::Resize(..)) => return Ok(Control::Changed),
         AppEvent::Event(e) => {
             if let Some(k) = press(e) {

@@ -2,6 +2,7 @@
 
 mod antenne;
 mod controle;
+mod medias;
 mod ops;
 mod planned;
 
@@ -25,12 +26,7 @@ pub fn registry() -> Vec<Box<dyn Screen>> {
             summary: &[k!("planned-agenda-1"), k!("planned-agenda-2"), k!("planned-agenda-3")],
             plugin: None,
         }),
-        Box::new(Planned {
-            title: k!("screen-media"),
-            lot: 4,
-            summary: &[k!("planned-media-1"), k!("planned-media-2"), k!("planned-media-3")],
-            plugin: None,
-        }),
+        Box::new(medias::Medias::default()),
         Box::new(Planned {
             title: k!("screen-tags"),
             lot: 8,

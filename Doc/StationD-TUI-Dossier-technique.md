@@ -403,6 +403,8 @@ Navigation : `[`/`]` jour ou semaine précédente/suivante, `t` aujourd'hui, `g`
 
 ### 5.5 Médias (`5`)
 
+**Fait (lot 4a)** : recherche (`/` ; mots + `genre:x` / `dossier:x`), tri `s` / `d`, filtre de métadonnée manquante `m`, disparus `a`, pages chargées en descendant, `o` override du média. Le reste de cette section (Type, tags, fiche, lots) suit.
+
 - Barre de recherche + filtres (**Type** en premier, genre, tag, dossier, disponible, titre/artiste/Type manquant) + tri. Colonnes : Type (chip colorée), artiste, titre, album, année, durée, genres, tags, dispo. Total / chargés. Pagination serveur (`SearchMedia`). Type et tags visibles seulement si le plugin `tags` est chargé.
 - **`t` : affecter un Type** à la ligne ou à la sélection multiple, via un sélecteur des valeurs déclarées (une touche par valeur). C'est l'action la plus fréquente de l'écran : pas de dialogue supplémentaire pour un seul média, confirmation avec le nombre de fichiers pour un lot.
 - Panneau de répartition par Type (barres), avec le nombre de médias sans Type.
@@ -444,7 +446,7 @@ Vues déclaratives des plugins chargés (§4.3). Base de chaque plugin : `DbInfo
 | 1 ✅ | stationd : `OnAirService` (Watch + History + simulation §3.3), `stationctl onair`, TUI : écran Antenne | — |
 | 2 ✅ | TUI : Contrôle (+ actions depuis Antenne : pause, suivant, override) ; stationd : incidents de grille (prévus / constatés, ligne fautive) | 1 |
 | 3 ✅ | stationd : `PlaylistService` (`Validate` / `PreviewPool` / `Save`, écriture + révision, diagnostics par champ), `SearchMedia` | — |
-| 4 | TUI : Playlists (liste + éditeur) + Médias | 3 |
+| 4 (4a ✅) | TUI : Médias (4a : recherche, filtres, tri, pages, override) ; Playlists (liste + éditeur, 4b) | 3 |
 | 5 | stationd : diagnostics de grille, `SaveGrid` | — |
 | 6 | TUI : Agenda (jour, semaine, couverture, édition) | 5 pour l'édition |
 | 7 | stationd : `ScanWatch`, `EventService`, `PluginService.Call/Views`, `media_meta_write` | — |
