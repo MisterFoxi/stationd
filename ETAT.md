@@ -47,7 +47,7 @@ reste l'étape 3 (tâche de diffusion) et 4 (fins de piste). Référence :
 conteneur de dev (s6-overlay, dépôt monté dans `/src`, réseau de l'hôte) —
 remplace l'installation systemd. README « Run (Docker) »,
 `Doc/liquidsoap.md` « Déploiement ».
-**Packaging d'exploitation (2026-09-25, à valider sur devstationd).**
+**Packaging d'exploitation (2026-09-25, validé sur devstationd le 2026-09-28).**
 `docker/package.sh` compile en `--release --locked` dans le conteneur de dev
 (stationd, stationctl, plugins wasm32), construit l'image sans toolchain
 `docker/Dockerfile.prod` (`stationd:<version>-<rev>`), la vérifie et produit
@@ -107,90 +107,84 @@ un fichier des DJ séparé (argon2, `stationctl dj hash`), créneaux par une
 règle de grille `kind = "live"` (ouverte jusqu'à la tranche suivante), prise
 d'antenne en fondu court, retour sur déconnexion ou silence (30 s) avec une
 piste choisie au retour. `stationctl live status|kick`. Validé sur
-Liquidsoap 2.2.4 (conteneur de préparation), **à valider sur devstationd
-(2.4)**. Référence : `Doc/liquidsoap.md` « DJ live ».
+Liquidsoap 2.2.4 (conteneur de préparation), **validé sur devstationd
+(2.4) le 2026-09-28**. Référence : `Doc/liquidsoap.md` « DJ live ».
 
 ---
 
-## ⭐ TÂCHE D'ENTRÉE PROCHAINE SESSION
+## ⭐ TÂCHE D'ENTRÉE PROCHAINE SESSION — jalon alpha
 
-Environnement : tout se teste désormais dans le conteneur de dev (README
-« Run (Docker) ») ; plus d'unités systemd sur devstationd.
+Alpha = une station qui tourne seule sur le nœud de test, pilotée
+au CLI et au TUI (pas de couche `api` ni d'UI web).
+Tout se teste dans le conteneur de dev (README « Run (Docker) ») ; plus
+d'unités systemd sur devstationd. Quatre chantiers, dans cet ordre.
 
-**Veille / arrêt opérateur (2026-09-28) — validation sur devstationd** :
-`cargo test --locked` (447), `liquidsoap --check` du script généré (commande
-`stationd.park`), build `stop-when-idle-wasm`, puis en réel : plugin
-`stop-when-idle` activé → 0 auditeur → `sleeping` (bruit), un `curl` sur le
-mount → réveil en ~5 s sur le créneau courant ; `station stop` → bruit à la
-fin de la piste (pas le fallback), `docker compose restart` → toujours
-arrêté, `station state` code 3, `station start` en `-u dev`.
+### A1 — Tout valider en réel sur devstationd ✅ (2026-09-28)
 
-**DJ live — validation sur devstationd (Liquidsoap 2.4)** : `cargo test
---locked` (378 attendus), `liquidsoap --check` du script généré avec
-`[live]`, puis un vrai client (butt / Mixxx) : login, hors créneau, fondu,
-déconnexion, silence, `live kick`. Ouvrir `harbor_port` (8005) aux DJ.
+Validés en réel : veille / arrêt opérateur, DJ live sur Liquidsoap 2.4
+(vrai client), capacité `db` des plugins (`play-stats`), `on_scan`
+(`custom-tags`), packaging (`package.sh` → `install.sh` sur nœud propre).
 
-**Câblage Liquidsoap — étape 3 : tâche de diffusion** (stationd agit sur
-l'antenne sans attendre un pull) :
-- **relais des flux `remote`** : ✅ (2026-09-25, voir Fait). Ancienne note :
-  `input.http` piloté par stationd (démarrage /
-  arrêt quand la règle gagnante change) — aujourd'hui `/next` répond
-  `none/stream_unsupported` → fallback ;
-- **`AtClock hard`** : ✅ coupe à l'heure pile (2026-09-25, voir Fait) ;
-- **résolution à l'heure réelle de passage** : ✅ (2026-09-25, voir Fait —
-  piste suivante demandée ~7 s avant la fin de la courante).
+### A2 — Pont amnésique au redémarrage de stationd
 
-Puis **étape 4 — fins de piste** : `unplayed_only` marqué automatiquement
-✅ (2026-09-25, voir Fait) ; restent `TrackStarted`/`TrackFinished` aux
-plugins, compteur `Every` exact.
-Côté Icecast (échantillonnage livré, voir Fait) :
-- **stop-when-idle sans piste de trop** : largement réglé par la demande en
-  fin de piste (point 5) — le pull, qui décide `stopped`, n'arrive plus que
-  quelques secondes avant la fin. Reste le cas d'un échantillon à 0 reçu
-  après cette demande. Le `flush` pendant `draining` n'a plus d'intérêt ;
-- `X-Forwarded-For` : **tranché** (2.5 : sockets virtuels, cf.
-  `Doc/liquidsoap.md`) ;
-- auditeurs **par mount** dans `ListenersSampled` (change le contrat
+Constaté en réel le 2026-09-25 : l'état du pont (pulls, `on air`, pistes
+préparées) est en mémoire ; Liquidsoap continue sa piste et ne rappelle
+`/next` / `/track` qu'au début de la suivante. Conséquences : `ls status`
+vide jusqu'au prochain changement de piste ; la piste préparée par
+l'ancienne instance démarre en `unknown request id` ; ces deux pistes ne
+sont jamais marquées `unplayed_only`. Sur un nœud sans surveillance (s6,
+mise à jour, crash), ça arrivera. Pistes (à trancher) : (1) pistes
+auto-décrites — l'annotation porte aussi média et feuille, renvoyés sur
+`/track` ; (2) resynchronisation au démarrage — demander à Liquidsoap, par
+le socket, ce qui est à l'antenne et depuis quand.
+
+### A3 — `stationctl playlist remove` / `export` / `reload`
+
+Aujourd'hui une playlist ne peut pas être retirée au CLI (invariant « CLI
+complet » cassé). À livrer de bout en bout (RPC + CLI + tests) :
+`remove`, `export` (TOML canonique), `reload` (relecture des fichiers
+`playlist/`). `watch` reste après l'alpha.
+
+### A4 — Refonte complète de la TUI
+
+La TUI actuelle (`stationd-tui`, feature `tui`, `Doc/tui-dev.md`) ne sert
+à rien en exploitation : trois onglets en lecture seule (Status / Playlists
+/ Grid) par polling, plus un formulaire qui écrit des TOML de playlist **sur
+la machine du TUI** en embarquant le parseur de `stationd::playlist` — de la
+logique métier côté client, contraire à l'invariant. Jamais compilée
+(Rust indispo dans l'env de préparation).
+
+Cible : outil d'administration complet pour un humain, **client gRPC pur au
+même rang que `stationctl`** — toute action passe par un RPC existant, aucune
+logique métier ni écriture de fichier côté TUI. Au minimum, couvrir ce que
+`stationctl` sait faire au quotidien : antenne (`ls status`, pause / resume
+/ next, `station stop|start|state`), grille (`schedule list|next|preview|
+check|validate|apply`), playlists (`list`, `sync`, puis `remove`/`export`/
+`reload` d'A3), queue (`enqueue`), bibliothèque (`library scan|list|genres`),
+live (`live status|kick`), Icecast (`icecast status`), plugins (`plugin
+list|start|stop|restart|reload`), stats. Périmètre exact, navigation et
+suivi en direct (polling vs contrat Watch/Subscribe) à définir avant de
+coder ; `Doc/tui-dev.md` à réécrire en conséquence.
+
+### Après l'alpha (non bloquant)
+
+- Fins de piste (étape 4 Liquidsoap) : `TrackStarted`/`TrackFinished` aux
+  plugins, compteur `Every` exact.
+- Stop-when-idle : cas d'un échantillon à 0 reçu après la demande de fin de
+  piste. Auditeurs **par mount** dans `ListenersSampled` (change le contrat
   `Doc/plugin-events.md`, tranche séparée).
-
-**Preview — statistiques de pool : patch préparé et testé (2026-09-19).**
-Voir la section Fait ci-dessous et `Doc/preview-pools.md`.
-
-**Plugins A2 — surface hôte : livré et validé (2026-09-23).** Voir Fait.
-**Capacité `db` (base SQLite par plugin) : livrée, tests verts (2026-09-27),
-à valider sur devstationd** : `cargo test --locked` (418 attendus), compiler
-`plugins/play-stats-wasm` (wasm32), le déclarer (`capabilities = ["db"]`),
-vérifier `stationctl plugin db play-stats info` puis `query "SELECT * FROM
-play_count ORDER BY plays DESC LIMIT 20"` après quelques pistes. Voir Fait.
-
-Autres, indépendants :
-- **`on_scan`** : câblé (2026-09-24). Le scan collecte les tags personnalisés
-  (`TXXX`, clés Vorbis/APE, MP4 freeform — `media::CustomTag`, non persistés),
-  les passe en lot à `on_scan` (natif + export WASM) ; les genres renvoyés sont
-  fusionnés dans `media_genre` (dédup `genre_key`). Plugin
-  `plugins/custom-tags-wasm` (`[plugin.config] tags = ["Type"]`) :
-  `TXXX:Type = talks` → genre `talks`. `.wasm` à compiler (cible wasm32).
-- **Crate de types partagé** `Candidate`/`PluginEvent` (host + guests wasm ne
-  les dupliquent plus — aujourd'hui recopiés dans les 2 crates guest).
-- **Refacto acteur `GridEngine`** (gabarit `library_actor`).
-- **Câblage Liquidsoap** : étapes 1 et 2 terminées (2026-09-24, voir Fait +
-  `Doc/liquidsoap.md`) ; étape 3 = tâche d'entrée ci-dessus.
-- **Redémarrage de stationd = pont amnésique** (constaté en réel le
-  2026-09-25) : l'état du pont (pulls, `on air`, pistes préparées) est en
-  mémoire ; Liquidsoap continue sa piste et ne rappelle `/next` / `/track`
-  qu'au début de la suivante. Conséquences : `ls status` vide jusqu'au
-  prochain changement de piste ; la piste préparée par l'ancienne instance
-  démarre en `unknown request id` ; ces deux pistes ne sont **jamais
-  marquées `unplayed_only`**. Piste proposée (non tranchée, à faire plus
-  tard) : (1) pistes auto-décrites — l'annotation porte aussi média et
-  feuille, renvoyés sur `/track` ; (2) resynchronisation au démarrage — demander
-  à Liquidsoap, par le socket, ce qui est à l'antenne et depuis quand.
-- Journaux : stationd en **UTC** (`…Z`), Liquidsoap en heure locale —
-  lecture croisée pénible ; journaliser stationd en heure locale (à faire).
-- Petits restes Liquidsoap : fondu sur la coupe d'un override hard.
-  (Validation au démarrage — jeton ASCII, fichiers de secours / bruit :
-  faite le 2026-09-25, voir Fait. Bloc `[[plugin]]` égaré de `Cargo.toml` :
-  retiré le 2026-09-25.)
+- Journaux de stationd en heure locale (aujourd'hui UTC, Liquidsoap en
+  local — lecture croisée pénible).
+- Fondu sur la coupe d'un override hard.
+- Contraintes sur une `queue` (non appliquées).
+- Rescan périodique de la bibliothèque / retry NFS (`apalis`) — pour
+  l'alpha, `library scan` à la main.
+- Remise à jour des docs de `Doc/` (README d'exploitation au minimum).
+- Formats autres que mp3.
+- Dette interne : crate de types partagé `Candidate`/`PluginEvent` (host +
+  guests wasm), refacto acteur `GridEngine` (gabarit `library_actor`),
+  `playlist_v1.proto` + identité `name`/`handle`, vue matérialisée peuplée,
+  rapport de cycle exact (Tarjan).
 
 ---
 
