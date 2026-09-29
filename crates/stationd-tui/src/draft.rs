@@ -41,7 +41,8 @@ pub fn orders(mode: &str) -> &'static [&'static str] {
 }
 
 /// Champs de filtre du catalogue, et opérateurs proposés pour chacun.
-pub const FILTER_FIELDS: [&str; 7] = ["path", "genre", "artist", "title", "album", "year", "duration"];
+pub const FILTER_FIELDS: [&str; 10] =
+    ["path", "genre", "artist", "title", "album", "year", "duration", "age", "creation", "tempo"];
 
 pub fn filter_ops(field: &str) -> &'static [&'static str] {
     match field {
@@ -49,6 +50,11 @@ pub fn filter_ops(field: &str) -> &'static [&'static str] {
         "title" | "artist" | "album" => &["contains", "eq", "ne", "prefix"],
         "year" | "duration" => &[">=", "<=", "=", "!=", ">", "<"],
         "genre" => &["has_any", "has", "has_all", "has_none"],
+        // Âge de la date de création, durée (`10d`) : `<` = plus récent que.
+        "age" => &["<", "<=", ">", ">="],
+        // Date RFC 3339 avec fuseau (`2026-09-01T00:00:00+02:00`).
+        "creation" => &[">=", "<=", ">", "<", "eq", "ne"],
+        "tempo" => &["eq", "ne"],
         _ => &[],
     }
 }
@@ -861,6 +867,22 @@ no_same_artist_within = "1h"
         assert!(!d.text().contains("filter"), "{}", d.text());
         d.add_filter();
         assert!(d.text().contains("[[selection.filter]]\nfield = \"path\""), "{}", d.text());
+    }
+
+    #[test]
+    fn age_creation_and_tempo_filters_are_written_as_text() {
+        let mut d = Draft::parse(MUSIQUE);
+        d.set_filter(0, FilterPart::Field, "age");
+        assert_eq!(d.filters()[0].op, "<", "op proposé par défaut pour l'âge");
+        d.set_filter(0, FilterPart::Value, "10d");
+        assert!(d.text().contains("field = \"age\"\nop    = \"<\"\nvalue = \"10d\""), "{}", d.text());
+        d.set_filter(0, FilterPart::Field, "creation");
+        d.set_filter(0, FilterPart::Value, "2026-09-01T00:00:00+02:00");
+        assert!(d.text().contains("value = \"2026-09-01T00:00:00+02:00\""), "{}", d.text());
+        d.set_filter(0, FilterPart::Field, "tempo");
+        assert_eq!(d.filters()[0].op, "eq");
+        d.set_filter(0, FilterPart::Value, "fast");
+        assert!(d.text().contains("value = \"fast\""), "{}", d.text());
     }
 
     #[test]
