@@ -163,3 +163,42 @@ level = "info"
 # trusted_proxies = ["192.168.1.94"]        # X-Forwarded-For (Icecast 2.5), exact IPs
 # share_dir       = "/usr/share/icecast2"   # Icecast's web/, admin/, report-db.xml
 # log_dir         = "/var/log/icecast2"
+
+# Optional scan enrichment. Audio files are read only; output is in media_meta.
+# Rebuild the WASM plugin and rescan the library after changing these rules.
+# [[plugin]]
+# name = "custom-tags"
+# enabled = true
+# wasm = "plugins/custom-tags-wasm/target/wasm32-unknown-unknown/release/custom_tags_wasm.wasm"
+# [plugin.config]
+# tags = ["Type"]                 # Existing Type values still become genres.
+# [plugin.config.creation]
+# enabled = true
+# source_tags = ["Description", "Comment"]
+# match = "made with suno; created="  # Literal, case-sensitive, configurable.
+# date_format = "rfc3339"
+# [plugin.config.tempo]
+# enabled = true
+# analyze_missing = true          # Default: estimate missing MP3 BPM offline.
+# Requires FFmpeg; writes TBPM and TXXX:tempo without playing on air.
+# source_tags = ["BPM"]
+# [[plugin.config.tempo.range]]
+# max = 79.999
+# value = "slow"
+# [[plugin.config.tempo.range]]
+# min = 80
+# max = 119.999
+# value = "medium"
+# [[plugin.config.tempo.range]]
+# min = 120
+# value = "fast"
+# Ranges are inclusive; gaps produce no tempo and overlaps are rejected.
+# In a dynamic playlist, use for example:
+# [[selection.filter]]
+# field = "tempo"
+# op = "eq"
+# value = "fast"
+# [[selection.filter]]
+# field = "creation"
+# op = ">="
+# value = "2026-06-01T00:00:00Z"

@@ -709,10 +709,8 @@ done-playlists-reloaded = playlists relues : { $added } appliquée(s), { $remove
 help-media-edit-tags = modifier les tags (dans le fichier)
 form-tags-title = Tags de { $path }
 form-tags-many-title = Tags de { $n } fichiers (vide = inchangé)
-form-tags-genre = genre (du fichier)
 form-tags-nothing = rien n'a changé
 form-tags-read-failed = Lecture des tags impossible
-form-year-invalid = { $field } : un nombre de 1 à 9999, ou vide
 confirm-tags-title = Écrire dans le fichier
 confirm-tags-body = Écrire ces tags dans { $path } :
 confirm-tags-many-body = Écrire ces tags dans { $n } fichiers :
@@ -722,3 +720,28 @@ confirm-tags-yes = Écrire
 done-tags-written = tags écrits dans { $n } fichier(s) sur { $total }
 done-tags-conflicts = modifiés entre-temps, rien écrit : { $list }
 done-tags-failed = { $n } échec(s), dont { $first }
+help-tags-write = écrire dans le(s) fichier(s)
+help-tags-list = choisir dans la liste (genres)
+tags-form-keys = ↑↓ champ · Entrée liste · ←→ tempo · Ctrl+S écrire · Échap annuler
+tags-genres = genres
+tags-bpm = BPM
+tags-tempo = tempo
+tags-creation = date de création
+tags-unchanged = inchangé
+tags-tempo-auto = auto (tiré du BPM)
+tags-tempo-auto-now = auto (tiré du BPM, actuellement { $tempo })
+tags-creation-now = auto (actuellement { $date })
+tags-bad-number = { $field } : un nombre de 1 à { $max }, ou vide
+tags-bad-creation = date de création : au format 2026-06-14T06:36:48Z (RFC 3339), ou vide
+tags-help-single = vide = champ retiré du fichier
+tags-help-batch = vide = inchangé dans chaque fichier
+tags-help-list = Entrée : choisir dans la liste des genres connus, ou en saisir un nouveau
+tags-help-tempo = ←→ : un libellé choisi l'emporte sur celui tiré du BPM ; « auto » revient au BPM
+tags-help-bpm = le tempo en est tiré (plages de custom-tags) sauf s'il est choisi à la main
+tags-help-creation = saisie : l'emporte sur la date tirée du commentaire ; vide : revenir à celle-ci
+tags-picker-title = { $field } : cocher (Espace)
+tags-picker-title-batch = { $field } : Espace = ajouter, puis retirer, puis inchangé
+tags-picker-keys = taper pour filtrer · Espace cocher · Entrée valider · Échap annuler
+tags-picker-new = ＋ nouveau : « { $genre } »
+tags-picker-none = aucun genre ne correspond : Espace l'ajoute
+confirm-tags-merge = { $field } : + { $add } / − { $remove }

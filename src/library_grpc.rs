@@ -7,7 +7,7 @@
 use tonic::{Request, Response, Status};
 
 use crate::library_actor::{LibraryError, LibraryHandle, TagsRead};
-use crate::media_tags::{TagEdit, TagError};
+use crate::media_tags::{TagEdit, TagError, CREATION_MANUAL, TEMPO_MANUAL};
 
 // Keep the generated module reachable under a stable path for callers/tests.
 pub use crate::proto::library;
@@ -16,30 +16,54 @@ use library::library_service_server::LibraryService;
 use library::{
     GenreCount, ListGenresRequest, ListGenresResponse, ListMediaRequest, ListMediaResponse, Media,
     GetTagsRequest, MediaTags, PruneRequest, PruneResponse, ScanRequest, ScanResponse, SearchMediaRequest,
-    SearchMediaResponse, SetTagsRequest, SetTagsResponse, Skip,
+    SearchMediaResponse, SetTagsRequest, SetTagsResponse, Skip, TagValues,
 };
 
 fn map_tags(rel_path: &str, t: TagsRead) -> MediaTags {
+    let first = |name: &str| t.tags.user_values(name).into_iter().next().unwrap_or_default();
     MediaTags {
         rel_path: rel_path.to_string(),
-        title: t.tags.title.unwrap_or_default(),
-        artist: t.tags.artist.unwrap_or_default(),
-        album: t.tags.album.unwrap_or_default(),
+        title: t.tags.title.clone().unwrap_or_default(),
+        artist: t.tags.artist.clone().unwrap_or_default(),
+        album: t.tags.album.clone().unwrap_or_default(),
         year: t.tags.year.unwrap_or(0),
-        genre: t.tags.genre.unwrap_or_default(),
-        revision: t.revision,
+        revision: t.revision.clone(),
+        genres: t.tags.genres.clone(),
+        sources: t
+            .genre_sources
+            .iter()
+            .map(|n| TagValues { name: n.clone(), values: t.tags.user_values(n) })
+            .collect(),
+        bpm: t.tags.bpm.unwrap_or(0),
+        tempo_manual: first(TEMPO_MANUAL),
+        creation_manual: first(CREATION_MANUAL),
+        tempo: t.tempo.clone().unwrap_or_default(),
+        creation: t.creation.clone().unwrap_or_default(),
+        tempo_choices: t.tempo_choices.clone(),
     }
 }
 
-/// Proto edit → `TagEdit`: absent = unchanged, "" / 0 = removed.
+/// Proto edit → `TagEdit`: absent = unchanged, "" / 0 / empty list = removed.
 fn edit_of(r: &SetTagsRequest) -> TagEdit {
     let text = |v: &Option<String>| v.as_ref().map(|s| (!s.trim().is_empty()).then(|| s.clone()));
+    let mut user = std::collections::BTreeMap::new();
+    for src in &r.sources {
+        user.insert(src.name.clone(), src.values.clone());
+    }
+    if let Some(v) = &r.tempo_manual {
+        user.insert(TEMPO_MANUAL.to_string(), vec![v.clone()]);
+    }
+    if let Some(v) = &r.creation_manual {
+        user.insert(CREATION_MANUAL.to_string(), vec![v.clone()]);
+    }
     TagEdit {
         title: text(&r.title),
         artist: text(&r.artist),
         album: text(&r.album),
         year: r.year.map(|y| (y != 0).then_some(y)),
-        genre: text(&r.genre),
+        genres: r.genres.as_ref().map(|g| g.values.clone()),
+        bpm: r.bpm.map(|b| (b != 0).then_some(b)),
+        user,
     }
 }
 

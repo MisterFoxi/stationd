@@ -44,6 +44,7 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       ca-certificates curl xz-utils tzdata \
       build-essential pkg-config protobuf-compiler libprotobuf-dev \
+      ffmpeg \
       "icecast2=${ICECAST_VERSION}" \
       "liquidsoap${LIQUIDSOAP_VERSION:+=${LIQUIDSOAP_VERSION}}" \
  && rm -rf /var/lib/apt/lists/*

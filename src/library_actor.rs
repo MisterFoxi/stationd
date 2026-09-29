@@ -97,11 +97,19 @@ enum Command {
     },
 }
 
-/// The standard tags of a file and their revision.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// The tags of a file and their revision, with what the editor needs
+/// around them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TagsRead {
     pub tags: StandardTags,
     pub revision: String,
+    /// User frames that the `custom-tags` plugin turns into genres.
+    pub genre_sources: Vec<String>,
+    /// Tempo labels to choose from: the plugin's ranges, then those in use.
+    pub tempo_choices: Vec<String>,
+    /// Effective tempo / creation (`media_meta`), whatever their source.
+    pub tempo: Option<String>,
+    pub creation: Option<String>,
 }
 
 /// What a tag edit did: `conflict` (nothing written, `tags` = current ones)
@@ -248,7 +256,7 @@ pub fn spawn_with(pool: SqlitePool, root: PathBuf, plugins: Option<PluginHandle>
                     let _ = reply.send(out);
                 }
                 Command::GetTags { rel_path, reply } => {
-                    let _ = reply.send(get_tags(&root, rel_path).await);
+                    let _ = reply.send(get_tags(&pool, &root, plugins.as_ref(), rel_path).await);
                 }
                 Command::SetTags { rel_path, revision, edit, reply } => {
                     let _ = reply.send(set_tags(&pool, &root, plugins.as_ref(), rel_path, revision, edit).await);
@@ -294,7 +302,9 @@ async fn enrich(report: &mut ScanReport, plugins: &PluginHandle) {
 fn apply_extras(report: &mut ScanReport, extras: &crate::plugin::ScanExtras) {
     for m in report.media.iter_mut() {
         let Some(add) = extras.get(&m.rel_path) else { continue };
-        for g in add {
+        let metadata = report.metadata.entry(m.rel_path.clone()).or_default();
+        for (key, value) in &add.metadata { metadata.entry(key.clone()).or_insert_with(|| value.clone()); }
+        for g in &add.genres {
             let key = media_index::genre_key(g);
             if !m.genres.iter().any(|x| media_index::genre_key(x) == key) {
                 m.genres.push(g.clone());
@@ -303,15 +313,83 @@ fn apply_extras(report: &mut ScanReport, extras: &crate::plugin::ScanExtras) {
     }
 }
 
-async fn get_tags(root: &Path, rel_path: String) -> Result<TagsRead, LibraryError> {
+/// Manual values written by a tag editor (`TXXX:tempo_manual`,
+/// `TXXX:creation_manual`) win over what the plugins derived: they become
+/// the media's `tempo` / `creation`, and the scan writes them back into
+/// `TXXX:tempo` / `TXXX:creation` like a derived value.
+fn apply_manual(report: &mut ScanReport) {
+    for m in &report.media {
+        let Some(tags) = report.custom_tags.get(&m.rel_path) else { continue };
+        let first = |name: &str| {
+            tags.iter()
+                .find(|t| t.name.trim().eq_ignore_ascii_case(name) && !t.value.trim().is_empty())
+                .map(|t| t.value.trim().to_string())
+        };
+        if let Some(v) = first(media_tags::TEMPO_MANUAL) {
+            report.metadata.entry(m.rel_path.clone()).or_default().insert("tempo".into(), v);
+        }
+        if let Some(v) = first(media_tags::CREATION_MANUAL).filter(|v| v.parse::<jiff::Timestamp>().is_ok()) {
+            report.metadata.entry(m.rel_path.clone()).or_default().insert("creation".into(), v);
+        }
+    }
+}
+
+async fn get_tags(
+    pool: &SqlitePool,
+    root: &Path,
+    plugins: Option<&PluginHandle>,
+    rel_path: String,
+) -> Result<TagsRead, LibraryError> {
     let root = root.to_path_buf();
-    tokio::task::spawn_blocking(move || {
-        let full = media_tags::resolve(&root, &rel_path)?;
+    let rel = rel_path.clone();
+    let mut read = tokio::task::spawn_blocking(move || -> Result<TagsRead, LibraryError> {
+        let full = media_tags::resolve(&root, &rel)?;
         let (tags, size) = media_tags::read(&full)?;
-        Ok(TagsRead { revision: media_tags::revision(&tags, size), tags })
+        Ok(TagsRead { revision: media_tags::revision(&tags, size), tags, ..TagsRead::default() })
     })
     .await
-    .map_err(|e| LibraryError::Join(e.to_string()))?
+    .map_err(|e| LibraryError::Join(e.to_string()))??;
+    let hints = match plugins {
+        Some(p) => p.tag_hints().await,
+        None => Default::default(),
+    };
+    let meta = media_index::meta_of(pool, &rel_path).await?;
+    let mut choices = hints.tempo_labels;
+    for v in media_index::meta_values(pool, "tempo").await? {
+        if !choices.contains(&v) {
+            choices.push(v);
+        }
+    }
+    read.genre_sources = hints.genre_sources;
+    read.tempo_choices = choices;
+    read.tempo = meta.get("tempo").cloned();
+    read.creation = meta.get("creation").cloned();
+    Ok(read)
+}
+
+/// After a tag edit: the file read again as a scan would (plugins, manual
+/// values, write-back of `TXXX:tempo` / `TXXX:creation`), then its index
+/// row, genres and `media_meta` replaced.
+async fn refresh_file(
+    pool: &SqlitePool,
+    root: &Path,
+    plugins: Option<&PluginHandle>,
+    mut report: ScanReport,
+) -> Result<Option<MediaRow>, LibraryError> {
+    if let Some(plugins) = plugins {
+        enrich(&mut report, plugins).await;
+    }
+    apply_manual(&mut report);
+    let write_root = root.to_path_buf();
+    let report = tokio::task::spawn_blocking(move || {
+        crate::scan_writeback::apply(&write_root, &mut report)?;
+        Ok::<_, TagError>(report)
+    })
+    .await
+    .map_err(|e| LibraryError::Join(e.to_string()))??;
+    let Some(m) = report.media.first() else { return Ok(None) };
+    let meta = report.metadata.get(&m.rel_path).cloned().unwrap_or_default();
+    Ok(media_index::refresh_one_with(pool, m, Some(&meta), now_epoch_seconds()).await?)
 }
 
 async fn set_tags(
@@ -331,11 +409,11 @@ async fn set_tags(
             Ok((tags, revision)) => {
                 let report = media::scan_file(&root_buf, &full)
                     .map_err(|e| LibraryError::Tags(TagError::Io(format!("{rel} written but not readable: {e:?}"))))?;
-                Ok(Ok((TagsRead { tags, revision }, report)))
+                Ok(Ok((TagsRead { tags, revision, ..TagsRead::default() }, report)))
             }
             Err(TagError::Conflict { current, .. }) => {
                 let (tags, _) = media_tags::read(&full)?;
-                Ok(Err(TagsRead { tags, revision: current }))
+                Ok(Err(TagsRead { tags, revision: current, ..TagsRead::default() }))
             }
             Err(e) if e.file_touched() => {
                 // Partly written: the index follows the file, then the error is said.
@@ -347,30 +425,21 @@ async fn set_tags(
     .await
     .map_err(|e| LibraryError::Join(e.to_string()))?;
     let written = match written {
-        Err(LibraryError::Touched(e, Some(mut report))) => {
-            if let Some(plugins) = plugins {
-                enrich(&mut report, plugins).await;
-            }
-            if let Some(m) = report.media.first() {
-                media_index::refresh_one(pool, m, now_epoch_seconds()).await?;
-            }
+        Err(LibraryError::Touched(e, Some(report))) => {
+            refresh_file(pool, root, plugins, report).await?;
             return Err(LibraryError::Tags(e));
         }
         Err(LibraryError::Touched(e, None)) => return Err(LibraryError::Tags(e)),
         other => other?,
     };
-    let (tags, mut report) = match written {
+    let (_, report) = match written {
         Ok(x) => x,
         Err(current) => return Ok(TagsWritten { conflict: true, tags: current, row: None }),
     };
-    if let Some(plugins) = plugins {
-        enrich(&mut report, plugins).await;
-    }
-    let row = match report.media.first() {
-        Some(m) => media_index::refresh_one(pool, m, now_epoch_seconds()).await?,
-        None => None,
-    };
+    let row = refresh_file(pool, root, plugins, report).await?;
     tracing::info!(media = %rel_path, "media tags written");
+    // What the editor shows next: the file as it is now (write-back included).
+    let tags = get_tags(pool, root, plugins, rel_path).await?;
     Ok(TagsWritten { conflict: false, tags, row })
 }
 
@@ -382,14 +451,30 @@ async fn do_scan(
     root: &Path,
     plugins: Option<&PluginHandle>,
 ) -> Result<ScanOutcome, LibraryError> {
+    let write_root = root.to_path_buf();
     let root = root.to_path_buf();
     let mut report: ScanReport = tokio::task::spawn_blocking(move || media::scan_library(&root))
         .await
         .map_err(|e| LibraryError::Join(e.to_string()))??;
     if let Some(plugins) = plugins {
+        if plugins.analyze_missing_bpm().await {
+            let analysis_root = write_root.clone();
+            report = tokio::task::spawn_blocking(move || {
+                crate::bpm_analysis::analyze_missing(&analysis_root, &mut report);
+                report
+            }).await.map_err(|e| LibraryError::Join(e.to_string()))?;
+        }
         enrich(&mut report, plugins).await;
     }
-    let stats = media_index::replace_library(pool, &report.media, now_epoch_seconds()).await?;
+    apply_manual(&mut report);
+    // Host-owned MP3 writes run off the async runtime, after enrichment.
+    let (report, originals) = tokio::task::spawn_blocking(move || {
+        let originals = crate::scan_writeback::apply(&write_root, &mut report)?;
+        Ok::<_, TagError>((report, originals))
+    }).await.map_err(|e| LibraryError::Join(e.to_string()))??;
+    let stats = media_index::replace_library_with_writeback(
+        pool, &report.media, &report.metadata, &originals, now_epoch_seconds(),
+    ).await?;
     Ok(ScanOutcome { report, stats })
 }
 
@@ -442,8 +527,14 @@ mod tests {
             ..Default::default()
         };
         let mut extras = crate::plugin::ScanExtras::new();
-        extras.insert("talk.mp3".into(), vec!["talks".into(), "news".into()]);
+        report.metadata.insert("talk.mp3".into(), [("bpm".into(), "70".into())].into());
+        extras.insert("talk.mp3".into(), crate::plugin::ScanAddition {
+            genres: vec!["talks".into(), "news".into()],
+            metadata: [("tempo".into(), "slow".into())].into(),
+        });
         apply_extras(&mut report, &extras);
+        assert_eq!(report.metadata["talk.mp3"]["tempo"], "slow");
+        assert_eq!(report.metadata["talk.mp3"]["bpm"], "70");
         assert_eq!(report.media[1].genres, vec!["Rock".to_string()], "untouched");
         assert_eq!(
             report.media[0].genres,
@@ -506,7 +597,7 @@ mod tests {
 
         let read = lib.get_tags("Pod/ep1.wav".into()).await.unwrap();
         assert_eq!(read.tags, StandardTags::default());
-        let edit = TagEdit { title: Some(Some("Épisode 1".into())), genre: Some(Some("talks".into())), ..Default::default() };
+        let edit = TagEdit { title: Some(Some("Épisode 1".into())), genres: Some(vec!["talks".into()]), ..Default::default() };
         let w = lib.set_tags("Pod/ep1.wav".into(), read.revision.clone(), edit.clone()).await.unwrap();
         assert!(!w.conflict);
         let row = w.row.unwrap();
@@ -527,7 +618,79 @@ mod tests {
         let again = lib.set_tags("Pod/ep1.wav".into(), read.revision, edit).await.unwrap();
         assert!(again.conflict && again.row.is_none());
         assert_eq!(again.tags.tags.title.as_deref(), Some("Épisode 1"));
+        // Manual tempo / creation: they reach media_meta (no plugin needed)
+        // and GetTags shows them as effective.
+        let now = lib.get_tags("Pod/ep1.wav".into()).await.unwrap();
+        let mut user = std::collections::BTreeMap::new();
+        user.insert(media_tags::TEMPO_MANUAL.to_string(), vec!["lent".to_string()]);
+        user.insert(media_tags::CREATION_MANUAL.to_string(), vec!["2026-06-14T08:36:48+02:00".to_string()]);
+        let w = lib.set_tags("Pod/ep1.wav".into(), now.revision, TagEdit { user, ..Default::default() }).await.unwrap();
+        assert_eq!(w.tags.tempo.as_deref(), Some("lent"));
+        assert_eq!(w.tags.creation.as_deref(), Some("2026-06-14T06:36:48.000000000Z"), "normalisée en UTC");
+        let meta = media_index::meta_of(&pool, "Pod/ep1.wav").await.unwrap();
+        assert_eq!(meta.get("tempo").map(String::as_str), Some("lent"));
+        // A full scan keeps them (read back from the file).
+        lib.scan().await.unwrap();
+        assert_eq!(media_index::meta_of(&pool, "Pod/ep1.wav").await.unwrap().get("tempo").map(String::as_str), Some("lent"));
+        // Removing the manual tempo: nothing derived here, so no tempo.
+        let now = lib.get_tags("Pod/ep1.wav".into()).await.unwrap();
+        assert_eq!(now.tempo_choices, ["lent"], "libellés déjà utilisés proposés");
+        let mut user = std::collections::BTreeMap::new();
+        user.insert(media_tags::TEMPO_MANUAL.to_string(), vec![]);
+        let w = lib.set_tags("Pod/ep1.wav".into(), now.revision, TagEdit { user, ..Default::default() }).await.unwrap();
+        assert_eq!(w.tags.tempo, None);
         // Outside the root: not found.
         assert!(matches!(lib.get_tags("../x.wav".into()).await, Err(LibraryError::Tags(TagError::NotFound(_)))));
+    }
+}
+
+#[cfg(test)]
+mod offline_bpm_tests {
+    use super::*;
+    #[tokio::test]
+    #[ignore = "requires FFmpeg and STATIOND_CUSTOM_TAGS_WASM"]
+    async fn offline_mp3_scan_through_real_wasm_writes_tags_and_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let mp3 = crate::bpm_analysis::tests::make_mp3(dir.path());
+        let pool = crate::db::init(&dir.path().join("test.db")).await.unwrap();
+        let wasm = std::env::var("STATIOND_CUSTOM_TAGS_WASM").expect("compiled custom-tags WASM path");
+        let mut declaration: crate::plugin::PluginDecl = toml::from_str(r#"
+name = "custom-tags"
+enabled = true
+[config]
+tags = ["Type"]
+[config.creation]
+enabled = true
+source_tags = ["Comment", "Description"]
+match = "made with suno; created="
+[config.tempo]
+enabled = true
+analyze_missing = true
+source_tags = ["BPM"]
+[[config.tempo.range]]
+max = 119.999
+value = "slow"
+[[config.tempo.range]]
+min = 120
+value = "fast"
+"#).unwrap();
+        declaration.wasm = Some(wasm);
+        let plugins = crate::plugin::spawn(vec![declaration]);
+        assert!(plugins.analyze_missing_bpm().await);
+        let library = spawn_with(pool.clone(), dir.path().to_path_buf(), Some(plugins));
+        library.scan().await.unwrap();
+        let before = std::fs::read(&mp3).unwrap();
+        for _ in 0..2 {
+            let tags = crate::media::scan_library(dir.path()).unwrap().custom_tags.remove("rhythm.mp3").unwrap();
+            assert!((crate::bpm_analysis::existing_bpm(&tags).unwrap() - 140.0).abs() <= 2.0);
+            assert!(tags.iter().any(|t| t.name == "tempo" && t.value == "fast"));
+            assert!(tags.iter().any(|t| t.name == "creation" && t.value == "2026-06-14T06:36:48Z"));
+            let tempo: String = sqlx::query_scalar("SELECT value FROM media_meta WHERE key = 'tempo'")
+                .fetch_one(&pool).await.unwrap();
+            assert_eq!(tempo, "fast");
+            assert_eq!(media_index::list(&pool, true, &["song".into()]).await.unwrap().len(), 1);
+            library.scan().await.unwrap();
+            assert_eq!(std::fs::read(&mp3).unwrap(), before);
+        }
     }
 }

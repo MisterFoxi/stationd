@@ -35,6 +35,8 @@ pub mod ls_grpc;
 pub mod ls_script;
 pub mod media;
 pub mod media_tags;
+pub mod scan_writeback;
+pub mod bpm_analysis;
 pub mod onair;
 pub mod onair_grpc;
 pub mod onair_sim;

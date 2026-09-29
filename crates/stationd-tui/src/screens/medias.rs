@@ -32,6 +32,7 @@ use stationd_proto::library::search_media_request::Field;
 use stationd_proto::library::{Media, SearchMediaRequest, SearchMediaResponse};
 
 use super::ops;
+use super::tagform::{TagForm, TagOutcome};
 use super::picker::{PlaylistPicker, Picked as PickedPlaylist, mode_label};
 use crate::action::Action;
 use crate::app::{AppEvent, Global, Handoff};
@@ -165,6 +166,10 @@ pub struct Medias {
     keep: Option<String>,
     /// Lecture des tags en cours (n° de requête) avant le formulaire.
     tags_req: Option<u64>,
+    /// Les médias dont on modifie les tags.
+    tags_targets: Vec<String>,
+    /// Éditeur des tags ouvert.
+    tagform: Option<TagForm>,
 }
 
 impl Default for Medias {
@@ -218,6 +223,8 @@ impl Medias {
             chooser: None,
             keep: None,
             tags_req: None,
+            tags_targets: Vec::new(),
+            tagform: None,
         }
     }
 
@@ -329,24 +336,20 @@ impl Medias {
         });
     }
 
-    /// `e` : modifier les tags. Un fichier : ses tags sont d'abord lus dans
-    /// le fichier (pas l'index), le formulaire s'ouvre à leur arrivée.
-    /// Plusieurs marqués : formulaire de lot (vide = inchangé).
+    /// `e` : modifier les tags du média (ou des marqués). Les tags du fichier
+    /// (du premier du lot) et les genres connus sont lus d'abord ; le
+    /// formulaire s'ouvre à leur arrivée.
     fn edit_tags(&mut self, ctx: &mut Global) {
         let targets = self.targets();
-        match targets.len() {
-            0 => {}
-            1 => {
-                self.request += 1;
-                self.tags_req = Some(self.request);
-                let (owner, id, channel, path) = (self.owner, self.request, ctx.channel.clone(), targets[0].clone());
-                ctx.spawn_async(async move {
-                    let r = crate::rpc::get_tags(channel, path).await;
-                    Ok(Control::Event(AppEvent::MediaTags(owner, id, r)))
-                });
-            }
-            _ => ctx.open(ops::edit_tags_many(targets)),
-        }
+        let Some(first) = targets.first().cloned() else { return };
+        self.request += 1;
+        self.tags_req = Some(self.request);
+        self.tags_targets = targets;
+        let (owner, id, channel) = (self.owner, self.request, ctx.channel.clone());
+        ctx.spawn_async(async move {
+            let r = crate::rpc::tag_form_data(channel, first).await;
+            Ok(Control::Event(AppEvent::MediaTags(owner, id, Box::new(r))))
+        });
     }
 
     /// Après une action (tags écrits…) : relit la page et la fiche, la
@@ -669,8 +672,11 @@ impl Medias {
             AppEvent::MediaTags(owner, id, r) if *owner == self.owner => {
                 if self.tags_req == Some(*id) {
                     self.tags_req = None;
-                    match r {
-                        Ok(t) => ctx.open(ops::edit_tags(t.clone())),
+                    match &**r {
+                        Ok((t, known)) => {
+                            let batch = (self.tags_targets.len() > 1).then(|| self.tags_targets.clone());
+                            self.tagform = Some(TagForm::new(t.clone(), known.clone(), batch));
+                        }
                         Err(e) => ctx.open(crate::dialog::Modal::Info(crate::dialog::Info {
                             title: tr!("form-tags-read-failed"),
                             lines: vec![e.clone()],
@@ -695,6 +701,22 @@ impl Medias {
             _ => return Control::Continue,
         }
         let AppEvent::Event(e) = event else { return Control::Continue };
+
+        // Éditeur de tags ouvert : il capture tout.
+        if let Some(f) = self.tagform.as_mut() {
+            match f.handle(e) {
+                TagOutcome::Pending => {}
+                TagOutcome::Cancel => self.tagform = None,
+                TagOutcome::Submit(action, lines) => {
+                    self.tagform = None;
+                    let yes = tr!("confirm-tags-yes");
+                    let c = crate::dialog::Confirm::new(tr!("confirm-tags-title"), lines, yes, *action);
+                    let c = if self.tags_targets.len() > 1 { c.danger() } else { c };
+                    ctx.open(crate::dialog::Modal::Confirm(c));
+                }
+            }
+            return Control::Changed;
+        }
 
         // Sélecteur de playlist ouvert : il capture tout.
         if let Some((purpose, p, _)) = self.chooser.as_mut() {
@@ -868,11 +890,21 @@ impl Medias {
             let cursor = p.render(area, buf, &ctx.theme);
             ctx.set_screen_cursor(cursor);
         }
+        if let Some(f) = self.tagform.as_mut() {
+            let cursor = f.render(area, buf, &ctx.theme);
+            ctx.set_screen_cursor(cursor);
+        }
     }
 
     /// Raccourcis du moment (aide et ligne du bas).
     pub fn keys(&self) -> &'static [KeyHelp] {
-        if self.editing {
+        if self.tagform.is_some() {
+            &[
+                (k!("key-ctrl-s"), k!("help-tags-write")),
+                (k!("key-enter"), k!("help-tags-list")),
+                (k!("key-esc"), k!("help-close")),
+            ]
+        } else if self.editing {
             &[(k!("key-enter"), k!("help-media-apply")), (k!("key-esc"), k!("help-media-cancel"))]
         } else if self.card.is_some() {
             &[
@@ -913,7 +945,7 @@ impl Medias {
 
     /// Une saisie est en cours (texte de recherche ou filtre du sélecteur).
     pub fn typing_text(&self) -> bool {
-        self.editing || self.chooser.is_some() || self.card.is_some()
+        self.editing || self.chooser.is_some() || self.card.is_some() || self.tagform.is_some()
     }
 }
 

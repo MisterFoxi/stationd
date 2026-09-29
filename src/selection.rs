@@ -1080,6 +1080,33 @@ fn filter_sql(f: &Filter) -> Result<Where, SelectionError> {
                 binds: vec![Bind::Text(as_text(f)?)],
             })
         }
+        "tempo" => {
+            let op = match f.op.as_str() {
+                "eq" | "has" | "=" | "==" => "=",
+                "ne" | "!=" => "<>",
+                _ => return Err(unsupported()),
+            };
+            Ok(Where {
+                sql: format!("EXISTS (SELECT 1 FROM media_meta d WHERE d.rel_path = media.rel_path AND d.key = 'tempo' AND d.value {op} ?)"),
+                binds: vec![Bind::Text(as_text(f)?)],
+            })
+        }
+        "creation" => {
+            let op = match f.op.as_str() {
+                "eq" => "=",
+                "ne" => "<>",
+                other => num_op(other).ok_or_else(unsupported)?,
+            };
+            let value = as_text(f)?;
+            let timestamp = crate::media_index::normalize_creation(&value).map_err(|_| SelectionError::BadFilterValue {
+                field: f.field.clone(), reason: "expected an RFC3339 timestamp with offset".into(),
+            })?;
+            // Same UTC, fixed precision representation as media_index.
+            Ok(Where {
+                sql: format!("EXISTS (SELECT 1 FROM media_meta d WHERE d.rel_path = media.rel_path AND d.key = 'creation' AND d.value {op} ?)"),
+                binds: vec![Bind::Text(timestamp)],
+            })
+        }
         "year" => {
             let op = num_op(&f.op).ok_or_else(unsupported)?;
             Ok(Where {
@@ -3258,4 +3285,49 @@ mod tests {
         assert_eq!(resolve_ref(&pool, "dj").await.unwrap(), "b.mp3");
         assert_eq!(resolve_ref(&pool, "dj").await.unwrap(), "a.mp3");
     }
+    #[tokio::test]
+    async fn metadata_filters_persist_and_rescan_clears_obsolete_values() {
+        let (_dir, pool) = fresh_db().await;
+        let tracks = vec![media("tagged.mp3", "a", 2026, &["talks"]), media("plain.mp3", "a", 2026, &[])];
+        let metadata = [("tagged.mp3".into(), [
+            ("tempo".into(), "fast".into()),
+            ("creation".into(), "2026-06-14T08:36:48.000000001+02:00".into()),
+            ("custom_key".into(), "custom value".into()),
+        ].into())].into();
+        media_index::replace_library_with_metadata(&pool, &tracks, &metadata, 1).await.unwrap();
+        for (field, op, value, expected) in [
+            ("tempo", "eq", "fast", 1),
+            ("tempo", "has", "fast", 1),
+            ("tempo", "ne", "slow", 1),
+            ("tempo", "eq", "slow", 0),
+            ("tempo", "eq", "fast' OR 1=1 --", 0),
+            ("creation", "=", "2026-06-14T06:36:48.000000001Z", 1),
+            ("creation", ">", "2026-06-14T06:36:48Z", 1),
+            ("creation", "<", "2026-06-14T06:36:48Z", 0),
+            ("creation", ">=", "2026-06-14T08:36:48.000000001+02:00", 1),
+        ] {
+            let w = filter_sql(&filt(field, op, toml::Value::String(value.into()))).unwrap();
+            let sql = format!("SELECT count(*) FROM media WHERE available = 1 AND {}", w.sql);
+            let mut query = sqlx::query_as::<_, (i64,)>(&sql);
+            for bind in w.binds {
+                query = match bind { Bind::Text(v) => query.bind(v), Bind::Int(v) => query.bind(v) };
+            }
+            assert_eq!(query.fetch_one(&pool).await.unwrap().0, expected, "{field} {op} {value}");
+        }
+        let rows = media_index::list(&pool, true, &[]).await.unwrap();
+        assert_eq!(rows.iter().find(|m| m.rel_path == "tagged.mp3").unwrap().genres, vec!["talks"]);
+        let (custom,): (String,) = sqlx::query_as("SELECT value FROM media_meta WHERE key = 'custom_key'").fetch_one(&pool).await.unwrap();
+        assert_eq!(custom, "custom value");
+        media_index::replace_library(&pool, &tracks, 2).await.unwrap();
+        let (remaining,): (i64,) = sqlx::query_as("SELECT count(*) FROM media_meta").fetch_one(&pool).await.unwrap();
+        assert_eq!(remaining, 0);
+    }
+
+    #[test]
+    fn metadata_filter_validation_rejects_bad_dates_and_operators() {
+        for (field, op, value) in [("creation", ">=", "bad"), ("creation", "contains", "2026-01-01T00:00:00Z"), ("tempo", "prefix", "fast")] {
+            assert!(filter_sql(&filt(field, op, toml::Value::String(value.into()))).is_err());
+        }
+    }
+
 }

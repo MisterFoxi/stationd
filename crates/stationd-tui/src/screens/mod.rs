@@ -8,6 +8,7 @@ mod ops;
 mod picker;
 mod planned;
 mod playlists;
+mod tagform;
 
 use std::sync::atomic::{AtomicU64, Ordering};
 

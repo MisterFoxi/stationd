@@ -91,6 +91,9 @@ pub struct ScanEnrichment {
     pub rel_path: String,
     #[serde(default)]
     pub genres: Vec<String>,
+    /// Scalar custom metadata. Missing in legacy plugin replies means empty.
+    #[serde(default)]
+    pub metadata: std::collections::BTreeMap<String, String>,
 }
 
 /// What a plugin implements. `Send` because plugins live on the actor task.
@@ -329,6 +332,15 @@ impl Host {
 // Declaration (config) and runtime state
 // ---------------------------------------------------------------------------
 
+/// See [`PluginHandle::tag_hints`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TagHints {
+    /// User frames (`TXXX`) whose values become genres.
+    pub genre_sources: Vec<String>,
+    /// Labels of the tempo ranges, in configuration order.
+    pub tempo_labels: Vec<String>,
+}
+
 /// One `[[plugin]]` entry in the station config. `name` is both identity and
 /// kind in A1 (one instance per kind); a separate `kind` for multiple
 /// instances is a later refinement. `config` is opaque to the core and handed
@@ -363,6 +375,38 @@ pub struct PluginDecl {
 }
 
 impl PluginDecl {
+    /// `custom-tags` configuration read for a tag editor (see
+    /// [`PluginHandle::tag_hints`]).
+    fn tag_hints(&self) -> TagHints {
+        let strings = |v: Option<&toml::Value>| -> Vec<String> {
+            v.and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|x| x.as_str()).map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect())
+                .unwrap_or_default()
+        };
+        let mut tempo_labels = Vec::new();
+        if let Some(ranges) = self.config.get("tempo").and_then(|t| t.get("range")).and_then(|r| r.as_array()) {
+            for r in ranges {
+                if let Some(v) = r.get("value").and_then(|v| v.as_str()).map(str::trim).filter(|v| !v.is_empty()) {
+                    if !tempo_labels.iter().any(|x: &String| x == v) {
+                        tempo_labels.push(v.to_string());
+                    }
+                }
+            }
+        }
+        TagHints { genre_sources: strings(self.config.get("tags")), tempo_labels }
+    }
+
+    fn requests_bpm_analysis(&self) -> bool {
+        self.name == "custom-tags"
+            && self.config.get("tempo").and_then(|v| v.as_table()).is_some_and(|t| {
+                t.get("enabled").and_then(|v| v.as_bool()) == Some(true)
+                    && t.get("analyze_missing").and_then(|v| v.as_bool()).unwrap_or(true)
+                    && t.get("source_tags").map_or(true, |v| v.as_array().is_some_and(|names| {
+                        names.iter().any(|n| n.as_str().is_some_and(|n| n.trim().eq_ignore_ascii_case("BPM")))
+                    }))
+            })
+    }
+
     fn has_db(&self) -> bool {
         self.capabilities.contains(&Capability::Db)
     }
@@ -653,6 +697,8 @@ fn build_plugin(decl: &PluginDecl, host: &Host) -> Result<Box<dyn Plugin>, Strin
 
 enum Msg {
     List(oneshot::Sender<Vec<PluginInfo>>),
+    AnalyzeMissingBpm(oneshot::Sender<bool>),
+    TagHints(oneshot::Sender<TagHints>),
     Control {
         name: String,
         action: Action,
@@ -711,7 +757,13 @@ pub struct DbInfo {
 
 /// Merged `on_scan` output: extra genres per `rel_path`, every loaded plugin
 /// contributing in `order`. Deduplicated case-insensitively per media.
-pub type ScanExtras = std::collections::BTreeMap<String, Vec<String>>;
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ScanAddition {
+    pub genres: Vec<String>,
+    pub metadata: std::collections::BTreeMap<String, String>,
+}
+
+pub type ScanExtras = std::collections::BTreeMap<String, ScanAddition>;
 
 /// Cheap, clonable handle to the plugin actor. The only way to reach plugins.
 #[derive(Clone)]
@@ -724,6 +776,24 @@ pub struct PluginHandle {
 }
 
 impl PluginHandle {
+    /// What the loaded `custom-tags` plugin makes of a file's tags, for a
+    /// tag editor: the user frames it turns into genres (`tags`), and the
+    /// tempo labels of its BPM ranges. Empty when it is not loaded.
+    pub async fn tag_hints(&self) -> TagHints {
+        let (reply, rx) = oneshot::channel();
+        if self.tx.send(Msg::TagHints(reply)).await.is_err() {
+            return TagHints::default();
+        }
+        rx.await.unwrap_or_default()
+    }
+
+    /// Current runtime state, so stopped/quarantined plugins cannot trigger analysis.
+    pub async fn analyze_missing_bpm(&self) -> bool {
+        let (reply, rx) = oneshot::channel();
+        if self.tx.send(Msg::AnalyzeMissingBpm(reply)).await.is_err() { return false; }
+        rx.await.unwrap_or(false)
+    }
+
     /// Fire-and-forget: emit an event to the plugins. Never blocks the caller;
     /// if the buffer is full the event is dropped (best-effort, as documented).
     pub fn emit(&self, event: PluginEvent) {
@@ -914,6 +984,20 @@ pub fn spawn_env(mut decls: Vec<PluginDecl>, env: PluginEnv) -> PluginHandle {
                 Msg::Scan { media, reply } => {
                     let _ = reply.send(run_scan(&mut slots, &media));
                 }
+                Msg::TagHints(reply) => {
+                    let hints = slots
+                        .iter()
+                        .find(|slot| matches!(slot.state, PluginState::Loaded) && slot.decl.name == "custom-tags")
+                        .map(|slot| slot.decl.tag_hints())
+                        .unwrap_or_default();
+                    let _ = reply.send(hints);
+                }
+                Msg::AnalyzeMissingBpm(reply) => {
+                    let enabled = slots.iter().any(|slot| {
+                        matches!(slot.state, PluginState::Loaded) && slot.decl.requests_bpm_analysis()
+                    });
+                    let _ = reply.send(enabled);
+                }
                 Msg::List(reply) => {
                     let _ = reply.send(slots.iter().map(Slot::info).collect());
                 }
@@ -1075,6 +1159,16 @@ fn validate_enrichment(
         if !known.contains(e.rel_path.as_str()) {
             return Err(format!("on_scan returned unknown media `{}`", e.rel_path));
         }
+        for (key, value) in &e.metadata {
+            if key.is_empty() || !key.bytes().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'_')
+                || value.trim().is_empty()
+            {
+                return Err(format!("on_scan returned invalid metadata for `{}`", e.rel_path));
+            }
+            if key == "creation" && crate::media_index::normalize_creation(value).is_err() {
+                return Err(format!("on_scan returned invalid creation for `{}`", e.rel_path));
+            }
+        }
         if e.genres.iter().any(|g| g.trim().is_empty()) {
             return Err(format!("on_scan returned a blank genre for `{}`", e.rel_path));
         }
@@ -1102,11 +1196,16 @@ fn run_scan(slots: &mut [Slot], media: &[ScanInput]) -> ScanExtras {
                 let mut added = 0usize;
                 for e in out {
                     let entry = extras.entry(e.rel_path).or_default();
+                    // First loaded plugin wins a key, in configured plugin order.
+                    for (key, value) in e.metadata {
+                        entry.metadata.entry(key).or_insert(value);
+                        added += 1;
+                    }
                     for g in e.genres {
                         let g = g.trim().to_string();
                         let key = crate::media_index::genre_key(&g);
-                        if !entry.iter().any(|x| crate::media_index::genre_key(x) == key) {
-                            entry.push(g);
+                        if !entry.genres.iter().any(|x| crate::media_index::genre_key(x) == key) {
+                            entry.genres.push(g);
                             added += 1;
                         }
                     }
@@ -1118,7 +1217,7 @@ fn run_scan(slots: &mut [Slot], media: &[ScanInput]) -> ScanExtras {
             Err(reason) => slot.note_failure(Phase::Scan, reason),
         }
     }
-    extras.retain(|_, v| !v.is_empty());
+    extras.retain(|_, v| !v.genres.is_empty() || !v.metadata.is_empty());
     extras
 }
 
@@ -2019,7 +2118,7 @@ mod tests {
         fn on_scan(&mut self, media: &[ScanInput]) -> Result<Vec<ScanEnrichment>, String> {
             Ok(media
                 .iter()
-                .map(|m| ScanEnrichment {
+                .map(|m| ScanEnrichment { metadata: Default::default(),
                     rel_path: m.rel_path.clone(),
                     genres: m
                         .custom_tags
@@ -2059,7 +2158,7 @@ mod tests {
             loaded("a", Box::new(TagToGenre("Type"))),
             loaded(
                 "b",
-                Box::new(FixedScan(Ok(vec![ScanEnrichment {
+                Box::new(FixedScan(Ok(vec![ScanEnrichment { metadata: Default::default(),
                     rel_path: "x.mp3".into(),
                     genres: vec!["TALKS".into(), "news".into()],
                 }]))),
@@ -2072,14 +2171,14 @@ mod tests {
         ];
         let extras = run_scan(&mut slots, &media);
         assert_eq!(extras.len(), 1, "media with nothing to add are absent");
-        assert_eq!(extras["x.mp3"], vec!["talks".to_string(), "news".to_string()]);
+        assert_eq!(extras["x.mp3"].genres, vec!["talks".to_string(), "news".to_string()]);
         assert!(slots.iter().all(|s| matches!(s.state, PluginState::Loaded)));
     }
 
     #[test]
     fn on_scan_error_or_invalid_reply_counts_as_failure_and_adds_nothing() {
-        let bad_path = ScanEnrichment { rel_path: "ghost.mp3".into(), genres: vec!["x".into()] };
-        let blank = ScanEnrichment { rel_path: "x.mp3".into(), genres: vec!["  ".into()] };
+        let bad_path = ScanEnrichment { metadata: Default::default(), rel_path: "ghost.mp3".into(), genres: vec!["x".into()] };
+        let blank = ScanEnrichment { metadata: Default::default(), rel_path: "x.mp3".into(), genres: vec!["  ".into()] };
         let mut slots = vec![
             loaded("err", Box::new(FixedScan(Err("boom".into())))),
             loaded("ghost", Box::new(FixedScan(Ok(vec![bad_path])))),
@@ -2383,5 +2482,73 @@ mod tests {
         sim.emit(PluginEvent::ListenersSampled { count: 1, at: 0 }); // no-op, no panic
         assert_eq!(sim.filter_pool(vec![cand("a.mp3")]).await.len(), 1);
         assert!(sim.simulation_notes().is_empty());
+    }
+    #[test]
+    fn metadata_only_replies_merge_first_wins_and_legacy_json_still_works() {
+        let legacy: ScanEnrichment = serde_json::from_str(r#"{"rel_path":"x.mp3","genres":["talks"]}"#).unwrap();
+        assert!(legacy.metadata.is_empty());
+        let reply = |value: &str| ScanEnrichment {
+            rel_path: "x.mp3".into(), genres: vec![],
+            metadata: [("tempo".into(), value.into())].into(),
+        };
+        let mut slots = vec![
+            loaded("first", Box::new(FixedScan(Ok(vec![reply("slow")])))),
+            loaded("second", Box::new(FixedScan(Ok(vec![reply("fast")])))),
+        ];
+        let extras = run_scan(&mut slots, &[scan_input("x.mp3", &[])]);
+        assert_eq!(extras["x.mp3"].metadata["tempo"], "slow");
+        assert!(extras["x.mp3"].genres.is_empty());
+        let known = ["x.mp3"].into_iter().collect();
+        for (key, value) in [("", "x"), ("bad key", "x"), ("tempo", " "), ("creation", "invalid")] {
+            let invalid = ScanEnrichment { rel_path: "x.mp3".into(), genres: vec![], metadata: [(key.into(), value.into())].into() };
+            assert!(validate_enrichment(&known, &[invalid]).is_err());
+        }
+    }
+
+}
+
+#[cfg(test)]
+mod bpm_policy_tests {
+    use super::*;
+    #[test]
+    fn analysis_requires_custom_tags_tempo_and_bpm_source() {
+        let parse = |extra: &str| toml::from_str::<PluginDecl>(&format!("name = 'custom-tags'\n[config.tempo]\n{extra}")).unwrap();
+        assert!(!parse("").requests_bpm_analysis());
+        assert!(parse("enabled = true").requests_bpm_analysis());
+        assert!(!parse("enabled = true\nanalyze_missing = false").requests_bpm_analysis());
+        assert!(!parse("enabled = false\nanalyze_missing = true").requests_bpm_analysis());
+        assert!(!parse("enabled = true\nsource_tags = ['Other']").requests_bpm_analysis());
+        let mut custom = parse("enabled = true\nsource_tags = ['bpm']");
+        assert!(custom.requests_bpm_analysis());
+        custom.name = "logger".into();
+        assert!(!custom.requests_bpm_analysis());
+    }
+    #[tokio::test]
+    async fn unloaded_plugin_does_not_trigger_analysis() {
+        let declaration: PluginDecl = toml::from_str("name = 'custom-tags'\nwasm = '/does/not/exist.wasm'\n[config.tempo]\nenabled = true").unwrap();
+        assert!(!spawn(vec![declaration]).analyze_missing_bpm().await);
+    }
+
+    #[test]
+    fn tag_hints_read_the_custom_tags_configuration() {
+        let d: PluginDecl = toml::from_str(
+            r#"
+name = "custom-tags"
+[config]
+tags = ["Type", " "]
+[config.tempo]
+enabled = true
+[[config.tempo.range]]
+max = 99
+value = "slow"
+[[config.tempo.range]]
+min = 100
+value = "fast"
+"#,
+        )
+        .unwrap();
+        let h = d.tag_hints();
+        assert_eq!(h.genre_sources, ["Type"]);
+        assert_eq!(h.tempo_labels, ["slow", "fast"]);
     }
 }

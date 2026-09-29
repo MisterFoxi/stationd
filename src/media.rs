@@ -43,8 +43,8 @@ pub struct ScannedMedia {
     pub artist: Option<String>,
     pub album: Option<String>,
     pub year: Option<u32>,
-    /// Set of genres (0..n). v1 reads the primary genre string as a single
-    /// element; multi-valued genre frames are a later refinement.
+    /// Set of genres (0..n): every value of the genre tag (`TCON`
+    /// multi-values), then the ones the plugins add (`on_scan`).
     pub genres: Vec<String>,
     /// Strictly positive (a zero-length file is skipped, never stored).
     pub duration_ms: u64,
@@ -97,6 +97,8 @@ pub struct ScanReport {
     /// Kept beside `media` rather than in `ScannedMedia`: transient plugin
     /// input, never a column of the index.
     pub custom_tags: std::collections::BTreeMap<String, Vec<CustomTag>>,
+    /// Plugin output, persisted with the library snapshot (never written to audio).
+    pub metadata: std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
 }
 
 impl ScanReport {
@@ -140,6 +142,21 @@ fn is_audio_ext(path: &Path) -> bool {
 /// Extract a 4-digit year from a tag value that may be a bare year (`2020`)
 /// or a full date (`2020-05-01`). Returns `None` if no leading 4-digit run in
 /// range 1..=9999 is present (kept in sync with the migration's CHECK).
+/// Every value of the genre tag, in file order: several `TCON` values
+/// (ID3v2.4 NUL-separated, 2.3 refinements), trimmed, case-insensitive
+/// duplicates dropped.
+pub(crate) fn genre_values(tag: &lofty::tag::Tag) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for g in tag.get_strings(lofty::tag::ItemKey::Genre) {
+        for v in g.split('\0').map(str::trim).filter(|v| !v.is_empty()) {
+            if !out.iter().any(|o| o.to_lowercase() == v.to_lowercase()) {
+                out.push(v.to_string());
+            }
+        }
+    }
+    out
+}
+
 pub(crate) fn parse_year(s: &str) -> Option<u32> {
     let digits: String = s.trim().chars().take_while(|c| c.is_ascii_digit()).collect();
     if digits.len() != 4 {
@@ -216,7 +233,10 @@ fn read_tagged(
     let probe = Probe::open(full)?;
     let Some(file_type) = probe.file_type() else {
         // Unknown to lofty by extension: let the generic path report it.
-        return Ok((probe.read()?, Vec::new()));
+        let tagged = probe.read()?;
+        let mut custom = Vec::new();
+        standard_plugin_tags(&tagged, &mut custom);
+        return Ok((tagged, custom));
     };
     let mut f = std::fs::File::open(full)?;
     let opts = ParseOptions::new();
@@ -283,12 +303,37 @@ fn read_tagged(
         // AAC (ADTS) and custom resolvers: no user-defined tag harvesting.
         _ => probe.read()?,
     };
+    standard_plugin_tags(&tagged, &mut custom);
     Ok((tagged, custom))
 }
 
 /// Read one audio file's tags + duration. Returns the media and its
 /// user-defined tags on success, `Err(SkipReason)` for a surfaced per-file
 /// failure.
+fn standard_plugin_tags(tagged: &lofty::file::TaggedFile, out: &mut Vec<CustomTag>) {
+    use lofty::file::TaggedFileExt;
+    use lofty::tag::ItemKey;
+    for tag in tagged.tags() {
+        for (key, name) in [
+            (ItemKey::Comment, "Comment"),
+            (ItemKey::Description, "Description"),
+            (ItemKey::PodcastDescription, "Description"),
+            (ItemKey::Bpm, "BPM"),
+            (ItemKey::IntegerBpm, "BPM"),
+        ] {
+            for value in tag.get_strings(key) {
+                let mut values = Vec::new();
+                push_custom(&mut values, name, value);
+                for value in values {
+                    if !out.iter().any(|t| t.name.eq_ignore_ascii_case(&value.name) && t.value == value.value) {
+                        out.push(value);
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn read_one(root: &Path, full: &Path) -> Result<(ScannedMedia, Vec<CustomTag>), SkipReason> {
     use lofty::file::{AudioFile, TaggedFileExt};
     use lofty::tag::{Accessor, ItemKey};
@@ -322,7 +367,7 @@ fn read_one(root: &Path, full: &Path) -> Result<(ScannedMedia, Vec<CustomTag>), 
                 tag.get_string(ItemKey::Year)
                     .or_else(|| tag.get_string(ItemKey::RecordingDate))
                     .and_then(parse_year),
-                tag.genre().map(|s| s.to_string()).into_iter().collect(),
+                genre_values(tag),
             ),
             None => (None, None, None, None, Vec::new()),
         };
@@ -545,4 +590,33 @@ mod tests {
         write_wav(&dir.path().join("plain.wav"), 1);
         assert!(scan_library(dir.path()).unwrap().custom_tags.is_empty());
     }
+    #[test]
+    fn standard_comment_description_and_bpm_reach_plugins_without_writing_audio() {
+        use lofty::config::{ParseOptions, WriteOptions};
+        use lofty::file::AudioFile;
+        use lofty::tag::{ItemKey, Tag, TagType};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("standard.wav");
+        write_wav(&path, 1);
+        let mut file = std::fs::OpenOptions::new().read(true).write(true).open(&path).unwrap();
+        let mut wav = lofty::iff::wav::WavFile::read_from(&mut file, ParseOptions::new()).unwrap();
+        let mut tag = Tag::new(TagType::Id3v2);
+        tag.insert_text(ItemKey::Comment, "created=2026-06-14T06:36:48Z".into());
+        tag.insert_text(ItemKey::IntegerBpm, "123".into());
+        tag.insert_text(ItemKey::PodcastDescription, "standard description".into());
+        let mut id3: lofty::id3::v2::Id3v2Tag = tag.into();
+        id3.insert_user_text("Description".into(), "description value".into());
+        wav.set_id3v2(id3);
+        wav.save_to(&mut file, WriteOptions::default()).unwrap();
+        drop(file);
+        let before = std::fs::read(&path).unwrap();
+        let report = scan_library(dir.path()).unwrap();
+        let tags = &report.custom_tags["standard.wav"];
+        for (name, value) in [("Comment", "created=2026-06-14T06:36:48Z"), ("Description", "description value"), ("Description", "standard description"), ("BPM", "123")] {
+            assert!(tags.iter().any(|t| t.name == name && t.value == value), "missing {name}: {tags:?}");
+        }
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert!(report.media[0].genres.is_empty());
+    }
+
 }

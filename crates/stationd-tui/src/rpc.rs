@@ -147,10 +147,19 @@ pub async fn list_genres(channel: Channel) -> Read<library::ListGenresResponse> 
     bounded(cli.list_genres(library::ListGenresRequest { only_available: true })).await
 }
 
-/// `LibraryService.GetTags` : les tags standard lus dans le fichier.
-pub async fn get_tags(channel: Channel, rel_path: String) -> Read<library::MediaTags> {
-    let mut cli = library::library_service_client::LibraryServiceClient::new(channel);
-    bounded(cli.get_tags(library::GetTagsRequest { rel_path })).await
+/// Ce qu'il faut pour ouvrir l'éditeur de tags : les tags du fichier et
+/// les genres connus (toute la bibliothèque, pour les proposer).
+pub async fn tag_form_data(
+    channel: Channel,
+    rel_path: String,
+) -> Read<(library::MediaTags, Vec<library::GenreCount>)> {
+    let mut a = library::library_service_client::LibraryServiceClient::new(channel);
+    let mut b = a.clone();
+    let (t, g) = tokio::join!(
+        bounded(a.get_tags(library::GetTagsRequest { rel_path })),
+        bounded(b.list_genres(library::ListGenresRequest { only_available: false })),
+    );
+    Ok((t?, g?.genres))
 }
 
 /// Fenêtres des statistiques d'une fiche média (la dernière vaut « depuis

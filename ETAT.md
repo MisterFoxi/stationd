@@ -322,6 +322,32 @@ verts. Essayé en réel (mp3 ID3v2.3 et 2.4 produits par ffmpeg, CLI et TUI).
   Autres formats refusés (`failed_precondition`).
 - TUI Médias : `e` (ligne, fiche, ou lot des marqués) → formulaire →
   confirmation qui liste les changements → `SetTags` ; liste et fiche relues.
+- **Genres, sources, BPM, tempo, date de création (2026-09-29, suite)** —
+  530 tests daemon + 45 TUI verts ; essayé en réel (CLI puis TUI, fichier
+  seul et lot, plugin `custom-tags` chargé). Chaque genre s'écrit à sa source :
+  - genres du fichier = `TCON` multi-valeurs (valeurs séparées par NUL ;
+    en 2.3 lofty l'écrit `(électro)house`, relu en deux genres) ; le scan
+    lit désormais toutes les valeurs (`media::genre_values`) ;
+  - sources = les `TXXX` listés dans `tags` de la config `custom-tags`
+    (ex. `Type`), multi-valeurs, toute variante de casse remplacée ;
+  - BPM = `TBPM` ;
+  - tempo / date de création manuels = `TXXX:tempo_manual` /
+    `TXXX:creation_manual`, appliqués par l'hôte après les plugins
+    (`library_actor::apply_manual`, au scan complet comme au rafraîchissement
+    d'un fichier) : l'emportent sur les valeurs déduites (BPM → libellé,
+    commentaire → date), marchent même sans plugin, date validée RFC 3339.
+  - proto `MediaTags` / `SetTagsRequest` : `genre` (6/7) réservé, remplacé par
+    `genres`, `sources`, `bpm`, `tempo_manual`, `creation_manual` (+ `tempo`,
+    `creation`, `tempo_choices` en lecture : libellés du plugin + valeurs de
+    `media_meta`). `PluginHandle::tag_hints()` lit sources et libellés dans
+    la config de `custom-tags`.
+  - CLI : `library tag --genre X` (répétable) `--no-genre` `--source
+    Type=a,b` `--bpm N` `--tempo L` `--creation DATE` (vide / 0 = retiré).
+  - TUI : formulaire dédié (`screens/tagform.rs`), genres et sources choisis
+    dans la liste des genres connus (filtre à la frappe, « ＋ nouveau » en
+    dernier), tempo en choix (auto / libellés). En lot : Espace = ajouter →
+    retirer → inchangé, fusionné fichier par fichier (relu avant écriture),
+    champ vide = inchangé.
 - TUI Playlists : la liste des genres proposés sous un filtre de genre n'est
   plus tronquée (tous, sur plusieurs lignes, sans couper un genre).
 

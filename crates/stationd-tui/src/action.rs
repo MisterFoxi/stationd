@@ -47,11 +47,45 @@ pub enum Action {
     RemovePlaylist { reference: String, revision: String },
     /// Relit toute la racine des playlists (`PlaylistService.Reload`).
     ReloadPlaylists,
-    /// Écrit des tags standard dans des fichiers (`LibraryService.SetTags`),
-    /// un par un. Révision vide = relue juste avant d'écrire (lot).
-    SetTags { targets: Vec<(String, String)>, edit: TagChanges },
+    /// Écrit des tags dans des fichiers (`LibraryService.SetTags`), un par
+    /// un. Révision vide = relue juste avant d'écrire (lot).
+    SetTags { targets: Vec<(String, String)>, edit: Box<TagChanges> },
     Plugin { name: String, verb: PluginVerb },
     Shutdown { force: bool },
+}
+
+/// Une liste de valeurs à écrire (genres, `Type`…).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ListEdit {
+    /// La liste devient exactement celle-ci (vide = retirée).
+    Replace(Vec<String>),
+    /// Lot : ces valeurs ajoutées / retirées, le reste de chaque fichier gardé.
+    Merge { add: Vec<String>, remove: Vec<String> },
+}
+
+impl ListEdit {
+    /// La liste d'un fichier après cette modification (casse ignorée pour
+    /// les doublons et le retrait, graphie existante gardée).
+    pub fn apply(&self, current: &[String]) -> Vec<String> {
+        let same = |a: &str, b: &str| a.trim().to_lowercase() == b.trim().to_lowercase();
+        let mut out: Vec<String> = Vec::new();
+        let push = |out: &mut Vec<String>, v: &str| {
+            if !v.trim().is_empty() && !out.iter().any(|o| same(o, v)) {
+                out.push(v.trim().to_string());
+            }
+        };
+        match self {
+            ListEdit::Replace(v) => v.iter().for_each(|x| push(&mut out, x)),
+            ListEdit::Merge { add, remove } => {
+                for x in current.iter().chain(add.iter()) {
+                    if !remove.iter().any(|r| same(r, x)) {
+                        push(&mut out, x);
+                    }
+                }
+            }
+        }
+        out
+    }
 }
 
 /// Tags à écrire : `None` = inchangé, `Some("")` / `Some(0)` = retiré.
@@ -61,12 +95,54 @@ pub struct TagChanges {
     pub artist: Option<String>,
     pub album: Option<String>,
     pub year: Option<u32>,
-    pub genre: Option<String>,
+    /// Genres du fichier (`TCON`).
+    pub genres: Option<ListEdit>,
+    /// Tags qui deviennent des genres (`Type`…), par nom.
+    pub sources: Vec<(String, ListEdit)>,
+    pub bpm: Option<u32>,
+    /// Tempo choisi à la main (`""` = revenir au tempo tiré du BPM).
+    pub tempo: Option<String>,
+    /// Date de création saisie (RFC 3339, `""` = revenir à la date dérivée).
+    pub creation: Option<String>,
 }
 
 impl TagChanges {
     pub fn is_empty(&self) -> bool {
         *self == Self::default()
+    }
+
+    /// Une fusion (lot) demande de relire chaque fichier avant d'écrire.
+    fn merges(&self) -> bool {
+        matches!(self.genres, Some(ListEdit::Merge { .. })) || self.sources.iter().any(|(_, e)| matches!(e, ListEdit::Merge { .. }))
+    }
+
+    /// La requête pour un fichier dont les tags actuels sont `current`.
+    pub fn request(&self, path: &str, revision: String, current: Option<&library::MediaTags>) -> library::SetTagsRequest {
+        let empty = Vec::new();
+        let genres_now = current.map(|c| &c.genres).unwrap_or(&empty);
+        library::SetTagsRequest {
+            rel_path: path.to_string(),
+            revision,
+            title: self.title.clone(),
+            artist: self.artist.clone(),
+            album: self.album.clone(),
+            year: self.year,
+            genres: self.genres.as_ref().map(|g| library::StringList { values: g.apply(genres_now) }),
+            sources: self
+                .sources
+                .iter()
+                .map(|(name, e)| {
+                    let now: Vec<String> = current
+                        .and_then(|c| c.sources.iter().find(|s| s.name.eq_ignore_ascii_case(name)))
+                        .map(|s| s.values.clone())
+                        .unwrap_or_default();
+                    library::TagValues { name: name.clone(), values: e.apply(&now) }
+                })
+                .collect(),
+            bpm: self.bpm,
+            tempo_manual: self.tempo.clone(),
+            creation_manual: self.creation.clone(),
+        }
     }
 }
 
@@ -249,26 +325,23 @@ pub async fn run(action: Action, channel: Channel, tz: Option<jiff::tz::TimeZone
             let total = targets.len();
             let (mut written, mut conflicts, mut failed) = (0, Vec::new(), Vec::new());
             for (path, revision) in targets {
-                let revision = if revision.is_empty() {
+                // Un lot relit chaque fichier : sa révision, et ses listes
+                // pour y ajouter / en retirer des valeurs.
+                let (revision, current) = if revision.is_empty() || edit.merges() {
                     match cli.get_tags(library::GetTagsRequest { rel_path: path.clone() }).await {
-                        Ok(r) => r.into_inner().revision,
+                        Ok(r) => {
+                            let t = r.into_inner();
+                            (if revision.is_empty() { t.revision.clone() } else { revision }, Some(t))
+                        }
                         Err(e) => {
                             failed.push(format!("{path} : {}", err(e)));
                             continue;
                         }
                     }
                 } else {
-                    revision
+                    (revision, None)
                 };
-                let req = library::SetTagsRequest {
-                    rel_path: path.clone(),
-                    revision,
-                    title: edit.title.clone(),
-                    artist: edit.artist.clone(),
-                    album: edit.album.clone(),
-                    year: edit.year,
-                    genre: edit.genre.clone(),
-                };
+                let req = edit.request(&path, revision, current.as_ref());
                 match cli.set_tags(req).await {
                     Ok(r) if r.get_ref().conflict => conflicts.push(path),
                     Ok(_) => written += 1,
@@ -330,5 +403,35 @@ pub async fn run(action: Action, channel: Channel, tz: Option<jiff::tz::TimeZone
                 ..Done::msg(if r.parked { tr!("done-shutdown") } else { tr!("done-shutdown-fallback") })
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_list_edit_replaces_or_merges_ignoring_case() {
+        let now = vec!["Électro".to_string(), "house".to_string()];
+        assert_eq!(ListEdit::Replace(vec!["a".into(), "A".into(), " ".into()]).apply(&now), ["a"]);
+        let m = ListEdit::Merge { add: vec!["électro".into(), "talks".into()], remove: vec!["HOUSE".into()] };
+        assert_eq!(m.apply(&now), ["Électro", "talks"], "graphie existante gardée, retrait sans casse");
+    }
+
+    #[test]
+    fn a_batch_request_merges_into_each_file() {
+        let c = TagChanges {
+            sources: vec![("Type".into(), ListEdit::Merge { add: vec!["news".into()], remove: vec![] })],
+            ..Default::default()
+        };
+        let cur = library::MediaTags {
+            sources: vec![library::TagValues { name: "type".into(), values: vec!["talks".into()] }],
+            genres: vec!["jazz".into()],
+            ..Default::default()
+        };
+        let r = c.request("a.mp3", "tags:1".into(), Some(&cur));
+        assert_eq!(r.sources[0].values, ["talks", "news"]);
+        assert!(r.genres.is_none(), "genres non touchés");
+        assert!(r.title.is_none());
     }
 }

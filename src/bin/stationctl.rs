@@ -356,9 +356,25 @@ enum LibraryCommand {
         album: Option<String>,
         #[arg(long)]
         year: Option<u32>,
-        /// The file's genre tag (one value)
+        /// Genres of the file (TCON): repeat for several; replaces them all
+        #[arg(long = "genre", value_name = "GENRE")]
+        genres: Vec<String>,
+        /// Remove every genre of the file (TCON)
+        #[arg(long, conflicts_with = "genres")]
+        no_genre: bool,
+        /// A user tag turned into genres by custom-tags, e.g. `Type=talks,news`
+        /// (replaces its values; `Type=` removes it). Repeatable
+        #[arg(long = "source", value_name = "NAME=V1,V2")]
+        sources: Vec<String>,
+        /// BPM (TBPM); 0 removes it
         #[arg(long)]
-        genre: Option<String>,
+        bpm: Option<u32>,
+        /// Manual tempo label (wins over the one derived from the BPM); "" removes it
+        #[arg(long)]
+        tempo: Option<String>,
+        /// Manual creation date, RFC 3339 (wins over the derived one); "" removes it
+        #[arg(long)]
+        creation: Option<String>,
         /// Refuse if the tags changed since this revision (from `library
         /// tags`); without it, the tags are read just before writing
         #[arg(long)]
@@ -590,7 +606,16 @@ fn print_tags(t: &library::MediaTags) {
     println!("artist:   {}", v(&t.artist));
     println!("album:    {}", v(&t.album));
     println!("year:     {}", if t.year == 0 { "-".to_string() } else { t.year.to_string() });
-    println!("genre:    {}", v(&t.genre));
+    println!("genres:   {}", v(&t.genres.join(", ")));
+    for src in &t.sources {
+        println!("{:<9} {}", format!("{}:", src.name), v(&src.values.join(", ")));
+    }
+    println!("bpm:      {}", if t.bpm == 0 { "-".to_string() } else { t.bpm.to_string() });
+    println!("tempo:    {}{}", v(&t.tempo), if t.tempo_manual.is_empty() { String::new() } else { format!("  (manual: {})", t.tempo_manual) });
+    println!("creation: {}{}", v(&t.creation), if t.creation_manual.is_empty() { String::new() } else { format!("  (manual: {})", t.creation_manual) });
+    if !t.tempo_choices.is_empty() {
+        println!("tempo labels: {}", t.tempo_choices.join(", "));
+    }
     println!("revision: {}", t.revision);
 }
 
@@ -929,14 +954,39 @@ async fn main() -> anyhow::Result<()> {
             let t = lib.get_tags(library::GetTagsRequest { rel_path: media }).await?.into_inner();
             print_tags(&t);
         }
-        Command::Library(LibraryCommand::Tag { media, title, artist, album, year, genre, revision }) => {
+        Command::Library(LibraryCommand::Tag {
+            media, title, artist, album, year, genres, no_genre, sources, bpm, tempo, creation, revision,
+        }) => {
             let mut lib = LibraryServiceClient::connect(args.addr.clone()).await?;
             let revision = match revision {
                 Some(r) => r,
                 None => lib.get_tags(library::GetTagsRequest { rel_path: media.clone() }).await?.into_inner().revision,
             };
+            let genres = (no_genre || !genres.is_empty()).then_some(library::StringList { values: genres });
+            let sources = sources
+                .iter()
+                .map(|s| {
+                    let (name, values) = s.split_once('=').ok_or_else(|| anyhow::anyhow!("--source `{s}`: expected NAME=V1,V2"))?;
+                    Ok(library::TagValues {
+                        name: name.trim().to_string(),
+                        values: values.split(',').map(|v| v.trim().to_string()).filter(|v| !v.is_empty()).collect(),
+                    })
+                })
+                .collect::<anyhow::Result<Vec<_>>>()?;
             let r = lib
-                .set_tags(library::SetTagsRequest { rel_path: media.clone(), revision, title, artist, album, year, genre })
+                .set_tags(library::SetTagsRequest {
+                    rel_path: media.clone(),
+                    revision,
+                    title,
+                    artist,
+                    album,
+                    year,
+                    genres,
+                    sources,
+                    bpm,
+                    tempo_manual: tempo,
+                    creation_manual: creation,
+                })
                 .await?
                 .into_inner();
             if r.conflict {

@@ -43,19 +43,24 @@ service LibraryService {
   // garde son chemin et son artiste.
   rpc Prune(PruneRequest) returns (PruneResponse);
 
-  // Les tags STANDARD tels qu'ils sont dans le fichier (titre, artiste,
-  // album, année, genre du fichier — pas les genres ajoutés par un plugin),
-  // avec leur révision. not_found si le fichier n'est pas sous la racine.
+  // Les tags tels qu'ils sont dans le fichier — titre, artiste, album,
+  // année, genres (TCON, toutes les valeurs), BPM (TBPM), tags utilisateur
+  // (TXXX) — avec leur révision, et ce qu'il faut pour les modifier : les
+  // TXXX que le plugin custom-tags transforme en genres, les libellés de
+  // tempo proposés, le tempo et la date de création effectifs. not_found si
+  // le fichier n'est pas sous la racine.
   rpc GetTags(GetTagsRequest) returns (MediaTags);
 
-  // Écrit des tags standard DANS le fichier (stationd seul écrit), puis
-  // relit le fichier (vérification après écriture, NFS) et met à jour
-  // l'index (plugins on_scan compris). Seuls les champs présents changent ;
-  // texte vide / année 0 = champ retiré. `revision` (de GetTags) : si les
-  // tags du fichier ont changé depuis, rien n'est écrit (conflict). La date
-  // de modification du fichier est conservée (ordre `mtime`, épisodes déjà
-  // joués). ID3v2 seulement (mp3, wav, aiff) : autre format =
-  // failed_precondition ; valeur invalide = invalid_argument.
+  // Écrit des tags DANS le fichier (stationd seul écrit), puis relit le
+  // fichier (vérification après écriture, NFS) et le repasse comme un scan :
+  // plugins on_scan, valeurs manuelles (tempo_manual / creation_manual
+  // l'emportent sur les valeurs dérivées), réécriture de TXXX:tempo /
+  // TXXX:creation, index et media_meta à jour. Seuls les champs présents
+  // changent ; texte vide / 0 / liste vide = champ retiré. `revision` (de
+  // GetTags) : si les tags du fichier ont changé depuis, rien n'est écrit
+  // (conflict). La date de modification du fichier est conservée. ID3v2
+  // seulement (mp3, wav, aiff) : autre format = failed_precondition ; valeur
+  // invalide = invalid_argument.
   rpc SetTags(SetTagsRequest) returns (SetTagsResponse);
 }
 
@@ -69,8 +74,27 @@ message MediaTags {
   string artist   = 3;
   string album    = 4;
   uint32 year     = 5;   // 0 = absente
-  string genre    = 6;   // le tag genre du fichier (une valeur)
+  reserved 6;            // (genre unique, remplacé par `genres`)
   string revision = 7;   // à renvoyer dans SetTags
+  repeated string genres = 8;          // TCON, toutes les valeurs, dans l'ordre du fichier
+  repeated TagValues sources = 9;      // TXXX qui deviennent des genres (config de custom-tags)
+  uint32 bpm = 10;                     // TBPM, 0 = absent
+  string tempo_manual = 11;            // TXXX:tempo_manual (vide = aucun)
+  string creation_manual = 12;         // TXXX:creation_manual (RFC 3339, vide = aucune)
+  string tempo = 13;                   // tempo effectif (index), vide = aucun
+  string creation = 14;                // date de création effective (index), vide = aucune
+  repeated string tempo_choices = 15;  // libellés des plages de custom-tags, puis ceux déjà utilisés
+}
+
+// Un tag à plusieurs valeurs.
+message TagValues {
+  string name = 1;
+  repeated string values = 2;
+}
+
+// Une liste présente = remplacée (vide = retirée).
+message StringList {
+  repeated string values = 1;
 }
 
 message SetTagsRequest {
@@ -80,7 +104,12 @@ message SetTagsRequest {
   optional string artist = 4;
   optional string album  = 5;
   optional uint32 year   = 6;    // 0 = retirée
-  optional string genre  = 7;
+  reserved 7;                    // (genre unique)
+  StringList genres = 8;         // absente = inchangés ; liste vide = TCON retiré
+  repeated TagValues sources = 9;  // chaque TXXX nommé est remplacé (liste vide = retiré)
+  optional uint32 bpm = 10;      // 0 = retiré
+  optional string tempo_manual = 11;     // "" = retiré (le tempo redevient celui du BPM)
+  optional string creation_manual = 12;  // RFC 3339 ; "" = retirée
 }
 
 message SetTagsResponse {

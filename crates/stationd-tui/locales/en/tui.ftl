@@ -705,10 +705,8 @@ done-playlists-reloaded = playlists re-read: { $added } applied, { $removed } dr
 help-media-edit-tags = edit the tags (in the file)
 form-tags-title = Tags of { $path }
 form-tags-many-title = Tags of { $n } files (empty = unchanged)
-form-tags-genre = genre (in the file)
 form-tags-nothing = nothing changed
 form-tags-read-failed = Cannot read the tags
-form-year-invalid = { $field }: a number from 1 to 9999, or empty
 confirm-tags-title = Write into the file
 confirm-tags-body = Write these tags into { $path }:
 confirm-tags-many-body = Write these tags into { $n } files:
@@ -718,3 +716,28 @@ confirm-tags-yes = Write
 done-tags-written = tags written into { $n } of { $total } file(s)
 done-tags-conflicts = changed meanwhile, nothing written: { $list }
 done-tags-failed = { $n } failure(s), including { $first }
+help-tags-write = write into the file(s)
+help-tags-list = pick from the list (genres)
+tags-form-keys = ↑↓ field · Enter list · ←→ tempo · Ctrl+S write · Esc cancel
+tags-genres = genres
+tags-bpm = BPM
+tags-tempo = tempo
+tags-creation = creation date
+tags-unchanged = unchanged
+tags-tempo-auto = auto (from the BPM)
+tags-tempo-auto-now = auto (from the BPM, now { $tempo })
+tags-creation-now = auto (now { $date })
+tags-bad-number = { $field }: a number from 1 to { $max }, or empty
+tags-bad-creation = creation date: as 2026-06-14T06:36:48Z (RFC 3339), or empty
+tags-help-single = empty = field removed from the file
+tags-help-batch = empty = unchanged in each file
+tags-help-list = Enter: pick from the known genres, or type a new one
+tags-help-tempo = ←→: a chosen label wins over the one from the BPM; "auto" goes back to the BPM
+tags-help-bpm = the tempo comes from it (custom-tags ranges) unless chosen by hand
+tags-help-creation = typed: wins over the date from the comment; empty: back to that one
+tags-picker-title = { $field }: check (Space)
+tags-picker-title-batch = { $field }: Space = add, then remove, then unchanged
+tags-picker-keys = type to filter · Space check · Enter confirm · Esc cancel
+tags-picker-new = ＋ new: "{ $genre }"
+tags-picker-none = no genre matches: Space adds it
+confirm-tags-merge = { $field }: + { $add } / − { $remove }

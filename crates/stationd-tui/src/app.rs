@@ -136,8 +136,9 @@ pub enum AppEvent {
     MediaTyped(u64, u64),
     /// Fiche d'un média (propriétaire, n° de requête).
     MediaCard(u64, u64, Box<crate::rpc::MediaCard>),
-    /// Tags d'un fichier lus pour les modifier (propriétaire, n° de requête).
-    MediaTags(u64, u64, Result<stationd_proto::library::MediaTags, String>),
+    /// Tags d'un fichier et genres connus, lus pour les modifier
+    /// (propriétaire, n° de requête).
+    MediaTags(u64, u64, Box<Result<(stationd_proto::library::MediaTags, Vec<stationd_proto::library::GenreCount>), String>>),
     /// Liste des playlists pour un sélecteur (propriétaire, n° de requête).
     PlaylistChoices(u64, u64, Result<Vec<stationd_proto::playlist::PlaylistSummary>, String>),
     /// Écran Playlists : réponses et minuteries (voir `screens::playlists`).

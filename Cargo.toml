@@ -31,6 +31,7 @@ tokio-stream = "0.1"   # flux serveur gRPC (OnAirService.Watch) ; déjà dans l'
 sqlx = { version = "0.7", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 toml_edit = "0.22"
+rustfft = "6.4" # Spectral flux for offline BPM estimation.
 walkdir = "2"
 sha2 = "0.10"          # révision d'un fichier de playlist (empreinte du contenu) ; déjà dans l'arbre via sqlx
 jiff = "0.2"

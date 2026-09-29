@@ -1,6 +1,8 @@
-//! Editing the STANDARD tags of a media file (title, artist, album, year,
-//! genre) — stationd writes, like everything that touches the station's
-//! files; a client (stationctl, the TUI) only sends the new values.
+//! Editing the tags of a media file — title, artist, album, year, genres
+//! (`TCON`, several values), BPM (`TBPM`) and user frames (`TXXX`: the ones
+//! a plugin turns into genres, `tempo_manual`, `creation_manual`) — stationd
+//! writes, like everything that touches the station's files; a client
+//! (stationctl, the TUI) only sends the new values.
 //!
 //! Pure and blocking (lofty + std): the library actor runs it off the async
 //! runtime and serialises it with the scans.
@@ -33,16 +35,41 @@ use lofty::tag::items::Timestamp;
 use lofty::tag::{Accessor, ItemKey, TagExt};
 use sha2::{Digest, Sha256};
 
-/// The standard fields, as the scanner reads them (primary tag).
+/// Manual tempo label: wins over the one derived from the BPM (the host puts
+/// it in `media_meta.tempo` after the plugins, and the scan writes it back
+/// into `TXXX:tempo`).
+pub const TEMPO_MANUAL: &str = "tempo_manual";
+/// Manual creation date (RFC 3339): wins over the one derived from the
+/// comment, same path as [`TEMPO_MANUAL`].
+pub const CREATION_MANUAL: &str = "creation_manual";
+
+/// The tags of a file, as the scanner reads them (primary tag for the
+/// standard fields; the ID3v2 user frames for `user`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StandardTags {
     pub title: Option<String>,
     pub artist: Option<String>,
     pub album: Option<String>,
     pub year: Option<u32>,
-    /// The file's genre tag (one string). Genres added by plugins at scan
-    /// time are not in the file and not edited here.
-    pub genre: Option<String>,
+    /// Every value of the genre tag (`TCON`), in file order.
+    pub genres: Vec<String>,
+    /// `TBPM` (a decimal BPM is rounded).
+    pub bpm: Option<u32>,
+    /// ID3v2 user text frames (`TXXX`), by description as written; values
+    /// split on NUL (ID3v2 multi-values).
+    pub user: std::collections::BTreeMap<String, Vec<String>>,
+}
+
+impl StandardTags {
+    /// Values of the user frame `name`, case-insensitively (as the scanner
+    /// and the plugins match names).
+    pub fn user_values(&self, name: &str) -> Vec<String> {
+        self.user
+            .iter()
+            .filter(|(k, _)| k.trim().eq_ignore_ascii_case(name.trim()))
+            .flat_map(|(_, v)| v.iter().cloned())
+            .collect()
+    }
 }
 
 /// One field of an edit: `None` = unchanged, `Some(None)` = removed,
@@ -55,31 +82,51 @@ pub struct TagEdit {
     pub artist: FieldEdit<String>,
     pub album: FieldEdit<String>,
     pub year: FieldEdit<u32>,
-    pub genre: FieldEdit<String>,
+    /// `Some(list)` replaces every genre value; an empty list removes `TCON`.
+    pub genres: Option<Vec<String>>,
+    pub bpm: FieldEdit<u32>,
+    /// User frames to replace (by name, case-insensitively); an empty list
+    /// removes the frame.
+    pub user: std::collections::BTreeMap<String, Vec<String>>,
 }
 
 impl TagEdit {
     pub fn is_empty(&self) -> bool {
-        self.title.is_none() && self.artist.is_none() && self.album.is_none() && self.year.is_none() && self.genre.is_none()
+        self.title.is_none()
+            && self.artist.is_none()
+            && self.album.is_none()
+            && self.year.is_none()
+            && self.genres.is_none()
+            && self.bpm.is_none()
+            && self.user.is_empty()
     }
 
-    /// `tags` with this edit applied (what the file must read back as).
-    pub fn apply_to(&self, tags: &StandardTags) -> StandardTags {
-        let pick = |e: &FieldEdit<String>, old: &Option<String>| match e {
-            None => old.clone(),
-            Some(v) => v.clone(),
+    /// Does `after` read back as this edit asked (edited fields only)?
+    fn kept_in(&self, after: &StandardTags) -> bool {
+        let same = |e: &FieldEdit<String>, v: &Option<String>| match e {
+            None => true,
+            Some(x) => x.as_deref().map(str::trim) == v.as_deref(),
         };
-        StandardTags {
-            title: pick(&self.title, &tags.title),
-            artist: pick(&self.artist, &tags.artist),
-            album: pick(&self.album, &tags.album),
-            year: match self.year {
-                None => tags.year,
-                Some(v) => v,
-            },
-            genre: pick(&self.genre, &tags.genre),
+        same(&self.title, &after.title)
+            && same(&self.artist, &after.artist)
+            && same(&self.album, &after.album)
+            && self.year.is_none_or(|y| y == after.year)
+            && self.bpm.is_none_or(|b| b == after.bpm)
+            && self.genres.as_ref().is_none_or(|g| clean(g) == after.genres)
+            && self.user.iter().all(|(k, v)| clean(v) == after.user_values(k))
+    }
+}
+
+/// Trimmed, non-empty, first spelling kept (case-insensitive duplicates
+/// dropped).
+fn clean(values: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for v in values.iter().map(|v| v.trim()).filter(|v| !v.is_empty()) {
+        if !out.iter().any(|o| o.to_lowercase() == v.to_lowercase()) {
+            out.push(v.to_string());
         }
     }
+    out
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -126,12 +173,12 @@ pub fn resolve(root: &Path, rel_path: &str) -> Result<PathBuf, TagError> {
     Ok(full)
 }
 
-/// Read the standard fields exactly as the scanner does, plus the size.
+/// Read the tags exactly as the scanner does, plus the size.
 pub fn read(full: &Path) -> Result<(StandardTags, u64), TagError> {
     let io = |e: &dyn std::fmt::Display| TagError::Io(format!("cannot read {}: {e}", full.display()));
     let size = std::fs::metadata(full).map_err(|e| io(&e))?.len();
     let tagged = lofty::read_from_path(full).map_err(|e| io(&e))?;
-    let tags = match tagged.primary_tag().or_else(|| tagged.first_tag()) {
+    let mut tags = match tagged.primary_tag().or_else(|| tagged.first_tag()) {
         Some(tag) => StandardTags {
             title: tag.title().map(|s| s.to_string()),
             artist: tag.artist().map(|s| s.to_string()),
@@ -140,18 +187,42 @@ pub fn read(full: &Path) -> Result<(StandardTags, u64), TagError> {
                 .get_string(ItemKey::Year)
                 .or_else(|| tag.get_string(ItemKey::RecordingDate))
                 .and_then(crate::media::parse_year),
-            genre: tag.genre().map(|s| s.to_string()),
+            genres: crate::media::genre_values(tag),
+            bpm: tag
+                .get_string(ItemKey::IntegerBpm)
+                .or_else(|| tag.get_string(ItemKey::Bpm))
+                .and_then(|b| b.trim().parse::<f64>().ok())
+                .filter(|b| b.is_finite() && *b > 0.0)
+                .map(|b| b.round() as u32),
+            user: Default::default(),
         },
         None => StandardTags::default(),
     };
+    if let Some(ftype) = id3v2_type(full) {
+        if let Ok((t, _)) = id3v2_of(full, ftype) {
+            for frame in &t {
+                if let Frame::UserText(u) = frame {
+                    let values: Vec<String> =
+                        u.content.split('\0').map(str::trim).filter(|v| !v.is_empty()).map(str::to_string).collect();
+                    tags.user.entry(u.description.to_string()).or_default().extend(values);
+                }
+            }
+        }
+    }
     Ok((tags, size))
 }
 
-/// `tags:<hex>` fingerprint of the standard fields and the size.
+/// The ID3v2 container type of `full`, if it is one this editor writes.
+fn id3v2_type(full: &Path) -> Option<FileType> {
+    let t = Probe::open(full).ok()?.guess_file_type().ok()?.file_type()?;
+    matches!(t, FileType::Mpeg | FileType::Wav | FileType::Aiff).then_some(t)
+}
+
+/// `tags:<hex>` fingerprint of every field read and the size.
 pub fn revision(tags: &StandardTags, size: u64) -> String {
     let mut h = Sha256::new();
-    for f in [&tags.title, &tags.artist, &tags.album, &tags.genre] {
-        match f {
+    let mut put = |v: Option<&str>| {
+        match v {
             Some(v) => {
                 h.update([1]);
                 h.update(v.as_bytes());
@@ -159,8 +230,22 @@ pub fn revision(tags: &StandardTags, size: u64) -> String {
             None => h.update([0]),
         }
         h.update([0xff]);
+    };
+    for f in [&tags.title, &tags.artist, &tags.album] {
+        put(f.as_deref());
+    }
+    for g in &tags.genres {
+        put(Some(g));
+    }
+    put(Some("|"));
+    for (k, vs) in &tags.user {
+        put(Some(k));
+        for v in vs {
+            put(Some(v));
+        }
     }
     h.update(tags.year.unwrap_or(0).to_le_bytes());
+    h.update(tags.bpm.unwrap_or(0).to_le_bytes());
     h.update(size.to_le_bytes());
     let digest = h.finalize();
     let mut out = String::from("tags:");
@@ -179,11 +264,26 @@ fn check(edit: &TagEdit) -> Result<(), TagError> {
             return Err(TagError::BadValue(format!("year {y} is out of range (1-9999)")));
         }
     }
-    for (name, v) in [("title", &edit.title), ("artist", &edit.artist), ("album", &edit.album), ("genre", &edit.genre)] {
+    if let Some(Some(b)) = edit.bpm {
+        if !(1..=999).contains(&b) {
+            return Err(TagError::BadValue(format!("BPM {b} is out of range (1-999)")));
+        }
+    }
+    for (name, v) in [("title", &edit.title), ("artist", &edit.artist), ("album", &edit.album)] {
         if let Some(Some(s)) = v {
             if s.trim().is_empty() {
                 return Err(TagError::BadValue(format!("{name}: an empty text removes the field, send it as absent")));
             }
+        }
+    }
+    for name in edit.user.keys() {
+        if name.trim().is_empty() {
+            return Err(TagError::BadValue("a user frame needs a name".into()));
+        }
+    }
+    if let Some(v) = edit.user.iter().find(|(k, _)| k.eq_ignore_ascii_case(CREATION_MANUAL)).and_then(|(_, v)| clean(v).into_iter().next()) {
+        if v.parse::<jiff::Timestamp>().is_err() {
+            return Err(TagError::BadValue(format!("{CREATION_MANUAL}: `{v}` is not an RFC 3339 date (2026-06-14T06:36:48Z)")));
         }
     }
     Ok(())
@@ -191,7 +291,7 @@ fn check(edit: &TagEdit) -> Result<(), TagError> {
 
 /// The file's current ID3v2 tag and its version, or a new 2.3 seeded from
 /// ID3v1.
-fn id3v2_of(full: &Path, ftype: FileType) -> Result<(Id3v2Tag, Id3v2Version), TagError> {
+pub(crate) fn id3v2_of(full: &Path, ftype: FileType) -> Result<(Id3v2Tag, Id3v2Version), TagError> {
     let io = |e: &dyn std::fmt::Display| TagError::Io(format!("cannot read {}: {e}", full.display()));
     let mut f = std::fs::File::open(full).map_err(|e| io(&e))?;
     let opts = ParseOptions::new();
@@ -247,15 +347,9 @@ fn id3v2_of(full: &Path, ftype: FileType) -> Result<(Id3v2Tag, Id3v2Version), Ta
 /// no check). Returns the tags read back and the new revision.
 pub fn write(full: &Path, rel_path: &str, expected: &str, edit: &TagEdit) -> Result<(StandardTags, String), TagError> {
     check(edit)?;
-    let ftype = Probe::open(full)
-        .map_err(|e| TagError::Io(format!("cannot read {}: {e}", full.display())))?
-        .guess_file_type()
-        .map_err(|e| TagError::Io(format!("cannot read {}: {e}", full.display())))?
-        .file_type();
-    if !matches!(ftype, Some(FileType::Mpeg | FileType::Wav | FileType::Aiff)) {
+    let Some(ftype) = id3v2_type(full) else {
         return Err(TagError::Unsupported(rel_path.to_string()));
-    }
-    let ftype = ftype.expect("checked above");
+    };
 
     let (before, size) = read(full)?;
     let current = revision(&before, size);
@@ -275,7 +369,47 @@ pub fn write(full: &Path, rel_path: &str, expected: &str, edit: &TagEdit) -> Res
     text(&mut tag, &edit.title, |t, v| t.set_title(v), |t| t.remove_title());
     text(&mut tag, &edit.artist, |t, v| t.set_artist(v), |t| t.remove_artist());
     text(&mut tag, &edit.album, |t, v| t.set_album(v), |t| t.remove_album());
-    text(&mut tag, &edit.genre, |t, v| t.set_genre(v), |t| t.remove_genre());
+    // Genres: one TCON frame, values NUL-separated (ID3v2.4 multi-values;
+    // lofty writes the 2.3 form and reads both back as separate genres).
+    if let Some(genres) = &edit.genres {
+        tag.remove_genre();
+        let values = clean(genres);
+        if !values.is_empty() {
+            tag.insert(Frame::Text(TextInformationFrame::new(
+                FrameId::Valid(Cow::Borrowed("TCON")),
+                TextEncoding::UTF16,
+                values.join("\0"),
+            )));
+        }
+    }
+    let tbpm = FrameId::Valid(Cow::Borrowed("TBPM"));
+    match edit.bpm {
+        None => {}
+        Some(None) => {
+            let _ = tag.remove(&tbpm).count();
+        }
+        Some(Some(b)) => {
+            let _ = tag.remove(&tbpm).count();
+            tag.insert(Frame::Text(TextInformationFrame::new(tbpm.clone(), TextEncoding::UTF16, b.to_string())));
+        }
+    }
+    for (name, values) in &edit.user {
+        // Every case variant of the name goes: one frame remains.
+        let variants: Vec<String> = (&tag)
+            .into_iter()
+            .filter_map(|f| match f {
+                Frame::UserText(u) if u.description.trim().eq_ignore_ascii_case(name.trim()) => Some(u.description.to_string()),
+                _ => None,
+            })
+            .collect();
+        for v in variants {
+            tag.remove_user_text(&v);
+        }
+        let values = clean(values);
+        if !values.is_empty() {
+            tag.insert_user_text(name.trim().to_string(), values.join("\0"));
+        }
+    }
     // The year, in the frame of the tag's version: TYER for 2.3, TDRC for
     // 2.4 (lofty drops a TDRC on a 2.3 write). Both are cleared first so a
     // single year remains.
@@ -302,11 +436,10 @@ pub fn write(full: &Path, rel_path: &str, expected: &str, edit: &TagEdit) -> Res
         }
     }
 
-    let wanted = edit.apply_to(&before);
     let (after, size) = read(full)?;
-    if after != wanted {
+    if !edit.kept_in(&after) {
         return Err(TagError::NotKept(format!(
-            "the tags of {rel_path} read back differ from what was written (read {after:?}, wanted {wanted:?})"
+            "the tags of {rel_path} read back differ from what was written (read {after:?}, wanted {edit:?})"
         )));
     }
     Ok((after.clone(), revision(&after, size)))
@@ -363,12 +496,12 @@ mod tests {
         let (tags, size) = read(&p).unwrap();
         assert_eq!(tags.title.as_deref(), Some("Old"));
         let rev = revision(&tags, size);
-        let edit = TagEdit { title: set("New"), artist: set("Air"), year: Some(Some(1998)), genre: set("ambient"), ..Default::default() };
+        let edit = TagEdit { title: set("New"), artist: set("Air"), year: Some(Some(1998)), genres: Some(vec!["ambient".into()]), ..Default::default() };
         let (after, rev2) = write(&p, "a.wav", &rev, &edit).unwrap();
         assert_eq!(after.title.as_deref(), Some("New"));
         assert_eq!(after.artist.as_deref(), Some("Air"));
         assert_eq!(after.year, Some(1998));
-        assert_eq!(after.genre.as_deref(), Some("ambient"));
+        assert_eq!(after.genres, ["ambient"]);
         assert_ne!(rev, rev2);
         assert_eq!(std::fs::metadata(&p).unwrap().modified().unwrap(), old, "mtime put back");
 
@@ -384,6 +517,62 @@ mod tests {
         let r = write(&p, "a.wav", &rev2, &TagEdit { title: set("X"), ..Default::default() });
         assert!(matches!(r, Err(TagError::Conflict { .. })), "{r:?}");
         assert_eq!(read(&p).unwrap().0.title.as_deref(), Some("New"));
+    }
+
+    #[test]
+    fn several_genres_user_frames_bpm_and_manual_values_round_trip() {
+        for v23 in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let p = dir.path().join("a.wav");
+            wav(&p);
+            {
+                let mut file = std::fs::OpenOptions::new().read(true).write(true).open(&p).unwrap();
+                let mut w = lofty::iff::wav::WavFile::read_from(&mut file, ParseOptions::new()).unwrap();
+                let mut t = Id3v2Tag::default();
+                t.insert_user_text("type".into(), "talks".into());
+                t.insert_user_text("Comment".into(), "keep me".into());
+                w.set_id3v2(t);
+                drop(file);
+                w.save_to_path(&p, WriteOptions::default().use_id3v23(v23)).unwrap();
+            }
+            let (before, size) = read(&p).unwrap();
+            assert_eq!(before.user_values("Type"), ["talks"], "noms sans casse");
+            let mut user = std::collections::BTreeMap::new();
+            user.insert("Type".to_string(), vec!["song".to_string(), "news".to_string(), "SONG".to_string()]);
+            user.insert(TEMPO_MANUAL.to_string(), vec!["lent".to_string()]);
+            user.insert(CREATION_MANUAL.to_string(), vec!["2026-06-14T06:36:48Z".to_string()]);
+            let edit = TagEdit {
+                genres: Some(vec!["électro".into(), " house ".into(), "Électro".into()]),
+                bpm: Some(Some(124)),
+                user,
+                ..Default::default()
+            };
+            let (after, _) = write(&p, "a.wav", &revision(&before, size), &edit).unwrap();
+            assert_eq!(after.genres, ["électro", "house"], "v2.3 = {v23}");
+            assert_eq!(after.bpm, Some(124));
+            assert_eq!(after.user_values("Type"), ["song", "news"]);
+            assert_eq!(after.user.keys().filter(|k| k.eq_ignore_ascii_case("type")).count(), 1, "une seule trame");
+            assert_eq!(after.user_values(TEMPO_MANUAL), ["lent"]);
+            assert_eq!(after.user_values("Comment"), ["keep me"], "trame non touchée gardée");
+            // The scanner sees every genre.
+            let report = crate::media::scan_library(dir.path()).unwrap();
+            assert_eq!(report.media[0].genres, ["électro", "house"]);
+            // Removal: empty lists.
+            let mut user = std::collections::BTreeMap::new();
+            user.insert("type".to_string(), vec![]);
+            user.insert(TEMPO_MANUAL.to_string(), vec![String::new()]);
+            let (after, _) = write(&p, "a.wav", "", &TagEdit { genres: Some(vec![]), bpm: Some(None), user, ..Default::default() }).unwrap();
+            assert!(after.genres.is_empty() && after.bpm.is_none());
+            assert!(after.user_values("Type").is_empty() && after.user_values(TEMPO_MANUAL).is_empty());
+        }
+        // A creation that is not RFC 3339 is refused before anything is written.
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("b.wav");
+        wav(&p);
+        let mut user = std::collections::BTreeMap::new();
+        user.insert(CREATION_MANUAL.to_string(), vec!["14/06/2026".to_string()]);
+        assert!(matches!(write(&p, "b.wav", "", &TagEdit { user, ..Default::default() }), Err(TagError::BadValue(_))));
+        assert!(matches!(write(&p, "b.wav", "", &TagEdit { bpm: Some(Some(0)), ..Default::default() }), Err(TagError::BadValue(_))));
     }
 
     #[test]

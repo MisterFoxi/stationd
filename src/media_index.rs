@@ -56,7 +56,30 @@ pub async fn replace_library(
     scanned: &[ScannedMedia],
     scanned_at: i64,
 ) -> Result<ReplaceStats, sqlx::Error> {
+    replace_library_with_metadata(pool, scanned, &Default::default(), scanned_at).await
+}
+
+/// Persist metadata in the SAME transaction as media and genres. Each scan is
+/// authoritative: removed tags or disabled plugins cannot leave stale values.
+pub async fn replace_library_with_metadata(
+    pool: &SqlitePool,
+    scanned: &[ScannedMedia],
+    metadata: &std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
+    scanned_at: i64,
+) -> Result<ReplaceStats, sqlx::Error> {
+    replace_library_with_writeback(pool, scanned, metadata, &Default::default(), scanned_at).await
+}
+
+/// Move play-once guards only for files actually changed by this scan's writer.
+pub async fn replace_library_with_writeback(
+    pool: &SqlitePool,
+    scanned: &[ScannedMedia],
+    metadata: &std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
+    originals: &crate::scan_writeback::Originals,
+    scanned_at: i64,
+) -> Result<ReplaceStats, sqlx::Error> {
     let mut tx = pool.begin().await?;
+    sqlx::query("DELETE FROM media_meta").execute(&mut *tx).await?;
 
     // 0. What was available before: the ones this scan does not see again
     //    vanished at this scan (the report tells them from older ones).
@@ -73,6 +96,11 @@ pub async fn replace_library(
 
     // 2. Upsert every file the scan saw.
     for m in scanned {
+        if let Some((old_size, old_mtime)) = originals.get(&m.rel_path) {
+            sqlx::query("UPDATE episode_play SET size_bytes = ?1, mtime_ns = ?2 WHERE rel_path = ?3 AND size_bytes = ?4 AND mtime_ns = ?5")
+                .bind(m.size_bytes as i64).bind(m.mtime_ns).bind(&m.rel_path)
+                .bind(*old_size as i64).bind(*old_mtime).execute(&mut *tx).await?;
+        }
         sqlx::query(
             "INSERT INTO media
                  (rel_path, title, artist, album, year, duration_ms, size_bytes, mtime_ns, available, scanned_at)
@@ -93,6 +121,19 @@ pub async fn replace_library(
         .bind(scanned_at)
         .execute(&mut *tx)
         .await?;
+
+        if let Some(values) = metadata.get(&m.rel_path) {
+            for (key, value) in values {
+                // UTC with fixed fractional precision sorts chronologically,
+                // including equal instants originally carrying different offsets.
+                let value = if key == "creation" {
+                    normalize_creation(value).map_err(sqlx::Error::Protocol)?
+                } else { value.clone() };
+                sqlx::query("INSERT INTO media_meta (rel_path, key, value) VALUES (?1, ?2, ?3)")
+                    .bind(&m.rel_path).bind(key).bind(value)
+                    .execute(&mut *tx).await?;
+            }
+        }
 
         // Replace the genre set for this path (no FK cascade relied upon).
         sqlx::query("DELETE FROM media_genre WHERE rel_path = ?1")
@@ -133,6 +174,17 @@ pub async fn replace_library(
 /// guards of this file that matched its previous size / mtime follow it (a
 /// tag edit is not a new episode). Returns the row.
 pub async fn refresh_one(pool: &SqlitePool, m: &ScannedMedia, scanned_at: i64) -> Result<Option<MediaRow>, sqlx::Error> {
+    refresh_one_with(pool, m, None, scanned_at).await
+}
+
+/// [`refresh_one`], and when `metadata` is given, the file's `media_meta`
+/// rows replaced by it (after a tag edit: tempo / creation re-derived).
+pub async fn refresh_one_with(
+    pool: &SqlitePool,
+    m: &ScannedMedia,
+    metadata: Option<&std::collections::BTreeMap<String, String>>,
+    scanned_at: i64,
+) -> Result<Option<MediaRow>, sqlx::Error> {
     let mut tx = pool.begin().await?;
     let before: Option<(i64, i64)> = sqlx::query_as("SELECT size_bytes, mtime_ns FROM media WHERE rel_path = ?1")
         .bind(&m.rel_path)
@@ -180,8 +232,40 @@ pub async fn refresh_one(pool: &SqlitePool, m: &ScannedMedia, scanned_at: i64) -
         .execute(&mut *tx)
         .await?;
     }
+    if let Some(values) = metadata {
+        sqlx::query("DELETE FROM media_meta WHERE rel_path = ?1").bind(&m.rel_path).execute(&mut *tx).await?;
+        for (key, value) in values {
+            let value = if key == "creation" { normalize_creation(value).map_err(sqlx::Error::Protocol)? } else { value.clone() };
+            sqlx::query("INSERT INTO media_meta (rel_path, key, value) VALUES (?1, ?2, ?3)")
+                .bind(&m.rel_path)
+                .bind(key)
+                .bind(value)
+                .execute(&mut *tx)
+                .await?;
+        }
+    }
     tx.commit().await?;
     row(pool, &m.rel_path).await
+}
+
+/// The `media_meta` values of one media (tempo, creation…).
+pub async fn meta_of(pool: &SqlitePool, rel_path: &str) -> Result<std::collections::BTreeMap<String, String>, sqlx::Error> {
+    let rows: Vec<(String, String)> = sqlx::query_as("SELECT key, value FROM media_meta WHERE rel_path = ?1 ORDER BY key")
+        .bind(rel_path)
+        .fetch_all(pool)
+        .await?;
+    Ok(rows.into_iter().collect())
+}
+
+/// Distinct values of a `media_meta` key across the library, most used
+/// first (the tempo labels already in use…).
+pub async fn meta_values(pool: &SqlitePool, key: &str) -> Result<Vec<String>, sqlx::Error> {
+    let rows: Vec<(String,)> =
+        sqlx::query_as("SELECT value FROM media_meta WHERE key = ?1 GROUP BY value ORDER BY count(*) DESC, value")
+            .bind(key)
+            .fetch_all(pool)
+            .await?;
+    Ok(rows.into_iter().map(|(v,)| v).collect())
 }
 
 /// Columns of a media row as read by [`row`].
@@ -945,4 +1029,31 @@ mod tests {
         assert_eq!(all.genres.len(), 1);
         assert_eq!(all.untagged, 1);
     }
+}
+
+/// Strict RFC3339 shape, calendar validation by jiff, and one sortable UTC form.
+/// Fixed nanosecond precision prevents prefix ordering mistakes at whole seconds.
+pub(crate) fn normalize_creation(value: &str) -> Result<String, String> {
+    let bad = || "expected an RFC3339 timestamp with offset".to_string();
+    let b = value.as_bytes();
+    if b.len() < 20 || !value.is_ascii()
+        || b[4] != b'-' || b[7] != b'-' || !matches!(b[10], b'T' | b't')
+        || b[13] != b':' || b[16] != b':'
+        || [0..4, 5..7, 8..10, 11..13, 14..16, 17..19].iter()
+            .any(|r| !b[r.clone()].iter().all(u8::is_ascii_digit))
+    { return Err(bad()); }
+    let mut offset = 19;
+    if b.get(offset) == Some(&b'.') {
+        offset += 1;
+        let start = offset;
+        while b.get(offset).is_some_and(u8::is_ascii_digit) { offset += 1; }
+        if start == offset { return Err(bad()); }
+    }
+    let zone = &b[offset..];
+    if !(zone == b"Z" || zone == b"z" || (zone.len() == 6
+        && matches!(zone[0], b'+' | b'-') && zone[3] == b':'
+        && zone[1..3].iter().chain(zone[4..6].iter()).all(u8::is_ascii_digit)))
+    { return Err(bad()); }
+    let timestamp = value.parse::<jiff::Timestamp>().map_err(|_| bad())?;
+    Ok(format!("{timestamp:.9}"))
 }
