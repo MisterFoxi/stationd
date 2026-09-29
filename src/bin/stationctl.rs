@@ -355,6 +355,13 @@ enum LibraryCommand {
         #[arg(long)]
         all: bool,
     },
+    /// Forget the media that vanished from disk (kept as unavailable by the
+    /// scans). The play history keeps their path and artist.
+    Prune {
+        /// Only those last seen more than this long ago (e.g. 30d, 12h)
+        #[arg(long)]
+        older_than: Option<String>,
+    },
     /// Search the index, one page at a time: words (title, artist, album,
     /// path; case-insensitive, accented capitals included), filters, stable sort.
     Search {
@@ -845,13 +852,29 @@ async fn main() -> anyhow::Result<()> {
                 std::process::exit(1);
             }
         }
+        Command::Library(LibraryCommand::Prune { older_than }) => {
+            let mut lib = LibraryServiceClient::connect(args.addr.clone()).await?;
+            let r = lib
+                .prune(library::PruneRequest { older_than: older_than.unwrap_or_default() })
+                .await?
+                .into_inner();
+            println!("forgotten: {} vanished media", r.removed);
+        }
         Command::Library(LibraryCommand::Scan) => {
             let mut lib = LibraryServiceClient::connect(args.addr.clone()).await?;
             let reply = lib.scan(ScanRequest {}).await?.into_inner();
             println!("found:       {}", reply.found);
             println!("skipped:     {}", reply.skipped);
             println!("present:     {}", reply.present);
-            println!("unavailable: {}", reply.unavailable);
+            println!("vanished:    {} (known before, not seen by this scan)", reply.vanished);
+            if reply.unavailable > 0 {
+                println!(
+                    "unavailable: {} in all (vanished files kept in the index; `library prune` forgets them)",
+                    reply.unavailable
+                );
+            } else {
+                println!("unavailable: 0");
+            }
             if !reply.skips.is_empty() {
                 println!("skips:");
                 for s in &reply.skips {

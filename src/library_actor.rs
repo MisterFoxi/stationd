@@ -74,6 +74,10 @@ enum Command {
         query: Box<SearchQuery>,
         reply: oneshot::Sender<Result<SearchPage, LibraryError>>,
     },
+    Prune {
+        seen_before: Option<i64>,
+        reply: oneshot::Sender<Result<u64, LibraryError>>,
+    },
 }
 
 /// Cheap, clonable handle to the library actor. Every caller (gRPC handler,
@@ -129,6 +133,17 @@ impl LibraryHandle {
         rx.await.map_err(|_| LibraryError::ActorGone)?
     }
 
+    /// Forget the media that vanished from disk (see
+    /// `media_index::prune_unavailable`). Serialised with the scans.
+    pub async fn prune(&self, seen_before: Option<i64>) -> Result<u64, LibraryError> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::Prune { seen_before, reply })
+            .await
+            .map_err(|_| LibraryError::ActorGone)?;
+        rx.await.map_err(|_| LibraryError::ActorGone)?
+    }
+
     /// Genre inventory (case-folded buckets + untagged count), same
     /// `only_available` scope as [`list`](Self::list).
     pub async fn genres(&self, only_available: bool) -> Result<GenreInventory, LibraryError> {
@@ -168,6 +183,10 @@ pub fn spawn_with(pool: SqlitePool, root: PathBuf, plugins: Option<PluginHandle>
                     let out = media_index::genres(&pool, only_available)
                         .await
                         .map_err(LibraryError::from);
+                    let _ = reply.send(out);
+                }
+                Command::Prune { seen_before, reply } => {
+                    let out = media_index::prune_unavailable(&pool, seen_before).await.map_err(LibraryError::from);
                     let _ = reply.send(out);
                 }
                 Command::Search { query, reply } => {

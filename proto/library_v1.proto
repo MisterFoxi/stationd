@@ -36,6 +36,20 @@ service LibraryService {
   // tri stable (clé puis chemin), pagination par curseur, total. Lecture
   // seule ; ListMedia reste pour le CLI (tout d'un coup).
   rpc SearchMedia(SearchMediaRequest) returns (SearchMediaResponse);
+
+  // Oublie les médias disparus du disque (lignes available = 0 et leurs
+  // genres). `older_than` ("30d", "12h"…) : seulement ceux que le dernier
+  // scan qui les a vus date d'avant ; vide = tous. L'historique de diffusion
+  // garde son chemin et son artiste.
+  rpc Prune(PruneRequest) returns (PruneResponse);
+}
+
+message PruneRequest {
+  string older_than = 1;
+}
+
+message PruneResponse {
+  uint64 removed = 1;
 }
 
 message ScanRequest {}
@@ -44,7 +58,8 @@ message ScanResponse {
   uint32 found       = 1;   // fichiers jouables trouvés à ce scan
   uint32 skipped     = 2;   // fichiers d'extension audio écartés (avec raison)
   uint32 present     = 3;   // lignes available après réconciliation
-  uint32 unavailable = 4;   // lignes connues mais disparues (available = 0)
+  uint32 unavailable = 4;   // lignes connues mais disparues (available = 0), tous scans confondus
+  uint32 vanished    = 6;   // disponibles avant ce scan et non revus : disparus À CE SCAN
   repeated Skip skips = 5;
 }
 

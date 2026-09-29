@@ -37,8 +37,10 @@ pub struct MediaRow {
 pub struct ReplaceStats {
     /// Rows available after this scan (files present on disk).
     pub present: usize,
-    /// Rows still known but now absent (available = 0).
+    /// Rows still known but now absent (available = 0), all scans together.
     pub unavailable: usize,
+    /// Rows available before this scan and not seen by it: what vanished NOW.
+    pub vanished: usize,
 }
 
 /// Reconcile a full scan snapshot into the view, in one transaction:
@@ -55,6 +57,14 @@ pub async fn replace_library(
     scanned_at: i64,
 ) -> Result<ReplaceStats, sqlx::Error> {
     let mut tx = pool.begin().await?;
+
+    // 0. What was available before: the ones this scan does not see again
+    //    vanished at this scan (the report tells them from older ones).
+    let before: Vec<(String,)> = sqlx::query_as("SELECT rel_path FROM media WHERE available = 1")
+        .fetch_all(&mut *tx)
+        .await?;
+    let seen: std::collections::HashSet<&str> = scanned.iter().map(|m| m.rel_path.as_str()).collect();
+    let vanished = before.iter().filter(|(p,)| !seen.contains(p.as_str())).count();
 
     // 1. Nothing is available until this scan re-affirms it.
     sqlx::query("UPDATE media SET available = 0")
@@ -114,7 +124,25 @@ pub async fn replace_library(
     Ok(ReplaceStats {
         present: present as usize,
         unavailable: unavailable as usize,
+        vanished,
     })
+}
+
+/// Forget the media that vanished from disk (`available = 0`): their rows
+/// and genres. `seen_before` = only those last seen by a scan before this
+/// epoch (s); `None` = all of them. The play history keeps its own path and
+/// artist (titles of forgotten media are no longer shown). Returns how many
+/// were forgotten.
+pub async fn prune_unavailable(pool: &SqlitePool, seen_before: Option<i64>) -> Result<u64, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    let cond = "available = 0 AND (?1 IS NULL OR scanned_at < ?1)";
+    sqlx::query(&format!("DELETE FROM media_genre WHERE rel_path IN (SELECT rel_path FROM media WHERE {cond})"))
+        .bind(seen_before)
+        .execute(&mut *tx)
+        .await?;
+    let r = sqlx::query(&format!("DELETE FROM media WHERE {cond}")).bind(seen_before).execute(&mut *tx).await?;
+    tx.commit().await?;
+    Ok(r.rows_affected())
 }
 
 /// Case-folding key for genre comparison: trimmed, Unicode lowercase. Done in
@@ -673,6 +701,25 @@ mod tests {
             assert_eq!(seen, want, "descending = {descending}");
         }
         assert!(SearchCursor::decode("pas un curseur").is_none());
+    }
+
+    #[tokio::test]
+    async fn a_scan_reports_what_vanished_now_and_prune_forgets_it() {
+        let (_dir, pool) = fresh_db().await;
+        replace_library(&pool, &[sample("a.mp3", &["x"]), sample("b.mp3", &[])], 100).await.unwrap();
+        let s = replace_library(&pool, &[sample("b.mp3", &[])], 200).await.unwrap();
+        assert_eq!((s.present, s.unavailable, s.vanished), (1, 1, 1));
+        // Nothing changed: nothing vanished now, one still known as gone.
+        let s = replace_library(&pool, &[sample("b.mp3", &[])], 300).await.unwrap();
+        assert_eq!((s.present, s.unavailable, s.vanished), (1, 1, 0));
+        // Last seen at 100: kept by a prune of what was seen before 50…
+        assert_eq!(prune_unavailable(&pool, Some(50)).await.unwrap(), 0);
+        // …forgotten by a full one, genres included.
+        assert_eq!(prune_unavailable(&pool, None).await.unwrap(), 1);
+        let s = replace_library(&pool, &[sample("b.mp3", &[])], 400).await.unwrap();
+        assert_eq!((s.present, s.unavailable, s.vanished), (1, 0, 0));
+        let (g,): (i64,) = sqlx::query_as("SELECT count(*) FROM media_genre").fetch_one(&pool).await.unwrap();
+        assert_eq!(g, 0);
     }
 
     #[tokio::test]

@@ -14,7 +14,7 @@ pub use crate::proto::library;
 use library::library_service_server::LibraryService;
 use library::{
     GenreCount, ListGenresRequest, ListGenresResponse, ListMediaRequest, ListMediaResponse, Media,
-    ScanRequest, ScanResponse, SearchMediaRequest, SearchMediaResponse, Skip,
+    PruneRequest, PruneResponse, ScanRequest, ScanResponse, SearchMediaRequest, SearchMediaResponse, Skip,
 };
 
 pub struct LibraryGrpc {
@@ -129,8 +129,23 @@ impl LibraryService for LibraryGrpc {
             skipped,
             present: outcome.stats.present as u32,
             unavailable: outcome.stats.unavailable as u32,
+            vanished: outcome.stats.vanished as u32,
             skips,
         }))
+    }
+
+    async fn prune(&self, request: Request<PruneRequest>) -> Result<Response<PruneResponse>, Status> {
+        let older = request.into_inner().older_than;
+        let seen_before = if older.trim().is_empty() {
+            None
+        } else {
+            let secs = crate::playlist::parse_duration_secs(older.trim()).map_err(Status::invalid_argument)?;
+            let now = jiff::Timestamp::now().as_second();
+            Some(now - secs as i64)
+        };
+        let removed = self.handle.prune(seen_before).await.map_err(map_error)?;
+        tracing::info!(removed, older_than = %older, "library: vanished media forgotten");
+        Ok(Response::new(PruneResponse { removed }))
     }
 
     async fn list_media(

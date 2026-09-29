@@ -29,11 +29,19 @@ pub struct BroadcastGrpc {
     control: StationControl,
     /// Liquidsoap control socket, when wired (`Skip` needs it).
     ls: Option<crate::ls_control::LsControl>,
+    /// Media root: a media override naming a file that is not there is
+    /// refused at push (not accepted, then dropped when it would air).
+    media_root: Option<std::path::PathBuf>,
 }
 
 impl BroadcastGrpc {
     pub fn new(control: StationControl) -> Self {
-        Self { control, ls: None }
+        Self { control, ls: None, media_root: None }
+    }
+
+    pub fn with_media_root(mut self, root: impl Into<std::path::PathBuf>) -> Self {
+        self.media_root = Some(root.into());
+        self
     }
 
     pub fn with_liquidsoap(mut self, ls: crate::ls_control::LsControl) -> Self {
@@ -128,7 +136,17 @@ impl BroadcastService for BroadcastGrpc {
     ) -> Result<Response<PushOverrideResponse>, Status> {
         let req = request.into_inner();
         let content = match req.content {
-            Some(ProtoContent::MediaPath(p)) => OverrideContent::Media(p),
+            Some(ProtoContent::MediaPath(p)) => {
+                if let Some(root) = &self.media_root {
+                    let rel = crate::station_control::normalize_media_ref(&p).map_err(Status::invalid_argument)?;
+                    if !root.join(&rel).is_file() {
+                        return Err(Status::not_found(format!(
+                            "media `{rel}` not found under the media root (moved or removed? `library scan` updates the index)"
+                        )));
+                    }
+                }
+                OverrideContent::Media(p)
+            }
             Some(ProtoContent::PlaylistRef(r)) => OverrideContent::Playlist(r),
             None => return Err(Status::invalid_argument("media_path or playlist_ref is required")),
         };
@@ -196,5 +214,32 @@ impl BroadcastService for BroadcastGrpc {
         Ok(Response::new(ClearOverridesResponse {
             removed: removed as u32,
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn push(path: &str) -> PushOverrideRequest {
+        PushOverrideRequest {
+            content: Some(ProtoContent::MediaPath(path.into())),
+            mode: ProtoMode::Soft as i32,
+            expiry: String::new(),
+            tracks: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_media_override_on_a_missing_file_is_refused_at_push() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("Rock")).unwrap();
+        std::fs::write(dir.path().join("Rock/a.mp3"), b"x").unwrap();
+        let svc = BroadcastGrpc::new(StationControl::new_in_memory()).with_media_root(dir.path());
+        let e = svc.push_override(Request::new(push("rock/a.mp3"))).await.unwrap_err();
+        assert_eq!(e.code(), tonic::Code::NotFound, "case matters on the disk");
+        assert!(svc.control.list_overrides().is_empty());
+        svc.push_override(Request::new(push("Rock/a.mp3"))).await.unwrap();
+        assert_eq!(svc.control.list_overrides().len(), 1);
     }
 }

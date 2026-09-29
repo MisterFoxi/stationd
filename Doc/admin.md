@@ -82,7 +82,7 @@ Réveils automatiques (core) : audience devenue inconnue, DJ qui prend l'antenne
 | `schedule preview` | Projection de la grille sur une fenêtre, en UTC et en heure locale | `--at <epoch>` (défaut maintenant) ; `--window <s>` (défaut 86400) |
 | `schedule check` | Assez de médias par règle ? OK / ⚠ juste / ✗ insuffisant ; un ✗ = code ≠ 0 | `--rule <id>` (répétable) |
 | `queue push <REF> <MEDIA>` | Ajoute un média au tampon d'une playlist `queue` (demande d'auditeur, injection DJ) ; refusé si `max_len` atteint | `<REF>` : playlist queue ; `<MEDIA>` : chemin relatif |
-| `override push` | Contenu poussé devant la grille. `soft` = au prochain bord de piste | `--media <chemin>` ou `--playlist <ref>` ; `--hard` (coupe maintenant ; dégradé en soft sans Liquidsoap ou en pause/veille) ; `--expiry 30s\|5m\|2h` (défaut jamais périmé) ; `--tracks <n>` (playlist, défaut 1) |
+| `override push` | Contenu poussé devant la grille. `soft` = au prochain bord de piste. Un média absent du disque est refusé tout de suite (`NotFound`) | `--media <chemin>` ou `--playlist <ref>` ; `--hard` (coupe maintenant ; dégradé en soft sans Liquidsoap ou en pause/veille) ; `--expiry 30s\|5m\|2h` (défaut jamais périmé) ; `--tracks <n>` (playlist, défaut 1) |
 | `override list` | Overrides en attente, dans l'ordre de passage | — |
 | `override clear` | Retire un override, ou tous | `--id <n>` (absent = tous) |
 | `clock show` | Horloge effective | — |
@@ -93,7 +93,8 @@ Réveils automatiques (core) : audience devenue inconnue, DJ qui prend l'antenne
 
 | Commande | Effet | Paramètres |
 | --- | --- | --- |
-| `library scan` | Scanne `[media] library_path` et réconcilie l'index ; un fichier illisible est signalé, pas bloquant | — |
+| `library scan` | Scanne `[media] library_path` et réconcilie l'index ; un fichier illisible est signalé, pas bloquant. Un fichier disparu reste dans l'index, marqué indisponible : `vanished` = disparus **à ce scan**, `unavailable` = disparus au total | — |
+| `library prune` | Oublie les médias disparus (lignes indisponibles et leurs genres). L'historique de diffusion garde leur chemin et leur artiste (plus leur titre) | `--older-than <durée>` (seulement ceux vus pour la dernière fois il y a plus de, ex. `30d`) |
 | `library list` | Index des médias (disponibles seulement par défaut) | `--all` (inclut les fichiers disparus) ; `--genre <g>` (répétable, OU) ; `--by-genre` (groupé par genre) |
 | `library genres` | Nombre de médias par genre + sans genre | `--all` |
 | `library search [MOTS]` | Recherche par page : chaque mot doit apparaître dans le titre, l'artiste, l'album ou le chemin (casse ignorée, majuscules accentuées comprises) ; tri stable (clé puis chemin) ; affiche le curseur de la page suivante | `--genre <g>` (répétable, OU) ; `--folder <dossier>` ; `--missing title\|artist\|album\|year\|genre` (répétable : manque tout) ; `--sort path\|title\|artist\|album\|year\|duration` ; `--desc` ; `--limit <n>` (défaut 50, max 500) ; `--cursor <c>` ; `--all` |

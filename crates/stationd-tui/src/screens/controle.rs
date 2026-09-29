@@ -376,10 +376,11 @@ impl Controle {
             field(tr!("control-scan-found"), Span::raw(r.found.to_string()), s),
             field(tr!("control-scan-present"), Span::raw(r.present.to_string()), s),
             field(
-                tr!("control-scan-unavailable"),
-                Span::styled(r.unavailable.to_string(), if r.unavailable > 0 { s.warn() } else { Style::default() }),
+                tr!("control-scan-vanished"),
+                Span::styled(r.vanished.to_string(), if r.vanished > 0 { s.warn() } else { Style::default() }),
                 s,
             ),
+            field(tr!("control-scan-unavailable"), Span::styled(r.unavailable.to_string(), s.muted()), s),
             field(
                 tr!("control-scan-skipped"),
                 Span::styled(r.skipped.to_string(), if r.skipped > 0 { s.warn() } else { Style::default() }),

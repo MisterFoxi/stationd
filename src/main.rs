@@ -120,7 +120,8 @@ async fn main() -> anyhow::Result<()> {
     );
     control.attach_plugins(plugins.clone());
     let plugin_service = PluginGrpc::new(plugins.clone());
-    let mut broadcast_service = BroadcastGrpc::new(control.clone());
+    let mut broadcast_service =
+        BroadcastGrpc::new(control.clone()).with_media_root(cfg.media.library_path.clone());
 
     // Grid engine: the live resolver over the SQLite-backed grid, in the
     // station timezone. `sync_grid` reconciles the Every counter rows for the

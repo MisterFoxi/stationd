@@ -182,7 +182,7 @@ pub async fn run(action: Action, channel: Channel, tz: Option<jiff::tz::TimeZone
                 .map_err(err)?
                 .into_inner();
             Ok(Done {
-                message: tr!("done-scan", found = r.found, skipped = r.skipped, unavailable = r.unavailable),
+                message: tr!("done-scan", found = r.found, skipped = r.skipped, vanished = r.vanished, unavailable = r.unavailable),
                 scan: Some(r),
                 exits: false,
             })

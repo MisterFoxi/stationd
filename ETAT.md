@@ -255,6 +255,21 @@ Essayé en réel (120×32 fr, 90×24 de).
 - Au passage : le curseur de saisie d'un écran n'est plus effacé par
   l'application (seule une modale le reprend).
 
+**Correctif 2026-09-29 — override d'un média disparu** (constaté sur
+devstationd : override poussé depuis Médias, accepté, puis abandonné 2 min
+plus tard « not found under the media root » — l'index datait d'avant une
+réorganisation de la bibliothèque) :
+- `BroadcastService.PushOverride` refuse tout de suite (`NOT_FOUND`) un
+  média absent sous la racine (casse comprise) ; testé.
+- Un override média constaté absent au moment de passer marque le média
+  indisponible dans l'index (comme les pistes de playlist) ; testé.
+- Scan : nouveau compteur `vanished` (disparus À CE SCAN) à côté
+  d'`unavailable` (total des disparus gardés dans l'index) ; CLI et TUI
+  (Contrôle › Bibliothèque).
+- `LibraryService.Prune` + `stationctl library prune [--older-than 30d]` :
+  oublie les disparus (lignes + genres). L'historique de diffusion garde
+  chemin et artiste, perd le titre.
+
 **Suivant : lot 4b** — écran Playlists (`3`) : liste (`PlaylistService.List`
 + `Export` pour l'état du fichier), éditeur par mode (formulaire à gauche,
 TOML + diagnostics à droite, `toml_edit` pour garder les commentaires,

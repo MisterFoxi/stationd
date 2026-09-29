@@ -1538,6 +1538,8 @@ impl GridEngine {
                     // No playlist produced it: no leaf, never an unplayed_only mark.
                     Ok(Resolved::File { path: path.clone(), leaf: None })
                 } else {
+                    // Keep the index honest: it is no longer offered as available.
+                    crate::media_index::mark_unavailable(&self.pool, path).await?;
                     Err(format!("media `{path}` not found under the media root"))
                 }
             }
@@ -2699,6 +2701,23 @@ mode = "dynamic""#;
         assert_eq!(r.media_path.as_deref(), Some("music/a.mp3"));
         assert!(r.override_source.is_none());
         assert_eq!(r.decision.origin, Origin::BaseRotation);
+    }
+
+    #[tokio::test]
+    async fn a_media_override_missing_on_disk_is_dropped_and_marked_unavailable() {
+        let (dir, eng) = engine_with_floor().await;
+        let root = dir.path().join("media");
+        std::fs::create_dir_all(root.join("music")).unwrap();
+        std::fs::write(root.join("music/a.mp3"), b"x").unwrap();
+        let eng = eng.with_media_root(&root);
+        // Indexed, but gone from the disk since the last scan.
+        eng.control().push_override(media_override("news/flash.mp3"), "cli").unwrap();
+        let r = eng.next_media(at(9, 0)).await.unwrap();
+        assert_eq!(r.media_path.as_deref(), Some("music/a.mp3"), "dropped: the grid airs");
+        assert!(eng.control().list_overrides().is_empty());
+        let available: Vec<_> =
+            crate::media_index::list(&eng.pool, true, &[]).await.unwrap().into_iter().map(|m| m.rel_path).collect();
+        assert!(!available.contains(&"news/flash.mp3".to_string()), "{available:?}");
     }
 
     #[tokio::test]
