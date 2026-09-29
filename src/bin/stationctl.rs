@@ -1876,7 +1876,7 @@ fn onair_note(n: &onair::Note, tz: &jiff::tz::TimeZone) -> String {
         Ok(C::SleepArmed) => "sleep armed: the station stops as soon as nobody listens".into(),
         Ok(C::LiveOnAir) => format!("DJ {} on air: what follows depends on the end of the live", n.dj),
         Ok(C::NoLiquidsoap) => "no [liquidsoap]: nothing airs; this is what the grid would pick".into(),
-        Ok(C::Simulated) => "simulated: one possible sequence (shuffles, overrides, a live, a new grid can change it)".into(),
+        Ok(C::Simulated) => "simulated: what the station will play if nothing changes meanwhile (an override, a live, a new grid, a rescan can change it)".into(),
         Ok(C::PoolEmpty) => "nothing left to air in the grid at that point: dead air (Liquidsoap fills it)".into(),
         Ok(C::Fallback) => "FALLBACK: no rule covers that moment".into(),
         Ok(C::StreamUnknownDuration) => format!("relay {}: unknown duration, no estimated time beyond", n.media),

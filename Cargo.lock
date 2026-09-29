@@ -4104,6 +4104,7 @@ dependencies = [
  "prost 0.13.5",
  "prost-types",
  "rand",
+ "rand_chacha",
  "roxmltree",
  "rusqlite",
  "rustfft",

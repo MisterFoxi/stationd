@@ -10,8 +10,10 @@
 //! log that feeds anti-repetition, `unplayed_only` marks) lands in the copy —
 //! so the simulation is faithful — and nowhere else.
 //!
-//! What it is NOT: a promise. Shuffles are drawn afresh, an override or a DJ
-//! can come in, the grid can be re-applied. `notes` say why a simulation
+//! Random draws are reproducible (`draw`): the copy draws what the real pull
+//! will draw, so a shuffle airs as simulated. What it is NOT: a promise — an
+//! override or a DJ can come in, the grid can be re-applied, a rescan can
+//! change a pool. `notes` say why a simulation
 //! stopped short; the caller adds what it knows about the station itself.
 //!
 //! Logs of the simulated run are silenced (it runs at every track change).
@@ -298,6 +300,15 @@ mod tests {
 
     /// Music (5 tracks of `music_s` seconds) on the floor, news hard every 15 min.
     async fn station(music_s: u64) -> (tempfile::TempDir, std::path::PathBuf, sqlx::SqlitePool) {
+        station_with(music_s, "music", &[]).await
+    }
+
+    /// Like [`station`], with `floor` on the floor and `extra` playlists (key, TOML).
+    async fn station_with(
+        music_s: u64,
+        floor: &str,
+        extra: &[(&str, &str)],
+    ) -> (tempfile::TempDir, std::path::PathBuf, sqlx::SqlitePool) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("live.db");
         let pool = crate::db::init(&path).await.unwrap();
@@ -323,7 +334,11 @@ mod tests {
             let pl = crate::playlist::Playlist::parse(&toml).unwrap();
             crate::store::upsert(&pool, r, &pl, &toml, Some(r)).await.unwrap();
         }
-        insert_rule(&pool, &rule("floor", RuleKind::BaseRotation { playlist_ref: "music".into() }))
+        for (r, toml) in extra {
+            let pl = crate::playlist::Playlist::parse(toml).unwrap();
+            crate::store::upsert(&pool, r, &pl, toml, Some(r)).await.unwrap();
+        }
+        insert_rule(&pool, &rule("floor", RuleKind::BaseRotation { playlist_ref: floor.into() }))
             .await
             .unwrap();
         insert_rule(
@@ -484,5 +499,66 @@ mod tests {
             .expect("predicted");
         assert_eq!((hard.rule_id.as_deref(), hard.playlist_ref.as_str(), hard.first_at), (Some("news"), "news", at(9, 15)));
         assert!(control.incidents_since(Epoch(0)).is_empty(), "nothing recorded on the real station");
+    }
+
+    /// What the real station airs from `at`: the same engine calls as the air
+    /// (pull, track start, track left at its end), on the LIVE database.
+    async fn airs(pool: &sqlx::SqlitePool, at: Epoch, count: usize) -> Vec<String> {
+        let engine = GridEngine::new(pool.clone(), "UTC");
+        let mut t = at;
+        let mut out = Vec::new();
+        for _ in 0..count {
+            let r = engine.next_media(t).await.unwrap();
+            let media = r.media_path.clone().unwrap();
+            engine.on_track_completed().await.unwrap();
+            let (_, _, _, d) = crate::media_index::brief(pool, &media).await.unwrap().unwrap();
+            let end = Epoch(t.0 + (d + 999) / 1000);
+            engine.track_left(r.log_id, &media, r.leaf_ref.as_deref(), end.0 - t.0, end).await.unwrap();
+            out.push(media);
+            t = end;
+        }
+        out
+    }
+
+    async fn simulated(path: &Path, at: Epoch, count: usize) -> Vec<String> {
+        let control = StationControl::new_in_memory();
+        let out = simulate(SimStart { live_db: path, tz: "UTC", control: &control, plugins: None, at, at_known: true, count })
+            .await;
+        assert_eq!(out.tracks.len(), count, "notes: {:?}", out.notes);
+        out.tracks.into_iter().map(|t| t.media).collect()
+    }
+
+    #[tokio::test]
+    async fn what_is_simulated_is_what_airs_from_a_shuffle() {
+        let (_d, path, pool) = station(60).await;
+        // Some history first: the simulation starts mid-way, not from a fresh station.
+        airs(&pool, at(9, 1), 2).await;
+        let sim = simulated(&path, at(9, 3), 10).await;
+        assert_eq!(airs(&pool, at(9, 3), 10).await, sim);
+    }
+
+    #[tokio::test]
+    async fn what_is_simulated_is_what_airs_from_groups() {
+        // A shuffle group (permutation drawn per cycle) holding a weighted group.
+        let (_d, path, pool) = station_with(
+            60,
+            "mix",
+            &[
+                (
+                    "mix",
+                    "name = \"mix\"\n[selection]\nmode = \"group\"\nstrategy = \"shuffle\"\n\
+                     members = [{ ref = \"w\", take = 2 }, { ref = \"music\", take = 1 }, { ref = \"news\", take = 1 }]\n",
+                ),
+                (
+                    "w",
+                    "name = \"w\"\n[selection]\nmode = \"group\"\nstrategy = \"weighted\"\n\
+                     members = [{ ref = \"music\", weight = 30 }, { ref = \"news\", weight = 10 }]\n",
+                ),
+            ],
+        )
+        .await;
+        airs(&pool, at(9, 1), 3).await;
+        let sim = simulated(&path, at(9, 4), 12).await;
+        assert_eq!(airs(&pool, at(9, 4), 12).await, sim);
     }
 }

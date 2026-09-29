@@ -358,11 +358,10 @@ async fn resolve_leaf(
 
     // 3. Choose from the filtered pool.
     match order {
-        Order::Shuffle => Ok(candidates
-            .choose(&mut rand::thread_rng())
-            .expect("non-empty pool")
-            .rel_path
-            .clone()),
+        Order::Shuffle => {
+            let mut rng = crate::draw::rng(pool, &format!("pick:{reference}")).await?;
+            Ok(candidates.choose(&mut rng).expect("non-empty pool").rel_path.clone())
+        }
         Order::Sequential => cursor_pick(pool, reference, &candidates).await,
         Order::Newest => {
             let key = order_key(sel)?;
@@ -503,7 +502,7 @@ async fn resolve_group_rotation(
                 st.member_idx = 0;
                 st.take_count = 0;
                 st.member_started_at = None;
-                new_permutation(n)
+                new_permutation(pool, group_ref, n).await?
             }
         }
     } else {
@@ -527,7 +526,7 @@ async fn resolve_group_rotation(
             st.take_count = 0;
             st.member_started_at = None;
             if shuffle {
-                order = new_permutation(n);
+                order = new_permutation(pool, group_ref, n).await?;
             }
         }
 
@@ -575,7 +574,7 @@ async fn resolve_group_rotation(
                     st.take_count = 0;
                     st.member_started_at = None;
                     if shuffle {
-                        order = new_permutation(n);
+                        order = new_permutation(pool, group_ref, n).await?;
                     }
                 }
                 st.permutation = shuffle.then(|| order.clone());
@@ -646,9 +645,11 @@ async fn resolve_group_weighted(
 
     // Bounded: each failed draw under `skip` removes one member, so at most
     // `members.len()` iterations before the pool is empty.
+    // One draw per turn (`draw`), reused by the `skip` re-draws.
+    let mut rng = crate::draw::rng(pool, &format!("weight:{group_ref}")).await?;
     while !eligible.is_empty() {
         let &(member_i, _) = eligible
-            .choose_weighted(&mut rand::thread_rng(), |&(_, w)| w)
+            .choose_weighted(&mut rng, |&(_, w)| w)
             .map_err(|_| SelectionError::PoolEmpty)?;
         let member = &sel.members[member_i];
         let member_key = crate::playlist::resolve_member_ref(group_ref, &member.r#ref)
@@ -667,11 +668,13 @@ async fn resolve_group_weighted(
     Err(SelectionError::PoolEmpty)
 }
 
-/// A fresh random permutation of member indices `0..n` (for `shuffle`).
-fn new_permutation(n: usize) -> Vec<usize> {
+/// A fresh random permutation of member indices `0..n` (for `shuffle`),
+/// drawn reproducibly (`draw`) so the on-air simulation draws the same.
+async fn new_permutation(pool: &SqlitePool, group_ref: &str, n: usize) -> Result<Vec<usize>, SelectionError> {
+    let mut rng = crate::draw::rng(pool, &format!("perm:{group_ref}")).await?;
     let mut order: Vec<usize> = (0..n).collect();
-    order.shuffle(&mut rand::thread_rng());
-    order
+    order.shuffle(&mut rng);
+    Ok(order)
 }
 
 /// A member's time budget in seconds, if it carries a `runtime` quota. The

@@ -14,6 +14,7 @@ pub mod broadcast_log;
 pub mod clock;
 pub mod config;
 pub mod db;
+pub mod draw;
 pub mod episode_play;
 pub mod grid_engine;
 pub mod grid_index;

@@ -22,6 +22,12 @@ pub enum DbError {
         #[source]
         source: sqlx::migrate::MigrateError,
     },
+    #[error("could not create the draw seed in {path}: {source}")]
+    Seed {
+        path: PathBuf,
+        #[source]
+        source: sqlx::Error,
+    },
     #[error("could not copy {path} into memory: {source}")]
     Copy {
         path: PathBuf,
@@ -69,6 +75,12 @@ pub async fn init(path: &Path) -> Result<SqlitePool, DbError> {
             path: path.to_path_buf(),
             source,
         })?;
+    // The station seed of the selection's draws (`draw`): here, not in a
+    // migration — `memory_copy` runs the migrations before copying the rows.
+    crate::draw::ensure_seed(&pool).await.map_err(|source| DbError::Seed {
+        path: path.to_path_buf(),
+        source,
+    })?;
 
     Ok(pool)
 }

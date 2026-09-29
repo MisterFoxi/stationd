@@ -6,8 +6,9 @@
 //
 // Lecture pure : rien ici ne modifie la station. Les morceaux « à suivre »
 // au-delà du préchargé sont une SIMULATION faite sur une copie en mémoire de
-// la base (même moteur, mêmes plugins en mode simulation) : une suite
-// possible, pas une promesse — les `notes` disent ce qui peut la changer.
+// la base (même moteur, mêmes plugins en mode simulation, mêmes tirages au
+// sort — `src/draw.rs`) : ce que la station jouera si rien ne change, pas une
+// promesse — les `notes` disent ce qui peut la changer.
 //
 // No-silent-failure : inconnu = champ absent (optional), jamais 0 ; une
 // simulation impossible ou tronquée le dit dans `notes`.
@@ -105,7 +106,7 @@ message Note {
     SLEEP_ARMED = 4;             // veille armée : dès qu'il n'y aura plus d'auditeur
     LIVE_ON_AIR = 5;             // un DJ tient l'antenne : la suite dépend de la fin du live
     NO_LIQUIDSOAP = 6;           // pas de [liquidsoap] : rien n'est diffusé, suite = ce que choisirait la grille
-    SIMULATED = 7;               // suite simulée : une suite possible
+    SIMULATED = 7;               // suite simulée : ce qui sera joué si rien ne change
     POOL_EMPTY = 8;              // plus rien de diffusable dans la grille : blanc
     FALLBACK = 9;                // aucune règle ne couvre ce moment
     STREAM_UNKNOWN_DURATION = 10;// relais d'un flux : durée inconnue, heures estimées impossibles au-delà

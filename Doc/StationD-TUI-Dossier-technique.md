@@ -106,9 +106,12 @@ l'appel, échec non compté mais signalé en note, aucun événement
 
 Pas de simulation (et une note) quand la station est en pause, en veille, en
 veille imminente (0 auditeur), ou qu'un DJ est à l'antenne. Sans Liquidsoap,
-la simulation montre ce que la grille choisirait (note). Les ordres aléatoires
-sont retirés à chaque simulation : la liste peut changer d'un instantané à
-l'autre, c'est dit en note.
+la simulation montre ce que la grille choisirait (note). Les tirages au sort
+(shuffle, permutation d'un groupe, membre pondéré) sont reproductibles
+(`src/draw.rs` : graine de la station + compteur par playlist, en base) : la
+copie tire ce que tirera l'antenne, la liste ne change que si l'état change
+(override, live, grille, rescan, fenêtre de contrainte franchie à un autre
+instant).
 
 ### 3.3 bis Incidents de grille — fait au lot 2
 

@@ -351,6 +351,33 @@ verts. Essayé en réel (mp3 ID3v2.3 et 2.4 produits par ffmpeg, CLI et TUI).
 - TUI Playlists : la liste des genres proposés sous un filtre de genre n'est
   plus tronquée (tous, sur plusieurs lignes, sans couper un genre).
 
+**Correctif « À suivre » ≠ ce qui est joué (2026-09-29)** — 535 tests
+daemon verts. Cause : les tirages au sort de la sélection (`thread_rng` :
+morceau d'une feuille `shuffle`, permutation d'un groupe `shuffle` à chaque
+cycle, membre d'un groupe `weighted`) étaient refaits par la simulation
+(`onair_sim`, copie de la base) puis autrement par le vrai passage : dès
+qu'une playlist était en shuffle, la liste divergeait.
+- `src/draw.rs` : tirage = fonction de l'état EN BASE — graine de la station
+  (`rng_seed`, 32 octets, créée une fois par `db::init`, pas par la
+  migration : `memory_copy` rejoue les migrations avant de copier les lignes)
+  et compteur par portée (`rng_draws` : `pick:<playlist>`, `perm:<groupe>`,
+  `weight:<groupe>`) ; ChaCha8 (`rand_chacha`, déjà dans le lock) : clé
+  dérivée graine + FNV-1a de la portée (stable d'une version de Rust à
+  l'autre), flux n = n-ième tirage. Compteur par portée : un override ou un
+  rendez-vous qui tire ailleurs ne décale pas les autres playlists.
+- Migration `0024_rng.sql`. `selection.rs` : les 4 tirages passent par
+  `draw::rng`.
+- Tests `onair_sim` : simulation de N morceaux puis N vrais passages sur la
+  base réelle → même suite (feuille shuffle ; groupe shuffle contenant un
+  groupe pondéré) ; échouent sans le correctif. Tests `draw` (copie = live,
+  portées indépendantes, FNV stable).
+- Divergences restantes (assumées, dites en note) : override, live, grille
+  appliquée, rescan, fenêtre de contrainte franchie à un autre instant ; en
+  GL `runtime`, bascule de membre à l'heure réelle (fondus) — les titres
+  dans la GL importent peu (décision utilisateur). Libellé de la note
+  `SIMULATED` revu (fr/en/de, stationctl).
+- À valider sur devstationd (la station de run2 n'a pas de grille).
+
 **Suivant** : valider 4b sur devstationd, puis lot 5 (stationd : diagnostics
 de grille, `SaveGrid`) et lot 6 (Agenda). Reste de Médias : Type / tags et
 panneaux de répartition (lot 8), jauge de scan (lot 7).
