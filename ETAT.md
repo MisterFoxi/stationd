@@ -5,7 +5,7 @@ sans reconstruire le contexte. À distinguer des docs de `Doc/` (décisions
 d'architecture durables) : ce fichier-ci est volatil, à mettre à jour à
 chaque session.
 
-Dernière mise à jour : 2026-09-29 (A4 lot 4b : Playlists + suite de Médias).
+Dernière mise à jour : 2026-09-29 (A4 lot 4b + édition des tags des médias).
 
 
 ## Où on en est en une phrase
@@ -306,6 +306,24 @@ en lot. **À valider sur devstationd.** Dossier §3.5, §5.3, §5.5 ; `Doc/admin
 - Écarts au dossier : pas de `handle` / `member_only` (absents de la
   grammaire), pas d'arbre des dossiers ni de recherche floue (la recherche de
   Médias sert de sélecteur), `q` (mise en file) devenu `f` (`q` = quitter).
+
+**Tags des médias modifiables (2026-09-29)** — 514 tests daemon + 40 TUI
+verts. Essayé en réel (mp3 ID3v2.3 et 2.4 produits par ffmpeg, CLI et TUI).
+- stationd : `LibraryService.GetTags` / `SetTags` (`src/media_tags.rs`,
+  commandes `GetTags` / `SetTags` de l'acteur bibliothèque) ; `stationctl
+  library tags <média>` / `library tag <média> --title … [--revision]`.
+  Écriture par la trame ID3v2 concrète (le `Tag` générique de lofty perd les
+  `TXXX` : `TXXX:Type` aurait été effacé — vérifié gardé), version 2.3 / 2.4
+  du fichier conservée (2.3 créée depuis l'ID3v1 si absente, comme
+  `id3v1-vers-id3v2.py`), année en `TYER` (2.3) ou `TDRC` (2.4), date de
+  modification remise, relecture comparée (un écart = erreur, l'index suit
+  quand même le fichier), ligne d'index rafraîchie via `on_scan`, garde-fous
+  `episode_play` suivis (une retouche de tags n'est pas un nouvel épisode).
+  Autres formats refusés (`failed_precondition`).
+- TUI Médias : `e` (ligne, fiche, ou lot des marqués) → formulaire →
+  confirmation qui liste les changements → `SetTags` ; liste et fiche relues.
+- TUI Playlists : la liste des genres proposés sous un filtre de genre n'est
+  plus tronquée (tous, sur plusieurs lignes, sans couper un genre).
 
 **Suivant** : valider 4b sur devstationd, puis lot 5 (stationd : diagnostics
 de grille, `SaveGrid`) et lot 6 (Agenda). Reste de Médias : Type / tags et

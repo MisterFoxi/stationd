@@ -161,6 +161,10 @@ pub struct Medias {
     card: Option<Card>,
     /// Sélecteur de playlist ouvert pour une action en lot.
     chooser: Option<(Purpose, PlaylistPicker, u64)>,
+    /// Relecture après une action : la sélection revient sur ce média.
+    keep: Option<String>,
+    /// Lecture des tags en cours (n° de requête) avant le formulaire.
+    tags_req: Option<u64>,
 }
 
 impl Default for Medias {
@@ -212,6 +216,8 @@ impl Medias {
             loaded_once: false,
             card: None,
             chooser: None,
+            keep: None,
+            tags_req: None,
         }
     }
 
@@ -269,6 +275,11 @@ impl Medias {
                     self.selected = 0;
                 }
                 self.rows.extend(page.media.iter().cloned());
+                if let Some(k) = self.keep.take()
+                    && let Some(i) = self.rows.iter().position(|m| m.rel_path == k)
+                {
+                    self.selected = i;
+                }
                 self.total = page.total;
                 self.next = page.next_cursor.clone();
                 self.error = None;
@@ -316,6 +327,50 @@ impl Medias {
             let card = crate::rpc::media_card(channel, path).await;
             Ok(Control::Event(AppEvent::MediaCard(owner, id, Box::new(card))))
         });
+    }
+
+    /// `e` : modifier les tags. Un fichier : ses tags sont d'abord lus dans
+    /// le fichier (pas l'index), le formulaire s'ouvre à leur arrivée.
+    /// Plusieurs marqués : formulaire de lot (vide = inchangé).
+    fn edit_tags(&mut self, ctx: &mut Global) {
+        let targets = self.targets();
+        match targets.len() {
+            0 => {}
+            1 => {
+                self.request += 1;
+                self.tags_req = Some(self.request);
+                let (owner, id, channel, path) = (self.owner, self.request, ctx.channel.clone(), targets[0].clone());
+                ctx.spawn_async(async move {
+                    let r = crate::rpc::get_tags(channel, path).await;
+                    Ok(Control::Event(AppEvent::MediaTags(owner, id, r)))
+                });
+            }
+            _ => ctx.open(ops::edit_tags_many(targets)),
+        }
+    }
+
+    /// Après une action (tags écrits…) : relit la page et la fiche, la
+    /// sélection reste sur son média.
+    fn refresh(&mut self, ctx: &mut Global) {
+        if !self.loaded_once {
+            return;
+        }
+        self.keep = self.rows.get(self.selected).map(|m| m.rel_path.clone());
+        self.load(ctx, false);
+        if let Some(c) = self.card.take() {
+            let path = c.media.rel_path.clone();
+            self.request += 1;
+            let (owner, id, channel) = (self.owner, self.request, ctx.channel.clone());
+            let mut media = c.media;
+            if let Some(m) = self.rows.iter().find(|m| m.rel_path == path) {
+                media = m.clone();
+            }
+            self.card = Some(Card { media, request: id, data: None });
+            ctx.spawn_async(async move {
+                let card = crate::rpc::media_card(channel, path).await;
+                Ok(Control::Event(AppEvent::MediaCard(owner, id, Box::new(card))))
+            });
+        }
     }
 
     fn open_chooser(&mut self, purpose: Purpose, ctx: &mut Global) {
@@ -611,6 +666,23 @@ impl Medias {
                 }
                 return Control::Changed;
             }
+            AppEvent::MediaTags(owner, id, r) if *owner == self.owner => {
+                if self.tags_req == Some(*id) {
+                    self.tags_req = None;
+                    match r {
+                        Ok(t) => ctx.open(ops::edit_tags(t.clone())),
+                        Err(e) => ctx.open(crate::dialog::Modal::Info(crate::dialog::Info {
+                            title: tr!("form-tags-read-failed"),
+                            lines: vec![e.clone()],
+                        })),
+                    }
+                }
+                return Control::Changed;
+            }
+            AppEvent::ActionDone(Ok(_)) if !self.picker => {
+                self.refresh(ctx);
+                return Control::Changed;
+            }
             AppEvent::PlaylistChoices(owner, id, r) if *owner == self.owner => {
                 if let Some((_, p, req)) = self.chooser.as_mut()
                     && req == id
@@ -708,6 +780,7 @@ impl Medias {
                 }
                 KeyCode::Char('p') => self.open_chooser(Purpose::AddToStatic, ctx),
                 KeyCode::Char('f') => self.open_chooser(Purpose::Enqueue, ctx),
+                KeyCode::Char('e') => self.edit_tags(ctx),
                 _ => return Control::Unchanged,
             }
             return Control::Changed;
@@ -740,6 +813,7 @@ impl Medias {
             }
             KeyCode::Char('p') => self.open_chooser(Purpose::AddToStatic, ctx),
             KeyCode::Char('f') => self.open_chooser(Purpose::Enqueue, ctx),
+            KeyCode::Char('e') => self.edit_tags(ctx),
             _ => {
                 if !self.key(k, ctx) {
                     return Control::Continue;
@@ -804,6 +878,7 @@ impl Medias {
             &[
                 (k!("key-esc"), k!("help-close")),
                 (k!("key-up-down"), k!("help-card-prev-next")),
+                (k!("key-e"), k!("help-media-edit-tags")),
                 (k!("key-o"), k!("help-override")),
                 (k!("key-p"), k!("help-media-to-playlist")),
                 (k!("key-f"), k!("help-media-enqueue")),
@@ -822,6 +897,7 @@ impl Medias {
                 (k!("key-slash"), k!("help-media-search")),
                 (k!("key-enter"), k!("help-media-card")),
                 (k!("key-space"), k!("help-media-mark")),
+                (k!("key-e"), k!("help-media-edit-tags")),
                 (k!("key-p"), k!("help-media-to-playlist")),
                 (k!("key-f"), k!("help-media-enqueue")),
                 (k!("key-o"), k!("help-override")),

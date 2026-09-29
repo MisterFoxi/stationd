@@ -6,7 +6,8 @@
 
 use tonic::{Request, Response, Status};
 
-use crate::library_actor::{LibraryError, LibraryHandle};
+use crate::library_actor::{LibraryError, LibraryHandle, TagsRead};
+use crate::media_tags::{TagEdit, TagError};
 
 // Keep the generated module reachable under a stable path for callers/tests.
 pub use crate::proto::library;
@@ -14,8 +15,33 @@ pub use crate::proto::library;
 use library::library_service_server::LibraryService;
 use library::{
     GenreCount, ListGenresRequest, ListGenresResponse, ListMediaRequest, ListMediaResponse, Media,
-    PruneRequest, PruneResponse, ScanRequest, ScanResponse, SearchMediaRequest, SearchMediaResponse, Skip,
+    GetTagsRequest, MediaTags, PruneRequest, PruneResponse, ScanRequest, ScanResponse, SearchMediaRequest,
+    SearchMediaResponse, SetTagsRequest, SetTagsResponse, Skip,
 };
+
+fn map_tags(rel_path: &str, t: TagsRead) -> MediaTags {
+    MediaTags {
+        rel_path: rel_path.to_string(),
+        title: t.tags.title.unwrap_or_default(),
+        artist: t.tags.artist.unwrap_or_default(),
+        album: t.tags.album.unwrap_or_default(),
+        year: t.tags.year.unwrap_or(0),
+        genre: t.tags.genre.unwrap_or_default(),
+        revision: t.revision,
+    }
+}
+
+/// Proto edit → `TagEdit`: absent = unchanged, "" / 0 = removed.
+fn edit_of(r: &SetTagsRequest) -> TagEdit {
+    let text = |v: &Option<String>| v.as_ref().map(|s| (!s.trim().is_empty()).then(|| s.clone()));
+    TagEdit {
+        title: text(&r.title),
+        artist: text(&r.artist),
+        album: text(&r.album),
+        year: r.year.map(|y| (y != 0).then_some(y)),
+        genre: text(&r.genre),
+    }
+}
 
 pub struct LibraryGrpc {
     handle: LibraryHandle,
@@ -36,6 +62,13 @@ fn map_error(e: LibraryError) -> Status {
             Status::failed_precondition(format!("media root unavailable: {}", p.display()))
         }
         LibraryError::BadFilter(m) => Status::invalid_argument(m),
+        LibraryError::Tags(t) => match t {
+            TagError::NotFound(_) => Status::not_found(t.to_string()),
+            TagError::Unsupported(_) => Status::failed_precondition(t.to_string()),
+            TagError::BadValue(_) => Status::invalid_argument(t.to_string()),
+            TagError::Conflict { .. } => Status::aborted(t.to_string()),
+            TagError::Io(_) | TagError::NotKept(_) => Status::internal(t.to_string()),
+        },
         other => Status::internal(other.to_string()),
     }
 }
@@ -146,6 +179,23 @@ impl LibraryService for LibraryGrpc {
         let removed = self.handle.prune(seen_before).await.map_err(map_error)?;
         tracing::info!(removed, older_than = %older, "library: vanished media forgotten");
         Ok(Response::new(PruneResponse { removed }))
+    }
+
+    async fn get_tags(&self, request: Request<GetTagsRequest>) -> Result<Response<MediaTags>, Status> {
+        let rel_path = request.into_inner().rel_path;
+        let t = self.handle.get_tags(rel_path.clone()).await.map_err(map_error)?;
+        Ok(Response::new(map_tags(&rel_path, t)))
+    }
+
+    async fn set_tags(&self, request: Request<SetTagsRequest>) -> Result<Response<SetTagsResponse>, Status> {
+        let r = request.into_inner();
+        let edit = edit_of(&r);
+        let w = self.handle.set_tags(r.rel_path.clone(), r.revision.clone(), edit).await.map_err(map_error)?;
+        Ok(Response::new(SetTagsResponse {
+            conflict: w.conflict,
+            tags: Some(map_tags(&r.rel_path, w.tags)),
+            media: w.row.map(map_media),
+        }))
     }
 
     async fn list_media(

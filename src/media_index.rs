@@ -128,6 +128,88 @@ pub async fn replace_library(
     })
 }
 
+/// Refresh ONE media row from a fresh read of its file (after a tag edit):
+/// tags, size, mtime, genres; the row is available. The `unplayed_only`
+/// guards of this file that matched its previous size / mtime follow it (a
+/// tag edit is not a new episode). Returns the row.
+pub async fn refresh_one(pool: &SqlitePool, m: &ScannedMedia, scanned_at: i64) -> Result<Option<MediaRow>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    let before: Option<(i64, i64)> = sqlx::query_as("SELECT size_bytes, mtime_ns FROM media WHERE rel_path = ?1")
+        .bind(&m.rel_path)
+        .fetch_optional(&mut *tx)
+        .await?;
+    sqlx::query(
+        "INSERT INTO media
+             (rel_path, title, artist, album, year, duration_ms, size_bytes, mtime_ns, available, scanned_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1, ?9)
+         ON CONFLICT(rel_path) DO UPDATE SET
+             title = ?2, artist = ?3, album = ?4, year = ?5,
+             duration_ms = ?6, size_bytes = ?7, mtime_ns = ?8,
+             available = 1, scanned_at = ?9",
+    )
+    .bind(&m.rel_path)
+    .bind(&m.title)
+    .bind(&m.artist)
+    .bind(&m.album)
+    .bind(m.year.map(|y| y as i64))
+    .bind(m.duration_ms as i64)
+    .bind(m.size_bytes as i64)
+    .bind(m.mtime_ns)
+    .bind(scanned_at)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query("DELETE FROM media_genre WHERE rel_path = ?1").bind(&m.rel_path).execute(&mut *tx).await?;
+    for g in &m.genres {
+        sqlx::query("INSERT OR IGNORE INTO media_genre (rel_path, genre, genre_key) VALUES (?1, ?2, ?3)")
+            .bind(&m.rel_path)
+            .bind(g)
+            .bind(genre_key(g))
+            .execute(&mut *tx)
+            .await?;
+    }
+    if let Some((size, mtime)) = before {
+        sqlx::query(
+            "UPDATE episode_play SET size_bytes = ?1, mtime_ns = ?2
+             WHERE rel_path = ?3 AND size_bytes = ?4 AND mtime_ns = ?5",
+        )
+        .bind(m.size_bytes as i64)
+        .bind(m.mtime_ns)
+        .bind(&m.rel_path)
+        .bind(size)
+        .bind(mtime)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    row(pool, &m.rel_path).await
+}
+
+/// Columns of a media row as read by [`row`].
+type RowColumns = (String, Option<String>, Option<String>, Option<String>, Option<i64>, i64, i64, i64);
+
+/// One media row (available or not), `None` if the index does not know it.
+pub async fn row(pool: &SqlitePool, rel_path: &str) -> Result<Option<MediaRow>, sqlx::Error> {
+    let r: Option<RowColumns> = sqlx::query_as(
+        "SELECT rel_path, title, artist, album, year, duration_ms, size_bytes, available
+         FROM media WHERE rel_path = ?1",
+    )
+    .bind(rel_path)
+    .fetch_optional(pool)
+    .await?;
+    let Some((rel_path, title, artist, album, year, duration_ms, size_bytes, available)) = r else {
+        return Ok(None);
+    };
+    let genres: Vec<String> =
+        sqlx::query_as::<_, (String,)>("SELECT genre FROM media_genre WHERE rel_path = ?1 ORDER BY genre")
+            .bind(&rel_path)
+            .fetch_all(pool)
+            .await?
+            .into_iter()
+            .map(|(g,)| g)
+            .collect();
+    Ok(Some(MediaRow { rel_path, title, artist, album, year, duration_ms, size_bytes, available: available != 0, genres }))
+}
+
 /// Forget the media that vanished from disk (`available = 0`): their rows
 /// and genres. `seen_before` = only those last seen by a scan before this
 /// epoch (s); `None` = all of them. The play history keeps its own path and

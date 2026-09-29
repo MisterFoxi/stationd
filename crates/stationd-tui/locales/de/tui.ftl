@@ -676,7 +676,7 @@ media-choose-static = { $n } Medien zu einer statischen Playlist hinzufügen
 media-choose-queue = { $n } Medien in die Queue stellen
 
 card-title = Medienkarte
-card-keys = Esc schließen · ↑↓ voriges / nächstes · o Override · p Playlist · f Queue
+card-keys = Esc schließen · ↑↓ voriges / nächstes · e Tags · o Override · p Playlist · f Queue
 card-no-title = kein Titel-Tag
 card-size = Größe
 card-size-mb = { $mb } MB
@@ -700,3 +700,22 @@ done-enqueue-partial = { $n } von { $total } eingereiht, dann: { $reason }
 done-playlist-removed = Playlist „{ $playlist }“ gelöscht
 done-playlist-removed-file = Playlist „{ $playlist }“ gelöscht (Datei { $file } entfernt)
 done-playlists-reloaded = Playlists neu eingelesen: { $added } angewendet, { $removed } entfernt, { $errors } Datei(en) mit Fehler
+
+## --- Tags des médias ---
+
+help-media-edit-tags = Tags bearbeiten (in der Datei)
+form-tags-title = Tags von { $path }
+form-tags-many-title = Tags von { $n } Dateien (leer = unverändert)
+form-tags-genre = Genre (in der Datei)
+form-tags-nothing = nichts geändert
+form-tags-read-failed = Tags nicht lesbar
+form-year-invalid = { $field }: eine Zahl von 1 bis 9999 oder leer
+confirm-tags-title = In die Datei schreiben
+confirm-tags-body = Diese Tags in { $path } schreiben:
+confirm-tags-many-body = Diese Tags in { $n } Dateien schreiben:
+confirm-tags-set = { $field } → „{ $value }“
+confirm-tags-remove = { $field }: entfernt
+confirm-tags-yes = Schreiben
+done-tags-written = Tags in { $n } von { $total } Datei(en) geschrieben
+done-tags-conflicts = inzwischen geändert, nichts geschrieben: { $list }
+done-tags-failed = { $n } Fehler, darunter { $first }

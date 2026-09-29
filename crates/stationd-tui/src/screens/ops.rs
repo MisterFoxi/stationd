@@ -4,7 +4,7 @@
 
 use stationd_proto::broadcast::State;
 
-use crate::action::{Action, OverrideContent, PluginVerb};
+use crate::action::{Action, OverrideContent, PluginVerb, TagChanges};
 use crate::dialog::{Confirm, Field, Form, Modal};
 use crate::store::Store;
 use crate::tr;
@@ -243,4 +243,143 @@ pub fn shutdown(force: bool, dj_on_air: Option<&str>) -> Modal {
             .danger()
             .then(second),
     )
+}
+
+/// Valeurs saisies → changements à écrire. Un seul fichier (`original`
+/// connu) : seuls les champs modifiés partent, vide = champ retiré. Un lot
+/// (`None`) : vide = inchangé. L'année doit être un nombre de 1 à 9999.
+pub fn tag_changes(original: Option<&stationd_proto::library::MediaTags>, v: [&str; 5], year_label: &str) -> Result<TagChanges, String> {
+    let [title, artist, album, year, genre] = v.map(str::trim);
+    let year_n: Option<u32> = match year {
+        "" => None,
+        y => Some(
+            y.parse::<u32>()
+                .ok()
+                .filter(|n| (1..=9999).contains(n))
+                .ok_or_else(|| tr!("form-year-invalid", field = year_label.to_string()))?,
+        ),
+    };
+    let out = match original {
+        Some(o) => {
+            let text = |new: &str, old: &str| (new != old).then(|| new.to_string());
+            TagChanges {
+                title: text(title, &o.title),
+                artist: text(artist, &o.artist),
+                album: text(album, &o.album),
+                year: (year_n.unwrap_or(0) != o.year).then(|| year_n.unwrap_or(0)),
+                genre: text(genre, &o.genre),
+            }
+        }
+        None => {
+            let text = |new: &str| (!new.is_empty()).then(|| new.to_string());
+            TagChanges { title: text(title), artist: text(artist), album: text(album), year: year_n, genre: text(genre) }
+        }
+    };
+    if out.is_empty() {
+        return Err(tr!("form-tags-nothing"));
+    }
+    Ok(out)
+}
+
+/// Lignes de la confirmation : ce qui va changer, champ par champ.
+fn tag_lines(c: &TagChanges) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut line = |label: String, v: &Option<String>| {
+        if let Some(v) = v {
+            out.push(if v.is_empty() { tr!("confirm-tags-remove", field = label) } else { tr!("confirm-tags-set", field = label, value = v.clone()) });
+        }
+    };
+    line(tr!("media-field-title"), &c.title);
+    line(tr!("media-field-artist"), &c.artist);
+    line(tr!("media-field-album"), &c.album);
+    line(tr!("form-tags-genre"), &c.genre);
+    if let Some(y) = c.year {
+        out.push(if y == 0 { tr!("confirm-tags-remove", field = tr!("media-field-year")) } else { tr!("confirm-tags-set", field = tr!("media-field-year"), value = y.to_string()) });
+    }
+    out
+}
+
+fn tag_fields(t: Option<&stationd_proto::library::MediaTags>) -> Vec<Field> {
+    let g = |f: fn(&stationd_proto::library::MediaTags) -> String| t.map(f).unwrap_or_default();
+    vec![
+        Field::text(tr!("media-field-title"), &g(|t| t.title.clone())),
+        Field::text(tr!("media-field-artist"), &g(|t| t.artist.clone())),
+        Field::text(tr!("media-field-album"), &g(|t| t.album.clone())),
+        Field::text(tr!("media-field-year"), &g(|t| if t.year == 0 { String::new() } else { t.year.to_string() })),
+        Field::text(tr!("form-tags-genre"), &g(|t| t.genre.clone())),
+    ]
+}
+
+fn values(f: &[Field]) -> [String; 5] {
+    [f[0].value(), f[1].value(), f[2].value(), f[3].value(), f[4].value()]
+}
+
+/// Modifier les tags d'UN fichier (valeurs lues dans le fichier), puis
+/// confirmation qui dit ce qui sera écrit.
+pub fn edit_tags(t: stationd_proto::library::MediaTags) -> Modal {
+    let path = t.rel_path.clone();
+    let orig = t.clone();
+    let form = Form::new(tr!("form-tags-title", path = path.clone()), tag_fields(Some(&t)), move |f| {
+        let v = values(f);
+        let edit = tag_changes(Some(&orig), [&v[0], &v[1], &v[2], &v[3], &v[4]], &f[3].label)?;
+        Ok(Action::SetTags { targets: vec![(orig.rel_path.clone(), orig.revision.clone())], edit })
+    })
+    .confirm_with(move |a| {
+        let Action::SetTags { edit, .. } = a else { return None };
+        let mut lines = vec![tr!("confirm-tags-body", path = path.clone())];
+        lines.extend(tag_lines(edit));
+        Some(Confirm::new(tr!("confirm-tags-title"), lines, tr!("confirm-tags-yes"), a.clone()))
+    });
+    Modal::Form(form)
+}
+
+/// Modifier les tags de plusieurs fichiers : champ vide = inchangé.
+pub fn edit_tags_many(paths: Vec<String>) -> Modal {
+    let n = paths.len();
+    let form = Form::new(tr!("form-tags-many-title", n = n), tag_fields(None), move |f| {
+        let v = values(f);
+        let edit = tag_changes(None, [&v[0], &v[1], &v[2], &v[3], &v[4]], &f[3].label)?;
+        Ok(Action::SetTags { targets: paths.iter().map(|p| (p.clone(), String::new())).collect(), edit })
+    })
+    .confirm_with(move |a| {
+        let Action::SetTags { edit, .. } = a else { return None };
+        let mut lines = vec![tr!("confirm-tags-many-body", n = n)];
+        lines.extend(tag_lines(edit));
+        Some(Confirm::new(tr!("confirm-tags-title"), lines, tr!("confirm-tags-yes"), a.clone()).danger())
+    });
+    Modal::Form(form)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tags() -> stationd_proto::library::MediaTags {
+        stationd_proto::library::MediaTags {
+            rel_path: "a.mp3".into(),
+            title: "T".into(),
+            artist: "A".into(),
+            year: 2001,
+            revision: "tags:1".into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn one_file_sends_only_what_changed_and_empty_removes() {
+        let c = tag_changes(Some(&tags()), ["T", "", "Alb", "2001", ""], "année").unwrap();
+        assert_eq!(c, TagChanges { artist: Some(String::new()), album: Some("Alb".into()), ..Default::default() });
+        let c = tag_changes(Some(&tags()), ["T", "A", "", "", ""], "année").unwrap();
+        assert_eq!(c.year, Some(0), "année effacée");
+        assert!(tag_changes(Some(&tags()), ["T", "A", "", "2001", ""], "année").is_err(), "rien n'a changé");
+    }
+
+    #[test]
+    fn a_batch_leaves_empty_fields_unchanged_and_checks_the_year() {
+        let c = tag_changes(None, ["", "", "", "", "talks"], "année").unwrap();
+        assert_eq!(c, TagChanges { genre: Some("talks".into()), ..Default::default() });
+        assert!(tag_changes(None, ["", "", "", "", ""], "année").is_err());
+        assert!(tag_changes(None, ["", "", "", "20 01", ""], "année").is_err());
+        assert!(tag_changes(None, ["", "", "", "0", ""], "année").is_err());
+    }
 }

@@ -42,6 +42,53 @@ service LibraryService {
   // scan qui les a vus date d'avant ; vide = tous. L'historique de diffusion
   // garde son chemin et son artiste.
   rpc Prune(PruneRequest) returns (PruneResponse);
+
+  // Les tags STANDARD tels qu'ils sont dans le fichier (titre, artiste,
+  // album, année, genre du fichier — pas les genres ajoutés par un plugin),
+  // avec leur révision. not_found si le fichier n'est pas sous la racine.
+  rpc GetTags(GetTagsRequest) returns (MediaTags);
+
+  // Écrit des tags standard DANS le fichier (stationd seul écrit), puis
+  // relit le fichier (vérification après écriture, NFS) et met à jour
+  // l'index (plugins on_scan compris). Seuls les champs présents changent ;
+  // texte vide / année 0 = champ retiré. `revision` (de GetTags) : si les
+  // tags du fichier ont changé depuis, rien n'est écrit (conflict). La date
+  // de modification du fichier est conservée (ordre `mtime`, épisodes déjà
+  // joués). ID3v2 seulement (mp3, wav, aiff) : autre format =
+  // failed_precondition ; valeur invalide = invalid_argument.
+  rpc SetTags(SetTagsRequest) returns (SetTagsResponse);
+}
+
+message GetTagsRequest {
+  string rel_path = 1;
+}
+
+message MediaTags {
+  string rel_path = 1;
+  string title    = 2;   // vide = absent
+  string artist   = 3;
+  string album    = 4;
+  uint32 year     = 5;   // 0 = absente
+  string genre    = 6;   // le tag genre du fichier (une valeur)
+  string revision = 7;   // à renvoyer dans SetTags
+}
+
+message SetTagsRequest {
+  string rel_path = 1;
+  string revision = 2;           // vide = sans contrôle
+  optional string title  = 3;    // absent = inchangé ; "" = retiré
+  optional string artist = 4;
+  optional string album  = 5;
+  optional uint32 year   = 6;    // 0 = retirée
+  optional string genre  = 7;
+}
+
+message SetTagsResponse {
+  // Les tags du fichier ont changé depuis `revision` : rien n'est écrit,
+  // `tags` = ce qu'ils sont maintenant.
+  bool conflict = 1;
+  MediaTags tags = 2;   // relus après écriture (ou actuels si conflit)
+  Media media   = 3;    // la ligne de l'index après mise à jour (absente si conflit)
 }
 
 message PruneRequest {

@@ -140,7 +140,7 @@ fn is_audio_ext(path: &Path) -> bool {
 /// Extract a 4-digit year from a tag value that may be a bare year (`2020`)
 /// or a full date (`2020-05-01`). Returns `None` if no leading 4-digit run in
 /// range 1..=9999 is present (kept in sync with the migration's CHECK).
-fn parse_year(s: &str) -> Option<u32> {
+pub(crate) fn parse_year(s: &str) -> Option<u32> {
     let digits: String = s.trim().chars().take_while(|c| c.is_ascii_digit()).collect();
     if digits.len() != 4 {
         return None;
@@ -341,6 +341,18 @@ fn read_one(root: &Path, full: &Path) -> Result<(ScannedMedia, Vec<CustomTag>), 
         },
         custom_tags,
     ))
+}
+
+/// Read ONE file as a scan would (after a tag edit): the media and its
+/// user-defined tags, as a one-file report ready for the plugins' `on_scan`.
+pub fn scan_file(root: &Path, full: &Path) -> Result<ScanReport, SkipReason> {
+    let (m, custom) = read_one(root, full)?;
+    let mut report = ScanReport::default();
+    if !custom.is_empty() {
+        report.custom_tags.insert(m.rel_path.clone(), custom);
+    }
+    report.media.push(m);
+    Ok(report)
 }
 
 /// Walk `root` and read every audio-extension file. Per-file failures are

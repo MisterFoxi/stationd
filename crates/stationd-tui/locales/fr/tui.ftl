@@ -679,7 +679,7 @@ media-choose-static = Ajouter { $n } média(s) à une playlist statique
 media-choose-queue = Mettre { $n } média(s) en file
 
 card-title = Fiche du média
-card-keys = Échap fermer · ↑↓ précédent / suivant · o override · p playlist · f file
+card-keys = Échap fermer · ↑↓ précédent / suivant · e tags · o override · p playlist · f file
 card-no-title = titre non renseigné
 card-size = taille
 card-size-mb = { $mb } Mo
@@ -703,3 +703,22 @@ done-enqueue-partial = { $n } sur { $total } mis en file, puis : { $reason }
 done-playlist-removed = playlist « { $playlist } » supprimée
 done-playlist-removed-file = playlist « { $playlist } » supprimée (fichier { $file } effacé)
 done-playlists-reloaded = playlists relues : { $added } appliquée(s), { $removed } retirée(s), { $errors } fichier(s) en erreur
+
+## --- Tags des médias ---
+
+help-media-edit-tags = modifier les tags (dans le fichier)
+form-tags-title = Tags de { $path }
+form-tags-many-title = Tags de { $n } fichiers (vide = inchangé)
+form-tags-genre = genre (du fichier)
+form-tags-nothing = rien n'a changé
+form-tags-read-failed = Lecture des tags impossible
+form-year-invalid = { $field } : un nombre de 1 à 9999, ou vide
+confirm-tags-title = Écrire dans le fichier
+confirm-tags-body = Écrire ces tags dans { $path } :
+confirm-tags-many-body = Écrire ces tags dans { $n } fichiers :
+confirm-tags-set = { $field } → « { $value } »
+confirm-tags-remove = { $field } : retiré
+confirm-tags-yes = Écrire
+done-tags-written = tags écrits dans { $n } fichier(s) sur { $total }
+done-tags-conflicts = modifiés entre-temps, rien écrit : { $list }
+done-tags-failed = { $n } échec(s), dont { $first }

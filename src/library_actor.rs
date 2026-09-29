@@ -24,6 +24,7 @@ use sqlx::SqlitePool;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::media::{self, ScanError, ScanReport};
+use crate::media_tags::{self, StandardTags, TagEdit, TagError};
 use crate::media_index::{self, GenreInventory, MediaRow, ReplaceStats, SearchPage, SearchQuery};
 use crate::plugin::{PluginHandle, ScanInput};
 
@@ -39,6 +40,12 @@ pub enum LibraryError {
     ActorGone,
     #[error("invalid filter: {0}")]
     BadFilter(String),
+    #[error(transparent)]
+    Tags(#[from] TagError),
+    /// Internal: a tag write that may have changed the file, with the file
+    /// re-read (to refresh the index before reporting the error).
+    #[error("{0}")]
+    Touched(TagError, Option<ScanReport>),
 }
 
 impl From<ScanError> for LibraryError {
@@ -78,6 +85,32 @@ enum Command {
         seen_before: Option<i64>,
         reply: oneshot::Sender<Result<u64, LibraryError>>,
     },
+    GetTags {
+        rel_path: String,
+        reply: oneshot::Sender<Result<TagsRead, LibraryError>>,
+    },
+    SetTags {
+        rel_path: String,
+        revision: String,
+        edit: TagEdit,
+        reply: oneshot::Sender<Result<TagsWritten, LibraryError>>,
+    },
+}
+
+/// The standard tags of a file and their revision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TagsRead {
+    pub tags: StandardTags,
+    pub revision: String,
+}
+
+/// What a tag edit did: `conflict` (nothing written, `tags` = current ones)
+/// or written, read back, and the index row refreshed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TagsWritten {
+    pub conflict: bool,
+    pub tags: TagsRead,
+    pub row: Option<MediaRow>,
 }
 
 /// Cheap, clonable handle to the library actor. Every caller (gRPC handler,
@@ -144,6 +177,27 @@ impl LibraryHandle {
         rx.await.map_err(|_| LibraryError::ActorGone)?
     }
 
+    /// The standard tags of one file, read from the file itself.
+    pub async fn get_tags(&self, rel_path: String) -> Result<TagsRead, LibraryError> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::GetTags { rel_path, reply })
+            .await
+            .map_err(|_| LibraryError::ActorGone)?;
+        rx.await.map_err(|_| LibraryError::ActorGone)?
+    }
+
+    /// Write standard tags into one file (see `media_tags`), then refresh its
+    /// index row through the plugins' `on_scan`. Serialised with the scans.
+    pub async fn set_tags(&self, rel_path: String, revision: String, edit: TagEdit) -> Result<TagsWritten, LibraryError> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::SetTags { rel_path, revision, edit, reply })
+            .await
+            .map_err(|_| LibraryError::ActorGone)?;
+        rx.await.map_err(|_| LibraryError::ActorGone)?
+    }
+
     /// Genre inventory (case-folded buckets + untagged count), same
     /// `only_available` scope as [`list`](Self::list).
     pub async fn genres(&self, only_available: bool) -> Result<GenreInventory, LibraryError> {
@@ -193,6 +247,12 @@ pub fn spawn_with(pool: SqlitePool, root: PathBuf, plugins: Option<PluginHandle>
                     let out = media_index::search(&pool, &query).await.map_err(LibraryError::from);
                     let _ = reply.send(out);
                 }
+                Command::GetTags { rel_path, reply } => {
+                    let _ = reply.send(get_tags(&root, rel_path).await);
+                }
+                Command::SetTags { rel_path, revision, edit, reply } => {
+                    let _ = reply.send(set_tags(&pool, &root, plugins.as_ref(), rel_path, revision, edit).await);
+                }
             }
         }
     });
@@ -241,6 +301,77 @@ fn apply_extras(report: &mut ScanReport, extras: &crate::plugin::ScanExtras) {
             }
         }
     }
+}
+
+async fn get_tags(root: &Path, rel_path: String) -> Result<TagsRead, LibraryError> {
+    let root = root.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let full = media_tags::resolve(&root, &rel_path)?;
+        let (tags, size) = media_tags::read(&full)?;
+        Ok(TagsRead { revision: media_tags::revision(&tags, size), tags })
+    })
+    .await
+    .map_err(|e| LibraryError::Join(e.to_string()))?
+}
+
+async fn set_tags(
+    pool: &SqlitePool,
+    root: &Path,
+    plugins: Option<&PluginHandle>,
+    rel_path: String,
+    revision: String,
+    edit: TagEdit,
+) -> Result<TagsWritten, LibraryError> {
+    let root_buf = root.to_path_buf();
+    let rel = rel_path.clone();
+    // Write + read back + re-read the file as a scan would, off the runtime.
+    let written = tokio::task::spawn_blocking(move || -> Result<Result<(TagsRead, ScanReport), TagsRead>, LibraryError> {
+        let full = media_tags::resolve(&root_buf, &rel)?;
+        match media_tags::write(&full, &rel, &revision, &edit) {
+            Ok((tags, revision)) => {
+                let report = media::scan_file(&root_buf, &full)
+                    .map_err(|e| LibraryError::Tags(TagError::Io(format!("{rel} written but not readable: {e:?}"))))?;
+                Ok(Ok((TagsRead { tags, revision }, report)))
+            }
+            Err(TagError::Conflict { current, .. }) => {
+                let (tags, _) = media_tags::read(&full)?;
+                Ok(Err(TagsRead { tags, revision: current }))
+            }
+            Err(e) if e.file_touched() => {
+                // Partly written: the index follows the file, then the error is said.
+                Err(LibraryError::Touched(e, media::scan_file(&root_buf, &full).ok()))
+            }
+            Err(e) => Err(e.into()),
+        }
+    })
+    .await
+    .map_err(|e| LibraryError::Join(e.to_string()))?;
+    let written = match written {
+        Err(LibraryError::Touched(e, Some(mut report))) => {
+            if let Some(plugins) = plugins {
+                enrich(&mut report, plugins).await;
+            }
+            if let Some(m) = report.media.first() {
+                media_index::refresh_one(pool, m, now_epoch_seconds()).await?;
+            }
+            return Err(LibraryError::Tags(e));
+        }
+        Err(LibraryError::Touched(e, None)) => return Err(LibraryError::Tags(e)),
+        other => other?,
+    };
+    let (tags, mut report) = match written {
+        Ok(x) => x,
+        Err(current) => return Ok(TagsWritten { conflict: true, tags: current, row: None }),
+    };
+    if let Some(plugins) = plugins {
+        enrich(&mut report, plugins).await;
+    }
+    let row = match report.media.first() {
+        Some(m) => media_index::refresh_one(pool, m, now_epoch_seconds()).await?,
+        None => None,
+    };
+    tracing::info!(media = %rel_path, "media tags written");
+    Ok(TagsWritten { conflict: false, tags, row })
 }
 
 /// Run the blocking scan off the async runtime, let the plugins enrich it,
@@ -336,5 +467,67 @@ mod tests {
             lib.list(true, vec!["  ".into()]).await,
             Err(LibraryError::BadFilter(_))
         ));
+    }
+
+    fn wav(path: &Path) {
+        use std::io::Write;
+        let n: u32 = 8000;
+        let mut f = std::fs::File::create(path).unwrap();
+        f.write_all(b"RIFF").unwrap();
+        f.write_all(&(36 + n).to_le_bytes()).unwrap();
+        f.write_all(b"WAVEfmt ").unwrap();
+        for v in [16u32.to_le_bytes().to_vec(), 1u16.to_le_bytes().to_vec(), 1u16.to_le_bytes().to_vec()] {
+            f.write_all(&v).unwrap();
+        }
+        f.write_all(&8000u32.to_le_bytes()).unwrap();
+        f.write_all(&8000u32.to_le_bytes()).unwrap();
+        f.write_all(&1u16.to_le_bytes()).unwrap();
+        f.write_all(&8u16.to_le_bytes()).unwrap();
+        f.write_all(b"data").unwrap();
+        f.write_all(&n.to_le_bytes()).unwrap();
+        f.write_all(&vec![128u8; n as usize]).unwrap();
+    }
+
+    #[tokio::test]
+    async fn set_tags_writes_the_file_refreshes_the_row_and_keeps_played_episodes() {
+        let db_dir = tempfile::tempdir().unwrap();
+        let media_dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(media_dir.path().join("Pod")).unwrap();
+        wav(&media_dir.path().join("Pod/ep1.wav"));
+        let pool = db::init(&db_dir.path().join("t.db")).await.unwrap();
+        let lib = spawn(pool.clone(), media_dir.path().to_path_buf());
+        lib.scan().await.unwrap();
+        let (size, mtime): (i64, i64) =
+            sqlx::query_as("SELECT size_bytes, mtime_ns FROM media WHERE rel_path = 'Pod/ep1.wav'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        crate::episode_play::mark(&pool, "pod", "Pod/ep1.wav", size, mtime, crate::resolver::Epoch(1)).await.unwrap();
+
+        let read = lib.get_tags("Pod/ep1.wav".into()).await.unwrap();
+        assert_eq!(read.tags, StandardTags::default());
+        let edit = TagEdit { title: Some(Some("Épisode 1".into())), genre: Some(Some("talks".into())), ..Default::default() };
+        let w = lib.set_tags("Pod/ep1.wav".into(), read.revision.clone(), edit.clone()).await.unwrap();
+        assert!(!w.conflict);
+        let row = w.row.unwrap();
+        assert_eq!(row.title.as_deref(), Some("Épisode 1"));
+        assert_eq!(row.genres, vec!["talks".to_string()]);
+        // The played-episode guard followed the file (not a new episode).
+        let (gs, gm): (i64, i64) = sqlx::query_as("SELECT size_bytes, mtime_ns FROM episode_play WHERE rel_path = 'Pod/ep1.wav'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let (ns, nm): (i64, i64) = sqlx::query_as("SELECT size_bytes, mtime_ns FROM media WHERE rel_path = 'Pod/ep1.wav'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!((gs, gm), (ns, nm));
+        assert_eq!(nm, mtime, "mtime kept");
+        // The old revision now conflicts; the current tags come back.
+        let again = lib.set_tags("Pod/ep1.wav".into(), read.revision, edit).await.unwrap();
+        assert!(again.conflict && again.row.is_none());
+        assert_eq!(again.tags.tags.title.as_deref(), Some("Épisode 1"));
+        // Outside the root: not found.
+        assert!(matches!(lib.get_tags("../x.wav".into()).await, Err(LibraryError::Tags(TagError::NotFound(_)))));
     }
 }

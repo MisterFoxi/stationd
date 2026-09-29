@@ -675,7 +675,7 @@ media-choose-static = Add { $n } media to a static playlist
 media-choose-queue = Enqueue { $n } media
 
 card-title = Media card
-card-keys = Esc close · ↑↓ previous / next · o override · p playlist · f queue
+card-keys = Esc close · ↑↓ previous / next · e tags · o override · p playlist · f queue
 card-no-title = no title tag
 card-size = size
 card-size-mb = { $mb } MB
@@ -699,3 +699,22 @@ done-enqueue-partial = { $n } of { $total } enqueued, then: { $reason }
 done-playlist-removed = playlist "{ $playlist }" deleted
 done-playlist-removed-file = playlist "{ $playlist }" deleted (file { $file } erased)
 done-playlists-reloaded = playlists re-read: { $added } applied, { $removed } dropped, { $errors } file(s) in error
+
+## --- Tags des médias ---
+
+help-media-edit-tags = edit the tags (in the file)
+form-tags-title = Tags of { $path }
+form-tags-many-title = Tags of { $n } files (empty = unchanged)
+form-tags-genre = genre (in the file)
+form-tags-nothing = nothing changed
+form-tags-read-failed = Cannot read the tags
+form-year-invalid = { $field }: a number from 1 to 9999, or empty
+confirm-tags-title = Write into the file
+confirm-tags-body = Write these tags into { $path }:
+confirm-tags-many-body = Write these tags into { $n } files:
+confirm-tags-set = { $field } → "{ $value }"
+confirm-tags-remove = { $field }: removed
+confirm-tags-yes = Write
+done-tags-written = tags written into { $n } of { $total } file(s)
+done-tags-conflicts = changed meanwhile, nothing written: { $list }
+done-tags-failed = { $n } failure(s), including { $first }

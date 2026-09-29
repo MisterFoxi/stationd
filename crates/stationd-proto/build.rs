@@ -9,7 +9,7 @@ const PROTO_DIR: &str = "../../proto";
 const PROTOS: &[(&str, bool)] = &[
     ("station.proto", false),
     ("schedule_v1.proto", true),
-    ("library_v1.proto", false),
+    ("library_v1.proto", true),
     ("plugin_v1.proto", false),
     ("broadcast_v1.proto", true),
     ("liquidsoap_v1.proto", false),

@@ -8,8 +8,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     tonic_build::configure()
         .protoc_arg("--experimental_allow_proto3_optional")
         .compile_protos(&["proto/schedule_v1.proto"], &["proto"])?;
-    // The media library service (scan + list). No well-known-type imports.
-    tonic_build::compile_protos("proto/library_v1.proto")?;
+    // The media library service (scan, list, search, tags). Uses proto3
+    // `optional` (SetTags: absent field = unchanged).
+    tonic_build::configure()
+        .protoc_arg("--experimental_allow_proto3_optional")
+        .compile_protos(&["proto/library_v1.proto"], &["proto"])?;
     // The plugin service (list + lifecycle control).
     tonic_build::compile_protos("proto/plugin_v1.proto")?;
     // The broadcast control service (state, overrides, listener injection).

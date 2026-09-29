@@ -336,6 +336,34 @@ enum LibraryCommand {
     /// off the async runtime server-side; a skipped audio file is reported,
     /// not fatal (the scan itself succeeds).
     Scan,
+    /// Show the standard tags of a media file, read from the file itself,
+    /// and their revision (for `library tag --revision`).
+    Tags {
+        /// Media path, relative to the media root (e.g. `Musique/a.mp3`)
+        media: String,
+    },
+    /// Write standard tags INTO a media file (ID3v2: mp3, wav, aiff); the
+    /// index is refreshed. Only the given fields change; an empty value
+    /// (`--title ""`, `--year 0`) removes the field.
+    Tag {
+        /// Media path, relative to the media root
+        media: String,
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long)]
+        artist: Option<String>,
+        #[arg(long)]
+        album: Option<String>,
+        #[arg(long)]
+        year: Option<u32>,
+        /// The file's genre tag (one value)
+        #[arg(long)]
+        genre: Option<String>,
+        /// Refuse if the tags changed since this revision (from `library
+        /// tags`); without it, the tags are read just before writing
+        #[arg(long)]
+        revision: Option<String>,
+    },
     /// List the media index. Available files only, unless --all also shows
     /// vanished-but-known files (available = 0).
     List {
@@ -554,6 +582,16 @@ enum PlaylistCommand {
         /// Media path, relative to the media root (e.g. `Musique/a.mp3`)
         media: String,
     },
+}
+
+fn print_tags(t: &library::MediaTags) {
+    let v = |s: &str| if s.is_empty() { "-".to_string() } else { s.to_string() };
+    println!("title:    {}", v(&t.title));
+    println!("artist:   {}", v(&t.artist));
+    println!("album:    {}", v(&t.album));
+    println!("year:     {}", if t.year == 0 { "-".to_string() } else { t.year.to_string() });
+    println!("genre:    {}", v(&t.genre));
+    println!("revision: {}", t.revision);
 }
 
 /// One line per playlist (`playlist list` / `containing`), plus who
@@ -885,6 +923,36 @@ async fn main() -> anyhow::Result<()> {
                 .await?
                 .into_inner();
             println!("forgotten: {} vanished media", r.removed);
+        }
+        Command::Library(LibraryCommand::Tags { media }) => {
+            let mut lib = LibraryServiceClient::connect(args.addr.clone()).await?;
+            let t = lib.get_tags(library::GetTagsRequest { rel_path: media }).await?.into_inner();
+            print_tags(&t);
+        }
+        Command::Library(LibraryCommand::Tag { media, title, artist, album, year, genre, revision }) => {
+            let mut lib = LibraryServiceClient::connect(args.addr.clone()).await?;
+            let revision = match revision {
+                Some(r) => r,
+                None => lib.get_tags(library::GetTagsRequest { rel_path: media.clone() }).await?.into_inner().revision,
+            };
+            let r = lib
+                .set_tags(library::SetTagsRequest { rel_path: media.clone(), revision, title, artist, album, year, genre })
+                .await?
+                .into_inner();
+            if r.conflict {
+                eprintln!("conflict: the tags of {media} changed since that revision; nothing written. Now:");
+                if let Some(t) = &r.tags {
+                    print_tags(t);
+                }
+                std::process::exit(1);
+            }
+            println!("written: {media}");
+            if let Some(t) = &r.tags {
+                print_tags(t);
+            }
+            if let Some(m) = &r.media {
+                println!("index genres: {}", if m.genres.is_empty() { "-".into() } else { m.genres.join(", ") });
+            }
         }
         Command::Library(LibraryCommand::Scan) => {
             let mut lib = LibraryServiceClient::connect(args.addr.clone()).await?;

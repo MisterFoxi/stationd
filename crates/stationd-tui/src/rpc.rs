@@ -147,6 +147,12 @@ pub async fn list_genres(channel: Channel) -> Read<library::ListGenresResponse> 
     bounded(cli.list_genres(library::ListGenresRequest { only_available: true })).await
 }
 
+/// `LibraryService.GetTags` : les tags standard lus dans le fichier.
+pub async fn get_tags(channel: Channel, rel_path: String) -> Read<library::MediaTags> {
+    let mut cli = library::library_service_client::LibraryServiceClient::new(channel);
+    bounded(cli.get_tags(library::GetTagsRequest { rel_path })).await
+}
+
 /// Fenêtres des statistiques d'une fiche média (la dernière vaut « depuis
 /// toujours » : dix ans d'historique).
 pub const CARD_WINDOWS: [&str; 4] = ["24h", "7d", "30d", "3650d"];

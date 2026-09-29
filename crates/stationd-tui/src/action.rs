@@ -47,15 +47,34 @@ pub enum Action {
     RemovePlaylist { reference: String, revision: String },
     /// Relit toute la racine des playlists (`PlaylistService.Reload`).
     ReloadPlaylists,
+    /// Écrit des tags standard dans des fichiers (`LibraryService.SetTags`),
+    /// un par un. Révision vide = relue juste avant d'écrire (lot).
+    SetTags { targets: Vec<(String, String)>, edit: TagChanges },
     Plugin { name: String, verb: PluginVerb },
     Shutdown { force: bool },
 }
 
+/// Tags à écrire : `None` = inchangé, `Some("")` / `Some(0)` = retiré.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TagChanges {
+    pub title: Option<String>,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+    pub year: Option<u32>,
+    pub genre: Option<String>,
+}
+
+impl TagChanges {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 impl Action {
-    /// Une opération qui peut durer (scan de la bibliothèque) : canal sans
-    /// délai maximal.
+    /// Une opération qui peut durer (scan, écriture de fichiers sur NFS) :
+    /// canal sans délai maximal.
     pub fn is_long(&self) -> bool {
-        matches!(self, Action::Scan)
+        matches!(self, Action::Scan | Action::SetTags { .. })
     }
 }
 
@@ -224,6 +243,49 @@ pub async fn run(action: Action, channel: Channel, tz: Option<jiff::tz::TimeZone
                 let first = r.errors.first().map(|e| format!("{} : {}", e.path, e.message)).unwrap_or_default();
                 Err(format!("{msg} — {first}"))
             }
+        }
+        Action::SetTags { targets, edit } => {
+            let mut cli = library::library_service_client::LibraryServiceClient::new(channel);
+            let total = targets.len();
+            let (mut written, mut conflicts, mut failed) = (0, Vec::new(), Vec::new());
+            for (path, revision) in targets {
+                let revision = if revision.is_empty() {
+                    match cli.get_tags(library::GetTagsRequest { rel_path: path.clone() }).await {
+                        Ok(r) => r.into_inner().revision,
+                        Err(e) => {
+                            failed.push(format!("{path} : {}", err(e)));
+                            continue;
+                        }
+                    }
+                } else {
+                    revision
+                };
+                let req = library::SetTagsRequest {
+                    rel_path: path.clone(),
+                    revision,
+                    title: edit.title.clone(),
+                    artist: edit.artist.clone(),
+                    album: edit.album.clone(),
+                    year: edit.year,
+                    genre: edit.genre.clone(),
+                };
+                match cli.set_tags(req).await {
+                    Ok(r) if r.get_ref().conflict => conflicts.push(path),
+                    Ok(_) => written += 1,
+                    Err(e) => failed.push(format!("{path} : {}", err(e))),
+                }
+            }
+            if conflicts.is_empty() && failed.is_empty() {
+                return Ok(Done::msg(tr!("done-tags-written", n = written, total = total)));
+            }
+            let mut msg = tr!("done-tags-written", n = written, total = total);
+            if !conflicts.is_empty() {
+                msg.push_str(&format!(" · {}", tr!("done-tags-conflicts", list = conflicts.join(", "))));
+            }
+            if let Some(f) = failed.first() {
+                msg.push_str(&format!(" · {}", tr!("done-tags-failed", n = failed.len(), first = f.clone())));
+            }
+            Err(msg)
         }
         Action::Scan => {
             let r = library::library_service_client::LibraryServiceClient::new(channel)

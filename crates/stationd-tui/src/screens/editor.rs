@@ -199,6 +199,32 @@ pub fn diag_text(d: &Diagnostic) -> String {
     t
 }
 
+/// Coupe `text` en lignes d'au plus `width` cellules, entre les éléments
+/// d'une liste (« a (1), b (2) ») : un élément n'est jamais coupé en deux,
+/// un élément plus long que la ligne reste entier sur la sienne.
+fn wrap(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(10);
+    let w = |s: &str| Span::raw(s).width();
+    let mut out: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let items: Vec<&str> = text.split(", ").collect();
+    for (i, item) in items.iter().enumerate() {
+        let piece = if i + 1 < items.len() { format!("{item},") } else { item.to_string() };
+        let need = if cur.is_empty() { w(&piece) } else { w(&cur) + 1 + w(&piece) };
+        if need > width && !cur.is_empty() {
+            out.push(std::mem::take(&mut cur));
+        }
+        if !cur.is_empty() {
+            cur.push(' ');
+        }
+        cur.push_str(&piece);
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
 fn is_error(d: &Diagnostic) -> bool {
     d.severity == Severity::Error as i32
 }
@@ -1213,6 +1239,7 @@ impl Editor {
         let label_w = (inner.width as usize / 3).clamp(12, 26);
         let mut lines: Vec<(Line, Option<usize>)> = Vec::new();
         let mut focus_line = 0;
+        let mut focus_tail = 0;
         for (i, r) in rows.iter().enumerate() {
             let is_focus = focused && r.target == Some(self.focus);
             if r.kind == Kind::Header {
@@ -1255,6 +1282,7 @@ impl Editor {
             };
             lines.push((line, if is_focus && r.kind == Kind::Text { Some(label_w + 3) } else { None }));
             if is_focus {
+                let before = lines.len();
                 for d in &per_row[i] {
                     let st = if is_error(d) { s.error() } else { s.warn() };
                     lines.push((Line::styled(format!("   ↳ {}", diag_text(d)), st), None));
@@ -1262,15 +1290,22 @@ impl Editor {
                 if let Target::Filter(fi, FilterPart::Value) = self.focus
                     && self.draft.filters().get(fi).is_some_and(|f| f.field == "genre")
                 {
-                    lines.push((Line::styled(format!("   {}", self.genre_hint()), s.muted()), None));
+                    // Tous les genres proposés, sur autant de lignes qu'il faut.
+                    for l in wrap(&self.genre_hint(), (inner.width as usize).saturating_sub(3)) {
+                        lines.push((Line::styled(format!("   {l}"), s.muted()), None));
+                    }
                 }
+                focus_tail = lines.len() - before;
             }
         }
+        // La ligne qui a le focus et ce qui la suit (diagnostics, genres)
+        // restent visibles, le focus d'abord si tout ne tient pas.
         let h = inner.height as usize;
+        let tail = focus_tail;
         if focus_line < self.form_scroll {
             self.form_scroll = focus_line.saturating_sub(1);
-        } else if focus_line + 3 > self.form_scroll + h {
-            self.form_scroll = (focus_line + 3).saturating_sub(h);
+        } else if focus_line + 1 + tail > self.form_scroll + h {
+            self.form_scroll = (focus_line + 1 + tail).saturating_sub(h).min(focus_line);
         }
         let mut cursor = None;
         for (n, (line, input_x)) in lines.into_iter().skip(self.form_scroll).take(h).enumerate() {
@@ -1288,7 +1323,7 @@ impl Editor {
         cursor
     }
 
-    /// Genres connus qui commencent par le mot en cours de frappe.
+    /// Genres connus qui commencent par le mot en cours de frappe (tous).
     fn genre_hint(&self) -> String {
         let typed = self.input.text();
         let last = typed.rsplit(',').next().unwrap_or("").trim().to_lowercase();
@@ -1296,7 +1331,6 @@ impl Editor {
             .genres
             .iter()
             .filter(|g| last.is_empty() || g.genre.to_lowercase().starts_with(&last))
-            .take(12)
             .map(|g| format!("{} ({})", g.genre, g.count))
             .collect();
         if list.is_empty() { tr!("ed-genres-none") } else { tr!("ed-genres", list = list.join(", ")) }
@@ -1542,6 +1576,17 @@ mod tests {
         assert_eq!(diag_row(&paths, "selection"), Some(2), "première ligne de la sélection");
         assert_eq!(diag_row(&paths, "broadcast.limit"), None);
         assert_eq!(diag_row(&paths, ""), None, "le fichier entier : pas de ligne");
+    }
+
+    #[test]
+    fn a_long_genre_list_wraps_without_losing_any() {
+        let text = (0..40).map(|i| format!("genre{i} ({i})")).collect::<Vec<_>>().join(", ");
+        let lines = wrap(&text, 30);
+        assert!(lines.len() > 1);
+        assert!(lines.iter().all(|l| Span::raw(l.as_str()).width() <= 30), "{lines:?}");
+        assert_eq!(lines.join(" "), text, "rien de perdu");
+        let named = wrap("genres : bossa nova (1), big beat (2), drum and bass (3)", 26);
+        assert!(named.iter().all(|l| !l.ends_with("bossa") && !l.ends_with("big") && !l.ends_with("drum")), "{named:?}");
     }
 
     #[test]
