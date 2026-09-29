@@ -23,6 +23,18 @@ custom keys are stored; the filter whitelist currently exposes these scalars:
   quoted RFC3339 timestamps with an explicit offset. Storage and filter values
   normalize to UTC with nine fractional digits, so offsets compare as instants.
   Timestamp precision and leap-second handling follow StationD's jiff library.
+- `age`: `<`, `<=`, `>`, `>=`; the age of `creation`, a duration (`30m`,
+  `12h`, `10d`) resolved against the station clock at each pick — a sliding
+  window: `age < 10d` = created less than ten days ago. Media without a
+  creation date have no age and match none of these. Also in the media
+  search (`library search --age "<10d"`, TUI `âge:<10d`).
+
+```toml
+[[selection.filter]]
+field = "age"
+op = "<"
+value = "10d"
+```
 
 The custom-tags plugin keeps `tags = ["Type"]` as genre enrichment. Both new
 rules are opt-in. Metadata-only configurations can omit `tags`. See the commented

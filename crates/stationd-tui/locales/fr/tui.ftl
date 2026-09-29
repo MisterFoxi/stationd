@@ -393,7 +393,7 @@ control-shutdown-live = DJ { $dj } à l'antenne : a sera refusé, A le coupe.
 
 ## Écran Médias
 media-search-title = Recherche
-media-search-hint = / pour chercher : mots (titre, artiste, album, chemin), genre:x, dossier:x
+media-search-hint = / pour chercher : mots (titre, artiste, album, chemin), genre:x, dossier:x, âge:<10d (création)
 media-count = { $shown } / { $total }
 media-sorted-by = tri : { $field } { $dir }
 media-missing = sans { $field }

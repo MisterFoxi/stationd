@@ -395,6 +395,24 @@ qu'une playlist était en shuffle, la liste divergeait.
 - Écran Médias en erreur (stationd injoignable) : relu au retour de la
   liaison (`Screen::reconnected`, appelé sur l'écran actif) et en y revenant.
 
+**Filtre `age` — âge de la date de création (2026-09-29)** — fenêtre
+glissante : `field = "age", op = "<", value = "10d"` = créé il y a moins de
+dix jours, résolu à chaque choix sur l'horloge de la station (la simulation
+« À suivre » l'évalue à l'heure simulée). Ops `<` `<=` `>` `>=` (`=` refusé),
+durée `s`/`m`/`h`/`d` (`parse_duration_secs`) ; sans date de création = aucun
+âge, exclu. Traduit en borne sur `media_meta.creation`
+(`media_index::age_filter`, partagé filtre / recherche).
+- `now` passé explicitement : `filter_sql`, `combine_where`,
+  `materialize_dynamic`, `dynamic_matches`, `pool_inspection::inspect_ref_at`
+  (`inspect_ref` = horloge murale), `playlist_edit::preview` / `containing`
+  (horloge de la station, horloge manuelle comprise, via `PlaylistGrpc`),
+  projection de grille à l'instant projeté.
+- Recherche : `SearchMediaRequest.age` (repeated `AgeFilter{op, value}`,
+  refus `invalid_argument` expliqué) ; `stationctl library search --age "<10d"` ;
+  TUI Médias `âge:<10d` (ou `age:`), ignoré tant qu'il est en cours de frappe.
+- Tests : fenêtre qui glisse (materialize à now, now+7 j, now+9 j), sans
+  date exclu, SQL / refus, recherche.
+
 **Suivant** : valider 4b sur devstationd, puis lot 5 (stationd : diagnostics
 de grille, `SaveGrid`) et lot 6 (Agenda). Reste de Médias : Type / tags et
 panneaux de répartition (lot 8), jauge de scan (lot 7).

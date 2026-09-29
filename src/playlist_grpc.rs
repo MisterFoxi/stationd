@@ -37,6 +37,18 @@ impl PlaylistGrpc {
         Self { db, root, control, writes: Arc::new(Mutex::new(())) }
     }
 
+    /// The station's now (manual clock if set): relative filters (`age`)
+    /// resolve against it.
+    fn now(&self) -> i64 {
+        match &self.control {
+            Some(c) => c.now().0,
+            None => std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0),
+        }
+    }
+
     fn changed(&self) {
         if let Some(c) = &self.control {
             c.bump_air();
@@ -166,7 +178,7 @@ impl PlaylistService for PlaylistGrpc {
     ) -> Result<Response<PreviewPoolResponse>, Status> {
         let r = request.into_inner();
         let key = draft_key(&r.reference)?;
-        let p = playlist_edit::preview(&self.db, &r.toml, key.as_deref(), r.sample as usize)
+        let p = playlist_edit::preview(&self.db, &r.toml, key.as_deref(), r.sample as usize, self.now())
             .await
             .map_err(edit_status)?;
         let file = key.unwrap_or_default();
@@ -278,7 +290,7 @@ impl PlaylistService for PlaylistGrpc {
         if media.is_empty() {
             return Err(Status::invalid_argument("media_path is empty"));
         }
-        let holders = playlist_edit::containing(&self.db, media).await.map_err(edit_status)?;
+        let holders = playlist_edit::containing(&self.db, media, self.now()).await.map_err(edit_status)?;
         let refs = crate::sync::reference_index(&self.db).await.map_err(Status::internal)?;
         let playlists = holders
             .into_iter()

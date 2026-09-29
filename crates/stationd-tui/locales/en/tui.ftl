@@ -392,7 +392,7 @@ control-shutdown-live = DJ { $dj } on air: a will be refused, A kicks them.
 
 ## Media screen
 media-search-title = Search
-media-search-hint = / to search: words (title, artist, album, path), genre:x, dossier:x
+media-search-hint = / to search: words (title, artist, album, path), genre:x, dossier:x, age:<10d (creation)
 media-count = { $shown } / { $total }
 media-sorted-by = sorted by { $field } { $dir }
 media-missing = without { $field }

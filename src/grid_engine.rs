@@ -682,7 +682,7 @@ impl GridEngine {
         // Size the pool (read-only). Only SQLite is infra and propagates; a
         // config-level selection error (transitive unknown ref, unsupported
         // mode, bad filter) marks THIS entry insufficient, report goes on.
-        let inspection = match pool_inspection::inspect_ref(&self.pool, &key).await {
+        let inspection = match pool_inspection::inspect_ref_at(&self.pool, &key, self.effective_now(None).0).await {
             Ok(i) => i,
             Err(crate::selection::SelectionError::Sqlx(e)) => return Err(EngineError::Sqlx(e)),
             Err(e) => return Ok(fail(format!("pool non résolvable : {e}"))),
@@ -1033,7 +1033,7 @@ impl GridEngine {
                     if let Some(stats) = pool_memo.get(&canonical) {
                         stats.clone()
                     } else {
-                        let stats = crate::pool_inspection::inspect_ref(&self.pool, &canonical).await?;
+                        let stats = crate::pool_inspection::inspect_ref_at(&self.pool, &canonical, epoch.0).await?;
                         pool_memo.insert(canonical, stats.clone());
                         stats
                     }

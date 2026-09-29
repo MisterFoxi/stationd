@@ -56,7 +56,21 @@ pub async fn inspect_ref(
     pool: &SqlitePool,
     playlist_ref: &str,
 ) -> Result<PoolInspection, SelectionError> {
-    inspect_ref_at_depth(pool, playlist_ref, 0).await
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    inspect_ref_at(pool, playlist_ref, now).await
+}
+
+/// [`inspect_ref`] at instant `now` (epoch seconds, the station clock): the
+/// relative filters (`age`) resolve against it.
+pub async fn inspect_ref_at(
+    pool: &SqlitePool,
+    playlist_ref: &str,
+    now: i64,
+) -> Result<PoolInspection, SelectionError> {
+    inspect_ref_at_depth(pool, playlist_ref, 0, now).await
 }
 
 /// Depth-tracked worker for [`inspect_ref`]. A nested group member recurses,
@@ -66,12 +80,13 @@ async fn inspect_ref_at_depth(
     pool: &SqlitePool,
     playlist_ref: &str,
     depth: u32,
+    now: i64,
 ) -> Result<PoolInspection, SelectionError> {
     let playlist = load_playlist(pool, playlist_ref).await?;
     let sel = &playlist.selection;
     if sel.mode != Mode::Group {
         return Ok(PoolInspection {
-            stats: inspect_leaf(pool, sel)
+            stats: inspect_leaf(pool, sel, now)
                 .await
                 .map_err(|e| identify_playlist(e, playlist_ref))?,
             group: None,
@@ -107,11 +122,11 @@ async fn inspect_ref_at_depth(
         let child = load_playlist(pool, &member_key).await?;
         let mut stats = if child.selection.mode == Mode::Group {
             // Nested group: recurse and fold in its aggregate stats.
-            Box::pin(inspect_ref_at_depth(pool, &member_key, depth + 1))
+            Box::pin(inspect_ref_at_depth(pool, &member_key, depth + 1, now))
                 .await?
                 .stats
         } else {
-            inspect_leaf(pool, &child.selection)
+            inspect_leaf(pool, &child.selection, now)
                 .await
                 .map_err(|e| identify_playlist(e, &member.r#ref))?
         };
@@ -161,9 +176,9 @@ async fn load_playlist(pool: &SqlitePool, reference: &str) -> Result<Playlist, S
     Ok(Playlist::parse(&toml)?)
 }
 
-async fn inspect_leaf(pool: &SqlitePool, sel: &Selection) -> Result<PoolStats, SelectionError> {
+async fn inspect_leaf(pool: &SqlitePool, sel: &Selection, now: i64) -> Result<PoolStats, SelectionError> {
     let candidates = match sel.mode {
-        Mode::Dynamic => materialize_dynamic(pool, sel).await?,
+        Mode::Dynamic => materialize_dynamic(pool, sel, now).await?,
         Mode::Static => materialize_static(pool, &sel.files).await?,
         // No indexed media/duration source exists for these modes yet.
         // A containing member can still supply its explicit runtime above.

@@ -216,6 +216,15 @@ message SearchMediaRequest {
   bool descending = 7;
   uint32 limit = 8;        // 0 = 50, plafonné à 500
   string cursor = 9;       // `next_cursor` de la page précédente ; vide = début
+  // Âge de la date de création (celle de l'index : déduite ou choisie à la
+  // main), toutes vérifiées : `<` 10d = créé il y a moins de dix jours.
+  // Un média sans date de création n'en passe aucune.
+  repeated AgeFilter age = 10;
+
+  message AgeFilter {
+    string op = 1;         // <, <=, >, >=
+    string value = 2;      // durée : 30m, 12h, 10d
+  }
 
   enum Field {
     FIELD_UNSPECIFIED = 0;

@@ -425,6 +425,11 @@ enum LibraryCommand {
         /// title, artist, album, year, genre
         #[arg(long = "missing", value_name = "FIELD")]
         missing: Vec<String>,
+        /// Age of the creation date: `<10d` = created less than ten days ago,
+        /// `>=30d` = at least thirty days ago (repeatable: all of them).
+        /// Units: s, m, h, d. Media without a creation date never match
+        #[arg(long = "age", value_name = "OP DURATION", allow_hyphen_values = true)]
+        age: Vec<String>,
         /// Sort key: path, title, artist, album, year, duration
         #[arg(long, default_value = "path")]
         sort: String,
@@ -1035,7 +1040,7 @@ async fn main() -> anyhow::Result<()> {
             }
             // A skipped audio file is diagnostic, not a failure: exit zero.
         }
-        Command::Library(LibraryCommand::Search { query, genres, folder, missing, sort, desc, limit, cursor, all }) => {
+        Command::Library(LibraryCommand::Search { query, genres, folder, missing, age, sort, desc, limit, cursor, all }) => {
             use library::search_media_request::Field;
             let field = |s: &str| -> anyhow::Result<Field> {
                 Ok(match s.to_ascii_lowercase().as_str() {
@@ -1066,6 +1071,7 @@ async fn main() -> anyhow::Result<()> {
                     descending: desc,
                     limit,
                     cursor: cursor.unwrap_or_default(),
+                    age: age.iter().map(String::as_str).map(age_filter).collect::<anyhow::Result<Vec<_>>>()?,
                 })
                 .await?
                 .into_inner();
@@ -1903,6 +1909,17 @@ fn onair_note(n: &onair::Note, tz: &jiff::tz::TimeZone) -> String {
         ),
         Ok(C::Unspecified) | Err(_) => format!("unknown note (code {})", n.code),
     }
+}
+
+/// `<10d` → operator `<`, duration `10d` (the duration is checked by stationd).
+fn age_filter(s: &str) -> anyhow::Result<library::search_media_request::AgeFilter> {
+    let s = s.trim();
+    let op_len = s.bytes().take_while(|b| matches!(b, b'<' | b'>' | b'=')).count();
+    let (op, value) = s.split_at(op_len);
+    if !matches!(op, "<" | "<=" | ">" | ">=") || value.trim().is_empty() {
+        anyhow::bail!("--age {s:?}: want an operator and a duration, e.g. <10d, >=30d");
+    }
+    Ok(library::search_media_request::AgeFilter { op: op.into(), value: value.trim().into() })
 }
 
 fn print_onair(s: &onair::OnAirSnapshot) {

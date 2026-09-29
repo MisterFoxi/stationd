@@ -493,6 +493,10 @@ pub struct SearchQuery {
     pub descending: bool,
     pub limit: usize,
     pub cursor: Option<SearchCursor>,
+    /// Creation-date bounds, resolved from ages by [`age_filter`]: `(op,
+    /// instant)` on the stored form. A media without a creation date passes
+    /// none of them.
+    pub creation: Vec<(&'static str, String)>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -506,7 +510,7 @@ pub struct SearchPage {
 
 /// rel_path, title, artist, album, year, duration_ms, size_bytes,
 /// available, genres (joined by U+001F).
-type SearchRow = (String, Option<String>, Option<String>, Option<String>, Option<i64>, i64, i64, i64, Option<String>);
+type SearchRow = (String, Option<String>, Option<String>, Option<String>, Option<i64>, i64, i64, i64, Option<String>, Option<String>);
 
 pub const SEARCH_LIMIT_DEFAULT: usize = 50;
 pub const SEARCH_LIMIT_MAX: usize = 500;
@@ -535,7 +539,8 @@ pub async fn search(pool: &SqlitePool, q: &SearchQuery) -> Result<SearchPage, sq
     let rows: Vec<SearchRow> =
         sqlx::query_as(
             "SELECT m.rel_path, m.title, m.artist, m.album, m.year, m.duration_ms, m.size_bytes, m.available,
-                    GROUP_CONCAT(g.genre, char(31))
+                    GROUP_CONCAT(g.genre, char(31)),
+                    (SELECT d.value FROM media_meta d WHERE d.rel_path = m.rel_path AND d.key = 'creation')
              FROM media m LEFT JOIN media_genre g ON g.rel_path = m.rel_path
              GROUP BY m.rel_path",
         )
@@ -549,9 +554,21 @@ pub async fn search(pool: &SqlitePool, q: &SearchQuery) -> Result<SearchPage, sq
         if f.is_empty() { f } else { format!("{f}/") }
     };
 
+    let created = |c: &Option<String>| {
+        q.creation.iter().all(|(op, bound)| {
+            c.as_deref().is_some_and(|c| match *op {
+                "<" => c < bound.as_str(),
+                "<=" => c <= bound.as_str(),
+                ">" => c > bound.as_str(),
+                ">=" => c >= bound.as_str(),
+                _ => false,
+            })
+        })
+    };
     let mut hits: Vec<MediaRow> = rows
         .into_iter()
-        .map(|(rel_path, title, artist, album, year, duration_ms, size_bytes, available, genres)| {
+        .filter(|row| created(&row.9))
+        .map(|(rel_path, title, artist, album, year, duration_ms, size_bytes, available, genres, _creation)| {
             let mut genres: Vec<String> =
                 genres.map(|g| g.split('\u{1f}').map(str::to_string).collect()).unwrap_or_default();
             genres.sort();
@@ -834,6 +851,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn search_filters_on_the_age_of_the_creation_date() {
+        let (_d, pool) = searchable().await;
+        let now = 1_790_683_200; // 2026-09-29T12:00:00Z
+        for (p, c) in [("Rock/b.mp3", "2026-09-27T12:00:00.000000000Z"), ("Électro/d.mp3", "2026-08-01T00:00:00.000000000Z")] {
+            sqlx::query("INSERT INTO media_meta (rel_path, key, value) VALUES (?1, 'creation', ?2)")
+                .bind(p)
+                .bind(c)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        let q = |ages: &[(&str, &str)]| SearchQuery {
+            creation: ages.iter().map(|(op, v)| age_filter(op, v, now).unwrap()).collect(),
+            ..Default::default()
+        };
+        let paths = |p: SearchPage| p.media.into_iter().map(|m| m.rel_path).collect::<Vec<_>>();
+        assert_eq!(paths(search(&pool, &q(&[("<", "10d")])).await.unwrap()), ["Rock/b.mp3"]);
+        assert_eq!(paths(search(&pool, &q(&[(">", "10d")])).await.unwrap()), ["Électro/d.mp3"]);
+        assert!(search(&pool, &q(&[(">", "10d"), ("<", "30d")])).await.unwrap().media.is_empty());
+        assert_eq!(age_filter("=", "10d", now), Err(AgeFilterError::Op));
+        assert!(matches!(age_filter("<", "10", now), Err(AgeFilterError::Value(_))));
+    }
+
+    #[tokio::test]
     async fn search_finds_missing_metadata() {
         let (_d, pool) = searchable().await;
         let q = SearchQuery { missing: vec![SearchField::Title], ..Default::default() };
@@ -1033,6 +1074,45 @@ mod tests {
 
 /// Strict RFC3339 shape, calendar validation by jiff, and one sortable UTC form.
 /// Fixed nanosecond precision prevents prefix ordering mistakes at whole seconds.
+/// The creation instant `age` (a duration: `10d`, `12h`) before `now`, in the
+/// stored form of `normalize_creation` (UTC, 9 fractional digits: the
+/// strings order like the instants).
+fn creation_age_bound(age: &str, now: i64) -> Result<String, String> {
+    let secs = crate::playlist::parse_duration_secs(age)?;
+    let at = now.checked_sub(i64::try_from(secs).map_err(|_| format!("duration {age:?} is too large"))?);
+    let t = at
+        .and_then(|s| jiff::Timestamp::from_second(s).ok())
+        .ok_or_else(|| format!("duration {age:?} is too large"))?;
+    Ok(format!("{t:.9}"))
+}
+
+/// An age comparison as a comparison of creation instants: younger = later.
+/// `=` / `!=` are refused (an age to the second is never what is meant).
+fn age_as_creation_op(op: &str) -> Option<&'static str> {
+    Some(match op {
+        "<" => ">",
+        "<=" => ">=",
+        ">" => "<",
+        ">=" => "<=",
+        _ => return None,
+    })
+}
+
+/// Why an age filter is refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgeFilterError {
+    Op,
+    Value(String),
+}
+
+/// `age <op> <duration>` at `now` → the same test on the stored creation
+/// date: `(op, instant)`. Shared by the playlist filter and the search.
+pub(crate) fn age_filter(op: &str, value: &str, now: i64) -> Result<(&'static str, String), AgeFilterError> {
+    let op = age_as_creation_op(op).ok_or(AgeFilterError::Op)?;
+    let bound = creation_age_bound(value, now).map_err(AgeFilterError::Value)?;
+    Ok((op, bound))
+}
+
 pub(crate) fn normalize_creation(value: &str) -> Result<String, String> {
     let bad = || "expected an RFC3339 timestamp with offset".to_string();
     let b = value.as_bytes();

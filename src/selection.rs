@@ -312,7 +312,7 @@ async fn resolve_leaf(
     // 1. Materialize the base pool (base order: static = declared, dynamic =
     //    lexical on rel_path).
     let mut candidates = match sel.mode {
-        Mode::Dynamic => materialize_dynamic(pool, sel).await?,
+        Mode::Dynamic => materialize_dynamic(pool, sel, now).await?,
         Mode::Static => materialize_static(pool, &sel.files).await?,
         m => return Err(SelectionError::UnsupportedMode(m)),
     };
@@ -837,12 +837,15 @@ type CandRow = (
     i64,            // mtime_ns
 );
 
+/// `now` (epoch seconds, the station clock) resolves the relative filters
+/// (`age`).
 pub(crate) async fn materialize_dynamic(
     pool: &SqlitePool,
     sel: &Selection,
+    now: i64,
 ) -> Result<Vec<Candidate>, SelectionError> {
     let m = sel.r#match.unwrap_or(Match::All);
-    let w = combine_where(&sel.filter, m)?;
+    let w = combine_where(&sel.filter, m, now)?;
     let sql = format!(
         "SELECT rel_path, artist, title, album, year, duration_ms, mtime_ns \
          FROM media WHERE available = 1 AND ({}) ORDER BY rel_path",
@@ -862,9 +865,14 @@ pub(crate) async fn materialize_dynamic(
 /// Does the dynamic selection `sel` keep media `rel_path`, available or not?
 /// (The media card: "which playlists can air this".) Same filters as
 /// `materialize_dynamic`, narrowed to one row.
-pub(crate) async fn dynamic_matches(pool: &SqlitePool, sel: &Selection, rel_path: &str) -> Result<bool, SelectionError> {
+pub(crate) async fn dynamic_matches(
+    pool: &SqlitePool,
+    sel: &Selection,
+    rel_path: &str,
+    now: i64,
+) -> Result<bool, SelectionError> {
     let m = sel.r#match.unwrap_or(Match::All);
-    let w = combine_where(&sel.filter, m)?;
+    let w = combine_where(&sel.filter, m, now)?;
     let sql = format!("SELECT count(*) FROM media WHERE rel_path = ? AND ({})", w.sql);
     let mut q = sqlx::query_as::<_, (i64,)>(&sql).bind(rel_path.to_string());
     for b in &w.binds {
@@ -1002,7 +1010,7 @@ struct Where {
 
 /// Combine the filters with AND (`match = all`) or OR (`match = any`). No
 /// filters → the always-true predicate (whole available library).
-fn combine_where(filters: &[Filter], m: Match) -> Result<Where, SelectionError> {
+fn combine_where(filters: &[Filter], m: Match, now: i64) -> Result<Where, SelectionError> {
     if filters.is_empty() {
         return Ok(Where {
             sql: "1 = 1".to_string(),
@@ -1016,7 +1024,7 @@ fn combine_where(filters: &[Filter], m: Match) -> Result<Where, SelectionError> 
     let mut parts = Vec::with_capacity(filters.len());
     let mut binds = Vec::new();
     for (index, f) in filters.iter().enumerate() {
-        let w = filter_sql(f).map_err(|error| match error {
+        let w = filter_sql(f, now).map_err(|error| match error {
             SelectionError::BadFilterValue { field, reason } => SelectionError::BadFilterValue {
                 field,
                 reason: format!(
@@ -1039,7 +1047,7 @@ fn combine_where(filters: &[Filter], m: Match) -> Result<Where, SelectionError> 
 /// The `field` is a closed whitelist, so the column names interpolated below
 /// are constant, never user input. Unknown field/op or a mistyped value is a
 /// loud error.
-fn filter_sql(f: &Filter) -> Result<Where, SelectionError> {
+fn filter_sql(f: &Filter, now: i64) -> Result<Where, SelectionError> {
     let unsupported = || SelectionError::UnsupportedFilter {
         field: f.field.clone(),
         op: f.op.clone(),
@@ -1108,6 +1116,23 @@ fn filter_sql(f: &Filter) -> Result<Where, SelectionError> {
             Ok(Where {
                 sql: format!("EXISTS (SELECT 1 FROM media_meta d WHERE d.rel_path = media.rel_path AND d.key = 'creation' AND d.value {op} ?)"),
                 binds: vec![Bind::Text(timestamp)],
+            })
+        }
+        // Age of the creation date, relative to `now`: `age < 10d` = created
+        // less than ten days ago. A media without a creation date has no
+        // age: kept by no `age` filter.
+        "age" => {
+            let value = as_text(f)?;
+            let (op, bound) = crate::media_index::age_filter(&f.op, &value, now).map_err(|e| match e {
+                crate::media_index::AgeFilterError::Op => unsupported(),
+                crate::media_index::AgeFilterError::Value(_) => SelectionError::BadFilterValue {
+                    field: f.field.clone(),
+                    reason: "expected a duration, e.g. 10d, 12h, 30m".into(),
+                },
+            })?;
+            Ok(Where {
+                sql: format!("EXISTS (SELECT 1 FROM media_meta d WHERE d.rel_path = media.rel_path AND d.key = 'creation' AND d.value {op} ?)"),
+                binds: vec![Bind::Text(bound)],
             })
         }
         "year" => {
@@ -1235,7 +1260,8 @@ fn set_field_sql(sf: &SetField, f: &Filter) -> Result<Where, SelectionError> {
 /// filter at apply/validate time instead of it only surfacing on air. Single
 /// source of truth: defers to `filter_sql`, never a second catalogue.
 pub(crate) fn validate_filter(f: &Filter) -> Result<(), SelectionError> {
-    filter_sql(f).map(|_| ())
+    // The instant only resolves relative values: any one validates them.
+    filter_sql(f, wall_now()).map(|_| ())
 }
 
 fn num_op(op: &str) -> Option<&'static str> {
@@ -1308,6 +1334,10 @@ mod tests {
 
     // ----- pure WHERE builder (no DB) ----------------------------------
 
+    fn sql(f: &Filter) -> Result<Where, SelectionError> {
+        filter_sql(f, 0)
+    }
+
     fn filt(field: &str, op: &str, value: toml::Value) -> Filter {
         Filter {
             field: field.into(),
@@ -1324,6 +1354,7 @@ mod tests {
                 filt("path", "prefix", toml::Value::String("pop/".into())),
             ],
             Match::All,
+            0,
         )
         .unwrap();
         assert_eq!(w.sql, "(year >= ?) AND (instr(rel_path, ?) = 1)");
@@ -1338,6 +1369,7 @@ mod tests {
                 filt("artist", "eq", toml::Value::String("B".into())),
             ],
             Match::Any,
+            0,
         )
         .unwrap();
         assert_eq!(w.sql, "(artist = ?) OR (artist = ?)");
@@ -1345,10 +1377,11 @@ mod tests {
 
     #[test]
     fn empty_prefix_and_no_filter_match_everything() {
-        assert_eq!(combine_where(&[], Match::All).unwrap().sql, "1 = 1");
+        assert_eq!(combine_where(&[], Match::All, 0).unwrap().sql, "1 = 1");
         let w = combine_where(
             &[filt("path", "prefix", toml::Value::String(String::new()))],
             Match::All,
+            0,
         )
         .unwrap();
         assert_eq!(w.sql, "(1 = 1)");
@@ -1358,11 +1391,11 @@ mod tests {
     #[test]
     fn unknown_field_or_op_is_a_loud_error() {
         assert!(matches!(
-            filter_sql(&filt("rating", ">=", toml::Value::Integer(3))),
+            sql(&filt("rating", ">=", toml::Value::Integer(3))),
             Err(SelectionError::UnsupportedFilter { .. })
         ));
         assert!(matches!(
-            filter_sql(&filt("year", "between", toml::Value::Integer(3))),
+            sql(&filt("year", "between", toml::Value::Integer(3))),
             Err(SelectionError::UnsupportedFilter { .. })
         ));
     }
@@ -1370,14 +1403,14 @@ mod tests {
     #[test]
     fn wrong_value_type_is_a_loud_error() {
         assert!(matches!(
-            filter_sql(&filt("year", ">=", toml::Value::String("nope".into()))),
+            sql(&filt("year", ">=", toml::Value::String("nope".into()))),
             Err(SelectionError::BadFilterValue { .. })
         ));
     }
 
     #[test]
     fn genre_has_builds_an_exists() {
-        let w = filter_sql(&filt("genre", "has", toml::Value::String("jazz".into()))).unwrap();
+        let w = sql(&filt("genre", "has", toml::Value::String("jazz".into()))).unwrap();
         assert_eq!(
             w.sql,
             "EXISTS (SELECT 1 FROM media_genre d WHERE d.rel_path = media.rel_path AND d.genre_key = ?)"
@@ -1387,7 +1420,7 @@ mod tests {
 
     #[test]
     fn genre_has_any_builds_an_in_exists() {
-        let w = filter_sql(&filt(
+        let w = sql(&filt(
             "genre",
             "has_any",
             toml::Value::Array(vec![
@@ -1411,7 +1444,7 @@ mod tests {
         // `has`/`has_any` are for set-valued fields; on a scalar field they are
         // a loud error, never a silent no-match.
         assert!(matches!(
-            filter_sql(&filt(
+            sql(&filt(
                 "artist",
                 "has_any",
                 toml::Value::Array(vec![toml::Value::String("A".into())])
@@ -1424,17 +1457,17 @@ mod tests {
     fn has_any_rejects_non_list_empty_or_non_string() {
         // not an array
         assert!(matches!(
-            filter_sql(&filt("genre", "has_any", toml::Value::String("jazz".into()))),
+            sql(&filt("genre", "has_any", toml::Value::String("jazz".into()))),
             Err(SelectionError::BadFilterValue { .. })
         ));
         // empty array
         assert!(matches!(
-            filter_sql(&filt("genre", "has_any", toml::Value::Array(vec![]))),
+            sql(&filt("genre", "has_any", toml::Value::Array(vec![]))),
             Err(SelectionError::BadFilterValue { .. })
         ));
         // non-string element
         assert!(matches!(
-            filter_sql(&filt(
+            sql(&filt(
                 "genre",
                 "has_any",
                 toml::Value::Array(vec![toml::Value::Integer(3)])
@@ -1445,7 +1478,7 @@ mod tests {
 
     #[test]
     fn genre_has_all_builds_an_and_of_exists() {
-        let w = filter_sql(&filt(
+        let w = sql(&filt(
             "genre",
             "has_all",
             toml::Value::Array(vec![
@@ -1467,7 +1500,7 @@ mod tests {
 
     #[test]
     fn genre_has_none_builds_a_not_exists_in() {
-        let w = filter_sql(&filt(
+        let w = sql(&filt(
             "genre",
             "has_none",
             toml::Value::Array(vec![
@@ -1491,11 +1524,11 @@ mod tests {
         // Same list-value contract as has_any: non-array / empty → loud error.
         for op in ["has_all", "has_none"] {
             assert!(matches!(
-                filter_sql(&filt("genre", op, toml::Value::String("jazz".into()))),
+                sql(&filt("genre", op, toml::Value::String("jazz".into()))),
                 Err(SelectionError::BadFilterValue { .. })
             ));
             assert!(matches!(
-                filter_sql(&filt("genre", op, toml::Value::Array(vec![]))),
+                sql(&filt("genre", op, toml::Value::Array(vec![]))),
                 Err(SelectionError::BadFilterValue { .. })
             ));
         }
@@ -1548,6 +1581,55 @@ mod tests {
         store::upsert(pool, reference, &pl, toml, Some(reference))
             .await
             .expect("upsert playlist");
+    }
+
+    #[tokio::test]
+    async fn an_age_filter_keeps_media_created_within_the_window() {
+        let (_d, pool) = fresh_db().await;
+        media_index::replace_library(&pool, &[media("new.mp3", "a", 0, &[]), media("old.mp3", "b", 0, &[]), media("none.mp3", "c", 0, &[])], 1000)
+            .await
+            .unwrap();
+        // now = 2026-09-29T12:00:00Z ; new = 2 days before, old = 20 days before.
+        let now = 1_790_683_200;
+        for (p, c) in [("new.mp3", "2026-09-27T12:00:00.000000000Z"), ("old.mp3", "2026-09-09T12:00:00.000000000Z")] {
+            sqlx::query("INSERT INTO media_meta (rel_path, key, value) VALUES (?1, 'creation', ?2)")
+                .bind(p)
+                .bind(c)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        let sel = |op: &str| {
+            Playlist::parse(&format!(
+                "name = \"n\"\n[selection]\nmode = \"dynamic\"\norder = \"shuffle\"\n\
+                 [[selection.filter]]\nfield = \"age\"\nop = \"{op}\"\nvalue = \"10d\"\n"
+            ))
+            .unwrap()
+            .selection
+        };
+        let paths = |c: Vec<Candidate>| c.into_iter().map(|c| c.rel_path).collect::<Vec<_>>();
+        assert_eq!(paths(materialize_dynamic(&pool, &sel("<"), now).await.unwrap()), ["new.mp3"]);
+        assert_eq!(paths(materialize_dynamic(&pool, &sel(">="), now).await.unwrap()), ["old.mp3"]);
+        // The window slides: a week later « new » (9 days old) is still in,
+        // two more days and it is out.
+        assert_eq!(paths(materialize_dynamic(&pool, &sel("<"), now + 7 * 86400).await.unwrap()), ["new.mp3"]);
+        assert!(materialize_dynamic(&pool, &sel("<"), now + 9 * 86400).await.unwrap().is_empty());
+        assert!(dynamic_matches(&pool, &sel("<"), "new.mp3", now).await.unwrap());
+        assert!(!dynamic_matches(&pool, &sel("<"), "none.mp3", now).await.unwrap(), "no creation date: no age");
+    }
+
+    #[test]
+    fn an_age_filter_wants_an_order_and_a_duration() {
+        let f = |op: &str, v: &str| filter_sql(&filt("age", op, toml::Value::String(v.into())), 1_000_000_000);
+        let w = f("<", "10d").unwrap();
+        assert!(w.sql.contains("d.key = 'creation' AND d.value > ?"), "{}", w.sql);
+        assert_eq!(w.binds, vec![Bind::Text("2001-08-30T01:46:40.000000000Z".into())]);
+        assert!(matches!(f("=", "10d"), Err(SelectionError::UnsupportedFilter { .. })));
+        assert!(matches!(f("<", "10 days"), Err(SelectionError::BadFilterValue { .. })));
+        assert!(matches!(
+            filter_sql(&filt("age", "<", toml::Value::Integer(10)), 0),
+            Err(SelectionError::BadFilterValue { .. })
+        ));
     }
 
     #[tokio::test]
@@ -3309,7 +3391,7 @@ mod tests {
             ("creation", "<", "2026-06-14T06:36:48Z", 0),
             ("creation", ">=", "2026-06-14T08:36:48.000000001+02:00", 1),
         ] {
-            let w = filter_sql(&filt(field, op, toml::Value::String(value.into()))).unwrap();
+            let w = sql(&filt(field, op, toml::Value::String(value.into()))).unwrap();
             let sql = format!("SELECT count(*) FROM media WHERE available = 1 AND {}", w.sql);
             let mut query = sqlx::query_as::<_, (i64,)>(&sql);
             for bind in w.binds {
@@ -3329,7 +3411,7 @@ mod tests {
     #[test]
     fn metadata_filter_validation_rejects_bad_dates_and_operators() {
         for (field, op, value) in [("creation", ">=", "bad"), ("creation", "contains", "2026-01-01T00:00:00Z"), ("tempo", "prefix", "fast")] {
-            assert!(filter_sql(&filt(field, op, toml::Value::String(value.into()))).is_err());
+            assert!(sql(&filt(field, op, toml::Value::String(value.into()))).is_err());
         }
     }
 

@@ -135,7 +135,7 @@ async fn validation_sees_the_set_member_refs_and_cycles() {
 #[tokio::test]
 async fn preview_counts_the_pool_and_warns_when_empty() {
     let (_dir, pool) = setup().await;
-    let p = playlist_edit::preview(&pool, MUSIC, None, 0).await.unwrap();
+    let p = playlist_edit::preview(&pool, MUSIC, None, 0, 0).await.unwrap();
     assert!(p.ok);
     assert_eq!((p.count, p.duration_ms, p.artists), (Some(2), Some(120_000), Some(2)));
     let paths: Vec<_> = p.sample.iter().map(|m| m.rel_path.as_str()).collect();
@@ -143,14 +143,14 @@ async fn preview_counts_the_pool_and_warns_when_empty() {
     assert!(p.diagnostics.is_empty());
 
     let empty = MUSIC.replace("music/", "rien/");
-    let p = playlist_edit::preview(&pool, &empty, None, 0).await.unwrap();
+    let p = playlist_edit::preview(&pool, &empty, None, 0, 0).await.unwrap();
     assert!(p.ok);
     assert_eq!(p.count, Some(0));
     assert_eq!(p.diagnostics[0].code, DiagCode::EmptyPool);
     assert!(!p.diagnostics[0].error, "a warning, not an error");
 
     // Invalid draft: diagnostics, no pool.
-    let p = playlist_edit::preview(&pool, "name = 1", None, 0).await.unwrap();
+    let p = playlist_edit::preview(&pool, "name = 1", None, 0, 0).await.unwrap();
     assert!(!p.ok && p.count.is_none());
 }
 
@@ -160,7 +160,7 @@ async fn preview_of_a_group_counts_each_member() {
     let root = root(&dir);
     playlist_edit::save(&pool, &root, "music", MUSIC, "").await.unwrap();
     let g = "name = \"g\"\n[selection]\nmode = \"group\"\nstrategy = \"rotate\"\n[[selection.members]]\nref = \"music\"\n";
-    let p = playlist_edit::preview(&pool, g, Some("g"), 0).await.unwrap();
+    let p = playlist_edit::preview(&pool, g, Some("g"), 0, 0).await.unwrap();
     assert!(p.ok, "{:?}", p.diagnostics);
     assert_eq!(p.members.len(), 1);
     assert_eq!((p.members[0].resolved.as_deref(), p.members[0].count), (Some("music"), Some(2)));
@@ -171,7 +171,7 @@ async fn preview_of_a_group_counts_each_member() {
     let empty = MUSIC.replace("music/", "rien/");
     playlist_edit::save(&pool, &root, "rien", &empty, "").await.unwrap();
     let g2 = format!("{g}[[selection.members]]\nref = \"rien\"\n");
-    let p = playlist_edit::preview(&pool, &g2, Some("g"), 0).await.unwrap();
+    let p = playlist_edit::preview(&pool, &g2, Some("g"), 0, 0).await.unwrap();
     assert!(p.ok);
     assert_eq!(p.diagnostics.len(), 1, "{:?}", p.diagnostics);
     assert_eq!((p.diagnostics[0].code, p.diagnostics[0].field.as_str()), (DiagCode::EmptyPool, "selection.members[2].ref"));
@@ -216,14 +216,14 @@ async fn containing_names_static_and_dynamic_holders_and_refuses_an_unknown_medi
 
     let refs = |h: Vec<playlist_edit::Holder>| h.into_iter().filter_map(|h| h.rel_path).collect::<Vec<_>>();
     // b: filtered by `music` (dynamic), listed by `jingles` (static, leading `/` normalised).
-    assert_eq!(refs(playlist_edit::containing(&pool, "music/b.mp3").await.unwrap()), ["jingles", "music"]);
-    assert_eq!(refs(playlist_edit::containing(&pool, "jingles/j.mp3").await.unwrap()), ["jingles"]);
+    assert_eq!(refs(playlist_edit::containing(&pool, "music/b.mp3", 0).await.unwrap()), ["jingles", "music"]);
+    assert_eq!(refs(playlist_edit::containing(&pool, "jingles/j.mp3", 0).await.unwrap()), ["jingles"]);
     // A vanished media still says where it was.
     media_index::mark_unavailable(&pool, "music/a.mp3").await.unwrap();
-    assert_eq!(refs(playlist_edit::containing(&pool, "music/a.mp3").await.unwrap()), ["music"]);
+    assert_eq!(refs(playlist_edit::containing(&pool, "music/a.mp3", 0).await.unwrap()), ["music"]);
     // Case matters for a media path: unknown = said, not an empty answer.
     assert!(matches!(
-        playlist_edit::containing(&pool, "Music/b.mp3").await,
+        playlist_edit::containing(&pool, "Music/b.mp3", 0).await,
         Err(playlist_edit::EditError::UnknownMedia(_))
     ));
 }

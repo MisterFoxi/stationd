@@ -148,6 +148,23 @@ impl LibraryService for LibraryGrpc {
     ) -> Result<Response<SearchMediaResponse>, Status> {
         use crate::media_index::{SearchCursor, SearchQuery};
         let r = request.into_inner();
+        // Ages resolve against the wall clock: a search is about « now ».
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let creation = r
+            .age
+            .iter()
+            .map(|a| {
+                crate::media_index::age_filter(a.op.trim(), a.value.trim(), now).map_err(|e| match e {
+                    crate::media_index::AgeFilterError::Op => {
+                        Status::invalid_argument(format!("age: unknown operator `{}` (<, <=, >, >=)", a.op))
+                    }
+                    crate::media_index::AgeFilterError::Value(why) => Status::invalid_argument(format!("age: {why}")),
+                })
+            })
+            .collect::<Result<Vec<_>, Status>>()?;
         let cursor = if r.cursor.trim().is_empty() {
             None
         } else {
@@ -165,6 +182,7 @@ impl LibraryService for LibraryGrpc {
                 descending: r.descending,
                 limit: r.limit as usize,
                 cursor,
+                creation,
             })
             .await
             .map_err(map_error)?;

@@ -393,7 +393,7 @@ control-shutdown-live = DJ { $dj } auf Sendung: a wird abgewiesen, A trennt ihn.
 
 ## Bildschirm Medien
 media-search-title = Suche
-media-search-hint = / zum Suchen: Wörter (Titel, Interpret, Album, Pfad), genre:x, dossier:x
+media-search-hint = / zum Suchen: Wörter (Titel, Interpret, Album, Pfad), genre:x, dossier:x, age:<10d (Erstellung)
 media-count = { $shown } / { $total }
 media-sorted-by = sortiert nach { $field } { $dir }
 media-missing = ohne { $field }

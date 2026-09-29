@@ -199,7 +199,9 @@ pub const SAMPLE_MAX: usize = 100;
 /// Evaluate the pool of a draft without applying it: what the index offers
 /// TODAY (available media only), before anti-repetition and plugins — the
 /// same materialization as playback, no cursor or state touched.
-pub async fn preview(db: &SqlitePool, text: &str, key: Option<&str>, sample: usize) -> Result<Preview, EditError> {
+///
+/// `now` (epoch seconds, the station clock) resolves the relative filters (`age`).
+pub async fn preview(db: &SqlitePool, text: &str, key: Option<&str>, sample: usize, now: i64) -> Result<Preview, EditError> {
     let (playlist, diagnostics) = validate_draft(db, text, key).await?;
     let mut out = Preview { diagnostics, ..Preview::default() };
     let Some(playlist) = playlist else { return Ok(out) };
@@ -209,7 +211,7 @@ pub async fn preview(db: &SqlitePool, text: &str, key: Option<&str>, sample: usi
     let sample = if sample == 0 { SAMPLE_DEFAULT } else { sample.min(SAMPLE_MAX) };
     let sel = &playlist.selection;
     let candidates = match sel.mode {
-        Mode::Dynamic => Some(materialize_dynamic(db, sel).await),
+        Mode::Dynamic => Some(materialize_dynamic(db, sel, now).await),
         Mode::Static => Some(materialize_static(db, &sel.files).await),
         Mode::Remote | Mode::Queue => None,
         Mode::Group => None,
@@ -251,7 +253,7 @@ pub async fn preview(db: &SqlitePool, text: &str, key: Option<&str>, sample: usi
                     Err(e) => mp.error = Some(e),
                     Ok(k) => {
                         mp.resolved = Some(k.clone());
-                        match pool_inspection::inspect_ref(db, &k).await {
+                        match pool_inspection::inspect_ref_at(db, &k, now).await {
                             Ok(i) => {
                                 mp.count = i.stats.selected_count;
                                 mp.duration_ms = i.stats.total_duration_ms;
@@ -308,7 +310,9 @@ pub struct Holder {
 /// listing it, dynamic ones whose filters keep it (available or not). Groups
 /// are not unfolded (their members are listed). `NotFound` when the index
 /// does not know the media: a mistyped path is said, never an empty answer.
-pub async fn containing(db: &SqlitePool, rel_path: &str) -> Result<Vec<Holder>, EditError> {
+///
+/// `now` resolves the relative filters (`age`): « peut le diffuser » is as of now.
+pub async fn containing(db: &SqlitePool, rel_path: &str, now: i64) -> Result<Vec<Holder>, EditError> {
     let io = |e: sqlx::Error| EditError::Io(format!("could not read the media index: {e}"));
     if crate::media_index::brief(db, rel_path).await.map_err(io)?.is_none() {
         return Err(EditError::UnknownMedia(rel_path.to_string()));
@@ -322,7 +326,7 @@ pub async fn containing(db: &SqlitePool, rel_path: &str) -> Result<Vec<Holder>, 
             Mode::Static => crate::selection::static_lists(&p.selection.files, rel_path),
             // A filter the index refuses keeps nothing (it is reported by
             // Validate / on air, not here).
-            Mode::Dynamic => crate::selection::dynamic_matches(db, &p.selection, rel_path).await.unwrap_or(false),
+            Mode::Dynamic => crate::selection::dynamic_matches(db, &p.selection, rel_path, now).await.unwrap_or(false),
             Mode::Remote | Mode::Queue | Mode::Group => false,
         };
         if holds {

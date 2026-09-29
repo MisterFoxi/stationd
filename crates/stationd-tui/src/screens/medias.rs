@@ -71,19 +71,22 @@ pub fn live_query(text: &str) -> String {
 
 fn is_prefix_token(tok: &str) -> bool {
     tok.split_once(':')
-        .is_some_and(|(k, _)| matches!(k.to_lowercase().as_str(), "genre" | "dossier" | "dir" | "folder"))
+        .is_some_and(|(k, _)| matches!(k.to_lowercase().as_str(), "genre" | "dossier" | "dir" | "folder" | "age" | "âge"))
 }
 
-/// La barre de recherche découpée : mots, genres, dossier.
+/// La barre de recherche découpée : mots, genres, dossier, âges.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Parsed {
     pub words: String,
     pub genres: Vec<String>,
     pub folder: String,
+    /// `âge:<10d` → (`<`, `10d`) : âge de la date de création. Envoyé tel
+    /// quel, stationd refuse (et dit pourquoi) un opérateur ou une durée faux.
+    pub age: Vec<(String, String)>,
 }
 
-/// `daft genre:électro dossier:Musique/Rock punk` → mots `daft punk`, genre
-/// `électro`, dossier `Musique/Rock`. Préfixes insensibles à la casse ;
+/// `daft genre:électro dossier:Musique/Rock âge:<10d punk` → mots `daft
+/// punk`, genre `électro`, dossier `Musique/Rock`, créé il y a moins de 10 jours. Préfixes insensibles à la casse ;
 /// `dir:` / `folder:` acceptés pour `dossier:`. Un préfixe vide est ignoré.
 pub fn parse_query(text: &str) -> Parsed {
     let mut p = Parsed::default();
@@ -96,7 +99,12 @@ pub fn parse_query(text: &str) -> Parsed {
         match key.as_str() {
             "genre" if !val.is_empty() => p.genres.push(val.to_string()),
             "dossier" | "dir" | "folder" if !val.is_empty() => p.folder = val.to_string(),
-            "genre" | "dossier" | "dir" | "folder" => {}
+            "age" | "âge" if !val.is_empty() => {
+                let n = val.chars().take_while(|c| matches!(c, '<' | '>' | '=')).count();
+                let (op, dur) = val.split_at(n);
+                p.age.push((op.to_string(), dur.to_string()));
+            }
+            "genre" | "dossier" | "dir" | "folder" | "age" | "âge" => {}
             _ => words.push(tok),
         }
     }
@@ -259,6 +267,11 @@ impl Medias {
             descending: self.descending,
             limit: PAGE,
             cursor,
+            age: p
+                .age
+                .into_iter()
+                .map(|(op, value)| stationd_proto::library::search_media_request::AgeFilter { op, value })
+                .collect(),
         }
     }
 
@@ -1039,6 +1052,10 @@ mod tests {
         assert_eq!(p.genres, ["électro", "house"]);
         assert_eq!(p.folder, "Musique/Rock");
         assert_eq!(parse_query("  ").words, "");
+        let a = parse_query("âge:<10d daft Age:>=30d age:");
+        assert_eq!(a.age, [("<".to_string(), "10d".to_string()), (">=".to_string(), "30d".to_string())]);
+        assert_eq!(a.words, "daft");
+        assert_eq!(live_query("daft âge:<1"), "daft");
         // Un « : » ailleurs que dans un préfixe reste un mot.
         assert_eq!(parse_query("12:30").words, "12:30");
     }
