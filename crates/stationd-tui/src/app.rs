@@ -435,6 +435,8 @@ pub fn event(event: &AppEvent, state: &mut Scenery, ctx: &mut Global) -> Result<
             if ok && was != ctx.store.link {
                 state.expect_exit = false;
                 state.status.status(0, tr!("status-connected"));
+                let active = state.active;
+                state.screens[active].reconnected(ctx)?;
             } else if !ok
                 && !was_lost
                 && !state.expect_exit

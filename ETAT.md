@@ -378,6 +378,23 @@ qu'une playlist était en shuffle, la liste divergeait.
   `SIMULATED` revu (fr/en/de, stationctl).
 - À valider sur devstationd (la station de run2 n'a pas de grille).
 
+**Correctifs TUI Médias (2026-09-29)** — 47 tests TUI verts, essayé en réel.
+- Modification depuis la fiche non visible (liste et fiche restaient sur les
+  anciennes valeurs jusqu'à un changement d'écran) : un seul compteur
+  numérotait liste, fiche, tags et choix de playlist ; après l'écriture, la
+  relecture de la fiche rendait périmée la réponse de la liste, jetée. La
+  liste garde désormais son propre n° (`list_req`), et la fiche prend la
+  ligne relue. Test de non-régression (échoue sans le correctif).
+- Fiche : section « Tags du fichier » (GetTags) — BPM, tempo et date de
+  création effectifs (« choisi à la main » / « déduit »), sources (`Type`…).
+- Écriture vérifiée : `SetTags` renvoie les tags relus ; la TUI compare à la
+  demande (`action::not_applied`, même normalisation que stationd). Un écart
+  est un échec nommé (« stationd n'a pas écrit genres, BPM… (stationd plus
+  ancien que la TUI ?) ») au lieu de « tags écrits » — cas d'un stationd pas
+  relancé, qui ignore les nouveaux champs du proto et répond OK.
+- Écran Médias en erreur (stationd injoignable) : relu au retour de la
+  liaison (`Screen::reconnected`, appelé sur l'écran actif) et en y revenant.
+
 **Suivant** : valider 4b sur devstationd, puis lot 5 (stationd : diagnostics
 de grille, `SaveGrid`) et lot 6 (Agenda). Reste de Médias : Type / tags et
 panneaux de répartition (lot 8), jauge de scan (lot 7).

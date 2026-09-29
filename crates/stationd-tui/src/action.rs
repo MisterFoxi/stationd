@@ -146,6 +146,54 @@ impl TagChanges {
     }
 }
 
+/// Les champs de `req` que les tags relus `got` ne reflètent pas (libellés
+/// traduits). Même normalisation que stationd : valeurs rognées, vides
+/// ignorées, doublons à la casse près retirés, comparaison sans la casse.
+pub fn not_applied(req: &library::SetTagsRequest, got: &library::MediaTags) -> Vec<String> {
+    fn norm(values: &[String]) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for v in values.iter().map(|v| v.trim().to_lowercase()).filter(|v| !v.is_empty()) {
+            if !out.contains(&v) {
+                out.push(v);
+            }
+        }
+        out
+    }
+    let text = |want: &Option<String>, have: &str| want.as_ref().is_some_and(|w| w.trim() != have.trim());
+    let mut out = Vec::new();
+    if text(&req.title, &got.title) {
+        out.push(tr!("media-field-title"));
+    }
+    if text(&req.artist, &got.artist) {
+        out.push(tr!("media-field-artist"));
+    }
+    if text(&req.album, &got.album) {
+        out.push(tr!("media-field-album"));
+    }
+    if req.year.is_some_and(|y| y != got.year) {
+        out.push(tr!("media-field-year"));
+    }
+    if req.genres.as_ref().is_some_and(|g| norm(&g.values) != norm(&got.genres)) {
+        out.push(tr!("tags-genres"));
+    }
+    for src in &req.sources {
+        let have = got.sources.iter().find(|s| s.name.eq_ignore_ascii_case(&src.name)).map(|s| s.values.as_slice()).unwrap_or(&[]);
+        if norm(&src.values) != norm(have) {
+            out.push(src.name.clone());
+        }
+    }
+    if req.bpm.is_some_and(|b| b != got.bpm) {
+        out.push(tr!("tags-bpm"));
+    }
+    if text(&req.tempo_manual, &got.tempo_manual) {
+        out.push(tr!("tags-tempo"));
+    }
+    if text(&req.creation_manual, &got.creation_manual) {
+        out.push(tr!("tags-creation"));
+    }
+    out
+}
+
 impl Action {
     /// Une opération qui peut durer (scan, écriture de fichiers sur NFS) :
     /// canal sans délai maximal.
@@ -342,9 +390,22 @@ pub async fn run(action: Action, channel: Channel, tz: Option<jiff::tz::TimeZone
                     (revision, None)
                 };
                 let req = edit.request(&path, revision, current.as_ref());
-                match cli.set_tags(req).await {
+                match cli.set_tags(req.clone()).await {
                     Ok(r) if r.get_ref().conflict => conflicts.push(path),
-                    Ok(_) => written += 1,
+                    // Relu dans le fichier après écriture : ce qui a été
+                    // demandé doit y être. Un stationd plus ancien que la TUI
+                    // ignore les champs qu'il ne connaît pas et répond OK.
+                    Ok(r) => match &r.get_ref().tags {
+                        Some(t) => {
+                            let missing = not_applied(&req, t);
+                            if missing.is_empty() {
+                                written += 1;
+                            } else {
+                                failed.push(tr!("done-tags-not-applied", path = path, fields = missing.join(", ")));
+                            }
+                        }
+                        None => failed.push(tr!("done-tags-no-readback", path = path)),
+                    },
                     Err(e) => failed.push(format!("{path} : {}", err(e))),
                 }
             }
@@ -409,6 +470,35 @@ pub async fn run(action: Action, channel: Channel, tz: Option<jiff::tz::TimeZone
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn what_stationd_did_not_write_is_reported() {
+        let req = library::SetTagsRequest {
+            rel_path: "a.mp3".into(),
+            title: Some(" Veridis Quo ".into()),
+            year: Some(0),
+            genres: Some(library::StringList { values: vec!["House".into(), "house".into(), "électro".into()] }),
+            sources: vec![library::TagValues { name: "Type".into(), values: vec!["song".into()] }],
+            bpm: Some(120),
+            tempo_manual: Some("fast".into()),
+            ..Default::default()
+        };
+        let mut got = library::MediaTags {
+            title: "Veridis Quo".into(),
+            genres: vec!["house".into(), "Électro".into()],
+            sources: vec![library::TagValues { name: "type".into(), values: vec!["Song".into()] }],
+            bpm: 120,
+            tempo_manual: "fast".into(),
+            ..Default::default()
+        };
+        assert!(not_applied(&req, &got).is_empty(), "{:?}", not_applied(&req, &got));
+        // Un stationd qui ignore les nouveaux champs : seul le titre passe.
+        got.genres.clear();
+        got.sources.clear();
+        got.bpm = 0;
+        got.tempo_manual.clear();
+        assert_eq!(not_applied(&req, &got), vec![tr!("tags-genres"), "Type".to_string(), tr!("tags-bpm"), tr!("tags-tempo")]);
+    }
 
     #[test]
     fn a_list_edit_replaces_or_merges_ignoring_case() {

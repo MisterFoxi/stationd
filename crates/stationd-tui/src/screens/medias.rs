@@ -156,8 +156,12 @@ pub struct Medias {
     selected: usize,
     /// Médias marqués (`Espace`), dans l'ordre où ils l'ont été.
     marks: Vec<String>,
-    /// N° de la dernière requête : une réponse plus ancienne est ignorée.
+    /// Compteur des requêtes de l'écran (liste, fiche, tags, choix de
+    /// playlist) : chacune garde le n° de SA dernière requête.
     request: u64,
+    /// N° de la dernière requête de LA LISTE : seule sa réponse est gardée
+    /// (une fiche ou un formulaire ouverts entre-temps ne la périment pas).
+    list_req: u64,
     loaded_once: bool,
     card: Option<Card>,
     /// Sélecteur de playlist ouvert pour une action en lot.
@@ -218,6 +222,7 @@ impl Medias {
             selected: 0,
             marks: Vec::new(),
             request: 0,
+            list_req: 0,
             loaded_once: false,
             card: None,
             chooser: None,
@@ -233,10 +238,11 @@ impl Medias {
         self.picked.take()
     }
 
-    /// Lance la première recherche si rien n'est chargé (ou une réponse
-    /// partie pendant qu'un autre écran était actif).
+    /// Lance la première recherche si rien n'est chargé, si une réponse est
+    /// partie pendant qu'un autre écran était actif, ou si la dernière a
+    /// échoué (stationd injoignable alors).
     pub fn ensure_loaded(&mut self, ctx: &mut Global) {
-        if !self.loaded_once || self.loading {
+        if !self.loaded_once || self.loading || self.error.is_some() {
             self.load(ctx, false);
         }
     }
@@ -264,6 +270,7 @@ impl Medias {
             return;
         }
         self.request += 1;
+        self.list_req = self.request;
         self.loading = true;
         self.loaded_once = true;
         let (owner, id, req, channel) = (self.owner, self.request, self.request(cursor), ctx.channel.clone());
@@ -290,6 +297,12 @@ impl Medias {
                 self.total = page.total;
                 self.next = page.next_cursor.clone();
                 self.error = None;
+                // La fiche ouverte montre la ligne relue (tags écrits…).
+                if let Some(c) = self.card.as_mut()
+                    && let Some(m) = self.rows.iter().find(|m| m.rel_path == c.media.rel_path)
+                {
+                    c.media = m.clone();
+                }
             }
             Err(e) => self.error = Some(e.clone()),
         }
@@ -511,7 +524,7 @@ impl Medias {
         let tz = ctx.store.tz.as_ref();
         let m = &card.media;
         let w = 84.min(area.width.saturating_sub(2)).max(40);
-        let h = area.height.saturating_sub(2).clamp(12, 26);
+        let h = area.height.saturating_sub(2).clamp(12, 34);
         let box_a = centered(area, w, h);
         Clear.render(box_a, buf);
         let block = frame(&tr!("card-title"), &s, false)
@@ -520,7 +533,7 @@ impl Medias {
         block.style(s.base()).render(box_a, buf);
 
         let kv = |k: String, v: Span<'static>| {
-            Line::from(vec![Span::styled(format!(" {:<12} ", fit::ellipsize(&k, 12)), s.label()), v])
+            Line::from(vec![Span::styled(format!(" {:<16} ", fit::ellipsize(&k, 16)), s.label()), v])
         };
         let or_dash = |v: &str| if v.is_empty() { Span::styled("—", s.muted()) } else { Span::raw(v.to_string()) };
         let mut lines = vec![
@@ -537,8 +550,39 @@ impl Medias {
                 if m.available { Span::styled(tr!("card-available"), s.ok()) } else { Span::styled(tr!("card-unavailable"), s.error()) },
             ),
             Line::default(),
-            Line::styled(format!(" {}", tr!("card-playlists")), s.title()),
+            Line::styled(format!(" {}", tr!("card-tags")), s.title()),
         ];
+        // Ce que l'index ne porte pas : lu dans le fichier (GetTags).
+        match card.data.as_ref().map(|d| &d.tags) {
+            None => lines.push(Line::styled(format!("   {}", tr!("media-loading")), s.muted())),
+            Some(Err(e)) => lines.push(Line::styled(format!("   {e}"), s.muted())),
+            Some(Ok(t)) => {
+                let how = |manual: &str| {
+                    Span::styled(
+                        format!("  {}", if manual.is_empty() { tr!("card-tags-auto") } else { tr!("card-tags-manual") }),
+                        s.muted(),
+                    )
+                };
+                let bpm = if t.bpm == 0 { Span::styled("—", s.muted()) } else { Span::raw(t.bpm.to_string()) };
+                lines.push(kv(tr!("tags-bpm"), bpm));
+                let mut tempo = vec![Span::styled(format!(" {:<16} ", fit::ellipsize(&tr!("tags-tempo"), 16)), s.label()), or_dash(&t.tempo)];
+                if !t.tempo.is_empty() {
+                    tempo.push(how(&t.tempo_manual));
+                }
+                lines.push(Line::from(tempo));
+                let mut creation =
+                    vec![Span::styled(format!(" {:<16} ", fit::ellipsize(&tr!("tags-creation"), 16)), s.label()), or_dash(&t.creation)];
+                if !t.creation.is_empty() {
+                    creation.push(how(&t.creation_manual));
+                }
+                lines.push(Line::from(creation));
+                for src in &t.sources {
+                    lines.push(kv(src.name.clone(), or_dash(&src.values.join(", "))));
+                }
+            }
+        }
+        lines.push(Line::default());
+        lines.push(Line::styled(format!(" {}", tr!("card-playlists")), s.title()));
         match card.data.as_ref().map(|d| &d.playlists) {
             None => lines.push(Line::styled(format!("   {}", tr!("media-loading")), s.muted())),
             Some(Err(e)) => lines.push(Line::styled(format!("   {e}"), s.error())),
@@ -645,7 +689,7 @@ impl Medias {
     pub fn handle(&mut self, event: &AppEvent, ctx: &mut Global) -> Control<AppEvent> {
         match event {
             AppEvent::Media(owner, id, r, append) if *owner == self.owner => {
-                if *id == self.request {
+                if *id == self.list_req {
                     self.apply(r, *append);
                     return Control::Changed;
                 }
@@ -963,6 +1007,13 @@ impl Screen for Medias {
         Ok(())
     }
 
+    fn reconnected(&mut self, ctx: &mut Global) -> Result<(), Error> {
+        if self.error.is_some() {
+            self.load(ctx, false);
+        }
+        Ok(())
+    }
+
     fn help(&self) -> &'static [KeyHelp] {
         self.keys()
     }
@@ -990,6 +1041,40 @@ mod tests {
         assert_eq!(parse_query("  ").words, "");
         // Un « : » ailleurs que dans un préfixe reste un mot.
         assert_eq!(parse_query("12:30").words, "12:30");
+    }
+
+    fn media(path: &str, title: &str) -> Media {
+        Media { rel_path: path.into(), title: title.into(), available: true, ..Default::default() }
+    }
+
+    fn page(media: Vec<Media>) -> Result<SearchMediaResponse, String> {
+        Ok(SearchMediaResponse { total: media.len() as u64, media, ..Default::default() })
+    }
+
+    #[tokio::test]
+    async fn the_list_read_after_a_write_reaches_the_list_and_the_open_card() {
+        use clap::Parser;
+        let args = crate::Args::parse_from(["stationd-tui"]);
+        let ch = crate::rpc::lazy_channel(&args.addr).unwrap();
+        let mut ctx = Global::new(&args, ch.clone(), ch);
+        let mut m = Medias::new(false);
+        let owner = m.owner;
+        // Liste chargée, fiche ouverte sur a.mp3.
+        m.list_req = 1;
+        m.request = 1;
+        let _ = m.handle(&AppEvent::Media(owner, 1, page(vec![media("a.mp3", "Veridis")]), false), &mut ctx);
+        m.request = 2;
+        m.card = Some(Card { media: m.rows[0].clone(), request: 2, data: None });
+        // Après l'écriture (refresh) : liste relue (3) PUIS fiche relue (4).
+        m.list_req = 3;
+        m.request = 4;
+        m.card.as_mut().unwrap().request = 4;
+        let _ = m.handle(&AppEvent::Media(owner, 3, page(vec![media("a.mp3", "Veridis Quo")]), false), &mut ctx);
+        assert_eq!(m.rows[0].title, "Veridis Quo", "la réponse de la liste n'est pas périmée par la fiche");
+        assert_eq!(m.card.as_ref().unwrap().media.title, "Veridis Quo", "la fiche suit la ligne relue");
+        // Une réponse de liste vraiment ancienne reste ignorée.
+        let _ = m.handle(&AppEvent::Media(owner, 1, page(vec![media("a.mp3", "Veridis")]), false), &mut ctx);
+        assert_eq!(m.rows[0].title, "Veridis Quo");
     }
 
     #[test]

@@ -173,10 +173,14 @@ pub struct MediaCard {
     pub playlists: Read<Vec<playlist::PlaylistSummary>>,
     /// Une entrée par `CARD_WINDOWS` ; `Ok(None)` = jamais choisi dans la fenêtre.
     pub plays: Vec<Read<Option<stats::PlaysRow>>>,
+    /// Les tags lus dans le fichier (BPM, tempo, date de création, sources) ;
+    /// une erreur pour un format que stationd ne lit pas.
+    pub tags: Read<library::MediaTags>,
 }
 
 pub async fn media_card(channel: Channel, path: String) -> MediaCard {
     let mut pl = playlist::playlist_service_client::PlaylistServiceClient::new(channel.clone());
+    let mut lib = library::library_service_client::LibraryServiceClient::new(channel.clone());
     let st = stats::stats_service_client::StatsServiceClient::new(channel);
     let plays = |since: &'static str| {
         let mut st = st.clone();
@@ -191,14 +195,15 @@ pub async fn media_card(channel: Channel, path: String) -> MediaCard {
             bounded(st.plays(req)).await.map(|r| r.rows.into_iter().next())
         }
     };
-    let (playlists, a, b, c, d) = tokio::join!(
+    let (playlists, tags, a, b, c, d) = tokio::join!(
         bounded(pl.containing(playlist::ContainingRequest { media_path: path.clone() })),
+        bounded(lib.get_tags(library::GetTagsRequest { rel_path: path.clone() })),
         plays(CARD_WINDOWS[0]),
         plays(CARD_WINDOWS[1]),
         plays(CARD_WINDOWS[2]),
         plays(CARD_WINDOWS[3]),
     );
-    MediaCard { playlists: playlists.map(|r| r.playlists), plays: vec![a, b, c, d] }
+    MediaCard { playlists: playlists.map(|r| r.playlists), plays: vec![a, b, c, d], tags }
 }
 
 /// Ce que la TUI demande au flux de l'antenne : le maximum servi, chaque

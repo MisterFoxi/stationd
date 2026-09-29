@@ -37,6 +37,12 @@ pub trait Screen {
         Ok(())
     }
 
+    /// La liaison avec stationd revient (après une perte, ou au premier
+    /// contact) : l'écran actif relit ce qui avait échoué.
+    fn reconnected(&mut self, _ctx: &mut Global) -> Result<(), Error> {
+        Ok(())
+    }
+
     /// Vrai quand un champ de saisie a le focus : les raccourcis globaux
     /// (1..8, q, ?) sont alors du texte et ne sont pas interceptés.
     fn captures_text(&self) -> bool {
