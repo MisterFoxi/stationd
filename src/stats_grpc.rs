@@ -51,9 +51,13 @@ impl StatsService for StatsGrpc {
         };
         let to = wall_now();
         let from = to.saturating_sub(secs as i64);
-        let rows = broadcast_log::plays(&self.pool, from, by, req.limit)
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+        let key = req.key.trim();
+        let rows = if key.is_empty() {
+            broadcast_log::plays(&self.pool, from, by, req.limit).await
+        } else {
+            broadcast_log::plays_of(&self.pool, from, by, key).await.map(|r| r.into_iter().collect())
+        }
+        .map_err(|e| Status::internal(e.to_string()))?;
         // Totals over the whole window, not just the returned lines.
         let all = broadcast_log::plays(&self.pool, from, PlaysBy::Origin, 0)
             .await

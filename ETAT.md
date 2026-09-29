@@ -5,7 +5,7 @@ sans reconstruire le contexte. À distinguer des docs de `Doc/` (décisions
 d'architecture durables) : ce fichier-ci est volatil, à mettre à jour à
 chaque session.
 
-Dernière mise à jour : 2026-09-28 (A4 lot 4a).
+Dernière mise à jour : 2026-09-29 (A4 lot 4b : Playlists + suite de Médias).
 
 
 ## Où on en est en une phrase
@@ -270,16 +270,46 @@ réorganisation de la bibliothèque) :
   oublie les disparus (lignes + genres). L'historique de diffusion garde
   chemin et artiste, perd le titre.
 
-**Suivant : lot 4b** — écran Playlists (`3`) : liste (`PlaylistService.List`
-+ `Export` pour l'état du fichier), éditeur par mode (formulaire à gauche,
-TOML + diagnostics à droite, `toml_edit` pour garder les commentaires,
-diagnostics traduits par `Diagnostic.Code`), aperçu du pool en direct
-(`PreviewPool`, 300 ms après la frappe), `Ctrl+S` = `Save` avec la révision
-lue à l'ouverture (conflit → dialogue comparer / recharger / garder),
-sélecteur de médias pour `static` (réutiliser la recherche de
-`medias.rs`), `d` supprimer (avec révision). Puis, reste de Médias :
-fiche (`Entrée`), statistiques, Type/tags quand le plugin `tags` existera
-(lot 8).
+**Lot 4b fait (2026-09-29)** — écran Playlists (`3`) complet + suite de
+Médias. 511 tests daemon + 37 TUI verts ; clippy : TUI propre, daemon sans
+nouvel avertissement. Essayé en réel dans l'env de préparation (stationd +
+stationctl + TUI dans un terminal 130×40, 120×32, 100×30, 80×24 ; fr/en/de) :
+création d'une statique par le sélecteur de médias, modification d'une
+dynamique (commentaires gardés dans le fichier écrit), erreur de valeur sur
+son champ puis corrigée, conflit (fichier modifié à la main) → comparer,
+suppression confirmée / refusée (référencée), membre ajouté à un groupe,
+TOML brut illisible, fiche média, ajout en lot à une statique, mise en file
+en lot. **À valider sur devstationd.** Dossier §3.5, §5.3, §5.5 ; `Doc/admin.md`.
+- stationd (D3 : pas de contournement côté TUI), chacun avec sa commande :
+  `PlaylistSummary.rules` / `groups` (qui la référence : `sync::reference_index`,
+  que `referrers` — refus de `remove` — lit aussi ; `playlist list` affiche
+  `used by:`) ; `PlaylistService.Containing` (playlists qui peuvent diffuser un
+  média : statiques qui le listent, dynamiques dont les filtres le retiennent ;
+  média inconnu = `NOT_FOUND` ; `stationctl playlist containing <media>`) ;
+  `PlaysRequest.key` (une seule clé : `broadcast_log::plays_of` ;
+  `stationctl stats --by media --key <chemin>`).
+- TUI : `draft.rs` (le TOML du brouillon par `toml_edit` : commentaires gardés,
+  valeurs typées sans rien juger, mode changé = champs de l'autre mode mis de
+  côté et rendus au retour), `screens/editor.rs` (formulaire / TOML /
+  diagnostics / pool, `Ctrl+S` avec révision, conflit garder / comparer /
+  recharger, `Ctrl+T` TOML brut, `Ctrl+N` / `Ctrl+D` / `Alt+↑↓`, `F8`),
+  `screens/playlists.rs` (liste, détail, `n`, `d`, `R`), `screens/picker.rs`
+  (sélecteur de playlist), Médias : fiche (`Entrée`), `Espace` / `c`, `p` →
+  brouillon ouvert dans Playlists (rien d'enregistré avant `Ctrl+S`), `f` mise
+  en file en lot. `F1` ouvre l'aide même pendant une saisie.
+- Plomberie : les réponses de recherche de médias portent leur demandeur
+  (l'écran Médias et le sélecteur de l'éditeur ont chacun la leur) ; un écran
+  peut en ouvrir un autre en lui confiant un travail (`Global::switch_to`,
+  `Handoff`) ; `ActionDone` est aussi transmis à l'écran actif (la liste des
+  playlists se relit après une suppression) ; modale `Info` (refus expliqué).
+- Dépendance TUI : `toml_edit` 0.22 (déjà celle du daemon ; `Cargo.lock` : une ligne).
+- Écarts au dossier : pas de `handle` / `member_only` (absents de la
+  grammaire), pas d'arbre des dossiers ni de recherche floue (la recherche de
+  Médias sert de sélecteur), `q` (mise en file) devenu `f` (`q` = quitter).
+
+**Suivant** : valider 4b sur devstationd, puis lot 5 (stationd : diagnostics
+de grille, `SaveGrid`) et lot 6 (Agenda). Reste de Médias : Type / tags et
+panneaux de répartition (lot 8), jauge de scan (lot 7).
 
 ### Après l'alpha (non bloquant)
 

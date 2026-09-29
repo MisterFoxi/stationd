@@ -55,6 +55,20 @@ pub struct Global {
     pending_modal: Option<Modal>,
     /// Action demandée par un écran sans confirmation (lecture, scan…).
     pending_action: Option<Action>,
+    /// Un écran demande d'en ouvrir un autre (n° du registre).
+    pending_switch: Option<usize>,
+    /// Ce qu'un écran confie à celui qu'il ouvre (médias à ajouter à une
+    /// playlist…) ; l'écran ouvert le prend à son entrée.
+    pub handoff: Option<Handoff>,
+}
+
+/// Travail confié d'un écran à un autre.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Handoff {
+    /// Ouvrir le brouillon de la playlist statique `reference` (ou d'une
+    /// nouvelle, `None`) avec ces médias ajoutés — rien n'est enregistré
+    /// avant `Ctrl+S`.
+    AddFiles { reference: Option<String>, files: Vec<String> },
 }
 
 impl SalsaContext<AppEvent, Error> for Global {
@@ -77,6 +91,8 @@ impl Global {
             store: Store::new(&args.addr),
             pending_modal: None,
             pending_action: None,
+            pending_switch: None,
+            handoff: None,
         }
     }
 
@@ -88,6 +104,12 @@ impl Global {
     /// Un écran lance une action sans confirmation.
     pub fn request(&mut self, action: Action) {
         self.pending_action = Some(action);
+    }
+
+    /// Un écran en ouvre un autre, en lui confiant `handoff`.
+    pub fn switch_to(&mut self, screen: usize, handoff: Option<Handoff>) {
+        self.pending_switch = Some(screen);
+        self.handoff = handoff;
     }
 }
 
@@ -105,11 +127,19 @@ pub enum AppEvent {
     OnAirLost(String),
     /// Une action est terminée (message traduit, ou erreur).
     ActionDone(Result<Done, String>),
-    /// Une page de la recherche de médias (n° de requête, page ou erreur,
-    /// `true` = page suivante à ajouter).
-    Media(u64, Result<stationd_proto::library::SearchMediaResponse, String>, bool),
-    /// Écran Médias : fin du délai après une frappe (n° de la frappe).
-    MediaTyped(u64),
+    /// Une page de la recherche de médias (propriétaire, n° de requête, page
+    /// ou erreur, `true` = page suivante à ajouter). Le propriétaire
+    /// distingue l'écran Médias des sélecteurs qui réutilisent sa recherche.
+    Media(u64, u64, Result<stationd_proto::library::SearchMediaResponse, String>, bool),
+    /// Recherche de médias : fin du délai après une frappe (propriétaire,
+    /// n° de la frappe).
+    MediaTyped(u64, u64),
+    /// Fiche d'un média (propriétaire, n° de requête).
+    MediaCard(u64, u64, Box<crate::rpc::MediaCard>),
+    /// Liste des playlists pour un sélecteur (propriétaire, n° de requête).
+    PlaylistChoices(u64, u64, Result<Vec<stationd_proto::playlist::PlaylistSummary>, String>),
+    /// Écran Playlists : réponses et minuteries (voir `screens::playlists`).
+    Playlists(Box<crate::screens::PlEvent>),
 }
 
 impl From<RenderedEvent> for AppEvent {
@@ -432,6 +462,9 @@ pub fn event(event: &AppEvent, state: &mut Scenery, ctx: &mut Global) -> Result<
                 }
                 Err(e) => state.status.status(0, tr!("status-action-failed", reason = e.clone())),
             }
+            // L'écran actif peut vouloir relire ce que l'action a changé.
+            let active = state.active;
+            let _ = state.screens[active].event(event, ctx)?;
             return Ok(Control::Changed);
         }
         AppEvent::Rendered => {
@@ -441,7 +474,11 @@ pub fn event(event: &AppEvent, state: &mut Scenery, ctx: &mut Global) -> Result<
             return Ok(Control::Continue);
         }
         // Réponse destinée à l'écran qui l'a demandée (plus bas).
-        AppEvent::Media(..) | AppEvent::MediaTyped(..) => {}
+        AppEvent::Media(..)
+        | AppEvent::MediaTyped(..)
+        | AppEvent::MediaCard(..)
+        | AppEvent::PlaylistChoices(..)
+        | AppEvent::Playlists(..) => {}
         AppEvent::Event(Event::Resize(..)) => return Ok(Control::Changed),
         AppEvent::Event(e) => {
             if let Some(k) = press(e) {
@@ -465,14 +502,20 @@ pub fn event(event: &AppEvent, state: &mut Scenery, ctx: &mut Global) -> Result<
                             spawn_action(ctx, state, action);
                         }
                         Outcome::Replace(next) => state.modal = Some(*next),
+                        Outcome::Close => state.modal = None,
                     }
                     return Ok(Control::Changed);
                 }
                 // L'aide ouverte capture tout (modale).
                 if state.help_open {
-                    if matches!(k.code, KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q')) {
+                    if matches!(k.code, KeyCode::Esc | KeyCode::F(1) | KeyCode::Char('?') | KeyCode::Char('q')) {
                         state.help_open = false;
                     }
+                    return Ok(Control::Changed);
+                }
+                // F1 : l'aide, même pendant une saisie.
+                if k.code == KeyCode::F(1) {
+                    state.help_open = true;
                     return Ok(Control::Changed);
                 }
                 if !state.screens[state.active].captures_text() && k.modifiers.is_empty() {
@@ -505,6 +548,14 @@ pub fn event(event: &AppEvent, state: &mut Scenery, ctx: &mut Global) -> Result<
     }
     if let Some(a) = ctx.pending_action.take() {
         spawn_action(ctx, state, a);
+        return Ok(Control::Changed);
+    }
+    if let Some(idx) = ctx.pending_switch.take()
+        && idx < state.screens.len()
+    {
+        state.active = idx;
+        state.status.status(1, tr!("status-screen", screen = state.screens[idx].title()));
+        state.active().enter(ctx)?;
         return Ok(Control::Changed);
     }
     Ok(r)

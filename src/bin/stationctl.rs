@@ -126,6 +126,9 @@ enum Command {
         /// Max lines (0 = all)
         #[arg(long, default_value_t = 20)]
         limit: u32,
+        /// Only this key of the grouping (e.g. one media path with --by media)
+        #[arg(long, default_value = "")]
+        key: String,
     },
 }
 
@@ -545,6 +548,29 @@ enum PlaylistCommand {
         #[arg(long, conflicts_with = "revision")]
         force: bool,
     },
+    /// The playlists that can air a media: static ones listing it, dynamic
+    /// ones whose filters keep it (groups: see their members).
+    Containing {
+        /// Media path, relative to the media root (e.g. `Musique/a.mp3`)
+        media: String,
+    },
+}
+
+/// One line per playlist (`playlist list` / `containing`), plus who
+/// references it.
+fn print_summary(p: &playlist::PlaylistSummary) {
+    let handle = if p.rel_path.is_empty() { "(no path)" } else { &p.rel_path };
+    let state = if p.enabled { "enabled" } else { "disabled" };
+    println!("{handle}  [{}]  {}  ({state})  {}", p.mode, p.name, p.id);
+    let by: Vec<String> = p
+        .rules
+        .iter()
+        .map(|r| format!("grid rule `{r}`"))
+        .chain(p.groups.iter().map(|g| format!("group `{g}`")))
+        .collect();
+    if !by.is_empty() {
+        println!("    used by: {}", by.join(", "));
+    }
 }
 
 #[tokio::main]
@@ -1321,7 +1347,7 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
-        Command::Stats { since, by, limit } => {
+        Command::Stats { since, by, limit, key } => {
             let by = match by {
                 StatsBy::Playlist => PlaysBy::Playlist,
                 StatsBy::Leaf => PlaysBy::Leaf,
@@ -1332,7 +1358,7 @@ async fn main() -> anyhow::Result<()> {
             };
             let mut cli = StatsServiceClient::connect(args.addr.clone()).await?;
             let r = cli
-                .plays(PlaysRequest { since: since.clone(), by: by as i32, limit })
+                .plays(PlaysRequest { since: since.clone(), by: by as i32, limit, key })
                 .await?
                 .into_inner();
             let local = |t: i64| {
@@ -2122,9 +2148,16 @@ async fn playlist_command(addr: &str, cmd: PlaylistCommand) -> anyhow::Result<()
                 println!("(no playlists in the view)");
             }
             for p in &reply.playlists {
-                let handle = if p.rel_path.is_empty() { "(no path)" } else { &p.rel_path };
-                let state = if p.enabled { "enabled" } else { "disabled" };
-                println!("{handle}  [{}]  {}  ({state})  {}", p.mode, p.name, p.id);
+                print_summary(p);
+            }
+        }
+        PlaylistCommand::Containing { media } => {
+            let reply = pl.containing(ContainingRequest { media_path: media.clone() }).await?.into_inner();
+            if reply.playlists.is_empty() {
+                println!("(no playlist can air {media})");
+            }
+            for p in &reply.playlists {
+                print_summary(p);
             }
         }
         PlaylistCommand::Reload => {

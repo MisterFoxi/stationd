@@ -1,7 +1,13 @@
 //! Médias (`5`) — la bibliothèque, par `LibraryService.SearchMedia`
 //! (dossier §5.5). Recherche, filtres, tri stable, pages chargées à la
-//! demande (curseur serveur). Lot 4a : consultation + override d'un média ;
-//! Type / tags (plugin `tags`), fiche et actions en lot viendront ensuite.
+//! demande (curseur serveur). Fiche d'un média (`Entrée` : métadonnées,
+//! playlists qui peuvent le diffuser, diffusions), sélection multiple
+//! (`Espace`) et actions sur la sélection : ajout à une playlist statique
+//! (brouillon ouvert dans Playlists), mise en file, override. Type / tags
+//! (plugin `tags`) viendront au lot 8.
+//!
+//! La même recherche sert de sélecteur de médias au brouillon d'une playlist
+//! statique (`Medias::new(true)`).
 //!
 //! La barre de recherche accepte des mots (titre, artiste, album, chemin)
 //! et deux préfixes : `genre:x` (répétable, au moins un) et `dossier:x`.
@@ -20,12 +26,16 @@ use ratatui_crossterm::crossterm::event::{Event, KeyCode, KeyEventKind};
 use ratatui_widgets::block::Block;
 use ratatui_widgets::borders::BorderType;
 use ratatui_widgets::paragraph::Paragraph;
+use ratatui_widgets::clear::Clear;
 use ratatui_widgets::table::{Cell, Row, Table};
 use stationd_proto::library::search_media_request::Field;
 use stationd_proto::library::{Media, SearchMediaRequest, SearchMediaResponse};
 
 use super::ops;
-use crate::app::{AppEvent, Global};
+use super::picker::{PlaylistPicker, Picked as PickedPlaylist, mode_label};
+use crate::action::Action;
+use crate::app::{AppEvent, Global, Handoff};
+use crate::dialog::{centered, frame};
 use crate::fit;
 use crate::screen::{KeyHelp, Screen};
 use crate::style::Styles;
@@ -93,7 +103,37 @@ pub fn parse_query(text: &str) -> Parsed {
     p
 }
 
+/// Ce que le sélecteur de playlist va recevoir (fiche ou lot).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Purpose {
+    /// Ajouter à une playlist statique (brouillon ouvert dans Playlists).
+    AddToStatic,
+    /// Mettre en file d'une playlist `queue`.
+    Enqueue,
+}
+
+/// Fiche d'un média (`Entrée`).
+struct Card {
+    media: Media,
+    request: u64,
+    data: Option<crate::rpc::MediaCard>,
+}
+
+/// Réponse d'un sélecteur de médias (mode `picker`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Picked {
+    Cancel,
+    Chosen(Vec<String>),
+}
+
 pub struct Medias {
+    /// Identifie les réponses de CETTE recherche (l'écran Médias et chaque
+    /// sélecteur ont la leur).
+    owner: u64,
+    /// Sélecteur de médias (brouillon de playlist statique) : `Entrée`
+    /// choisit au lieu d'ouvrir la fiche.
+    picker: bool,
+    picked: Option<Picked>,
     input: TextInputState,
     editing: bool,
     /// Recherche validée (texte de la barre au dernier Entrée) : Échap y
@@ -113,32 +153,19 @@ pub struct Medias {
     loading: bool,
     error: Option<String>,
     selected: usize,
+    /// Médias marqués (`Espace`), dans l'ordre où ils l'ont été.
+    marks: Vec<String>,
     /// N° de la dernière requête : une réponse plus ancienne est ignorée.
     request: u64,
     loaded_once: bool,
+    card: Option<Card>,
+    /// Sélecteur de playlist ouvert pour une action en lot.
+    chooser: Option<(Purpose, PlaylistPicker, u64)>,
 }
 
 impl Default for Medias {
     fn default() -> Self {
-        Self {
-            input: TextInputState::new(),
-            editing: false,
-            applied: String::new(),
-            searched: String::new(),
-            typing: 0,
-            sort: 0,
-            descending: false,
-            missing: 0,
-            include_unavailable: false,
-            rows: Vec::new(),
-            total: 0,
-            next: String::new(),
-            loading: false,
-            error: None,
-            selected: 0,
-            request: 0,
-            loaded_once: false,
-        }
+        Self::new(false)
     }
 }
 
@@ -160,6 +187,47 @@ fn field_label(f: Field) -> String {
 }
 
 impl Medias {
+    pub fn new(picker: bool) -> Self {
+        Self {
+            owner: super::next_owner(),
+            picker,
+            picked: None,
+            input: TextInputState::new(),
+            editing: false,
+            applied: String::new(),
+            searched: String::new(),
+            typing: 0,
+            sort: 0,
+            descending: false,
+            missing: 0,
+            include_unavailable: false,
+            rows: Vec::new(),
+            total: 0,
+            next: String::new(),
+            loading: false,
+            error: None,
+            selected: 0,
+            marks: Vec::new(),
+            request: 0,
+            loaded_once: false,
+            card: None,
+            chooser: None,
+        }
+    }
+
+    /// Sélecteur : la réponse, une fois donnée (`Entrée` ou `Échap`).
+    pub fn take_picked(&mut self) -> Option<Picked> {
+        self.picked.take()
+    }
+
+    /// Lance la première recherche si rien n'est chargé (ou une réponse
+    /// partie pendant qu'un autre écran était actif).
+    pub fn ensure_loaded(&mut self, ctx: &mut Global) {
+        if !self.loaded_once || self.loading {
+            self.load(ctx, false);
+        }
+    }
+
     fn request(&self, cursor: String) -> SearchMediaRequest {
         let p = parse_query(&self.searched);
         SearchMediaRequest {
@@ -185,10 +253,10 @@ impl Medias {
         self.request += 1;
         self.loading = true;
         self.loaded_once = true;
-        let (id, req, channel) = (self.request, self.request(cursor), ctx.channel.clone());
+        let (owner, id, req, channel) = (self.owner, self.request, self.request(cursor), ctx.channel.clone());
         ctx.spawn_async(async move {
             let r = crate::rpc::search_media(channel, req).await;
-            Ok(Control::Event(AppEvent::Media(id, r, append)))
+            Ok(Control::Event(AppEvent::Media(owner, id, r, append)))
         });
     }
 
@@ -217,6 +285,73 @@ impl Medias {
         }
     }
 
+    fn toggle_mark(&mut self) {
+        let Some(m) = self.rows.get(self.selected) else { return };
+        match self.marks.iter().position(|p| *p == m.rel_path) {
+            Some(i) => {
+                self.marks.remove(i);
+            }
+            None => self.marks.push(m.rel_path.clone()),
+        }
+    }
+
+    /// Les médias visés par une action : les marqués, sinon celui de la
+    /// ligne (ou de la fiche ouverte).
+    fn targets(&self) -> Vec<String> {
+        if let Some(c) = &self.card {
+            return vec![c.media.rel_path.clone()];
+        }
+        if !self.marks.is_empty() {
+            return self.marks.clone();
+        }
+        self.rows.get(self.selected).map(|m| vec![m.rel_path.clone()]).unwrap_or_default()
+    }
+
+    fn open_card(&mut self, ctx: &mut Global) {
+        let Some(m) = self.rows.get(self.selected).cloned() else { return };
+        self.request += 1;
+        let (owner, id, channel, path) = (self.owner, self.request, ctx.channel.clone(), m.rel_path.clone());
+        self.card = Some(Card { media: m, request: id, data: None });
+        ctx.spawn_async(async move {
+            let card = crate::rpc::media_card(channel, path).await;
+            Ok(Control::Event(AppEvent::MediaCard(owner, id, Box::new(card))))
+        });
+    }
+
+    fn open_chooser(&mut self, purpose: Purpose, ctx: &mut Global) {
+        let n = self.targets().len();
+        if n == 0 {
+            return;
+        }
+        let (title, modes, allow_new) = match purpose {
+            Purpose::AddToStatic => (tr!("media-choose-static", n = n), vec!["static"], true),
+            Purpose::Enqueue => (tr!("media-choose-queue", n = n), vec!["queue"], false),
+        };
+        self.request += 1;
+        let (owner, id, channel) = (self.owner, self.request, ctx.channel.clone());
+        self.chooser = Some((purpose, PlaylistPicker::new(title, modes, allow_new), id));
+        ctx.spawn_async(async move {
+            let r = crate::rpc::list_playlists(channel).await;
+            Ok(Control::Event(AppEvent::PlaylistChoices(owner, id, r)))
+        });
+    }
+
+    fn chosen(&mut self, purpose: Purpose, target: Option<String>, ctx: &mut Global) {
+        let files = self.targets();
+        match purpose {
+            Purpose::AddToStatic => {
+                ctx.switch_to(super::PLAYLISTS, Some(Handoff::AddFiles { reference: target, files }));
+            }
+            Purpose::Enqueue => {
+                let Some(playlist) = target else { return };
+                ctx.request(match files.len() {
+                    1 => Action::Enqueue { playlist, media: files[0].clone() },
+                    _ => Action::EnqueueMany { playlist, media: files },
+                });
+            }
+        }
+    }
+
     fn summary(&self) -> String {
         let mut parts = vec![tr!(
             "media-sorted-by",
@@ -228,6 +363,9 @@ impl Medias {
         }
         if self.include_unavailable {
             parts.push(tr!("media-with-unavailable"));
+        }
+        if !self.marks.is_empty() {
+            parts.push(tr!("media-marked", n = self.marks.len()));
         }
         parts.join(" · ")
     }
@@ -243,6 +381,7 @@ impl Medias {
             return;
         }
         let header = Row::new(vec![
+            Cell::from(""),
             Cell::from(tr!("media-field-artist")),
             Cell::from(tr!("media-field-title")),
             Cell::from(tr!("media-field-album")),
@@ -265,7 +404,9 @@ impl Medias {
                 };
                 let artist = if m.artist.is_empty() { Span::styled("—", s.muted()) } else { Span::raw(m.artist.clone()) };
                 let year = if m.year == 0 { String::new() } else { m.year.to_string() };
+                let mark = if self.marks.contains(&m.rel_path) { Span::styled("●", s.accent()) } else { Span::raw(" ") };
                 let mut row = Row::new(vec![
+                    Cell::from(mark),
                     Cell::from(artist),
                     Cell::from(title),
                     Cell::from(Span::styled(m.album.clone(), s.muted())),
@@ -284,6 +425,7 @@ impl Medias {
         let (year_w, dur_w) = (w(tr!("media-field-year"), 4), w(tr!("media-field-duration"), 5));
         let widths = if area.width >= 100 {
             vec![
+                Constraint::Length(1),
                 Constraint::Fill(2),
                 Constraint::Fill(3),
                 Constraint::Fill(2),
@@ -293,6 +435,7 @@ impl Medias {
             ]
         } else {
             vec![
+                Constraint::Length(1),
                 Constraint::Fill(1),
                 Constraint::Fill(2),
                 Constraint::Length(0),
@@ -303,110 +446,104 @@ impl Medias {
         };
         Widget::render(Table::new(rows, widths).header(header).column_spacing(1), area, buf);
     }
-}
 
-impl Screen for Medias {
-    fn title(&self) -> String {
-        tr!("screen-media")
-    }
+    fn render_card(&self, area: Rect, buf: &mut Buffer, ctx: &Global) {
+        let Some(card) = &self.card else { return };
+        let s = Styles(&ctx.theme);
+        let tz = ctx.store.tz.as_ref();
+        let m = &card.media;
+        let w = 84.min(area.width.saturating_sub(2)).max(40);
+        let h = area.height.saturating_sub(2).clamp(12, 26);
+        let box_a = centered(area, w, h);
+        Clear.render(box_a, buf);
+        let block = frame(&tr!("card-title"), &s, false)
+            .title_bottom(Span::styled(format!(" {} ", tr!("card-keys")), s.muted()));
+        let inner = block.inner(box_a);
+        block.style(s.base()).render(box_a, buf);
 
-    fn captures_text(&self) -> bool {
-        self.editing
-    }
-
-    fn enter(&mut self, ctx: &mut Global) -> Result<(), Error> {
-        // Premier passage, ou une réponse partie pendant qu'un autre écran
-        // était actif (elle ne nous est pas parvenue) : on recharge.
-        if !self.loaded_once || self.loading {
-            self.load(ctx, false);
-        }
-        Ok(())
-    }
-
-    fn help(&self) -> &'static [KeyHelp] {
-        if self.editing {
-            &[(k!("key-enter"), k!("help-media-apply")), (k!("key-esc"), k!("help-media-cancel"))]
-        } else {
-            &[
-                (k!("key-slash"), k!("help-media-search")),
-                (k!("key-s"), k!("help-media-sort")),
-                (k!("key-d"), k!("help-media-desc")),
-                (k!("key-m"), k!("help-media-missing")),
-                (k!("key-a"), k!("help-media-unavailable")),
-                (k!("key-o"), k!("help-override")),
-                (k!("key-r"), k!("help-media-reload")),
-            ]
-        }
-    }
-
-    fn event(&mut self, event: &AppEvent, ctx: &mut Global) -> Result<Control<AppEvent>, Error> {
-        if let AppEvent::Media(id, r, append) = event {
-            if *id == self.request {
-                self.apply(r, *append);
-                return Ok(Control::Changed);
-            }
-            return Ok(Control::Continue);
-        }
-        if let AppEvent::MediaTyped(id) = event {
-            if *id == self.typing && self.editing {
-                let live = live_query(self.input.text());
-                if live != self.searched {
-                    self.searched = live;
-                    self.load(ctx, false);
+        let kv = |k: String, v: Span<'static>| {
+            Line::from(vec![Span::styled(format!(" {:<12} ", fit::ellipsize(&k, 12)), s.label()), v])
+        };
+        let or_dash = |v: &str| if v.is_empty() { Span::styled("—", s.muted()) } else { Span::raw(v.to_string()) };
+        let mut lines = vec![
+            kv(tr!("media-field-title"), if m.title.is_empty() { Span::styled(tr!("card-no-title"), s.warn()) } else { Span::styled(m.title.clone(), s.title()) }),
+            kv(tr!("media-field-artist"), or_dash(&m.artist)),
+            kv(tr!("media-field-album"), or_dash(&m.album)),
+            kv(tr!("media-field-year"), if m.year == 0 { Span::styled("—", s.muted()) } else { Span::raw(m.year.to_string()) }),
+            kv(tr!("media-field-duration"), Span::raw(mmss(m.duration_ms))),
+            kv(tr!("media-field-genre"), or_dash(&m.genres.join(", "))),
+            kv(tr!("card-size"), Span::raw(tr!("card-size-mb", mb = format!("{:.1}", m.size_bytes as f64 / 1_048_576.0)))),
+            kv(tr!("media-field-path"), Span::raw(m.rel_path.clone())),
+            kv(
+                tr!("card-state"),
+                if m.available { Span::styled(tr!("card-available"), s.ok()) } else { Span::styled(tr!("card-unavailable"), s.error()) },
+            ),
+            Line::default(),
+            Line::styled(format!(" {}", tr!("card-playlists")), s.title()),
+        ];
+        match card.data.as_ref().map(|d| &d.playlists) {
+            None => lines.push(Line::styled(format!("   {}", tr!("media-loading")), s.muted())),
+            Some(Err(e)) => lines.push(Line::styled(format!("   {e}"), s.error())),
+            Some(Ok(ps)) if ps.is_empty() => lines.push(Line::styled(format!("   {}", tr!("card-no-playlist")), s.warn())),
+            Some(Ok(ps)) => {
+                for p in ps {
+                    let mut spans = vec![
+                        Span::raw("   "),
+                        Span::styled(p.rel_path.clone(), if p.enabled { s.base() } else { s.muted() }),
+                        Span::styled(format!("  {}", mode_label(&p.mode)), s.label()),
+                    ];
+                    if !p.enabled {
+                        spans.push(Span::styled(format!("  {}", tr!("pl-disabled")), s.muted()));
+                    }
+                    if !p.rules.is_empty() {
+                        spans.push(Span::styled(format!("  · {}", tr!("pl-used-rules", list = p.rules.join(", "))), s.muted()));
+                    }
+                    if !p.groups.is_empty() {
+                        spans.push(Span::styled(format!("  · {}", tr!("pl-used-groups", list = p.groups.join(", "))), s.muted()));
+                    }
+                    lines.push(Line::from(spans));
                 }
             }
-            return Ok(Control::Changed);
         }
-        let AppEvent::Event(e) = event else { return Ok(Control::Continue) };
-        if self.editing {
-            if let Event::Key(k) = e
-                && k.kind == KeyEventKind::Press
-            {
-                match k.code {
-                    KeyCode::Enter => {
-                        self.editing = false;
-                        self.input.focus.set(false);
-                        self.typing += 1; // une recherche en attente n'a plus lieu d'être
-                        self.applied = self.input.text().trim().to_string();
-                        if self.searched != self.applied {
-                            self.searched = self.applied.clone();
-                            self.load(ctx, false);
-                        }
-                        return Ok(Control::Changed);
+        lines.push(Line::default());
+        lines.push(Line::styled(format!(" {}", tr!("card-plays")), s.title()));
+        match &card.data {
+            None => lines.push(Line::styled(format!("   {}", tr!("media-loading")), s.muted())),
+            Some(d) => {
+                let labels = [tr!("card-24h"), tr!("card-7d"), tr!("card-30d"), tr!("card-all")];
+                let mut spans = vec![Span::raw("   ")];
+                let mut last = None;
+                for (i, (label, r)) in labels.iter().zip(&d.plays).enumerate() {
+                    if i > 0 {
+                        spans.push(Span::styled("   ", s.muted()));
                     }
-                    KeyCode::Esc => {
-                        self.editing = false;
-                        self.input.focus.set(false);
-                        self.typing += 1;
-                        let applied = self.applied.clone();
-                        self.input.set_text(applied.clone());
-                        // Retour aux résultats d'avant la saisie.
-                        if self.searched != applied {
-                            self.searched = applied;
-                            self.load(ctx, false);
+                    spans.push(Span::styled(format!("{label} "), s.label()));
+                    match r {
+                        Ok(Some(row)) => {
+                            spans.push(Span::raw(format!("{} / {}", row.aired, row.picked)));
+                            last = Some(row.last_at);
                         }
-                        return Ok(Control::Changed);
+                        Ok(None) => spans.push(Span::raw("0 / 0")),
+                        Err(e) => spans.push(Span::styled(fit::ellipsize(e, 30), s.error())),
                     }
-                    _ => {}
                 }
+                lines.push(Line::from(spans));
+                lines.push(Line::styled(format!("   {}", tr!("card-plays-legend")), s.muted()));
+                let last = last.and_then(|t| crate::store::local_day_hm(tz, t));
+                lines.push(Line::from(vec![
+                    Span::styled(format!("   {} ", tr!("card-last")), s.label()),
+                    match last {
+                        Some(t) => Span::raw(t),
+                        None => Span::styled(tr!("card-never"), s.muted()),
+                    },
+                ]));
             }
-            let before = self.input.text().to_string();
-            self.input.handle(e, Regular);
-            if self.input.text() != before {
-                // Recherche en direct, `DEBOUNCE` après la dernière frappe.
-                self.typing += 1;
-                let id = self.typing;
-                ctx.spawn_async(async move {
-                    tokio::time::sleep(DEBOUNCE).await;
-                    Ok(Control::Event(AppEvent::MediaTyped(id)))
-                });
-            }
-            return Ok(Control::Changed);
         }
-        let Event::Key(k) = e else { return Ok(Control::Continue) };
-        if k.kind != KeyEventKind::Press {
-            return Ok(Control::Continue);
-        }
+        Paragraph::new(lines).render(inner, buf);
+    }
+
+    /// Touches d'un sélecteur ou de la table (hors saisie, hors fiche).
+    fn key(&mut self, k: &ratatui_crossterm::crossterm::event::KeyEvent, ctx: &mut Global) -> bool {
         let page = 15;
         match k.code {
             KeyCode::Char('/') => {
@@ -430,23 +567,189 @@ impl Screen for Medias {
                 self.load(ctx, false);
             }
             KeyCode::Char('r') => self.load(ctx, false),
-            KeyCode::Char('o') => {
-                let Some(m) = self.rows.get(self.selected) else { return Ok(Control::Continue) };
-                let path = m.rel_path.clone();
-                ctx.open(ops::push_override_with(Some(&path)));
+            KeyCode::Char(' ') => {
+                self.toggle_mark();
+                self.move_to(self.selected + 1, ctx);
             }
+            KeyCode::Char('c') => self.marks.clear(),
             KeyCode::Up => self.move_to(self.selected.saturating_sub(1), ctx),
             KeyCode::Down => self.move_to(self.selected + 1, ctx),
             KeyCode::PageUp => self.move_to(self.selected.saturating_sub(page), ctx),
             KeyCode::PageDown => self.move_to(self.selected + page, ctx),
             KeyCode::Home => self.move_to(0, ctx),
             KeyCode::End => self.move_to(usize::MAX, ctx),
-            _ => return Ok(Control::Continue),
+            _ => return false,
         }
-        Ok(Control::Changed)
+        true
     }
 
-    fn render(&mut self, area: Rect, buf: &mut Buffer, ctx: &mut Global) -> Result<(), Error> {
+    /// Événements d'une recherche (écran ou sélecteur) : réponses, frappe.
+    pub fn handle(&mut self, event: &AppEvent, ctx: &mut Global) -> Control<AppEvent> {
+        match event {
+            AppEvent::Media(owner, id, r, append) if *owner == self.owner => {
+                if *id == self.request {
+                    self.apply(r, *append);
+                    return Control::Changed;
+                }
+                return Control::Continue;
+            }
+            AppEvent::MediaTyped(owner, id) if *owner == self.owner => {
+                if *id == self.typing && self.editing {
+                    let live = live_query(self.input.text());
+                    if live != self.searched {
+                        self.searched = live;
+                        self.load(ctx, false);
+                    }
+                }
+                return Control::Changed;
+            }
+            AppEvent::MediaCard(owner, id, card) if *owner == self.owner => {
+                if let Some(c) = self.card.as_mut()
+                    && c.request == *id
+                {
+                    c.data = Some((**card).clone());
+                }
+                return Control::Changed;
+            }
+            AppEvent::PlaylistChoices(owner, id, r) if *owner == self.owner => {
+                if let Some((_, p, req)) = self.chooser.as_mut()
+                    && req == id
+                {
+                    p.set_items(r.clone());
+                }
+                return Control::Changed;
+            }
+            AppEvent::Event(_) => {}
+            _ => return Control::Continue,
+        }
+        let AppEvent::Event(e) = event else { return Control::Continue };
+
+        // Sélecteur de playlist ouvert : il capture tout.
+        if let Some((purpose, p, _)) = self.chooser.as_mut() {
+            let purpose = *purpose;
+            match p.handle(e) {
+                PickedPlaylist::Unchanged => return Control::Unchanged,
+                PickedPlaylist::Changed => return Control::Changed,
+                PickedPlaylist::Cancel => self.chooser = None,
+                PickedPlaylist::Chosen(r) => {
+                    self.chooser = None;
+                    self.chosen(purpose, Some(r), ctx);
+                }
+                PickedPlaylist::New => {
+                    self.chooser = None;
+                    self.chosen(purpose, None, ctx);
+                }
+            }
+            return Control::Changed;
+        }
+
+        if self.editing {
+            if let Event::Key(k) = e
+                && k.kind == KeyEventKind::Press
+            {
+                match k.code {
+                    KeyCode::Enter => {
+                        self.editing = false;
+                        self.input.focus.set(false);
+                        self.typing += 1; // une recherche en attente n'a plus lieu d'être
+                        self.applied = self.input.text().trim().to_string();
+                        if self.searched != self.applied {
+                            self.searched = self.applied.clone();
+                            self.load(ctx, false);
+                        }
+                        return Control::Changed;
+                    }
+                    KeyCode::Esc => {
+                        self.editing = false;
+                        self.input.focus.set(false);
+                        self.typing += 1;
+                        let applied = self.applied.clone();
+                        self.input.set_text(applied.clone());
+                        // Retour aux résultats d'avant la saisie.
+                        if self.searched != applied {
+                            self.searched = applied;
+                            self.load(ctx, false);
+                        }
+                        return Control::Changed;
+                    }
+                    _ => {}
+                }
+            }
+            let before = self.input.text().to_string();
+            self.input.handle(e, Regular);
+            if self.input.text() != before {
+                // Recherche en direct, `DEBOUNCE` après la dernière frappe.
+                self.typing += 1;
+                let (owner, id) = (self.owner, self.typing);
+                ctx.spawn_async(async move {
+                    tokio::time::sleep(DEBOUNCE).await;
+                    Ok(Control::Event(AppEvent::MediaTyped(owner, id)))
+                });
+            }
+            return Control::Changed;
+        }
+        let Event::Key(k) = e else { return Control::Continue };
+        if k.kind != KeyEventKind::Press {
+            return Control::Continue;
+        }
+
+        // Fiche ouverte.
+        if self.card.is_some() {
+            match k.code {
+                KeyCode::Esc | KeyCode::Enter => self.card = None,
+                KeyCode::Up | KeyCode::Down => {
+                    let next = if k.code == KeyCode::Up { self.selected.saturating_sub(1) } else { self.selected + 1 };
+                    self.move_to(next, ctx);
+                    self.open_card(ctx);
+                }
+                KeyCode::Char('o') => {
+                    let path = self.card.as_ref().map(|c| c.media.rel_path.clone()).unwrap_or_default();
+                    ctx.open(ops::push_override_with(Some(&path)));
+                }
+                KeyCode::Char('p') => self.open_chooser(Purpose::AddToStatic, ctx),
+                KeyCode::Char('f') => self.open_chooser(Purpose::Enqueue, ctx),
+                _ => return Control::Unchanged,
+            }
+            return Control::Changed;
+        }
+
+        if self.picker {
+            match k.code {
+                KeyCode::Esc => {
+                    self.picked = Some(Picked::Cancel);
+                    return Control::Changed;
+                }
+                KeyCode::Enter => {
+                    let chosen = self.targets();
+                    if !chosen.is_empty() {
+                        self.picked = Some(Picked::Chosen(chosen));
+                    }
+                    return Control::Changed;
+                }
+                _ => {}
+            }
+            return if self.key(k, ctx) { Control::Changed } else { Control::Unchanged };
+        }
+
+        match k.code {
+            KeyCode::Enter => self.open_card(ctx),
+            KeyCode::Char('o') => {
+                let Some(m) = self.rows.get(self.selected) else { return Control::Continue };
+                let path = m.rel_path.clone();
+                ctx.open(ops::push_override_with(Some(&path)));
+            }
+            KeyCode::Char('p') => self.open_chooser(Purpose::AddToStatic, ctx),
+            KeyCode::Char('f') => self.open_chooser(Purpose::Enqueue, ctx),
+            _ => {
+                if !self.key(k, ctx) {
+                    return Control::Continue;
+                }
+            }
+        }
+        Control::Changed
+    }
+
+    pub fn draw(&mut self, area: Rect, buf: &mut Buffer, ctx: &mut Global) {
         let s = Styles(&ctx.theme);
         Block::new().style(s.base()).render(area, buf);
         let [search_a, info_a, table_a] =
@@ -484,6 +787,84 @@ impl Screen for Medias {
         Paragraph::new(right).render(r, buf);
 
         self.render_table(table_a, buf, &s);
+        if self.card.is_some() {
+            self.render_card(area, buf, ctx);
+        }
+        if let Some((_, p, _)) = self.chooser.as_mut() {
+            let cursor = p.render(area, buf, &ctx.theme);
+            ctx.set_screen_cursor(cursor);
+        }
+    }
+
+    /// Raccourcis du moment (aide et ligne du bas).
+    pub fn keys(&self) -> &'static [KeyHelp] {
+        if self.editing {
+            &[(k!("key-enter"), k!("help-media-apply")), (k!("key-esc"), k!("help-media-cancel"))]
+        } else if self.card.is_some() {
+            &[
+                (k!("key-esc"), k!("help-close")),
+                (k!("key-up-down"), k!("help-card-prev-next")),
+                (k!("key-o"), k!("help-override")),
+                (k!("key-p"), k!("help-media-to-playlist")),
+                (k!("key-f"), k!("help-media-enqueue")),
+            ]
+        } else if self.picker {
+            &[
+                (k!("key-enter"), k!("help-picker-add")),
+                (k!("key-space"), k!("help-media-mark")),
+                (k!("key-slash"), k!("help-media-search")),
+                (k!("key-esc"), k!("help-close")),
+                (k!("key-s"), k!("help-media-sort")),
+                (k!("key-c"), k!("help-media-clear-marks")),
+            ]
+        } else {
+            &[
+                (k!("key-slash"), k!("help-media-search")),
+                (k!("key-enter"), k!("help-media-card")),
+                (k!("key-space"), k!("help-media-mark")),
+                (k!("key-p"), k!("help-media-to-playlist")),
+                (k!("key-f"), k!("help-media-enqueue")),
+                (k!("key-o"), k!("help-override")),
+                (k!("key-s"), k!("help-media-sort")),
+                (k!("key-d"), k!("help-media-desc")),
+                (k!("key-m"), k!("help-media-missing")),
+                (k!("key-a"), k!("help-media-unavailable")),
+                (k!("key-c"), k!("help-media-clear-marks")),
+                (k!("key-r"), k!("help-media-reload")),
+            ]
+        }
+    }
+
+    /// Une saisie est en cours (texte de recherche ou filtre du sélecteur).
+    pub fn typing_text(&self) -> bool {
+        self.editing || self.chooser.is_some() || self.card.is_some()
+    }
+}
+
+impl Screen for Medias {
+    fn title(&self) -> String {
+        tr!("screen-media")
+    }
+
+    fn captures_text(&self) -> bool {
+        self.typing_text()
+    }
+
+    fn enter(&mut self, ctx: &mut Global) -> Result<(), Error> {
+        self.ensure_loaded(ctx);
+        Ok(())
+    }
+
+    fn help(&self) -> &'static [KeyHelp] {
+        self.keys()
+    }
+
+    fn event(&mut self, event: &AppEvent, ctx: &mut Global) -> Result<Control<AppEvent>, Error> {
+        Ok(self.handle(event, ctx))
+    }
+
+    fn render(&mut self, area: Rect, buf: &mut Buffer, ctx: &mut Global) -> Result<(), Error> {
+        self.draw(area, buf, ctx);
         Ok(())
     }
 }

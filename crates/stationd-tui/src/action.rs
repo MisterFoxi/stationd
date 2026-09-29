@@ -4,7 +4,7 @@
 //!
 //! Une action mutante n'est jamais rejouée automatiquement (dossier §4.2).
 
-use stationd_proto::{broadcast, library, live, plugin, schedule, station};
+use stationd_proto::{broadcast, library, live, playlist, plugin, schedule, station};
 use tonic::transport::Channel;
 
 use crate::rpc;
@@ -39,7 +39,14 @@ pub enum Action {
     LiveOpen { dj: String, duration: String },
     LiveClose { dj: String },
     Enqueue { playlist: String, media: String },
+    /// Plusieurs médias mis en file, dans l'ordre ; s'arrête au premier refus.
+    EnqueueMany { playlist: String, media: Vec<String> },
     Scan,
+    /// Supprime une playlist (fichier puis vue), si son fichier est encore à
+    /// `revision` (vide = sans contrôle).
+    RemovePlaylist { reference: String, revision: String },
+    /// Relit toute la racine des playlists (`PlaylistService.Reload`).
+    ReloadPlaylists,
     Plugin { name: String, verb: PluginVerb },
     Shutdown { force: bool },
 }
@@ -173,6 +180,49 @@ pub async fn run(action: Action, channel: Channel, tz: Option<jiff::tz::TimeZone
                 Ok(Done::msg(tr!("done-enqueued", playlist = playlist, len = r.len)))
             } else {
                 Err(tr!("done-enqueue-full", playlist = playlist, len = r.len))
+            }
+        }
+        Action::EnqueueMany { playlist, media } => {
+            let mut cli = schedule::schedule_service_client::ScheduleServiceClient::new(channel);
+            let total = media.len();
+            let mut len = 0;
+            for (done, m) in media.into_iter().enumerate() {
+                let r = cli
+                    .enqueue(schedule::EnqueueRequest { playlist_ref: playlist.clone(), media_path: m })
+                    .await
+                    .map_err(|e| tr!("done-enqueue-partial", n = done, total = total, reason = err(e)))?
+                    .into_inner();
+                if !r.accepted {
+                    return Err(tr!("done-enqueue-many-full", playlist = playlist, n = done, total = total, len = r.len));
+                }
+                len = r.len;
+            }
+            Ok(Done::msg(tr!("done-enqueued-many", playlist = playlist, n = total, len = len)))
+        }
+        Action::RemovePlaylist { reference, revision } => {
+            let r = playlist::playlist_service_client::PlaylistServiceClient::new(channel)
+                .remove(playlist::RemoveRequest { reference: reference.clone(), expected_revision: revision })
+                .await
+                .map_err(err)?
+                .into_inner();
+            Ok(Done::msg(if r.file.is_empty() {
+                tr!("done-playlist-removed", playlist = reference)
+            } else {
+                tr!("done-playlist-removed-file", playlist = reference, file = r.file)
+            }))
+        }
+        Action::ReloadPlaylists => {
+            let r = playlist::playlist_service_client::PlaylistServiceClient::new(channel)
+                .reload(playlist::ReloadRequest {})
+                .await
+                .map_err(err)?
+                .into_inner();
+            let msg = tr!("done-playlists-reloaded", added = r.added, removed = r.removed.len(), errors = r.errors.len());
+            if r.errors.is_empty() {
+                Ok(Done::msg(msg))
+            } else {
+                let first = r.errors.first().map(|e| format!("{} : {}", e.path, e.message)).unwrap_or_default();
+                Err(format!("{msg} — {first}"))
             }
         }
         Action::Scan => {

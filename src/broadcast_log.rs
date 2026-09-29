@@ -222,6 +222,34 @@ pub async fn plays(
         .collect())
 }
 
+/// Plays of ONE key of the `by` grouping since `cutoff` (e.g. one media with
+/// `PlaysBy::Media`): `None` when it was never picked in the window.
+pub async fn plays_of(
+    pool: &SqlitePool,
+    cutoff: i64,
+    by: PlaysBy,
+    key: &str,
+) -> Result<Option<PlaysRow>, sqlx::Error> {
+    let col = by.column();
+    let row: (i64, i64, Option<i64>) = sqlx::query_as(&format!(
+        "SELECT count(*), count(aired_at), max(played_at)
+         FROM broadcast_log WHERE played_at >= ?1 AND {col} = ?2"
+    ))
+    .bind(cutoff)
+    .bind(key)
+    .fetch_one(pool)
+    .await?;
+    Ok(match row {
+        (0, ..) | (_, _, None) => None,
+        (picked, aired, Some(last_at)) => Some(PlaysRow {
+            key: Some(key.to_string()),
+            picked: picked as u64,
+            aired: aired as u64,
+            last_at,
+        }),
+    })
+}
+
 /// Distinct `rel_path`s that started at or after `cutoff` (epoch UTC) — the set
 /// to exclude for a `no_same_track_within` window (`cutoff = now - window`).
 pub async fn tracks_since(pool: &SqlitePool, cutoff: i64) -> Result<HashSet<String>, sqlx::Error> {
@@ -319,6 +347,12 @@ mod tests {
         let by_rule = plays(&pool, 1_015, PlaysBy::Rule, 0).await.unwrap();
         assert_eq!(by_rule.len(), 2, "window: floor + unknown only");
         assert_eq!(plays(&pool, 0, PlaysBy::Artist, 1).await.unwrap().len(), 1, "limit");
+
+        // One key only: the media `h.mp3`, and a key never picked.
+        let h = plays_of(&pool, 0, PlaysBy::Media, "h.mp3").await.unwrap();
+        assert_eq!(h, Some(PlaysRow { key: Some("h.mp3".into()), picked: 1, aired: 1, last_at: 1_010 }));
+        assert_eq!(plays_of(&pool, 1_015, PlaysBy::Media, "h.mp3").await.unwrap(), None, "outside the window");
+        assert_eq!(plays_of(&pool, 0, PlaysBy::Media, "nope.mp3").await.unwrap(), None);
         let aired_at: Option<i64> = sqlx::query_scalar("SELECT aired_at FROM broadcast_log WHERE id = ?1")
             .bind(b)
             .fetch_one(&pool)

@@ -172,6 +172,16 @@ pub fn local_hms(tz: Option<&TimeZone>, epoch_s: i64) -> Option<String> {
     })
 }
 
+/// Date et heure locales `JJ/MM HH:MM` d'un instant epoch (s) dans le fuseau
+/// station ; en UTC suffixé si le fuseau est inconnu.
+pub fn local_day_hm(tz: Option<&TimeZone>, epoch_s: i64) -> Option<String> {
+    let ts = jiff::Timestamp::from_second(epoch_s).ok()?;
+    Some(match tz {
+        Some(tz) => ts.to_zoned(tz.clone()).strftime("%d/%m %H:%M").to_string(),
+        None => format!("{} UTC", ts.to_zoned(TimeZone::UTC).strftime("%d/%m %H:%M")),
+    })
+}
+
 /// `2j 04h 18m`, `4h 02m`, `12m 05s` (unités traduites).
 pub fn human_duration(d: Duration) -> String {
     let s = d.as_secs();
@@ -274,6 +284,13 @@ mod tests {
         // 2026-09-28T12:00:00Z = 14:00 à Paris (heure d'été).
         assert_eq!(local_hms(Some(&paris), 1_790_596_800).as_deref(), Some("14:00:00"));
         assert_eq!(local_hms(None, 1_790_596_800).as_deref(), Some("12:00:00 UTC"));
+    }
+
+    #[test]
+    fn local_day_hm_uses_zone_or_says_utc() {
+        let paris = TimeZone::get("Europe/Paris").unwrap();
+        assert_eq!(local_day_hm(Some(&paris), 1_790_596_800).as_deref(), Some("28/09 14:00"));
+        assert_eq!(local_day_hm(None, 1_790_596_800).as_deref(), Some("28/09 12:00 UTC"));
     }
 
     #[test]

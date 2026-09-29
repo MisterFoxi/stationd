@@ -856,6 +856,31 @@ pub(crate) async fn materialize_dynamic(
     with_genres(pool, rows).await
 }
 
+/// Does the dynamic selection `sel` keep media `rel_path`, available or not?
+/// (The media card: "which playlists can air this".) Same filters as
+/// `materialize_dynamic`, narrowed to one row.
+pub(crate) async fn dynamic_matches(pool: &SqlitePool, sel: &Selection, rel_path: &str) -> Result<bool, SelectionError> {
+    let m = sel.r#match.unwrap_or(Match::All);
+    let w = combine_where(&sel.filter, m)?;
+    let sql = format!("SELECT count(*) FROM media WHERE rel_path = ? AND ({})", w.sql);
+    let mut q = sqlx::query_as::<_, (i64,)>(&sql).bind(rel_path.to_string());
+    for b in &w.binds {
+        q = match b {
+            Bind::Text(s) => q.bind(s.clone()),
+            Bind::Int(i) => q.bind(*i),
+        };
+    }
+    let (n,) = q.fetch_one(pool).await?;
+    Ok(n > 0)
+}
+
+/// Does a static `files` list name media `rel_path` (same normalisation as
+/// `materialize_static`)?
+pub(crate) fn static_lists(files: &[String], rel_path: &str) -> bool {
+    let wanted = normalize_media_path(rel_path);
+    files.iter().any(|f| normalize_media_path(f) == wanted)
+}
+
 pub(crate) async fn materialize_static(
     pool: &SqlitePool,
     files: &[String],

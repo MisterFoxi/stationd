@@ -7,7 +7,7 @@
 use std::future::Future;
 use std::time::{Duration, Instant};
 
-use stationd_proto::{broadcast, library, liquidsoap, live, onair, plugin, station};
+use stationd_proto::{broadcast, library, liquidsoap, live, onair, playlist, plugin, stats, station};
 use tonic::transport::{Channel, Endpoint};
 
 /// Délai maximal d'une lecture simple (dossier §18 de la v1, conservé).
@@ -104,6 +104,86 @@ pub async fn read_banner(channel: Channel) -> BannerRead {
 pub async fn search_media(channel: Channel, req: library::SearchMediaRequest) -> Read<library::SearchMediaResponse> {
     let mut cli = library::library_service_client::LibraryServiceClient::new(channel);
     bounded(cli.search_media(req)).await
+}
+
+/// `PlaylistService.List` : la vue des playlists, avec qui les référence.
+pub async fn list_playlists(channel: Channel) -> Read<Vec<playlist::PlaylistSummary>> {
+    let mut cli = playlist::playlist_service_client::PlaylistServiceClient::new(channel);
+    bounded(cli.list(playlist::ListRequest {})).await.map(|r| r.playlists)
+}
+
+/// `PlaylistService.Export` : TOML appliqué + fichier et sa révision.
+pub async fn export_playlist(channel: Channel, reference: String) -> Read<playlist::ExportResponse> {
+    let mut cli = playlist::playlist_service_client::PlaylistServiceClient::new(channel);
+    bounded(cli.export(playlist::ExportRequest { reference })).await
+}
+
+/// `PlaylistService.PreviewPool` : pool d'un brouillon + ses diagnostics.
+pub async fn preview_pool(
+    channel: Channel,
+    toml: String,
+    reference: String,
+    sample: u32,
+) -> Read<playlist::PreviewPoolResponse> {
+    let mut cli = playlist::playlist_service_client::PlaylistServiceClient::new(channel);
+    bounded(cli.preview_pool(playlist::PreviewPoolRequest { toml, reference, sample })).await
+}
+
+/// `PlaylistService.Save` : écrit et applique, ou dit pourquoi non.
+pub async fn save_playlist(
+    channel: Channel,
+    reference: String,
+    toml: String,
+    expected_revision: String,
+) -> Read<playlist::SaveResponse> {
+    let mut cli = playlist::playlist_service_client::PlaylistServiceClient::new(channel);
+    bounded(cli.save(playlist::SaveRequest { reference, toml, expected_revision })).await
+}
+
+/// `LibraryService.ListGenres` (médias disponibles) : valeurs proposées
+/// dans les filtres de genre.
+pub async fn list_genres(channel: Channel) -> Read<library::ListGenresResponse> {
+    let mut cli = library::library_service_client::LibraryServiceClient::new(channel);
+    bounded(cli.list_genres(library::ListGenresRequest { only_available: true })).await
+}
+
+/// Fenêtres des statistiques d'une fiche média (la dernière vaut « depuis
+/// toujours » : dix ans d'historique).
+pub const CARD_WINDOWS: [&str; 4] = ["24h", "7d", "30d", "3650d"];
+
+/// Ce que la fiche d'un média ajoute à sa ligne : les playlists qui peuvent
+/// le diffuser et ses diffusions par fenêtre.
+#[derive(Debug, Clone)]
+pub struct MediaCard {
+    pub playlists: Read<Vec<playlist::PlaylistSummary>>,
+    /// Une entrée par `CARD_WINDOWS` ; `Ok(None)` = jamais choisi dans la fenêtre.
+    pub plays: Vec<Read<Option<stats::PlaysRow>>>,
+}
+
+pub async fn media_card(channel: Channel, path: String) -> MediaCard {
+    let mut pl = playlist::playlist_service_client::PlaylistServiceClient::new(channel.clone());
+    let st = stats::stats_service_client::StatsServiceClient::new(channel);
+    let plays = |since: &'static str| {
+        let mut st = st.clone();
+        let key = path.clone();
+        async move {
+            let req = stats::PlaysRequest {
+                since: since.to_string(),
+                by: stats::plays_request::By::Media as i32,
+                limit: 0,
+                key,
+            };
+            bounded(st.plays(req)).await.map(|r| r.rows.into_iter().next())
+        }
+    };
+    let (playlists, a, b, c, d) = tokio::join!(
+        bounded(pl.containing(playlist::ContainingRequest { media_path: path.clone() })),
+        plays(CARD_WINDOWS[0]),
+        plays(CARD_WINDOWS[1]),
+        plays(CARD_WINDOWS[2]),
+        plays(CARD_WINDOWS[3]),
+    );
+    MediaCard { playlists: playlists.map(|r| r.playlists), plays: vec![a, b, c, d] }
 }
 
 /// Ce que la TUI demande au flux de l'antenne : le maximum servi, chaque

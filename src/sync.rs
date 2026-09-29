@@ -230,6 +230,48 @@ pub(crate) fn files_by_key(root: &Path) -> HashMap<String, Vec<PathBuf>> {
     map
 }
 
+/// Who references a playlist: the ids of the grid rules airing it, the refs
+/// of the groups of the view listing it as a member (in view order).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Referrers {
+    pub rules: Vec<String>,
+    pub groups: Vec<String>,
+}
+
+/// Every reference of the grid and of the groups of the view, by the
+/// canonical key they designate (one read of each, for a whole listing).
+pub async fn reference_index(db: &SqlitePool) -> Result<HashMap<String, Referrers>, String> {
+    let mut out: HashMap<String, Referrers> = HashMap::new();
+    let grid = crate::grid_index::load_grid(db).await.map_err(|e| format!("could not read the grid: {e}"))?;
+    for rule in &grid.rules {
+        if let Some(Ok(key)) = crate::grid_toml::playlist_ref_of(rule).map(playlist::normalize_ref) {
+            let rules = &mut out.entry(key).or_default().rules;
+            if !rules.contains(&rule.id) {
+                rules.push(rule.id.clone());
+            }
+        }
+    }
+    let rows = store::all(db).await.map_err(|e| format!("could not read the playlist view: {e}"))?;
+    for row in rows {
+        let Some(group_key) = row.rel_path else { continue };
+        let Ok(pl) = Playlist::parse(&row.toml) else { continue };
+        if pl.selection.mode != playlist::Mode::Group {
+            continue;
+        }
+        for m in &pl.selection.members {
+            let Ok(key) = playlist::resolve_member_ref(&group_key, &m.r#ref) else { continue };
+            if key == group_key {
+                continue;
+            }
+            let groups = &mut out.entry(key).or_default().groups;
+            if !groups.contains(&group_key) {
+                groups.push(group_key.clone());
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// Who references playlist `key`: the grid rules airing it, and the groups
 /// of the view listing it as a member — except the groups in `ignore`
 /// (themselves on their way out). Human-readable, e.g. "grid rule `night`",
@@ -239,35 +281,13 @@ pub async fn referrers(
     key: &str,
     ignore: &HashSet<String>,
 ) -> Result<Vec<String>, String> {
-    let mut out = Vec::new();
-    let grid = crate::grid_index::load_grid(db).await.map_err(|e| format!("could not read the grid: {e}"))?;
-    for rule in &grid.rules {
-        if let Some(raw) = crate::grid_toml::playlist_ref_of(rule) {
-            if playlist::normalize_ref(raw).as_deref() == Ok(key) {
-                out.push(format!("grid rule `{}`", rule.id));
-            }
-        }
-    }
-    let rows = store::all(db).await.map_err(|e| format!("could not read the playlist view: {e}"))?;
-    for row in rows {
-        let Some(group_key) = row.rel_path else { continue };
-        if group_key == key || ignore.contains(&group_key) {
-            continue;
-        }
-        let Ok(pl) = Playlist::parse(&row.toml) else { continue };
-        if pl.selection.mode != playlist::Mode::Group {
-            continue;
-        }
-        let member = pl
-            .selection
-            .members
-            .iter()
-            .any(|m| playlist::resolve_member_ref(&group_key, &m.r#ref).as_deref() == Ok(key));
-        if member {
-            out.push(format!("group `{group_key}`"));
-        }
-    }
-    Ok(out)
+    let by = reference_index(db).await?.remove(key).unwrap_or_default();
+    Ok(by
+        .rules
+        .iter()
+        .map(|r| format!("grid rule `{r}`"))
+        .chain(by.groups.iter().filter(|g| !ignore.contains(*g)).map(|g| format!("group `{g}`")))
+        .collect())
 }
 
 /// Why a `remove` did not happen.

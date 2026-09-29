@@ -24,6 +24,9 @@ message PlaysRequest {
   By     by    = 2;
   // Nombre max de lignes (0 = toutes).
   uint32 limit = 3;
+  // Une seule clé du regroupement (ex. un média avec `by = MEDIA`) ; vide =
+  // toutes. Une clé jamais diffusée dans la fenêtre = aucune ligne.
+  string key = 4;
 
   enum By {
     PLAYLIST = 0;   // playlist de la règle / de l'override (un groupe = le groupe)

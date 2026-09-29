@@ -14,7 +14,7 @@ screen-plugins = Plugins
 
 ## Touches et aide
 key-digits = 1…8
-key-help = ?
+key-help = ? / F1
 key-quit = q
 key-force-quit = Ctrl+Q
 key-plus-minus = + / -
@@ -168,9 +168,6 @@ planned-coming = À venir
 planned-lot = lot { $lot }
 planned-plugin-missing = plugin « { $plugin } » non chargé
 planned-unavailable = Indisponible : { $reason }
-planned-playlists-1 = Liste : mode, pool, règles et groupes qui la référencent
-planned-playlists-2 = Formulaire par mode, aperçu du pool en direct
-planned-playlists-3 = Enregistrement par stationd (révision, conflits)
 planned-agenda-1 = Jour : timeline, bases, rendez-vous, every projetés
 planned-agenda-2 = Semaine : 7 colonnes, pas 15/30/60 min
 planned-agenda-3 = Couverture de la grille, édition de règle
@@ -422,3 +419,287 @@ help-media-desc = inverser l'ordre
 help-media-missing = filtre « sans titre / artiste / genre / année »
 help-media-unavailable = inclure les fichiers disparus
 help-media-reload = recharger
+
+## --- Lot 4b : playlists, éditeur, fiche média -----------------------------
+
+key-p = p
+key-f = f
+key-shift-r = R
+key-ctrl-s = Ctrl+S
+key-ctrl-t = Ctrl+T
+key-ctrl-n = Ctrl+N
+key-ctrl-d = Ctrl+D
+key-alt-updown = Alt+↑ / ↓
+key-left-right = ← / → / Espace
+key-f8 = F8
+
+help-close = fermer
+help-pl-edit = modifier
+help-pl-new = nouvelle playlist
+help-pl-delete = supprimer
+help-pl-filter = filtrer
+help-pl-reload-root = relire tous les fichiers
+help-ed-save = enregistrer
+help-ed-next = champ suivant (Maj+Tab : précédent)
+help-ed-choice = changer le choix
+help-ed-add = ajouter (filtre, membre, médias)
+help-ed-remove = retirer l'élément
+help-ed-move = déplacer l'élément
+help-ed-raw = éditer le TOML brut
+help-ed-form = revenir au formulaire
+help-ed-next-diag = aller au problème suivant
+help-media-card = fiche du média
+help-media-mark = marquer / démarquer
+help-media-clear-marks = tout démarquer
+help-media-to-playlist = ajouter à une playlist statique
+help-media-enqueue = mettre en file
+help-card-prev-next = média précédent / suivant
+help-picker-add = ajouter les médias marqués (ou celui-ci)
+
+dialog-info-keys = Entrée / Échap : fermer
+picker-keys = ↑↓ choisir · Entrée valider · Échap annuler
+picker-loading = chargement de la liste…
+picker-new = Nouvelle playlist…
+picker-none = aucune playlist ne correspond
+
+mode-static = statique
+mode-dynamic = dynamique
+mode-remote = relais
+mode-queue = file
+mode-group = groupe
+
+val-shuffle = aléatoire
+val-sequential = dans l'ordre
+val-newest = le plus récent d'abord
+val-oldest = le plus ancien d'abord
+val-fifo = premier arrivé d'abord
+val-lifo = dernier arrivé d'abord
+val-all = tous les filtres
+val-any = au moins un filtre
+val-filename = nom de fichier
+val-mtime = date du fichier
+val-published = date de publication
+val-weighted = pondéré
+val-rotate = à tour de rôle
+val-sequence = à la suite
+val-abort = tout le groupe cède
+val-skip = passer au suivant
+val-fallthrough = céder la place
+val-stop = s'arrêter
+val-disable = se désactiver
+val-hold = garder l'antenne
+val-yes = oui
+val-no = non
+val-duration-s = durée (s)
+val-prefix = commence par
+val-eq = égal à
+val-ne = différent de
+val-contains = contient
+val-has = porte le genre
+val-has-any = au moins un de
+val-has-all = tous ces genres
+val-has-none = aucun de
+
+pl-summary = { $n ->
+    [one] { $n } playlist
+   *[other] { $n } playlists
+} · tri : { $sort } · / filtrer
+pl-none = aucune playlist
+pl-col-ref = fichier (ref)
+pl-col-name = nom
+pl-col-mode = mode
+pl-col-used = utilisée par
+pl-pool = pool
+pl-used-rules-n = { $n ->
+    [one] { $n } règle
+   *[other] { $n } règles
+}
+pl-used-groups-n = { $n ->
+    [one] { $n } groupe
+   *[other] { $n } groupes
+}
+pl-used-none = rien (ni règle de grille, ni groupe)
+pl-used-rules = règles de grille : { $list }
+pl-used-groups = groupes : { $list }
+pl-disabled = désactivée
+pl-detail = Détail
+pl-file = fichier
+pl-no-file = sans fichier
+pl-no-file-long = aucun (entrée ajoutée par stationctl add)
+pl-file-differs = le fichier diffère de ce qui est appliqué (modifié à la main, ou invalide)
+pl-edit-no-file = Cette playlist a été ajoutée sans fichier (stationctl add) : elle se modifie là où vit son TOML, puis par stationctl add.
+pl-open-failed = Ouverture impossible
+pl-opening = ouverture…
+pl-new-title = Nouvelle playlist
+pl-new-mode = Mode de la playlist (modifiable ensuite) :
+pl-delete-title = Supprimer une playlist
+pl-delete-refused = « { $playlist } » ne peut pas être supprimée tant qu'elle est référencée :
+pl-delete-body = Supprimer « { $playlist } » ({ $name }) ?
+pl-delete-file = Son fichier { $file } sera effacé du nœud.
+pl-delete-no-file = Elle n'a pas de fichier : seule sa ligne sera retirée.
+pl-delete-yes = Supprimer
+pl-reload-title = Relire les playlists
+pl-reload-body = stationd relit tous les fichiers de playlists du nœud et retire celles dont le fichier a disparu (sauf si une règle ou un groupe les référence encore).
+pl-reload-yes = Relire
+pl-busy-title = Brouillon en cours
+pl-busy-body = Un autre brouillon de playlist est ouvert : enregistre-le ou ferme-le, puis recommence depuis Médias.
+
+pl-h-identity = Identité
+pl-h-selection = Sélection
+pl-h-broadcast = Diffusion
+pl-h-files = { $n ->
+    [one] Média ({ $n })
+   *[other] Médias ({ $n })
+}
+pl-h-filters = { $n ->
+    [one] Filtre ({ $n })
+   *[other] Filtres ({ $n })
+}
+pl-h-members = { $n ->
+    [one] Membre ({ $n })
+   *[other] Membres ({ $n })
+}
+pl-f-ref = fichier (ref)
+pl-f-name = nom
+pl-f-enabled = activée
+pl-f-mode = mode
+pl-f-order = ordre
+pl-f-match = combinaison
+pl-f-order-by = date prise
+pl-f-unplayed = une seule diffusion
+pl-f-url = adresse du flux
+pl-f-max-len = longueur maximale
+pl-f-strategy = stratégie
+pl-f-on-member-unavailable = membre sans média
+pl-f-filter = filtre { $n }
+pl-f-op = opérateur
+pl-f-value = valeur
+pl-f-member = membre { $n }
+pl-f-weight = poids
+pl-f-take = pistes
+pl-f-runtime = durée
+pl-f-limit = pistes par passage
+pl-f-repeat = reprendre au début
+pl-f-on-exhausted = une fois épuisée
+pl-f-no-same-artist = même artiste, pas avant
+pl-f-no-same-track = même fichier, pas avant
+pl-f-no-same-title = même morceau, pas avant
+pl-absent = — (non précisé)
+pl-add-files = ajouter des médias
+pl-add-filter = ajouter un filtre
+pl-add-member = ajouter un membre
+
+ed-title = Playlist { $reference }
+ed-title-new = Nouvelle playlist { $reference }
+ed-modified = modifiée
+ed-revision = rév. { $rev }
+ed-raw-mode = TOML brut
+ed-form = Formulaire
+ed-toml = TOML
+ed-toml-keys = Ctrl+T pour l'éditer
+ed-toml-keys-raw = Échap ou Ctrl+T : formulaire · Ctrl+S : enregistrer
+ed-unreadable = Le TOML ne se lit plus : le formulaire attend qu'il soit corrigé.
+ed-unreadable-hint = Ctrl+T pour revenir à l'éditeur de texte ; stationd indique la ligne en cause.
+ed-file-differs = le fichier { $file } diffère de ce qui est appliqué : c'est lui qui est ouvert
+ed-no-file = pas de fichier sur le nœud : l'enregistrement le créera
+ed-files-added = { $n } média(s) ajouté(s) sur { $total }
+ed-ref-required = indique le fichier (ref) de la nouvelle playlist, ex. emission/intro
+ed-saving = enregistrement…
+ed-save-failed = enregistrement impossible : { $reason }
+ed-saved = enregistrée ({ $file })
+ed-created = créée ({ $file })
+ed-reloaded = brouillon remplacé par le fichier du nœud
+ed-not-saved = { $n ->
+    [one] non enregistrée : { $n } erreur
+   *[other] non enregistrée : { $n } erreurs
+}
+ed-conflict-short = conflit : le fichier a changé
+ed-conflict-title = Le fichier a changé entre-temps
+ed-conflict-body = { $file } a été modifié depuis son ouverture (par quelqu'un d'autre, ou à la main). Rien n'a été écrit.
+ed-conflict-never = Un enregistrement n'écrase jamais une autre modification : compare, puis recharge et reprends tes changements.
+ed-conflict-keep = Garder le brouillon
+ed-conflict-compare = Comparer
+ed-conflict-reload = Recharger (brouillon perdu)
+ed-compare-title = Fichier du nœud / brouillon
+ed-compare-keys = ↑↓ PgUp PgDn défiler · Échap fermer · lignes en orange : différentes
+ed-compare-disk = Sur le nœud (rév. { $rev })
+ed-compare-draft = Ton brouillon
+ed-discard-title = Brouillon modifié
+ed-discard-body = Les modifications de ce brouillon ne sont pas enregistrées.
+ed-discard-keep = Continuer l'édition
+ed-discard-yes = Abandonner les modifications
+ed-pick-media = Ajouter des médias
+ed-pick-member = Ajouter un membre
+ed-genres = genres : { $list }
+ed-genres-none = aucun genre connu ne commence ainsi
+ed-diags = { $errors } erreur(s), { $warnings } avertissement(s)
+ed-diags-none = Diagnostics
+ed-diags-ok = stationd ne voit aucun problème
+ed-diag-label = { $label } :
+ed-diag-file = fichier
+ed-pool = Pool aujourd'hui
+ed-pool-pending = calcul par stationd…
+ed-pool-invalid = brouillon invalide : pas d'aperçu tant qu'il y a des erreurs
+ed-pool-unmeasured = pool non mesurable pour ce mode (relais d'un flux, file d'attente)
+ed-pool-unmeasured-short = non mesurable
+ed-pool-empty = pool vide : rien ne passera
+ed-pool-member-empty = aucun média
+ed-pool-count = { $n ->
+    [one] { $n } média
+   *[other] { $n } médias
+}
+ed-pool-artists = { $n ->
+    [one] { $n } artiste
+   *[other] { $n } artistes
+}
+
+diag-syntax = TOML illisible ({ $detail })
+diag-unknown-field = champ inconnu de la grammaire
+diag-missing-field = champ obligatoire absent
+diag-bad-value = valeur invalide
+diag-not-allowed = champ interdit dans ce mode ou cette stratégie
+diag-required-for-mode = requis par ce mode ou cette stratégie
+diag-conflict = incompatible avec un autre champ
+diag-bad-filter = filtre invalide (champ, opérateur ou valeur)
+diag-bad-duration = durée invalide (30s, 15m, 2h, 1d)
+diag-unknown-ref = ne désigne aucune playlist
+diag-bad-ref = référence invalide
+diag-cycle = le groupe se contient lui-même
+diag-id-changed = l'identifiant ne peut pas changer
+diag-empty-pool = aucun média ne correspond aujourd'hui
+diag-unknown = problème inconnu (code { $code })
+diag-rejected = {" "}: « { $value } »
+diag-expected = {" "}(attendu : { $values })
+
+media-marked = { $n ->
+    [one] { $n } marqué
+   *[other] { $n } marqués
+}
+media-choose-static = Ajouter { $n } média(s) à une playlist statique
+media-choose-queue = Mettre { $n } média(s) en file
+
+card-title = Fiche du média
+card-keys = Échap fermer · ↑↓ précédent / suivant · o override · p playlist · f file
+card-no-title = titre non renseigné
+card-size = taille
+card-size-mb = { $mb } Mo
+card-state = état
+card-available = disponible
+card-unavailable = disparu du disque
+card-playlists = Playlists qui peuvent le diffuser
+card-no-playlist = aucune : ce média ne passera que par override ou file d'attente
+card-plays = Diffusions (diffusées / choisies)
+card-plays-legend = diffusées : réellement parties à l'antenne · choisies : retenues par stationd
+card-24h = 24 h
+card-7d = 7 j
+card-30d = 30 j
+card-all = total
+card-last = dernier choix :
+card-never = jamais
+
+done-enqueued-many = { $n } médias ajoutés à « { $playlist } » ({ $len } en file)
+done-enqueue-many-full = file « { $playlist } » pleine après { $n } sur { $total } ({ $len } en file)
+done-enqueue-partial = { $n } sur { $total } mis en file, puis : { $reason }
+done-playlist-removed = playlist « { $playlist } » supprimée
+done-playlist-removed-file = playlist « { $playlist } » supprimée (fichier { $file } effacé)
+done-playlists-reloaded = playlists relues : { $added } appliquée(s), { $removed } retirée(s), { $errors } fichier(s) en erreur

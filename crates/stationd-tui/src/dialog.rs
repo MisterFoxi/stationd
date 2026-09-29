@@ -36,11 +36,14 @@ pub enum Outcome {
     Submit(Action),
     /// Remplacée par une autre modale (confirmation en deux temps).
     Replace(Box<Modal>),
+    /// Fermée après lecture (message) : rien à faire, rien à dire.
+    Close,
 }
 
 pub enum Modal {
     Confirm(Confirm),
     Form(Form),
+    Info(Info),
 }
 
 impl Modal {
@@ -48,6 +51,7 @@ impl Modal {
         match self {
             Modal::Confirm(c) => c.handle(event),
             Modal::Form(f) => f.handle(event),
+            Modal::Info(i) => i.handle(event),
         }
     }
 
@@ -55,6 +59,7 @@ impl Modal {
         match self {
             Modal::Confirm(c) => c.render(area, buf, ctx),
             Modal::Form(f) => f.render(area, buf, ctx),
+            Modal::Info(i) => i.render(area, buf, ctx),
         }
     }
 }
@@ -67,13 +72,13 @@ fn press(e: &Event) -> Option<&KeyEvent> {
 }
 
 /// Zone centrée de `w` × `h` dans `area` (bornée par elle).
-fn centered(area: Rect, w: u16, h: u16) -> Rect {
+pub fn centered(area: Rect, w: u16, h: u16) -> Rect {
     let w = w.min(area.width);
     let h = h.min(area.height);
     Rect::new(area.x + (area.width - w) / 2, area.y + (area.height - h) / 2, w, h)
 }
 
-fn frame<'a>(title: &str, s: &Styles, danger: bool) -> Block<'a> {
+pub fn frame<'a>(title: &str, s: &Styles, danger: bool) -> Block<'a> {
     Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(if danger { s.error() } else { s.accent() })
@@ -82,7 +87,7 @@ fn frame<'a>(title: &str, s: &Styles, danger: bool) -> Block<'a> {
 
 /// Lignes occupées par `text` coupé aux mots sur `width` colonnes (comme
 /// `Paragraph` avec `Wrap`) : la boîte a juste la hauteur de son texte.
-fn wrapped_lines(text: &str, width: usize) -> usize {
+pub fn wrapped_lines(text: &str, width: usize) -> usize {
     let width = width.max(1);
     let mut lines = 1;
     let mut col = 0;
@@ -184,6 +189,113 @@ impl Confirm {
             Span::styled(format!(" {} ", self.yes), yes_style),
         ]))
         .render(buttons_a, buf);
+    }
+}
+
+// --- message ---------------------------------------------------------------------
+
+/// Un message à lire (refus expliqué avant d'agir) : Entrée ou Échap ferme.
+pub struct Info {
+    pub title: String,
+    pub lines: Vec<String>,
+}
+
+impl Info {
+    fn handle(&mut self, event: &Event) -> Outcome {
+        match press(event).map(|k| k.code) {
+            Some(KeyCode::Esc | KeyCode::Enter) => Outcome::Close,
+            _ => Outcome::Unchanged,
+        }
+    }
+
+    fn render(&mut self, area: Rect, buf: &mut Buffer, ctx: &mut Global) {
+        let s = Styles(&ctx.theme);
+        let w = 64.min(area.width.saturating_sub(4)).max(30);
+        let inner_w = w.saturating_sub(2) as usize;
+        let text_h: u16 = self.lines.iter().map(|l| wrapped_lines(l, inner_w) as u16).sum();
+        let box_a = centered(area, w, text_h + 2);
+        Clear.render(box_a, buf);
+        let block = frame(&self.title, &s, true)
+            .title_bottom(Span::styled(format!(" {} ", tr!("dialog-info-keys")), s.muted()));
+        let inner = block.inner(box_a);
+        block.style(s.base()).render(box_a, buf);
+        Paragraph::new(self.lines.iter().map(|l| Line::raw(l.clone())).collect::<Vec<_>>())
+            .wrap(Wrap { trim: true })
+            .render(inner, buf);
+    }
+}
+
+// --- choix entre plusieurs boutons (dans un écran) ------------------------------
+
+/// Question à plusieurs réponses posée par un écran sur lui-même (conflit
+/// d'enregistrement, abandon d'un brouillon) : ce n'est pas une action
+/// envoyée à stationd, l'écran lit le bouton choisi. Le premier bouton est
+/// sélectionné par défaut : c'est le plus prudent.
+pub struct ChoiceBox {
+    pub title: String,
+    pub lines: Vec<String>,
+    pub buttons: Vec<String>,
+    pub danger: bool,
+    selected: usize,
+}
+
+pub enum Choice {
+    /// Rien d'utile.
+    Unchanged,
+    Changed,
+    /// Échap.
+    Cancel,
+    /// Le n° du bouton choisi.
+    Picked(usize),
+}
+
+impl ChoiceBox {
+    pub fn new(title: String, lines: Vec<String>, buttons: Vec<String>) -> Self {
+        Self { title, lines, buttons, danger: false, selected: 0 }
+    }
+
+    pub fn handle(&mut self, event: &Event) -> Choice {
+        let Some(k) = press(event) else { return Choice::Unchanged };
+        let n = self.buttons.len().max(1);
+        match k.code {
+            KeyCode::Esc => Choice::Cancel,
+            KeyCode::Right | KeyCode::Tab => {
+                self.selected = (self.selected + 1) % n;
+                Choice::Changed
+            }
+            KeyCode::Left | KeyCode::BackTab => {
+                self.selected = (self.selected + n - 1) % n;
+                Choice::Changed
+            }
+            KeyCode::Enter => Choice::Picked(self.selected),
+            _ => Choice::Unchanged,
+        }
+    }
+
+    pub fn render(&self, area: Rect, buf: &mut Buffer, s: &Styles) {
+        let w = 72.min(area.width.saturating_sub(4)).max(30);
+        let inner_w = w.saturating_sub(2) as usize;
+        let text_h: u16 = self.lines.iter().map(|l| wrapped_lines(l, inner_w) as u16).sum();
+        let box_a = centered(area, w, text_h + 4);
+        Clear.render(box_a, buf);
+        let block = frame(&self.title, s, self.danger)
+            .title_bottom(Span::styled(format!(" {} ", tr!("dialog-confirm-keys")), s.muted()));
+        let inner = block.inner(box_a);
+        block.style(s.base()).render(box_a, buf);
+        let [text_a, _, buttons_a] =
+            Layout::vertical([Constraint::Fill(1), Constraint::Length(1), Constraint::Length(1)]).areas(inner);
+        Paragraph::new(self.lines.iter().map(|l| Line::raw(l.clone())).collect::<Vec<_>>())
+            .wrap(Wrap { trim: true })
+            .render(text_a, buf);
+        let mut spans = Vec::new();
+        for (i, b) in self.buttons.iter().enumerate() {
+            if i > 0 {
+                spans.push(Span::raw("  "));
+            }
+            let st = if i == self.selected { s.tab_active() } else { s.muted() };
+            spans.push(Span::styled(format!(" {b} "), st));
+        }
+        Paragraph::new(Line::from(spans)).render(buttons_a, buf);
     }
 }
 

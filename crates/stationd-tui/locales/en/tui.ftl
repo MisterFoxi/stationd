@@ -13,7 +13,7 @@ screen-plugins = Plugins
 
 ## Keys and help
 key-digits = 1…8
-key-help = ?
+key-help = ? / F1
 key-quit = q
 key-force-quit = Ctrl+Q
 key-plus-minus = + / -
@@ -167,9 +167,6 @@ planned-coming = Coming
 planned-lot = batch { $lot }
 planned-plugin-missing = plugin “{ $plugin }” not loaded
 planned-unavailable = Unavailable: { $reason }
-planned-playlists-1 = List: mode, pool, rules and groups referencing it
-planned-playlists-2 = Form per mode, live pool preview
-planned-playlists-3 = Saved by stationd (revision, conflicts)
 planned-agenda-1 = Day: timeline, bases, appointments, projected every
 planned-agenda-2 = Week: 7 columns, 15/30/60 min steps
 planned-agenda-3 = Grid coverage, rule editing
@@ -421,3 +418,284 @@ help-media-desc = reverse the order
 help-media-missing = filter "no title / artist / genre / year"
 help-media-unavailable = include missing files
 help-media-reload = reload
+
+## --- Lot 4b: playlists, editor, media card --------------------------------
+
+key-p = p
+key-f = f
+key-shift-r = R
+key-ctrl-s = Ctrl+S
+key-ctrl-t = Ctrl+T
+key-ctrl-n = Ctrl+N
+key-ctrl-d = Ctrl+D
+key-alt-updown = Alt+↑ / ↓
+key-left-right = ← / → / Space
+key-f8 = F8
+
+help-close = close
+help-pl-edit = edit
+help-pl-new = new playlist
+help-pl-delete = delete
+help-pl-filter = filter
+help-pl-reload-root = re-read every file
+help-ed-save = save
+help-ed-next = next field (Shift+Tab: previous)
+help-ed-choice = change the choice
+help-ed-add = add (filter, member, media)
+help-ed-remove = remove the item
+help-ed-move = move the item
+help-ed-raw = edit the raw TOML
+help-ed-form = back to the form
+help-ed-next-diag = go to the next problem
+help-media-card = media card
+help-media-mark = mark / unmark
+help-media-clear-marks = unmark all
+help-media-to-playlist = add to a static playlist
+help-media-enqueue = enqueue
+help-card-prev-next = previous / next media
+help-picker-add = add the marked media (or this one)
+
+dialog-info-keys = Enter / Esc: close
+picker-keys = ↑↓ choose · Enter confirm · Esc cancel
+picker-loading = loading the list…
+picker-new = New playlist…
+picker-none = no playlist matches
+
+mode-static = static
+mode-dynamic = dynamic
+mode-remote = relay
+mode-queue = queue
+mode-group = group
+
+val-shuffle = random
+val-sequential = in order
+val-newest = newest first
+val-oldest = oldest first
+val-fifo = first in first
+val-lifo = last in first
+val-all = every filter
+val-any = at least one filter
+val-filename = file name
+val-mtime = file date
+val-published = publication date
+val-weighted = weighted
+val-rotate = in turn
+val-sequence = one after another
+val-abort = the whole group yields
+val-skip = skip to the next
+val-fallthrough = yield
+val-stop = stop
+val-disable = disable itself
+val-hold = keep the air
+val-yes = yes
+val-no = no
+val-duration-s = duration (s)
+val-prefix = starts with
+val-eq = equals
+val-ne = differs from
+val-contains = contains
+val-has = has the genre
+val-has-any = any of
+val-has-all = all of
+val-has-none = none of
+
+pl-summary = { $n ->
+    [one] { $n } playlist
+   *[other] { $n } playlists
+} · sort: { $sort } · / filter
+pl-none = no playlist
+pl-col-ref = file (ref)
+pl-col-name = name
+pl-col-mode = mode
+pl-col-used = used by
+pl-pool = pool
+pl-used-rules-n = { $n ->
+    [one] { $n } rule
+   *[other] { $n } rules
+}
+pl-used-groups-n = { $n ->
+    [one] { $n } group
+   *[other] { $n } groups
+}
+pl-used-none = nothing (no grid rule, no group)
+pl-used-rules = grid rules: { $list }
+pl-used-groups = groups: { $list }
+pl-disabled = disabled
+pl-detail = Detail
+pl-file = file
+pl-no-file = no file
+pl-no-file-long = none (entry added by stationctl add)
+pl-file-differs = the file differs from what is applied (edited by hand, or invalid)
+pl-edit-no-file = This playlist was added without a file (stationctl add): edit it where its TOML lives, then stationctl add again.
+pl-open-failed = Cannot open
+pl-opening = opening…
+pl-new-title = New playlist
+pl-new-mode = Playlist mode (can be changed later):
+pl-delete-title = Delete a playlist
+pl-delete-refused = "{ $playlist }" cannot be deleted while it is referenced:
+pl-delete-body = Delete "{ $playlist }" ({ $name })?
+pl-delete-file = Its file { $file } will be erased from the node.
+pl-delete-no-file = It has no file: only its entry is removed.
+pl-delete-yes = Delete
+pl-reload-title = Re-read the playlists
+pl-reload-body = stationd re-reads every playlist file of the node and drops those whose file is gone (unless a rule or a group still references them).
+pl-reload-yes = Re-read
+pl-busy-title = Draft in progress
+pl-busy-body = Another playlist draft is open: save or close it, then try again from Media.
+
+pl-h-identity = Identity
+pl-h-selection = Selection
+pl-h-broadcast = Broadcast
+pl-h-files = { $n ->
+    [one] Media ({ $n })
+   *[other] Media ({ $n })
+}
+pl-h-filters = { $n ->
+    [one] Filter ({ $n })
+   *[other] Filters ({ $n })
+}
+pl-h-members = { $n ->
+    [one] Member ({ $n })
+   *[other] Members ({ $n })
+}
+pl-f-ref = file (ref)
+pl-f-name = name
+pl-f-enabled = enabled
+pl-f-mode = mode
+pl-f-order = order
+pl-f-match = combination
+pl-f-order-by = date used
+pl-f-unplayed = air once only
+pl-f-url = stream address
+pl-f-max-len = maximum length
+pl-f-strategy = strategy
+pl-f-on-member-unavailable = member without media
+pl-f-filter = filter { $n }
+pl-f-op = operator
+pl-f-value = value
+pl-f-member = member { $n }
+pl-f-weight = weight
+pl-f-take = tracks
+pl-f-runtime = duration
+pl-f-limit = tracks per turn
+pl-f-repeat = restart from the top
+pl-f-on-exhausted = once exhausted
+pl-f-no-same-artist = same artist, not before
+pl-f-no-same-track = same file, not before
+pl-f-no-same-title = same song, not before
+pl-absent = — (not set)
+pl-add-files = add media
+pl-add-filter = add a filter
+pl-add-member = add a member
+
+ed-title = Playlist { $reference }
+ed-title-new = New playlist { $reference }
+ed-modified = modified
+ed-revision = rev. { $rev }
+ed-raw-mode = raw TOML
+ed-form = Form
+ed-toml = TOML
+ed-toml-keys = Ctrl+T to edit it
+ed-toml-keys-raw = Esc or Ctrl+T: form · Ctrl+S: save
+ed-unreadable = The TOML no longer parses: the form waits until it is fixed.
+ed-unreadable-hint = Ctrl+T to go back to the text editor; stationd names the faulty line.
+ed-file-differs = the file { $file } differs from what is applied: the file is what is open
+ed-no-file = no file on the node: saving will create it
+ed-files-added = { $n } of { $total } media added
+ed-ref-required = give the file (ref) of the new playlist, e.g. show/intro
+ed-saving = saving…
+ed-save-failed = cannot save: { $reason }
+ed-saved = saved ({ $file })
+ed-created = created ({ $file })
+ed-reloaded = draft replaced by the node's file
+ed-not-saved = { $n ->
+    [one] not saved: { $n } error
+   *[other] not saved: { $n } errors
+}
+ed-conflict-short = conflict: the file changed
+ed-conflict-title = The file changed in the meantime
+ed-conflict-body = { $file } was modified since it was opened (by someone else, or by hand). Nothing was written.
+ed-conflict-never = A save never overwrites another change: compare, then reload and redo your changes.
+ed-conflict-keep = Keep the draft
+ed-conflict-compare = Compare
+ed-conflict-reload = Reload (draft lost)
+ed-compare-title = Node file / draft
+ed-compare-keys = ↑↓ PgUp PgDn scroll · Esc close · orange lines: different
+ed-compare-disk = On the node (rev. { $rev })
+ed-compare-draft = Your draft
+ed-discard-title = Modified draft
+ed-discard-body = The changes to this draft are not saved.
+ed-discard-keep = Keep editing
+ed-discard-yes = Discard the changes
+ed-pick-media = Add media
+ed-pick-member = Add a member
+ed-genres = genres: { $list }
+ed-genres-none = no known genre starts like this
+ed-diags = { $errors } error(s), { $warnings } warning(s)
+ed-diags-none = Diagnostics
+ed-diags-ok = stationd sees no problem
+ed-diag-label = { $label }:
+ed-diag-file = file
+ed-pool = Pool today
+ed-pool-pending = stationd is computing…
+ed-pool-invalid = invalid draft: no preview while there are errors
+ed-pool-unmeasured = pool not measurable for this mode (relayed stream, queue)
+ed-pool-unmeasured-short = not measurable
+ed-pool-empty = empty pool: nothing will air
+ed-pool-member-empty = no media
+ed-pool-count = { $n ->
+    [one] { $n } media
+   *[other] { $n } media
+}
+ed-pool-artists = { $n ->
+    [one] { $n } artist
+   *[other] { $n } artists
+}
+
+diag-syntax = unreadable TOML ({ $detail })
+diag-unknown-field = field unknown to the grammar
+diag-missing-field = required field missing
+diag-bad-value = invalid value
+diag-not-allowed = field not allowed in this mode or strategy
+diag-required-for-mode = required by this mode or strategy
+diag-conflict = incompatible with another field
+diag-bad-filter = invalid filter (field, operator or value)
+diag-bad-duration = invalid duration (30s, 15m, 2h, 1d)
+diag-unknown-ref = names no playlist
+diag-bad-ref = invalid reference
+diag-cycle = the group contains itself
+diag-id-changed = the id cannot change
+diag-empty-pool = no media matches today
+diag-unknown = unknown problem (code { $code })
+diag-rejected = : "{ $value }"
+diag-expected = {" "}(expected: { $values })
+
+media-marked = { $n } marked
+media-choose-static = Add { $n } media to a static playlist
+media-choose-queue = Enqueue { $n } media
+
+card-title = Media card
+card-keys = Esc close · ↑↓ previous / next · o override · p playlist · f queue
+card-no-title = no title tag
+card-size = size
+card-size-mb = { $mb } MB
+card-state = state
+card-available = available
+card-unavailable = gone from the disk
+card-playlists = Playlists that can air it
+card-no-playlist = none: this media only airs by override or queue
+card-plays = Plays (aired / picked)
+card-plays-legend = aired: really started on air · picked: chosen by stationd
+card-24h = 24 h
+card-7d = 7 d
+card-30d = 30 d
+card-all = total
+card-last = last picked:
+card-never = never
+
+done-enqueued-many = { $n } media added to "{ $playlist }" ({ $len } queued)
+done-enqueue-many-full = queue "{ $playlist }" full after { $n } of { $total } ({ $len } queued)
+done-enqueue-partial = { $n } of { $total } enqueued, then: { $reason }
+done-playlist-removed = playlist "{ $playlist }" deleted
+done-playlist-removed-file = playlist "{ $playlist }" deleted (file { $file } erased)
+done-playlists-reloaded = playlists re-read: { $added } applied, { $removed } dropped, { $errors } file(s) in error

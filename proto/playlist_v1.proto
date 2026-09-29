@@ -67,6 +67,13 @@ service PlaylistService {
   // « ajoutée », désignée par son UUID) ; renvoie le TOML avec son id. Pour
   // une playlist qui vit dans la racine, utiliser Save.
   rpc Add(AddRequest) returns (AddResponse);
+
+  // Les playlists qui peuvent diffuser un média : les statiques qui le
+  // listent, les dynamiques dont les filtres le retiennent (qu'il soit
+  // disponible ou non). Les groupes ne sont pas dépliés : ils apparaissent
+  // dans `groups` de leurs membres. not_found si le média est inconnu de
+  // l'index. Lecture seule.
+  rpc Containing(ContainingRequest) returns (ContainingResponse);
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -129,6 +136,10 @@ message PlaylistSummary {
   string name     = 3;
   string mode     = 4;   // static | dynamic | remote | queue | group
   bool   enabled  = 5;
+  // Qui la référence : règles de grille (leur id) et groupes de la vue (leur
+  // ref). Tant que l'un d'eux existe, Remove est refusé.
+  repeated string rules  = 6;
+  repeated string groups = 7;
 }
 
 message ExportRequest {
@@ -255,4 +266,16 @@ message AddRequest {
 message AddResponse {
   string toml = 1;   // TOML avec l'id injecté
   string id   = 2;
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Containing
+// ─────────────────────────────────────────────────────────────────────────
+
+message ContainingRequest {
+  string media_path = 1;   // relatif à media/, casse conservée
+}
+
+message ContainingResponse {
+  repeated PlaylistSummary playlists = 1;   // ordre de List
 }

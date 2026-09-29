@@ -11,6 +11,7 @@ mod action;
 mod app;
 mod banner;
 mod dialog;
+mod draft;
 mod fit;
 mod i18n;
 mod rpc;

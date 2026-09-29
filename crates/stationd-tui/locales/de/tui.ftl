@@ -14,7 +14,7 @@ screen-plugins = Plugins
 
 ## Tasten und Hilfe
 key-digits = 1…8
-key-help = ?
+key-help = ? / F1
 key-quit = q
 key-force-quit = Strg+Q
 key-plus-minus = + / -
@@ -168,9 +168,6 @@ planned-coming = Demnächst
 planned-lot = Paket { $lot }
 planned-plugin-missing = Plugin „{ $plugin }“ nicht geladen
 planned-unavailable = Nicht verfügbar: { $reason }
-planned-playlists-1 = Liste: Modus, Pool, verweisende Regeln und Gruppen
-planned-playlists-2 = Formular je Modus, Live-Vorschau des Pools
-planned-playlists-3 = Speichern durch stationd (Revision, Konflikte)
 planned-agenda-1 = Tag: Zeitleiste, Basen, Termine, geschätzte every
 planned-agenda-2 = Woche: 7 Spalten, Raster 15/30/60 Min.
 planned-agenda-3 = Abdeckung des Sendeplans, Regeln bearbeiten
@@ -422,3 +419,284 @@ help-media-desc = Reihenfolge umkehren
 help-media-missing = Filter „ohne Titel / Interpret / Genre / Jahr“
 help-media-unavailable = verschwundene Dateien einbeziehen
 help-media-reload = neu laden
+
+## --- Lot 4b: Playlists, Editor, Medienkarte --------------------------------
+
+key-p = p
+key-f = f
+key-shift-r = R
+key-ctrl-s = Strg+S
+key-ctrl-t = Strg+T
+key-ctrl-n = Strg+N
+key-ctrl-d = Strg+D
+key-alt-updown = Alt+↑ / ↓
+key-left-right = ← / → / Leertaste
+key-f8 = F8
+
+help-close = schließen
+help-pl-edit = bearbeiten
+help-pl-new = neue Playlist
+help-pl-delete = löschen
+help-pl-filter = filtern
+help-pl-reload-root = alle Dateien neu einlesen
+help-ed-save = speichern
+help-ed-next = nächstes Feld (Umschalt+Tab: voriges)
+help-ed-choice = Auswahl ändern
+help-ed-add = hinzufügen (Filter, Mitglied, Medien)
+help-ed-remove = Eintrag entfernen
+help-ed-move = Eintrag verschieben
+help-ed-raw = rohes TOML bearbeiten
+help-ed-form = zurück zum Formular
+help-ed-next-diag = zum nächsten Problem
+help-media-card = Medienkarte
+help-media-mark = markieren / Markierung aufheben
+help-media-clear-marks = alle Markierungen aufheben
+help-media-to-playlist = zu einer statischen Playlist hinzufügen
+help-media-enqueue = in die Queue stellen
+help-card-prev-next = voriges / nächstes Medium
+help-picker-add = markierte Medien (oder dieses) hinzufügen
+
+dialog-info-keys = Enter / Esc: schließen
+picker-keys = ↑↓ wählen · Enter bestätigen · Esc abbrechen
+picker-loading = Liste wird geladen…
+picker-new = Neue Playlist…
+picker-none = keine passende Playlist
+
+mode-static = statisch
+mode-dynamic = dynamisch
+mode-remote = Relay
+mode-queue = Queue
+mode-group = Gruppe
+
+val-shuffle = zufällig
+val-sequential = der Reihe nach
+val-newest = neueste zuerst
+val-oldest = älteste zuerst
+val-fifo = zuerst eingereiht zuerst
+val-lifo = zuletzt eingereiht zuerst
+val-all = alle Filter
+val-any = mindestens ein Filter
+val-filename = Dateiname
+val-mtime = Dateidatum
+val-published = Veröffentlichungsdatum
+val-weighted = gewichtet
+val-rotate = abwechselnd
+val-sequence = nacheinander
+val-abort = die ganze Gruppe weicht
+val-skip = zum nächsten springen
+val-fallthrough = Platz machen
+val-stop = anhalten
+val-disable = sich deaktivieren
+val-hold = auf Sendung bleiben
+val-yes = ja
+val-no = nein
+val-duration-s = Dauer (s)
+val-prefix = beginnt mit
+val-eq = gleich
+val-ne = ungleich
+val-contains = enthält
+val-has = hat das Genre
+val-has-any = eines von
+val-has-all = alle von
+val-has-none = keines von
+
+pl-summary = { $n ->
+    [one] { $n } Playlist
+   *[other] { $n } Playlists
+} · Sortierung: { $sort } · / filtern
+pl-none = keine Playlist
+pl-col-ref = Datei (Ref)
+pl-col-name = Name
+pl-col-mode = Modus
+pl-col-used = verwendet von
+pl-pool = Pool
+pl-used-rules-n = { $n ->
+    [one] { $n } Regel
+   *[other] { $n } Regeln
+}
+pl-used-groups-n = { $n ->
+    [one] { $n } Gruppe
+   *[other] { $n } Gruppen
+}
+pl-used-none = nichts (weder Rasterregel noch Gruppe)
+pl-used-rules = Rasterregeln: { $list }
+pl-used-groups = Gruppen: { $list }
+pl-disabled = deaktiviert
+pl-detail = Details
+pl-file = Datei
+pl-no-file = ohne Datei
+pl-no-file-long = keine (Eintrag über stationctl add)
+pl-file-differs = die Datei weicht vom Angewendeten ab (von Hand geändert oder ungültig)
+pl-edit-no-file = Diese Playlist wurde ohne Datei hinzugefügt (stationctl add): bearbeite sie dort, wo ihr TOML liegt, dann erneut stationctl add.
+pl-open-failed = Öffnen nicht möglich
+pl-opening = wird geöffnet…
+pl-new-title = Neue Playlist
+pl-new-mode = Modus der Playlist (später änderbar):
+pl-delete-title = Playlist löschen
+pl-delete-refused = „{ $playlist }“ kann nicht gelöscht werden, solange sie referenziert wird:
+pl-delete-body = „{ $playlist }“ ({ $name }) löschen?
+pl-delete-file = Ihre Datei { $file } wird auf dem Knoten gelöscht.
+pl-delete-no-file = Sie hat keine Datei: nur ihr Eintrag wird entfernt.
+pl-delete-yes = Löschen
+pl-reload-title = Playlists neu einlesen
+pl-reload-body = stationd liest alle Playlist-Dateien des Knotens neu ein und entfernt die, deren Datei verschwunden ist (außer eine Regel oder Gruppe verweist noch darauf).
+pl-reload-yes = Neu einlesen
+pl-busy-title = Entwurf offen
+pl-busy-body = Ein anderer Playlist-Entwurf ist offen: speichere oder schließe ihn und versuche es dann erneut aus Medien.
+
+pl-h-identity = Identität
+pl-h-selection = Auswahl
+pl-h-broadcast = Sendung
+pl-h-files = { $n ->
+    [one] Medium ({ $n })
+   *[other] Medien ({ $n })
+}
+pl-h-filters = { $n ->
+    [one] Filter ({ $n })
+   *[other] Filter ({ $n })
+}
+pl-h-members = { $n ->
+    [one] Mitglied ({ $n })
+   *[other] Mitglieder ({ $n })
+}
+pl-f-ref = Datei (Ref)
+pl-f-name = Name
+pl-f-enabled = aktiviert
+pl-f-mode = Modus
+pl-f-order = Reihenfolge
+pl-f-match = Verknüpfung
+pl-f-order-by = verwendetes Datum
+pl-f-unplayed = nur einmal senden
+pl-f-url = Stream-Adresse
+pl-f-max-len = maximale Länge
+pl-f-strategy = Strategie
+pl-f-on-member-unavailable = Mitglied ohne Medien
+pl-f-filter = Filter { $n }
+pl-f-op = Operator
+pl-f-value = Wert
+pl-f-member = Mitglied { $n }
+pl-f-weight = Gewicht
+pl-f-take = Titel
+pl-f-runtime = Dauer
+pl-f-limit = Titel pro Durchgang
+pl-f-repeat = von vorn beginnen
+pl-f-on-exhausted = wenn erschöpft
+pl-f-no-same-artist = gleicher Interpret, nicht vor
+pl-f-no-same-track = gleiche Datei, nicht vor
+pl-f-no-same-title = gleicher Titel, nicht vor
+pl-absent = — (nicht gesetzt)
+pl-add-files = Medien hinzufügen
+pl-add-filter = Filter hinzufügen
+pl-add-member = Mitglied hinzufügen
+
+ed-title = Playlist { $reference }
+ed-title-new = Neue Playlist { $reference }
+ed-modified = geändert
+ed-revision = Rev. { $rev }
+ed-raw-mode = rohes TOML
+ed-form = Formular
+ed-toml = TOML
+ed-toml-keys = Strg+T zum Bearbeiten
+ed-toml-keys-raw = Esc oder Strg+T: Formular · Strg+S: speichern
+ed-unreadable = Das TOML ist nicht mehr lesbar: das Formular wartet, bis es korrigiert ist.
+ed-unreadable-hint = Strg+T zurück zum Texteditor; stationd nennt die betroffene Zeile.
+ed-file-differs = die Datei { $file } weicht vom Angewendeten ab: geöffnet ist die Datei
+ed-no-file = keine Datei auf dem Knoten: Speichern legt sie an
+ed-files-added = { $n } von { $total } Medien hinzugefügt
+ed-ref-required = gib die Datei (Ref) der neuen Playlist an, z. B. sendung/intro
+ed-saving = wird gespeichert…
+ed-save-failed = Speichern nicht möglich: { $reason }
+ed-saved = gespeichert ({ $file })
+ed-created = angelegt ({ $file })
+ed-reloaded = Entwurf durch die Datei des Knotens ersetzt
+ed-not-saved = { $n ->
+    [one] nicht gespeichert: { $n } Fehler
+   *[other] nicht gespeichert: { $n } Fehler
+}
+ed-conflict-short = Konflikt: die Datei hat sich geändert
+ed-conflict-title = Die Datei hat sich inzwischen geändert
+ed-conflict-body = { $file } wurde seit dem Öffnen geändert (von jemand anderem oder von Hand). Nichts wurde geschrieben.
+ed-conflict-never = Speichern überschreibt nie eine andere Änderung: vergleichen, dann neu laden und die eigenen Änderungen wiederholen.
+ed-conflict-keep = Entwurf behalten
+ed-conflict-compare = Vergleichen
+ed-conflict-reload = Neu laden (Entwurf verloren)
+ed-compare-title = Datei des Knotens / Entwurf
+ed-compare-keys = ↑↓ Bild↑ Bild↓ blättern · Esc schließen · orange Zeilen: verschieden
+ed-compare-disk = Auf dem Knoten (Rev. { $rev })
+ed-compare-draft = Dein Entwurf
+ed-discard-title = Geänderter Entwurf
+ed-discard-body = Die Änderungen an diesem Entwurf sind nicht gespeichert.
+ed-discard-keep = Weiter bearbeiten
+ed-discard-yes = Änderungen verwerfen
+ed-pick-media = Medien hinzufügen
+ed-pick-member = Mitglied hinzufügen
+ed-genres = Genres: { $list }
+ed-genres-none = kein bekanntes Genre beginnt so
+ed-diags = { $errors } Fehler, { $warnings } Warnung(en)
+ed-diags-none = Diagnosen
+ed-diags-ok = stationd sieht kein Problem
+ed-diag-label = { $label }:
+ed-diag-file = Datei
+ed-pool = Pool heute
+ed-pool-pending = stationd rechnet…
+ed-pool-invalid = ungültiger Entwurf: keine Vorschau, solange Fehler bestehen
+ed-pool-unmeasured = Pool für diesen Modus nicht messbar (weitergeleiteter Stream, Queue)
+ed-pool-unmeasured-short = nicht messbar
+ed-pool-empty = leerer Pool: nichts wird gesendet
+ed-pool-member-empty = keine Medien
+ed-pool-count = { $n ->
+    [one] { $n } Medium
+   *[other] { $n } Medien
+}
+ed-pool-artists = { $n ->
+    [one] { $n } Interpret
+   *[other] { $n } Interpreten
+}
+
+diag-syntax = unlesbares TOML ({ $detail })
+diag-unknown-field = der Grammatik unbekanntes Feld
+diag-missing-field = Pflichtfeld fehlt
+diag-bad-value = ungültiger Wert
+diag-not-allowed = Feld in diesem Modus oder dieser Strategie nicht erlaubt
+diag-required-for-mode = von diesem Modus oder dieser Strategie verlangt
+diag-conflict = mit einem anderen Feld unvereinbar
+diag-bad-filter = ungültiger Filter (Feld, Operator oder Wert)
+diag-bad-duration = ungültige Dauer (30s, 15m, 2h, 1d)
+diag-unknown-ref = bezeichnet keine Playlist
+diag-bad-ref = ungültige Referenz
+diag-cycle = die Gruppe enthält sich selbst
+diag-id-changed = die Kennung kann sich nicht ändern
+diag-empty-pool = heute passt kein Medium
+diag-unknown = unbekanntes Problem (Code { $code })
+diag-rejected = : „{ $value }“
+diag-expected = {" "}(erwartet: { $values })
+
+media-marked = { $n } markiert
+media-choose-static = { $n } Medien zu einer statischen Playlist hinzufügen
+media-choose-queue = { $n } Medien in die Queue stellen
+
+card-title = Medienkarte
+card-keys = Esc schließen · ↑↓ voriges / nächstes · o Override · p Playlist · f Queue
+card-no-title = kein Titel-Tag
+card-size = Größe
+card-size-mb = { $mb } MB
+card-state = Zustand
+card-available = verfügbar
+card-unavailable = von der Platte verschwunden
+card-playlists = Playlists, die es senden können
+card-no-playlist = keine: dieses Medium läuft nur per Override oder Queue
+card-plays = Sendungen (gesendet / gewählt)
+card-plays-legend = gesendet: wirklich auf Sendung gegangen · gewählt: von stationd ausgewählt
+card-24h = 24 Std.
+card-7d = 7 T.
+card-30d = 30 T.
+card-all = gesamt
+card-last = zuletzt gewählt:
+card-never = nie
+
+done-enqueued-many = { $n } Medien zu „{ $playlist }“ hinzugefügt ({ $len } in der Queue)
+done-enqueue-many-full = Queue „{ $playlist }“ voll nach { $n } von { $total } ({ $len } in der Queue)
+done-enqueue-partial = { $n } von { $total } eingereiht, dann: { $reason }
+done-playlist-removed = Playlist „{ $playlist }“ gelöscht
+done-playlist-removed-file = Playlist „{ $playlist }“ gelöscht (Datei { $file } entfernt)
+done-playlists-reloaded = Playlists neu eingelesen: { $added } angewendet, { $removed } entfernt, { $errors } Datei(en) mit Fehler

@@ -32,6 +32,9 @@ pub enum EditError {
     /// No playlist with this ref / id.
     #[error("no playlist `{0}` (neither a ref nor an id of the view)")]
     NotFound(String),
+    /// A media path the index does not know.
+    #[error("media `{0}` is unknown to the library index (paths are relative to the media root, case included)")]
+    UnknownMedia(String),
     /// Several files map to the same ref (case): nothing done.
     #[error("several files map to `{key}` ({}): rename or delete one by hand", files.join(", "))]
     Ambiguous { key: String, files: Vec<String> },
@@ -284,6 +287,48 @@ pub async fn preview(db: &SqlitePool, text: &str, key: Option<&str>, sample: usi
         None => {}
     }
     out.ok = true;
+    Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// Containing
+// ---------------------------------------------------------------------------
+
+/// A playlist of the view that can air a given media.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Holder {
+    pub id: String,
+    pub rel_path: Option<String>,
+    pub name: String,
+    pub mode: Mode,
+    pub enabled: bool,
+}
+
+/// The playlists of the view that can air media `rel_path`: static ones
+/// listing it, dynamic ones whose filters keep it (available or not). Groups
+/// are not unfolded (their members are listed). `NotFound` when the index
+/// does not know the media: a mistyped path is said, never an empty answer.
+pub async fn containing(db: &SqlitePool, rel_path: &str) -> Result<Vec<Holder>, EditError> {
+    let io = |e: sqlx::Error| EditError::Io(format!("could not read the media index: {e}"));
+    if crate::media_index::brief(db, rel_path).await.map_err(io)?.is_none() {
+        return Err(EditError::UnknownMedia(rel_path.to_string()));
+    }
+    let rows = store::all(db).await.map_err(|e| EditError::Io(format!("could not read the playlist view: {e}")))?;
+    let mut out = Vec::new();
+    for row in rows {
+        // A row that no longer parses (older grammar) cannot air anything.
+        let Ok(p) = Playlist::parse(&row.toml) else { continue };
+        let holds = match p.selection.mode {
+            Mode::Static => crate::selection::static_lists(&p.selection.files, rel_path),
+            // A filter the index refuses keeps nothing (it is reported by
+            // Validate / on air, not here).
+            Mode::Dynamic => crate::selection::dynamic_matches(db, &p.selection, rel_path).await.unwrap_or(false),
+            Mode::Remote | Mode::Queue | Mode::Group => false,
+        };
+        if holds {
+            out.push(Holder { id: row.id, rel_path: row.rel_path, name: p.name, mode: p.selection.mode, enabled: p.enabled });
+        }
+    }
     Ok(out)
 }
 

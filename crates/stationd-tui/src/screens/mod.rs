@@ -2,24 +2,35 @@
 
 mod antenne;
 mod controle;
+mod editor;
 mod medias;
 mod ops;
+mod picker;
 mod planned;
+mod playlists;
+
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::k;
 use crate::screen::Screen;
 use planned::Planned;
+pub use playlists::PlEvent;
+
+/// Rang de l'écran Playlists dans le registre (ouvert depuis Médias).
+pub const PLAYLISTS: usize = 2;
+
+/// Identifiant unique d'un demandeur (écran, sélecteur, éditeur) : ses
+/// réponses ne sont prises par personne d'autre.
+pub fn next_owner() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
 
 pub fn registry() -> Vec<Box<dyn Screen>> {
     vec![
         Box::new(antenne::Antenne::default()),
         Box::new(controle::Controle::default()),
-        Box::new(Planned {
-            title: k!("screen-playlists"),
-            lot: 4,
-            summary: &[k!("planned-playlists-1"), k!("planned-playlists-2"), k!("planned-playlists-3")],
-            plugin: None,
-        }),
+        Box::new(playlists::Playlists::default()),
         Box::new(Planned {
             title: k!("screen-agenda"),
             lot: 6,
@@ -46,4 +57,13 @@ pub fn registry() -> Vec<Box<dyn Screen>> {
             plugin: None,
         }),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_playlists_screen_is_where_medias_sends_its_selection() {
+        let r = super::registry();
+        assert_eq!(r[super::PLAYLISTS].title(), crate::tr!("screen-playlists"));
+    }
 }

@@ -1,6 +1,6 @@
 # StationD — Dossier technique de la TUI
 
-Version 2.6 — 28 septembre 2026
+Version 2.7 — 29 septembre 2026
 Statut : refonte complète (remplace la v1.0 du 25/09). Document vivant : il suit les besoins, pas l'inverse.
 Socle : Rust + Ratatui + rat-salsa / rat-widget, client gRPC pur de `stationd`.
 
@@ -50,10 +50,10 @@ La TUI v1 ne permettait ni de piloter la station, ni de créer une playlist corr
 | `LiveService` | `GetStatus`, `Kick`, `Open`, `Close` | Panneau live |
 | `LiquidsoapService` | `GetStatus` | Système (et repli de l'Antenne tant que §3.2 n'existe pas) |
 | `IcecastService` | `GetStatus` | Système, auditeurs par mount |
-| `PlaylistService` (lot 3) | `List`, `Export`, `Validate`, `PreviewPool`, `Save`, `Remove`, `Sync`, `Reload`, `Add` | Playlists (§3.5) |
+| `PlaylistService` (lot 3) | `List`, `Export`, `Validate`, `PreviewPool`, `Save`, `Remove`, `Sync`, `Reload`, `Add`, `Containing` (lot 4b) | Playlists (§3.5), fiche média |
 | `ScheduleService` | `ListRules`, `Preview`, `CheckCoverage`, `ExportGrid`, `ValidateGrid`, `ApplyGrid`, `Enqueue` | Agenda, playlists `queue` |
 | `LibraryService` | `Scan`, `ListMedia`, `ListGenres` | Médias |
-| `StatsService` | `Plays` | Statistiques |
+| `StatsService` | `Plays` (`key` : une seule clé, lot 4b) | Statistiques, fiche média |
 | `PluginService` | `List`, `Control`, `DbInfo`, `DbQuery` | Plugins |
 
 `Station` ne garde que `Status`, `Quit`, `Shutdown` : ses six RPC `Playlist*` ont déménagé dans `PlaylistService` au lot 3. L'ancien `playlist_v1.proto` (contrat de conception jamais servi, 3 modes sur 5) a été réécrit.
@@ -152,6 +152,7 @@ Tranché : **`PlaylistService` dédié** (`proto/playlist_v1.proto`, réécrit),
 - `Export` rend le TOML appliqué **et** le fichier (commentaires compris) avec sa révision, et dit s'ils diffèrent. `Remove` accepte une révision attendue (`ABORTED` si le fichier a changé). `Sync` / `Reload` rendent les diagnostics de chaque fichier écarté.
 - `Add` reste pour un TOML qui vit hors de la racine (entrée sans chemin, désignée par son UUID) ; le client réécrit **son** fichier avec l'id. Pour la racine : `Save`.
 - CLI : `stationctl playlist validate|preview|save`, `export --file`, `remove --revision`.
+- **Ajouté au lot 4b** : `PlaylistSummary.rules` / `groups` (règles de grille et groupes qui référencent la playlist, calculés par stationd — c'est ce qui bloque `Remove`) ; `PlaylistService.Containing { media_path }` (playlists qui peuvent diffuser un média : statiques qui le listent, dynamiques dont les filtres le retiennent, disponible ou non ; `NOT_FOUND` si l'index ne le connaît pas) ; `StatsService.Plays.key` (une seule clé du regroupement : les diffusions d'un média). CLI : `playlist list` (ligne `used by:`), `playlist containing <media>`, `stats --key`.
 
 ### 3.6 À ajouter — Grille
 
@@ -368,6 +369,17 @@ Dialogues : confirmation (« Annuler » par défaut, `←/→`, cadre rouge si d
 
 ### 5.3 Playlists (`3`)
 
+**Fait (lot 4b)** — `screens/playlists.rs`, `screens/editor.rs`, `screens/picker.rs`, `draft.rs` :
+- Liste : ref, nom, mode, activée (grisée sinon), « utilisée par » (n règles · n groupes, de `PlaylistSummary`) ; filtre `/`, tri `s` (ref, nom, mode), `r` relire, `R` relire la racine (`Reload`, confirmé). Détail de la sélection (lu 200 ms après le dernier mouvement) : fichier et révision (`Export`), écart fichier / appliqué, qui la référence, pool du jour (`PreviewPool` du fichier), le TOML du fichier.
+- `n` : choix du mode, puis brouillon neuf (ref saisi dans le formulaire). `Entrée` / `e` : ouvre le **fichier** (commentaires compris) avec sa révision ; une entrée sans fichier (`add`) est expliquée et non ouverte.
+- Éditeur : formulaire à gauche (Identité, Sélection par mode, Diffusion), TOML et diagnostics à droite, pool du jour dessous ; à moins de 110 colonnes, formulaire / diagnostics / pool empilés et TOML via `Ctrl+T`. Le formulaire n'est qu'une vue du TOML (`toml_edit` : commentaires et mise en forme gardés, valeur mal typée écrite telle quelle, champs facultatifs « non précisé » = clé retirée, tables vides retirées). Changer de mode met de côté les champs de l'ancien mode et les rend si on y revient.
+- Par mode : statique = médias listés (`Ctrl+N` ouvre la recherche de Médias en sélecteur, `Espace` marque, `Entrée` ajoute, sans doublon) ; dynamique = combinaison, ordre, `order_by` / `unplayed_only` si ordre daté (ou déjà présents), filtres (champ → opérateurs proposés pour ce champ → valeur retypée : liste pour `has_any/has_all/has_none`, nombre pour année/durée ; genres connus proposés sous la valeur, `ListGenres`) ; groupe = stratégie, `on_member_unavailable` (sequence / shuffle), membres (`Ctrl+N` : sélecteur de playlists) avec poids ou `take` / `runtime` selon la stratégie ; file = ordre, longueur ; relais = adresse. `Ctrl+D` retire, `Alt+↑/↓` déplace.
+- `PreviewPool` 300 ms après la dernière frappe : diagnostics (traduits par `Code`, rattachés à leur ligne : ✗ / ⚠, détail sous la ligne qui a le focus, `F8` va au suivant), pool (nombre, durée, artistes, échantillon ; par membre pour un groupe ; vide en rouge ; « non mesurable » pour relais et file).
+- `Ctrl+T` : TOML brut (éditeur de texte) ; un TOML illisible y reste modifiable, le formulaire attend.
+- `Ctrl+S` : `Save` avec la révision lue. Invalide : rien d'écrit, focus sur la première erreur, saisie gardée. Conflit : « Garder le brouillon » (défaut) / « Comparer » (fichier du nœud et brouillon côte à côte, lignes différentes en orange) / « Recharger (brouillon perdu) » — jamais d'écrasement. `Échap` sur un brouillon modifié : confirmation.
+- `d` : si des règles ou groupes la référencent, message qui les nomme (rien n'est envoyé) ; sinon confirmation qui nomme le fichier effacé, puis `Remove` avec la révision lue au détail.
+- Écarts à la description ci-dessous : pas de `handle` ni de `member_only` (absents de la grammaire), pas d'arbre des dossiers ni de recherche floue (la recherche de Médias sert de sélecteur), pas d'éditeur externe, pas de `x` (le détail montre le TOML).
+
 **Liste** : nom/ref, mode (chip), activée, `member_only`, taille du pool et durée (issues de `CheckCoverage` / `Occurrence`), règles qui la référencent, groupes qui la contiennent, état de validation. Filtre `/`, tri.
 
 **Création / modification** (`n` / `e`) : formulaire à gauche, TOML généré + diagnostics à droite.
@@ -403,7 +415,8 @@ Navigation : `[`/`]` jour ou semaine précédente/suivante, `t` aujourd'hui, `g`
 
 ### 5.5 Médias (`5`)
 
-**Fait (lot 4a)** : recherche (`/` ; mots + `genre:x` / `dossier:x`), tri `s` / `d`, filtre de métadonnée manquante `m`, disparus `a`, pages chargées en descendant, `o` override du média. Le reste de cette section (Type, tags, fiche, lots) suit.
+**Fait (lot 4a)** : recherche (`/` ; mots + `genre:x` / `dossier:x`), tri `s` / `d`, filtre de métadonnée manquante `m`, disparus `a`, pages chargées en descendant, `o` override du média.
+**Fait (lot 4b)** : fiche (`Entrée` : métadonnées, taille, disponibilité, playlists qui peuvent le diffuser — `Containing`, avec ce qui les référence —, diffusions 24 h / 7 j / 30 j / total en diffusées / choisies et dernier choix — `Plays` par `key` ; `↑↓` média voisin, `o` / `p` / `f` depuis la fiche). Sélection multiple (`Espace`, `c` tout démarquer) ; sur la sélection (ou la ligne) : `p` ajouter à une playlist statique — sélecteur des statiques ou « Nouvelle playlist… », puis l'écran Playlists s'ouvre sur le **brouillon** avec les médias ajoutés, rien n'est enregistré avant `Ctrl+S` ; `f` mettre en file d'une playlist `queue` (`Enqueue` un par un, arrêt au premier refus, compte rendu). `q` de la description ci-dessous est devenu `f` (`q` = quitter). Restent : Type et tags (lot 8), panneaux de répartition, scan avec jauge (lot 7).
 
 - Barre de recherche + filtres (**Type** en premier, genre, tag, dossier, disponible, titre/artiste/Type manquant) + tri. Colonnes : Type (chip colorée), artiste, titre, album, année, durée, genres, tags, dispo. Total / chargés. Pagination serveur (`SearchMedia`). Type et tags visibles seulement si le plugin `tags` est chargé.
 - **`t` : affecter un Type** à la ligne ou à la sélection multiple, via un sélecteur des valeurs déclarées (une touche par valeur). C'est l'action la plus fréquente de l'écran : pas de dialogue supplémentaire pour un seul média, confirmation avec le nombre de fichiers pour un lot.
@@ -446,7 +459,7 @@ Vues déclaratives des plugins chargés (§4.3). Base de chaque plugin : `DbInfo
 | 1 ✅ | stationd : `OnAirService` (Watch + History + simulation §3.3), `stationctl onair`, TUI : écran Antenne | — |
 | 2 ✅ | TUI : Contrôle (+ actions depuis Antenne : pause, suivant, override) ; stationd : incidents de grille (prévus / constatés, ligne fautive) | 1 |
 | 3 ✅ | stationd : `PlaylistService` (`Validate` / `PreviewPool` / `Save`, écriture + révision, diagnostics par champ), `SearchMedia` | — |
-| 4 (4a ✅) | TUI : Médias (4a : recherche, filtres, tri, pages, override) ; Playlists (liste + éditeur, 4b) | 3 |
+| 4 ✅ | TUI : Médias (4a : recherche, filtres, tri, pages, override ; 4b : fiche, sélection multiple, ajout à une statique, mise en file) ; Playlists (4b : liste + éditeur) ; stationd : références dans `List`, `Containing`, `Plays.key` | 3 |
 | 5 | stationd : diagnostics de grille, `SaveGrid` | — |
 | 6 | TUI : Agenda (jour, semaine, couverture, édition) | 5 pour l'édition |
 | 7 | stationd : `ScanWatch`, `EventService`, `PluginService.Call/Views`, `media_meta_write` | — |

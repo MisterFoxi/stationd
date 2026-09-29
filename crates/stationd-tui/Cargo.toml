@@ -29,6 +29,9 @@ ratatui-crossterm = "0.1.2"
 # Traductions (Fluent) : catalogues locales/<langue>/*.ftl intégrés au binaire.
 fluent-templates = "0.15"
 unic-langid = "0.9"
+# Brouillons de playlist : le TOML modifié en gardant commentaires et mise en
+# forme (même version que le daemon).
+toml_edit = "0.22"
 
 [dev-dependencies]
 regex = "1"

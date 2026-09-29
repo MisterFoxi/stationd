@@ -203,3 +203,57 @@ async fn remove_with_a_stale_revision_removes_nothing() {
     sync::remove(&pool, &root, "music", Some(&now)).await.unwrap();
     assert!(!root.join("music.toml").exists());
 }
+
+#[tokio::test]
+async fn containing_names_static_and_dynamic_holders_and_refuses_an_unknown_media() {
+    let (dir, pool) = setup().await;
+    let root = root(&dir);
+    playlist_edit::save(&pool, &root, "music", MUSIC, "").await.unwrap();
+    let jingles = "name = \"J\"\n[selection]\nmode = \"static\"\nfiles = [\"jingles/j.mp3\", \"/music/b.mp3\"]\n";
+    playlist_edit::save(&pool, &root, "jingles", jingles, "").await.unwrap();
+    let grp = "name = \"G\"\n[selection]\nmode = \"group\"\nstrategy = \"weighted\"\nmembers = [{ ref = \"music\", weight = 1 }]\n";
+    playlist_edit::save(&pool, &root, "grp", grp, "").await.unwrap();
+
+    let refs = |h: Vec<playlist_edit::Holder>| h.into_iter().filter_map(|h| h.rel_path).collect::<Vec<_>>();
+    // b: filtered by `music` (dynamic), listed by `jingles` (static, leading `/` normalised).
+    assert_eq!(refs(playlist_edit::containing(&pool, "music/b.mp3").await.unwrap()), ["jingles", "music"]);
+    assert_eq!(refs(playlist_edit::containing(&pool, "jingles/j.mp3").await.unwrap()), ["jingles"]);
+    // A vanished media still says where it was.
+    media_index::mark_unavailable(&pool, "music/a.mp3").await.unwrap();
+    assert_eq!(refs(playlist_edit::containing(&pool, "music/a.mp3").await.unwrap()), ["music"]);
+    // Case matters for a media path: unknown = said, not an empty answer.
+    assert!(matches!(
+        playlist_edit::containing(&pool, "Music/b.mp3").await,
+        Err(playlist_edit::EditError::UnknownMedia(_))
+    ));
+}
+
+#[tokio::test]
+async fn the_reference_index_lists_grid_rules_and_groups() {
+    use stationd::grid_index::insert_rule;
+    use stationd::resolver::{Rule, RuleKind, Validity};
+    let (dir, pool) = setup().await;
+    let root = root(&dir);
+    playlist_edit::save(&pool, &root, "shows/music", MUSIC, "").await.unwrap();
+    let grp = "name = \"G\"\n[selection]\nmode = \"group\"\nstrategy = \"sequence\"\n\
+               members = [{ ref = \"./music\" }, { ref = \"shows/music\" }]\n";
+    playlist_edit::save(&pool, &root, "shows/main", grp, "").await.unwrap();
+    let rule = |id: &str, pl: &str| Rule {
+        id: id.into(),
+        enabled: true,
+        validity: Validity::default(),
+        kind: RuleKind::BaseRotation { playlist_ref: pl.into() },
+    };
+    insert_rule(&pool, &rule("floor", "Shows/Music.toml")).await.unwrap();
+    insert_rule(&pool, &rule("main", "shows/main")).await.unwrap();
+
+    let idx = sync::reference_index(&pool).await.unwrap();
+    let music = &idx["shows/music"];
+    assert_eq!(music.rules, ["floor"]);
+    assert_eq!(music.groups, ["shows/main"], "one entry per group, however many times it lists it");
+    assert_eq!(idx["shows/main"].rules, ["main"]);
+    assert!(idx["shows/main"].groups.is_empty());
+    // `referrers` (remove) reads the same index.
+    let by = sync::referrers(&pool, "shows/music", &Default::default()).await.unwrap();
+    assert_eq!(by, ["grid rule `floor`", "group `shows/main`"]);
+}

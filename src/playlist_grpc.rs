@@ -90,7 +90,7 @@ fn file_errors(errors: Vec<SyncError>) -> Vec<FileError> {
 fn edit_status(e: EditError) -> Status {
     match e {
         EditError::BadRef(_) => Status::invalid_argument(e.to_string()),
-        EditError::NotFound(_) => Status::not_found(e.to_string()),
+        EditError::NotFound(_) | EditError::UnknownMedia(_) => Status::not_found(e.to_string()),
         EditError::Ambiguous { .. } => Status::failed_precondition(e.to_string()),
         EditError::Io(_) => Status::internal(e.to_string()),
     }
@@ -112,14 +112,20 @@ impl PlaylistService for PlaylistGrpc {
         let rows = store::list(&self.db)
             .await
             .map_err(|e| Status::internal(format!("could not read playlist view: {e}")))?;
+        let refs = crate::sync::reference_index(&self.db).await.map_err(Status::internal)?;
         let playlists = rows
             .into_iter()
-            .map(|r| PlaylistSummary {
-                id: r.id,
-                rel_path: r.rel_path.unwrap_or_default(),
-                name: r.name,
-                mode: r.mode,
-                enabled: r.enabled,
+            .map(|r| {
+                let by = r.rel_path.as_ref().and_then(|k| refs.get(k)).cloned().unwrap_or_default();
+                PlaylistSummary {
+                    id: r.id,
+                    rel_path: r.rel_path.unwrap_or_default(),
+                    name: r.name,
+                    mode: r.mode,
+                    enabled: r.enabled,
+                    rules: by.rules,
+                    groups: by.groups,
+                }
             })
             .collect();
         Ok(Response::new(ListResponse { playlists }))
@@ -264,6 +270,32 @@ impl PlaylistService for PlaylistGrpc {
             removed: outcome.removed,
             errors: file_errors(outcome.errors),
         }))
+    }
+
+    async fn containing(&self, request: Request<ContainingRequest>) -> Result<Response<ContainingResponse>, Status> {
+        let media = request.into_inner().media_path;
+        let media = media.trim();
+        if media.is_empty() {
+            return Err(Status::invalid_argument("media_path is empty"));
+        }
+        let holders = playlist_edit::containing(&self.db, media).await.map_err(edit_status)?;
+        let refs = crate::sync::reference_index(&self.db).await.map_err(Status::internal)?;
+        let playlists = holders
+            .into_iter()
+            .map(|h| {
+                let by = h.rel_path.as_ref().and_then(|k| refs.get(k)).cloned().unwrap_or_default();
+                PlaylistSummary {
+                    id: h.id,
+                    rel_path: h.rel_path.unwrap_or_default(),
+                    name: h.name,
+                    mode: format!("{:?}", h.mode).to_lowercase(),
+                    enabled: h.enabled,
+                    rules: by.rules,
+                    groups: by.groups,
+                }
+            })
+            .collect();
+        Ok(Response::new(ContainingResponse { playlists }))
     }
 
     async fn add(&self, request: Request<AddRequest>) -> Result<Response<AddResponse>, Status> {
