@@ -1,5 +1,6 @@
 //! Registre des écrans. L'ordre donne les touches d'accès `1`..`8`.
 
+mod agenda;
 mod antenne;
 mod controle;
 mod editor;
@@ -8,6 +9,7 @@ mod ops;
 mod picker;
 mod planned;
 mod playlists;
+mod ruleform;
 mod tagform;
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -15,6 +17,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use crate::k;
 use crate::screen::Screen;
 use planned::Planned;
+pub use agenda::AgEvent;
+pub use ruleform::diag_text as grid_diag_text;
 pub use playlists::PlEvent;
 
 /// Rang de l'écran Playlists dans le registre (ouvert depuis Médias).
@@ -32,12 +36,7 @@ pub fn registry() -> Vec<Box<dyn Screen>> {
         Box::new(antenne::Antenne::default()),
         Box::new(controle::Controle::default()),
         Box::new(playlists::Playlists::default()),
-        Box::new(Planned {
-            title: k!("screen-agenda"),
-            lot: 6,
-            summary: &[k!("planned-agenda-1"), k!("planned-agenda-2"), k!("planned-agenda-3")],
-            plugin: None,
-        }),
+        Box::new(agenda::Agenda::default()),
         Box::new(medias::Medias::default()),
         Box::new(Planned {
             title: k!("screen-tags"),

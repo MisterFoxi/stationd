@@ -461,7 +461,7 @@ pub async fn save(
 /// file in the same directory, flushed, renamed over the target, then read
 /// back (a network filesystem may accept a write it did not keep — checked,
 /// not assumed).
-fn write_atomic(path: &Path, content: &str) -> std::io::Result<()> {
+pub(crate) fn write_atomic(path: &Path, content: &str) -> std::io::Result<()> {
     use std::io::Write;
     let dir = path.parent().ok_or_else(|| std::io::Error::other("no parent directory"))?;
     std::fs::create_dir_all(dir)?;

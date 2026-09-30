@@ -414,7 +414,8 @@ members = [{ ref = "jazz", runtime = "20m" }, { ref = "remote", runtime = "5m" }
                 seconds: 3 * 3600,
                 nanos: 0,
             }),
-        })
+                ..Default::default()
+            })
     };
     let first = service.preview(request()).await.unwrap().into_inner();
     assert_eq!(
@@ -535,7 +536,8 @@ members = [{ ref = "shows/broken", take = 1 }]"#,
                 seconds: 60,
                 nanos: 0,
             }),
-        }))
+                ..Default::default()
+            }))
         .await
         .unwrap_err();
     assert_eq!(error.code(), tonic::Code::InvalidArgument);
@@ -666,6 +668,10 @@ async fn coverage_flags_empty_pool_and_missing_ref() {
     assert!(by("floor").detail.contains("pool vide"), "{}", by("floor").detail);
     assert_eq!(by("ghost").verdict, Verdict::Insufficient);
     assert!(by("ghost").detail.contains("cassée"), "{}", by("ghost").detail);
+    // The same causes as opcodes, for clients that translate (D12).
+    use stationd::grid_engine::Reason;
+    assert_eq!(by("floor").reasons, vec![Reason::PoolEmpty]);
+    assert_eq!(by("ghost").reasons, vec![Reason::UnknownPlaylist]);
 }
 
 #[tokio::test]
@@ -712,6 +718,21 @@ members = [{ ref = "jazz", take = 5 }]"#,
     let seq_m = by("seq").members.iter().find(|m| m.r#ref == "jazz").unwrap();
     assert_eq!(seq_m.verdict, Verdict::Thin);
     assert!(seq_m.detail.contains("take"), "{}", seq_m.detail);
+
+    use stationd::grid_engine::Reason;
+    assert_eq!(by("night").reasons, vec![Reason::MembersLoop { refs: vec!["jazz".into()] }]);
+    assert!(
+        matches!(night_m.reasons.as_slice(), [Reason::RuntimeLoop { need_ms: 3_600_000, .. }]),
+        "{:?}",
+        night_m.reasons
+    );
+    assert!(
+        matches!(seq_m.reasons.as_slice(), [Reason::TakeRepeat { take: 5, count: 2 }]),
+        "{:?}",
+        seq_m.reasons
+    );
+    // The French line is still built from them, word for word.
+    assert_eq!(night_m.detail, night_m.reasons[0].text());
 }
 
 #[tokio::test]

@@ -37,14 +37,20 @@ pub async fn rng(pool: &SqlitePool, scope: &str) -> Result<ChaCha8Rng, sqlx::Err
     let (seed,): (Vec<u8>,) = sqlx::query_as("SELECT seed FROM rng_seed WHERE id = 1")
         .fetch_one(pool)
         .await?;
-    let (n,): (i64,) = sqlx::query_as(
+    // `fetch_all`, not `fetch_one`: a RETURNING statement keeps its write
+    // transaction open until it has run to completion, and `fetch_one` hands
+    // the row back after the first step — the lock then outlived the call and
+    // the next writer on another connection of the pool waited on it
+    // (« database is locked » once past the busy timeout, on a loaded host).
+    let rows: Vec<(i64,)> = sqlx::query_as(
         "INSERT INTO rng_draws (scope, draws) VALUES (?1, 1)
          ON CONFLICT(scope) DO UPDATE SET draws = draws + 1
          RETURNING draws - 1",
     )
     .bind(scope)
-    .fetch_one(pool)
+    .fetch_all(pool)
     .await?;
+    let n = rows.first().map(|r| r.0).ok_or(sqlx::Error::RowNotFound)?;
     Ok(stream(&seed, scope, n as u64))
 }
 
@@ -111,6 +117,29 @@ mod tests {
             mixed.extend(draws(&other, "pick:a", 1).await);
         }
         assert_eq!(mixed, a);
+    }
+
+    /// A draw leaves no write lock behind: a writer on another connection,
+    /// which does not wait at all, gets through right after it.
+    #[tokio::test]
+    async fn a_draw_releases_its_write_lock_before_returning() {
+        use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("lock.db");
+        let pool = crate::db::init(&path).await.unwrap();
+        let impatient = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(SqliteConnectOptions::new().filename(&path).busy_timeout(std::time::Duration::ZERO))
+            .await
+            .unwrap();
+        for i in 0..50 {
+            rng(&pool, "pick:x").await.unwrap();
+            sqlx::query("INSERT INTO rng_draws (scope, draws) VALUES (?1, 0)")
+                .bind(format!("other:{i}"))
+                .execute(&impatient)
+                .await
+                .unwrap_or_else(|e| panic!("draw {i} left the database locked: {e}"));
+        }
     }
 
     #[test]

@@ -8,11 +8,13 @@
 //! connexion). Les écrans sont des emplacements remplis lot par lot.
 
 mod action;
+mod agenda;
 mod app;
 mod banner;
 mod dialog;
 mod draft;
 mod fit;
+mod gridraft;
 mod i18n;
 mod rpc;
 mod screen;

@@ -167,9 +167,6 @@ planned-coming = Coming
 planned-lot = batch { $lot }
 planned-plugin-missing = plugin “{ $plugin }” not loaded
 planned-unavailable = Unavailable: { $reason }
-planned-agenda-1 = Day: timeline, bases, appointments, projected every
-planned-agenda-2 = Week: 7 columns, 15/30/60 min steps
-planned-agenda-3 = Grid coverage, rule editing
 planned-tags-1 = Types: declared values, counts, media without a Type
 planned-tags-2 = Free tags: create, rename, merge
 planned-system-1 = Health: stationd, Liquidsoap, Icecast (mounts), live
@@ -749,3 +746,289 @@ tags-picker-keys = type to filter · Space check · Enter confirm · Esc cancel
 tags-picker-new = ＋ new: "{ $genre }"
 tags-picker-none = no genre matches: Space adds it
 confirm-tags-merge = { $field }: + { $add } / − { $remove }
+
+## --- Lot 6a: agenda ---------------------------------------------------------
+key-brackets = [ / ]
+key-t = t
+key-g = g
+key-arrows = ← → ↑ ↓
+key-page = PgUp / PgDn
+help-ag-slot = previous / next slot
+help-ag-day = previous / next day
+help-ag-week-shift = previous / next week
+help-ag-today = today, now
+help-ag-goto = go to a date (calendar)
+help-ag-week = week view
+help-ag-day-view = day view
+help-ag-coverage = grid coverage
+help-ag-back = back to the agenda
+help-ag-step = 15 / 30 / 60 min step
+help-ag-item = next item of the slot
+help-ag-inspector = inspector (narrow terminal)
+help-ag-playlist = open the playlist
+help-ag-cell = pick a cell
+help-ag-open-day = open this day
+help-ag-rule = previous / next rule
+help-ag-cal-move = day / week
+help-ag-cal-month = previous / next month
+help-ag-cal-pick = show this day
+ag-no-tz = station timezone unknown: waiting for stationd…
+ag-bad-date = date out of the calendar
+ag-view-day = Day
+ag-view-week = Week
+ag-view-coverage = Coverage
+ag-weekday-short = { $wd ->
+    [1] Mon
+    [2] Tue
+    [3] Wed
+    [4] Thu
+    [5] Fri
+    [6] Sat
+   *[7] Sun
+}
+ag-date-long = { $wd ->
+    [1] Monday
+    [2] Tuesday
+    [3] Wednesday
+    [4] Thursday
+    [5] Friday
+    [6] Saturday
+   *[7] Sunday
+} { $date }
+ag-date-short = { ag-weekday-short } { $date }
+ag-week-of = week of { $from } to { $to }
+ag-month = { $month ->
+    [1] January
+    [2] February
+    [3] March
+    [4] April
+    [5] May
+    [6] June
+    [7] July
+    [8] August
+    [9] September
+    [10] October
+    [11] November
+   *[12] December
+} { $year }
+ag-step = { $n } min step
+ag-utc = UTC times (station: { $tz })
+ag-utc-rules = rules stay in station time
+ag-dst = clock change: { $h } h day
+ag-dst-week = clock change this week
+ag-stale = old data, reload failed: { $reason }
+ag-gap = (skipped)
+ag-inspector = Slot
+ag-slot-empty = nothing projected in this slot
+ag-until-end = end of the period
+ag-origin-daypart = day part
+ag-origin-base = base rotation
+ag-origin-hard = hard rendez-vous
+ag-origin-soft = soft rendez-vous
+ag-origin-every = every
+ag-origin-fallback = safety fallback
+ag-kind-at-clock = rendez-vous (at_clock)
+ag-kind-live = live slot
+ag-rule = rule
+ag-group = group
+ag-coverage = coverage
+ag-pool-unmeasured = not measurable
+ag-take = take { $n }
+ag-runtime = runtime { $d }
+ag-rule-base = floor, all day
+ag-rule-daypart = from { $start } to { $end }
+ag-rule-daypart-open = from { $start }, until the next day part
+ag-rule-at-hourly = at { $marks } every hour
+ag-rule-at-step = every { $n } min from { $first }
+ag-rule-at = at { $at }
+ag-hard = hard (cuts in)
+ag-soft = soft (at the end of the track)
+ag-rule-expiry = stale after { $d }
+ag-rule-every-elapsed = every { $d } since the last play
+ag-rule-every-tracks = every { $n } tracks
+ag-rule-live = DJ { $dj } from { $start }
+ag-rule-dates = from { $start } to { $end }
+ag-rule-from = from { $start }
+ag-rule-until = until { $end }
+ag-rule-disabled = disabled
+ag-live-before = opened earlier
+ag-live-window = connection window { $opens } – { $closes }
+ag-floating-title = Off the clock — since the last play or by track count
+ag-floating-more = … and { $n } more (l: all rules)
+ag-legend = ! hard rendez-vous · * soft · ♪ live · ▶ now
+ag-day-summary = { $hard } hard · { $soft } soft · { $live } live
+ag-calendar = Go to a date
+ag-calendar-keys = arrows · PgUp/PgDn · t · Enter
+cov-grid = Grid coverage:
+cov-rules = { $n ->
+    [one] { $n } rule
+   *[other] { $n } rules
+}
+cov-none = no active rule in the grid
+cov-ok = ok
+cov-thin = thin
+cov-insufficient = insufficient
+cov-reason-ok = the pool covers what the rule asks for
+cov-pool-empty = empty pool
+cov-track-repeat = no_same_track_within { $window }: pool of only { $pool } (a track will replay)
+cov-title-repeat = no_same_title_within { $window }: pool of only { $pool } (a song will replay)
+cov-artist-repeat = no_same_artist_within: { $n } distinct artist(s) (an artist will replay)
+cov-artist-not-evaluated = no_same_artist_within not evaluated (group aggregate)
+cov-limit-unmet = limit { $limit }: { $n } distinct media in the pool
+cov-finite-short = finite source of { $pool } for a { $need } slot (does not fill it)
+cov-members-empty-abort = empty member(s): { $list } → the group stops (abort)
+cov-members-empty-skip = empty member(s): { $list } → skipped (degraded)
+cov-members-loop = undersized member(s): { $list } → loops within the slot
+cov-bad-ref = invalid reference: { $reason }
+cov-unknown-playlist = unknown playlist (broken reference)
+cov-unreadable-playlist = unreadable playlist: { $reason }
+cov-unresolvable = pool cannot be resolved: { $reason }
+cov-runtime-loop = runtime budget { $need } > pool of { $pool } → loops within the slot
+cov-take-repeat = take { $take } > { $n } distinct track(s) → repeats
+cov-unknown = unknown cause (code { $code }): stationd newer than the TUI?
+pl-reveal-missing-title = Playlist not found
+pl-reveal-missing = Playlist “{ $playlist }” is not in the list (broken grid reference?).
+
+## --- Lot 6b: editing the grid in the agenda ------------------------------------
+key-shift-g = G
+key-u = u
+key-ctrl-r = Ctrl+R
+key-left-right-space = ← → / Space
+help-ag-new = new event at this slot
+help-ag-edit = edit the rule
+help-ag-delete = delete the rule
+help-ag-grids = grids (view, activate, copy)
+help-ag-utc = local / UTC times
+help-ag-grid-move = previous / next grid
+help-ag-grid-view = show this grid
+help-ag-grid-activate = make it active
+help-ag-grid-copy = copy under a new name
+help-ag-kind-move = previous / next kind
+help-ag-kind-pick = create
+help-ag-rules = all rules of the grid
+ag-rules-title = Rules of grid { $grid }
+ag-rules-keys = Enter edit · d delete · n new · Esc
+ag-rules-none = no rule
+help-ag-cancel = close
+help-rf-field = previous / next field
+help-rf-choice = change the choice, tick a day
+help-rf-enter = pick the playlist / next field
+help-rf-save = save the grid
+help-rf-rebase = reread the file (conflict), keeping the input
+help-rf-close = close
+ag-grid-active = grid { $grid } (active)
+ag-grid-other = GRID IN PREPARATION: { $grid } (not on air)
+ag-grids-title = Grids of the node
+ag-grids-keys = Enter view · a activate · c copy · Esc
+ag-grids-none = no grid (the grid directory is empty)
+ag-grids-no-file = no file (the grid last applied stays)
+ag-grids-rules = { $n ->
+    [one] { $n } rule
+   *[other] { $n } rules
+}
+ag-grids-unreadable = unreadable
+ag-grids-active = active
+ag-grids-viewed = shown
+ag-activate-title = Activate a grid
+ag-activate-body = Grid { $grid } goes on air: it replaces the active grid, right now.
+ag-activate-yes = Activate
+ag-copy-title = Copy grid { $grid }
+ag-copy-name = Name of the new grid
+ag-copy-need-name = Give a name (e.g. summer)
+ag-new-title = New event
+ag-new-kind = Kind of rule:
+ag-grid-unreadable = Unreadable grid
+ag-grid-toml-broken = File { $grid } does not parse: fix it by hand (or `stationctl schedule show`).
+ag-rule-missing-title = Rule not found
+ag-rule-missing = Rule { $rule } is not in file { $grid } (edited by hand since?): `r` to reload.
+ag-delete-title = Delete a rule
+ag-delete-body = Rule { $rule } is removed from file { $grid }.
+ag-delete-active = This is the active grid: the air changes right away.
+ag-delete-other = Grid in preparation: the air does not change.
+ag-delete-yes = Delete
+done-rule-deleted = rule { $rule } deleted from { $grid }
+done-grid-activated = active grid: { $grid } ({ $n } rules)
+done-grid-not-activated = { $grid } is not activated
+done-grid-not-saved = { $grid } is not saved
+done-grid-conflict = { $grid } changed since it was read: nothing written, reload (r) and try again
+done-grid-copied = grid { $to } created (copy of { $from }), not active
+done-grid-exists = grid { $grid } already exists: nothing written
+done-grid-more = { $n ->
+    [one] {" "}(and { $n } other problem)
+   *[other] {" "}(and { $n } other problems)
+}
+gdiag-not-allowed = field of another kind of rule
+gdiag-bad-time = time as HH:MM (00:00 to 23:59)
+gdiag-bad-date = date as YYYY-MM-DD
+gdiag-bad-weekday = day: mon, tue, wed, thu, fri, sat, sun, no duplicate
+gdiag-schema-version = unsupported grid version
+gdiag-duplicate-id = this id is already another rule's
+gdiag-several-floors = only one floor (base_rotation) per grid
+gdiag-zero-window = same start and end: the day part covers nothing
+gdiag-dates-reversed = the end date is before the start date
+gdiag-out-of-range = number out of range
+gdiag-unknown-dj = DJ not in the DJ file
+gdiag-no-live = live slot without a [live] section in stationd.toml
+gdiag-dj-file = DJ file unreadable: { $detail }
+gdiag-file = grid file unreadable: { $detail }
+rf-title-new = New rule: { $kind }
+rf-title-edit = Rule { $id }
+rf-grid-active = in the active grid { $grid } (applied on save)
+rf-grid-other = in grid { $grid } (in preparation, not on air)
+rf-modified = modified
+rf-local-times = times and dates in the station timezone
+rf-id = id
+rf-playlist = playlist
+rf-dj = DJ
+rf-start = start
+rf-end = end
+rf-anchor = mark
+rf-anchor-at = once a day, at a fixed time
+rf-anchor-minute = every hour, at a minute
+rf-anchor-every = several times an hour
+rf-at = time
+rf-every-minutes = every (min)
+rf-minute = minute
+rf-mode = mode
+rf-expiry = expiry
+rf-cadence = cadence
+rf-cadence-elapsed = elapsed time
+rf-cadence-tracks = number of tracks
+rf-min-elapsed = at most every
+rf-min-tracks = at most every (tracks)
+rf-days = days
+rf-days-all = (none ticked = every day)
+rf-date-start = from
+rf-date-end = until
+rf-hint-time = HH:MM, station time
+rf-hint-end = HH:MM; empty = until the next day part; before the start = crosses midnight
+rf-hint-every-minutes = 1 to 1439, counted from midnight (45 → 00:45 01:30 … 23:15)
+rf-hint-minute = 0 to 59, one mark per hour (0 → :00, 58 → :58)
+rf-hint-expiry = 30s, 5m, 2h; empty = never stale
+rf-hint-duration = 30s, 15m, 2h, 1d
+rf-hint-tracks = a number of tracks (1 or more)
+rf-hint-date = YYYY-MM-DD; empty = no limit; both equal = that day only
+rf-hint-days = ← → to move, Space to tick
+rf-hint-playlist = Enter: pick from the list, or type the ref
+rf-pick-playlist = Playlist of the rule
+rf-preview = The day with the change
+rf-preview-bases = Bases:
+rf-preview-marks = { $n ->
+    [one] This rule, { $n } time:
+   *[other] This rule, { $n } times:
+}
+rf-preview-none = This rule does not play that day (days, dates, time, or a rule with priority).
+rf-preview-invalid = the day is projected once the grid has no error left
+rf-preview-others = { $n ->
+    [one] { $n } other mark that day
+   *[other] { $n } other marks that day
+}
+rf-other-problems = Other problems of the grid (they also block saving):
+rf-saving = saving…
+rf-saved = rule { $id } saved in { $grid } (grid in preparation)
+rf-saved-applied = rule { $id } saved in { $grid }: on air
+rf-invalid = nothing written: fix the fields marked ✗
+rf-conflict = the file changed since it was opened: nothing written — Ctrl+R rereads it, keeping the input
+rf-rebasing = rereading the file…
+rf-rebased = file reread, input carried over: check, then Ctrl+S
+rf-confirm-quit = unsaved changes: Esc again to drop them

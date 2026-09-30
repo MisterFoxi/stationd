@@ -44,8 +44,8 @@ async fn lists_every_variant_and_preserves_playback_state() {
     grid_store::record_at_clock_taken(&pool, "existing-mark", r::Epoch(120)).await.unwrap();
     let before = grid_store::load_playback_state(&pool).await.unwrap();
 
-    let first = service.list_rules(Request::new(p::ListRulesRequest {})).await.unwrap().into_inner();
-    let second = service.list_rules(Request::new(p::ListRulesRequest {})).await.unwrap().into_inner();
+    let first = service.list_rules(Request::new(p::ListRulesRequest::default())).await.unwrap().into_inner();
+    let second = service.list_rules(Request::new(p::ListRulesRequest::default())).await.unwrap().into_inner();
     assert_eq!(first, second, "repeated polling has stable transport output");
     assert_eq!(first.rules.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
         ["a-base", "b-day", "c-clock", "d-marks", "e-tracks", "f-elapsed"]);
@@ -98,9 +98,9 @@ async fn lists_every_variant_and_preserves_playback_state() {
 #[tokio::test]
 async fn empty_grid_is_success_and_storage_errors_are_explicit() {
     let (_dir, pool, service) = fixture().await;
-    let reply = service.list_rules(Request::new(p::ListRulesRequest {})).await.unwrap().into_inner();
+    let reply = service.list_rules(Request::new(p::ListRulesRequest::default())).await.unwrap().into_inner();
     assert!(reply.rules.is_empty());
     pool.close().await;
-    let error = service.list_rules(Request::new(p::ListRulesRequest {})).await.unwrap_err();
+    let error = service.list_rules(Request::new(p::ListRulesRequest::default())).await.unwrap_err();
     assert_eq!(error.code(), tonic::Code::Internal);
 }

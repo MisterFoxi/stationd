@@ -60,4 +60,26 @@ impl Styles<'_> {
     pub fn border(&self) -> Style {
         self.0.p.fg_style(Colors::Gray, 3)
     }
+    /// Bande de l'agenda n° `i` (une par playlist) : fond coloré, texte
+    /// lisible dessus. Le nom est toujours écrit à côté de la couleur.
+    pub fn band(&self, i: usize) -> Style {
+        self.0.p.style(BANDS[i % BANDS.len()], 3)
+    }
+    /// Bande du filet de sécurité (aucune règle ne couvre).
+    pub fn band_fallback(&self) -> Style {
+        self.0.p.style(Colors::Red, 3)
+    }
 }
+
+/// Couleurs des bandes de l'agenda, dans l'ordre d'apparition des playlists.
+const BANDS: [Colors; 9] = [
+    Colors::Blue,
+    Colors::Green,
+    Colors::Purple,
+    Colors::Cyan,
+    Colors::Orange,
+    Colors::Magenta,
+    Colors::LimeGreen,
+    Colors::DeepBlue,
+    Colors::Yellow,
+];

@@ -168,9 +168,6 @@ planned-coming = À venir
 planned-lot = lot { $lot }
 planned-plugin-missing = plugin « { $plugin } » non chargé
 planned-unavailable = Indisponible : { $reason }
-planned-agenda-1 = Jour : timeline, bases, rendez-vous, every projetés
-planned-agenda-2 = Semaine : 7 colonnes, pas 15/30/60 min
-planned-agenda-3 = Couverture de la grille, édition de règle
 planned-tags-1 = Types : valeurs déclarées, effectifs, médias sans Type
 planned-tags-2 = Tags libres : créer, renommer, fusionner
 planned-system-1 = Santé : stationd, Liquidsoap, Icecast (mounts), live
@@ -753,3 +750,289 @@ tags-picker-keys = taper pour filtrer · Espace cocher · Entrée valider · Éc
 tags-picker-new = ＋ nouveau : « { $genre } »
 tags-picker-none = aucun genre ne correspond : Espace l'ajoute
 confirm-tags-merge = { $field } : + { $add } / − { $remove }
+
+## --- Lot 6a : agenda --------------------------------------------------------
+key-brackets = [ / ]
+key-t = t
+key-g = g
+key-arrows = ← → ↑ ↓
+key-page = PgPréc / PgSuiv
+help-ag-slot = créneau précédent / suivant
+help-ag-day = jour précédent / suivant
+help-ag-week-shift = semaine précédente / suivante
+help-ag-today = aujourd'hui, maintenant
+help-ag-goto = aller à une date (calendrier)
+help-ag-week = vue semaine
+help-ag-day-view = vue jour
+help-ag-coverage = couverture de la grille
+help-ag-back = revenir à l'agenda
+help-ag-step = pas de 15 / 30 / 60 min
+help-ag-item = élément suivant du créneau
+help-ag-inspector = inspecteur (terminal étroit)
+help-ag-playlist = ouvrir la playlist
+help-ag-cell = choisir une case
+help-ag-open-day = ouvrir ce jour
+help-ag-rule = règle précédente / suivante
+help-ag-cal-move = jour / semaine
+help-ag-cal-month = mois précédent / suivant
+help-ag-cal-pick = afficher ce jour
+ag-no-tz = fuseau de la station inconnu : en attente de stationd…
+ag-bad-date = date hors calendrier
+ag-view-day = Jour
+ag-view-week = Semaine
+ag-view-coverage = Couverture
+ag-weekday-short = { $wd ->
+    [1] lun.
+    [2] mar.
+    [3] mer.
+    [4] jeu.
+    [5] ven.
+    [6] sam.
+   *[7] dim.
+}
+ag-date-long = { $wd ->
+    [1] lundi
+    [2] mardi
+    [3] mercredi
+    [4] jeudi
+    [5] vendredi
+    [6] samedi
+   *[7] dimanche
+} { $date }
+ag-date-short = { ag-weekday-short } { $date }
+ag-week-of = semaine du { $from } au { $to }
+ag-month = { $month ->
+    [1] janvier
+    [2] février
+    [3] mars
+    [4] avril
+    [5] mai
+    [6] juin
+    [7] juillet
+    [8] août
+    [9] septembre
+    [10] octobre
+    [11] novembre
+   *[12] décembre
+} { $year }
+ag-step = pas { $n } min
+ag-utc = heures UTC (station : { $tz })
+ag-utc-rules = les règles restent en heure de la station
+ag-dst = changement d'heure : journée de { $h } h
+ag-dst-week = changement d'heure cette semaine
+ag-stale = données anciennes, relecture en échec : { $reason }
+ag-gap = (sautée)
+ag-inspector = Créneau
+ag-slot-empty = rien de projeté dans ce créneau
+ag-until-end = fin de la période
+ag-origin-daypart = tranche (day_part)
+ag-origin-base = base (base_rotation)
+ag-origin-hard = rendez-vous hard
+ag-origin-soft = rendez-vous soft
+ag-origin-every = every
+ag-origin-fallback = filet de sécurité
+ag-kind-at-clock = rendez-vous (at_clock)
+ag-kind-live = créneau live
+ag-rule = règle
+ag-group = groupe
+ag-coverage = couverture
+ag-pool-unmeasured = non mesurable
+ag-take = take { $n }
+ag-runtime = runtime { $d }
+ag-rule-base = plancher, toute la journée
+ag-rule-daypart = de { $start } à { $end }
+ag-rule-daypart-open = à partir de { $start }, jusqu'à la tranche suivante
+ag-rule-at-hourly = à { $marks } de chaque heure
+ag-rule-at-step = toutes les { $n } min à partir de { $first }
+ag-rule-at = à { $at }
+ag-hard = hard (coupe)
+ag-soft = soft (en fin de morceau)
+ag-rule-expiry = périmé après { $d }
+ag-rule-every-elapsed = toutes les { $d } depuis le dernier passage
+ag-rule-every-tracks = toutes les { $n } pistes
+ag-rule-live = DJ { $dj } à partir de { $start }
+ag-rule-dates = du { $start } au { $end }
+ag-rule-from = à partir du { $start }
+ag-rule-until = jusqu'au { $end }
+ag-rule-disabled = désactivée
+ag-live-before = ouverte avant
+ag-live-window = fenêtre de connexion { $opens } – { $closes }
+ag-floating-title = Hors horloge — au dernier passage ou au compteur de pistes
+ag-floating-more = … et { $n } de plus (l : toutes les règles)
+ag-legend = ! rendez-vous hard · * soft · ♪ live · ▶ maintenant
+ag-day-summary = { $hard } hard · { $soft } soft · { $live } live
+ag-calendar = Aller à une date
+ag-calendar-keys = flèches · PgPréc/PgSuiv · t · Entrée
+cov-grid = Couverture de la grille :
+cov-rules = { $n ->
+    [one] { $n } règle
+   *[other] { $n } règles
+}
+cov-none = aucune règle active dans la grille
+cov-ok = ok
+cov-thin = juste
+cov-insufficient = insuffisant
+cov-reason-ok = le pool couvre ce que la règle demande
+cov-pool-empty = pool vide
+cov-track-repeat = no_same_track_within { $window } : pool de { $pool } seulement (une piste repassera)
+cov-title-repeat = no_same_title_within { $window } : pool de { $pool } seulement (un morceau repassera)
+cov-artist-repeat = no_same_artist_within : { $n } artiste(s) distinct(s) (un artiste repassera)
+cov-artist-not-evaluated = no_same_artist_within non évalué (agrégat de groupe)
+cov-limit-unmet = limit { $limit } : { $n } média(s) distinct(s) dans le pool
+cov-finite-short = source finie de { $pool } pour un créneau de { $need } (ne le remplit pas)
+cov-members-empty-abort = membre(s) vide(s) : { $list } → le groupe s'arrête (abort)
+cov-members-empty-skip = membre(s) vide(s) : { $list } → sautés (dégradé)
+cov-members-loop = membre(s) sous-dimensionné(s) : { $list } → boucle dans le créneau
+cov-bad-ref = référence invalide : { $reason }
+cov-unknown-playlist = playlist inconnue (référence cassée)
+cov-unreadable-playlist = playlist illisible : { $reason }
+cov-unresolvable = pool non résolvable : { $reason }
+cov-runtime-loop = budget runtime { $need } > pool de { $pool } → boucle dans le créneau
+cov-take-repeat = take { $take } > { $n } piste(s) distincte(s) → répétition
+cov-unknown = cause inconnue (code { $code }) : stationd plus récent que la TUI ?
+pl-reveal-missing-title = Playlist introuvable
+pl-reveal-missing = La playlist « { $playlist } » n'est pas dans la liste (référence de la grille cassée ?).
+
+## --- Lot 6b : édition de la grille dans l'agenda ------------------------------
+key-shift-g = G
+key-u = u
+key-ctrl-r = Ctrl+R
+key-left-right-space = ← → / Espace
+help-ag-new = nouvel event au créneau
+help-ag-edit = modifier la règle
+help-ag-delete = supprimer la règle
+help-ag-grids = grilles (voir, activer, copier)
+help-ag-utc = heures locales / UTC
+help-ag-grid-move = grille précédente / suivante
+help-ag-grid-view = afficher cette grille
+help-ag-grid-activate = la rendre active
+help-ag-grid-copy = copier sous un nouveau nom
+help-ag-kind-move = nature précédente / suivante
+help-ag-kind-pick = créer
+help-ag-rules = toutes les règles de la grille
+ag-rules-title = Règles de la grille { $grid }
+ag-rules-keys = Entrée modifier · d supprimer · n nouvelle · Échap
+ag-rules-none = aucune règle
+help-ag-cancel = fermer
+help-rf-field = champ précédent / suivant
+help-rf-choice = changer le choix, cocher un jour
+help-rf-enter = choisir la playlist / champ suivant
+help-rf-save = enregistrer la grille
+help-rf-rebase = relire le fichier (conflit) en gardant la saisie
+help-rf-close = fermer
+ag-grid-active = grille { $grid } (active)
+ag-grid-other = GRILLE EN PRÉPARATION : { $grid } (pas à l'antenne)
+ag-grids-title = Grilles du nœud
+ag-grids-keys = Entrée voir · a activer · c copier · Échap
+ag-grids-none = aucune grille (le répertoire des grilles est vide)
+ag-grids-no-file = pas de fichier (la dernière grille appliquée reste)
+ag-grids-rules = { $n ->
+    [one] { $n } règle
+   *[other] { $n } règles
+}
+ag-grids-unreadable = illisible
+ag-grids-active = active
+ag-grids-viewed = affichée
+ag-activate-title = Activer une grille
+ag-activate-body = La grille { $grid } passe à l'antenne : elle remplace la grille active, dès maintenant.
+ag-activate-yes = Activer
+ag-copy-title = Copier la grille { $grid }
+ag-copy-name = Nom de la nouvelle grille
+ag-copy-need-name = Donner un nom (ex. ete)
+ag-new-title = Nouvel event
+ag-new-kind = Nature de la règle :
+ag-grid-unreadable = Grille illisible
+ag-grid-toml-broken = Le fichier { $grid } ne se lit pas : le corriger à la main (ou `stationctl schedule show`).
+ag-rule-missing-title = Règle introuvable
+ag-rule-missing = La règle { $rule } n'est pas dans le fichier { $grid } (modifié à la main depuis ?) : `r` pour relire.
+ag-delete-title = Supprimer une règle
+ag-delete-body = La règle { $rule } est retirée du fichier { $grid }.
+ag-delete-active = C'est la grille active : l'antenne change aussitôt.
+ag-delete-other = Grille en préparation : l'antenne ne change pas.
+ag-delete-yes = Supprimer
+done-rule-deleted = règle { $rule } supprimée de { $grid }
+done-grid-activated = grille active : { $grid } ({ $n } règles)
+done-grid-not-activated = { $grid } n'est pas activée
+done-grid-not-saved = { $grid } n'est pas enregistrée
+done-grid-conflict = { $grid } a changé depuis la lecture : rien n'est écrit, relire (r) et recommencer
+done-grid-copied = grille { $to } créée (copie de { $from }), pas active
+done-grid-exists = la grille { $grid } existe déjà : rien n'est écrit
+done-grid-more = { $n ->
+    [one] {" "}(et { $n } autre problème)
+   *[other] {" "}(et { $n } autres problèmes)
+}
+gdiag-not-allowed = champ d'une autre nature de règle
+gdiag-bad-time = heure au format HH:MM (00:00 à 23:59)
+gdiag-bad-date = date au format AAAA-MM-JJ
+gdiag-bad-weekday = jour : mon, tue, wed, thu, fri, sat, sun, sans doublon
+gdiag-schema-version = version de grille non prise en charge
+gdiag-duplicate-id = cet id est déjà celui d'une autre règle
+gdiag-several-floors = un seul plancher (base_rotation) par grille
+gdiag-zero-window = début et fin identiques : la tranche ne couvre rien
+gdiag-dates-reversed = la date de fin précède la date de début
+gdiag-out-of-range = nombre hors limites
+gdiag-unknown-dj = DJ absent du fichier des DJ
+gdiag-no-live = créneau live sans section [live] dans stationd.toml
+gdiag-dj-file = fichier des DJ illisible : { $detail }
+gdiag-file = fichier de grille illisible : { $detail }
+rf-title-new = Nouvelle règle : { $kind }
+rf-title-edit = Règle { $id }
+rf-grid-active = dans la grille active { $grid } (appliquée à l'enregistrement)
+rf-grid-other = dans la grille { $grid } (en préparation, pas à l'antenne)
+rf-modified = modifiée
+rf-local-times = heures et dates dans le fuseau de la station
+rf-id = id
+rf-playlist = playlist
+rf-dj = DJ
+rf-start = début
+rf-end = fin
+rf-anchor = repère
+rf-anchor-at = une fois par jour, à heure fixe
+rf-anchor-minute = chaque heure, à la minute
+rf-anchor-every = plusieurs fois par heure
+rf-at = heure
+rf-every-minutes = toutes les (min)
+rf-minute = minute
+rf-mode = mode
+rf-expiry = péremption
+rf-cadence = cadence
+rf-cadence-elapsed = temps écoulé
+rf-cadence-tracks = nombre de pistes
+rf-min-elapsed = au plus toutes les
+rf-min-tracks = au plus toutes les (pistes)
+rf-days = jours
+rf-days-all = (aucun coché = tous les jours)
+rf-date-start = à partir du
+rf-date-end = jusqu'au
+rf-hint-time = HH:MM, heure de la station
+rf-hint-end = HH:MM ; vide = jusqu'à la tranche suivante ; avant le début = passe minuit
+rf-hint-every-minutes = 1 à 1439, comptées depuis minuit (45 → 00:45 01:30 … 23:15)
+rf-hint-minute = 0 à 59, un repère par heure (0 → :00, 58 → :58)
+rf-hint-expiry = 30s, 5m, 2h ; vide = jamais périmé
+rf-hint-duration = 30s, 15m, 2h, 1d
+rf-hint-tracks = un nombre de pistes (1 ou plus)
+rf-hint-date = AAAA-MM-JJ ; vide = sans limite ; les deux égales = ce jour seulement
+rf-hint-days = ← → pour choisir, Espace pour cocher
+rf-hint-playlist = Entrée : choisir dans la liste, ou taper le ref
+rf-pick-playlist = Playlist de la règle
+rf-preview = La journée avec la modification
+rf-preview-bases = Bases :
+rf-preview-marks = { $n ->
+    [one] Cette règle, { $n } fois :
+   *[other] Cette règle, { $n } fois :
+}
+rf-preview-none = Cette règle ne joue pas ce jour-là (jours, dates, heure, ou une règle prioritaire).
+rf-preview-invalid = la journée sera projetée dès que la grille n'aura plus d'erreur
+rf-preview-others = { $n ->
+    [one] { $n } autre repère ce jour-là
+   *[other] { $n } autres repères ce jour-là
+}
+rf-other-problems = Autres problèmes de la grille (ils bloquent aussi l'enregistrement) :
+rf-saving = enregistrement…
+rf-saved = règle { $id } enregistrée dans { $grid } (grille en préparation)
+rf-saved-applied = règle { $id } enregistrée dans { $grid } : à l'antenne
+rf-invalid = rien n'est écrit : corriger les champs marqués ✗
+rf-conflict = le fichier a changé depuis l'ouverture : rien n'est écrit — Ctrl+R le relit en gardant la saisie
+rf-rebasing = relecture du fichier…
+rf-rebased = fichier relu, saisie reportée : vérifier puis Ctrl+S
+rf-confirm-quit = modifications non enregistrées : Échap encore pour les abandonner

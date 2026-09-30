@@ -168,9 +168,6 @@ planned-coming = Demnächst
 planned-lot = Paket { $lot }
 planned-plugin-missing = Plugin „{ $plugin }“ nicht geladen
 planned-unavailable = Nicht verfügbar: { $reason }
-planned-agenda-1 = Tag: Zeitleiste, Basen, Termine, geschätzte every
-planned-agenda-2 = Woche: 7 Spalten, Raster 15/30/60 Min.
-planned-agenda-3 = Abdeckung des Sendeplans, Regeln bearbeiten
 planned-tags-1 = Typen: deklarierte Werte, Anzahlen, Medien ohne Typ
 planned-tags-2 = Freie Tags: anlegen, umbenennen, zusammenführen
 planned-system-1 = Zustand: stationd, Liquidsoap, Icecast (Mounts), Live
@@ -750,3 +747,289 @@ tags-picker-keys = tippen zum Filtern · Leertaste ankreuzen · Enter bestätige
 tags-picker-new = ＋ neu: „{ $genre }“
 tags-picker-none = kein Genre passt: Leertaste fügt es hinzu
 confirm-tags-merge = { $field }: + { $add } / − { $remove }
+
+## --- Lot 6a: Sendeplan ----------------------------------------------------------
+key-brackets = [ / ]
+key-t = t
+key-g = g
+key-arrows = ← → ↑ ↓
+key-page = Bild↑ / Bild↓
+help-ag-slot = vorheriger / nächster Zeitblock
+help-ag-day = vorheriger / nächster Tag
+help-ag-week-shift = vorherige / nächste Woche
+help-ag-today = heute, jetzt
+help-ag-goto = zu einem Datum (Kalender)
+help-ag-week = Wochenansicht
+help-ag-day-view = Tagesansicht
+help-ag-coverage = Abdeckung des Rasters
+help-ag-back = zurück zum Sendeplan
+help-ag-step = Raster 15 / 30 / 60 Min.
+help-ag-item = nächstes Element des Zeitblocks
+help-ag-inspector = Details (schmales Terminal)
+help-ag-playlist = Playlist öffnen
+help-ag-cell = Feld wählen
+help-ag-open-day = diesen Tag öffnen
+help-ag-rule = vorherige / nächste Regel
+help-ag-cal-move = Tag / Woche
+help-ag-cal-month = vorheriger / nächster Monat
+help-ag-cal-pick = diesen Tag anzeigen
+ag-no-tz = Zeitzone des Senders unbekannt: warte auf stationd…
+ag-bad-date = Datum außerhalb des Kalenders
+ag-view-day = Tag
+ag-view-week = Woche
+ag-view-coverage = Abdeckung
+ag-weekday-short = { $wd ->
+    [1] Mo.
+    [2] Di.
+    [3] Mi.
+    [4] Do.
+    [5] Fr.
+    [6] Sa.
+   *[7] So.
+}
+ag-date-long = { $wd ->
+    [1] Montag
+    [2] Dienstag
+    [3] Mittwoch
+    [4] Donnerstag
+    [5] Freitag
+    [6] Samstag
+   *[7] Sonntag
+} { $date }
+ag-date-short = { ag-weekday-short } { $date }
+ag-week-of = Woche vom { $from } bis { $to }
+ag-month = { $month ->
+    [1] Januar
+    [2] Februar
+    [3] März
+    [4] April
+    [5] Mai
+    [6] Juni
+    [7] Juli
+    [8] August
+    [9] September
+    [10] Oktober
+    [11] November
+   *[12] Dezember
+} { $year }
+ag-step = Raster { $n } Min.
+ag-utc = UTC-Zeiten (Sender: { $tz })
+ag-utc-rules = Regeln bleiben in Senderzeit
+ag-dst = Zeitumstellung: Tag mit { $h } Std.
+ag-dst-week = Zeitumstellung in dieser Woche
+ag-stale = alte Daten, Neuladen fehlgeschlagen: { $reason }
+ag-gap = (übersprungen)
+ag-inspector = Zeitblock
+ag-slot-empty = in diesem Zeitblock ist nichts geplant
+ag-until-end = Ende des Zeitraums
+ag-origin-daypart = Tagesabschnitt (day_part)
+ag-origin-base = Grundrotation (base_rotation)
+ag-origin-hard = harter Termin
+ag-origin-soft = weicher Termin
+ag-origin-every = every
+ag-origin-fallback = Sicherheitsnetz
+ag-kind-at-clock = Termin (at_clock)
+ag-kind-live = Live-Slot
+ag-rule = Regel
+ag-group = Gruppe
+ag-coverage = Abdeckung
+ag-pool-unmeasured = nicht messbar
+ag-take = take { $n }
+ag-runtime = runtime { $d }
+ag-rule-base = Grundlage, ganztägig
+ag-rule-daypart = von { $start } bis { $end }
+ag-rule-daypart-open = ab { $start }, bis zum nächsten Abschnitt
+ag-rule-at-hourly = um { $marks } jeder Stunde
+ag-rule-at-step = alle { $n } Min. ab { $first }
+ag-rule-at = um { $at }
+ag-hard = hart (schneidet)
+ag-soft = weich (am Titelende)
+ag-rule-expiry = verfällt nach { $d }
+ag-rule-every-elapsed = alle { $d } seit dem letzten Einsatz
+ag-rule-every-tracks = alle { $n } Titel
+ag-rule-live = DJ { $dj } ab { $start }
+ag-rule-dates = vom { $start } bis { $end }
+ag-rule-from = ab { $start }
+ag-rule-until = bis { $end }
+ag-rule-disabled = deaktiviert
+ag-live-before = schon vorher offen
+ag-live-window = Verbindungsfenster { $opens } – { $closes }
+ag-floating-title = Ohne Uhrzeit — ab dem letzten Einsatz oder nach Titelzahl
+ag-floating-more = … und { $n } weitere (l: alle Regeln)
+ag-legend = ! harter Termin · * weich · ♪ live · ▶ jetzt
+ag-day-summary = { $hard } hart · { $soft } weich · { $live } live
+ag-calendar = Zu einem Datum
+ag-calendar-keys = Pfeile · Bild↑/Bild↓ · t · Eingabe
+cov-grid = Abdeckung des Rasters:
+cov-rules = { $n ->
+    [one] { $n } Regel
+   *[other] { $n } Regeln
+}
+cov-none = keine aktive Regel im Raster
+cov-ok = ok
+cov-thin = knapp
+cov-insufficient = unzureichend
+cov-reason-ok = der Pool deckt ab, was die Regel verlangt
+cov-pool-empty = leerer Pool
+cov-track-repeat = no_same_track_within { $window }: Pool von nur { $pool } (ein Titel wird wiederholt)
+cov-title-repeat = no_same_title_within { $window }: Pool von nur { $pool } (ein Stück wird wiederholt)
+cov-artist-repeat = no_same_artist_within: { $n } verschiedene(r) Künstler (ein Künstler wird wiederholt)
+cov-artist-not-evaluated = no_same_artist_within nicht bewertet (Gruppensumme)
+cov-limit-unmet = limit { $limit }: { $n } verschiedene Medien im Pool
+cov-finite-short = endliche Quelle von { $pool } für einen Block von { $need } (füllt ihn nicht)
+cov-members-empty-abort = leere(s) Mitglied(er): { $list } → Gruppe bricht ab (abort)
+cov-members-empty-skip = leere(s) Mitglied(er): { $list } → übersprungen (eingeschränkt)
+cov-members-loop = zu knappe(s) Mitglied(er): { $list } → Schleife im Block
+cov-bad-ref = ungültiger Verweis: { $reason }
+cov-unknown-playlist = unbekannte Playlist (Verweis kaputt)
+cov-unreadable-playlist = Playlist nicht lesbar: { $reason }
+cov-unresolvable = Pool nicht auflösbar: { $reason }
+cov-runtime-loop = runtime-Budget { $need } > Pool von { $pool } → Schleife im Block
+cov-take-repeat = take { $take } > { $n } verschiedene Titel → Wiederholung
+cov-unknown = unbekannte Ursache (Code { $code }): stationd neuer als die TUI?
+pl-reveal-missing-title = Playlist nicht gefunden
+pl-reveal-missing = Die Playlist „{ $playlist }“ ist nicht in der Liste (Verweis im Raster kaputt?).
+
+## --- Lot 6b: Raster im Sendeplan bearbeiten ------------------------------------
+key-shift-g = G
+key-u = u
+key-ctrl-r = Strg+R
+key-left-right-space = ← → / Leertaste
+help-ag-new = neues Event im Zeitblock
+help-ag-edit = Regel bearbeiten
+help-ag-delete = Regel löschen
+help-ag-grids = Raster (ansehen, aktivieren, kopieren)
+help-ag-utc = Ortszeit / UTC
+help-ag-grid-move = vorheriges / nächstes Raster
+help-ag-grid-view = dieses Raster anzeigen
+help-ag-grid-activate = aktiv schalten
+help-ag-grid-copy = unter neuem Namen kopieren
+help-ag-kind-move = vorherige / nächste Art
+help-ag-kind-pick = anlegen
+help-ag-rules = alle Regeln des Rasters
+ag-rules-title = Regeln des Rasters { $grid }
+ag-rules-keys = Eingabe bearbeiten · d löschen · n neu · Esc
+ag-rules-none = keine Regel
+help-ag-cancel = schließen
+help-rf-field = vorheriges / nächstes Feld
+help-rf-choice = Auswahl ändern, Tag ankreuzen
+help-rf-enter = Playlist wählen / nächstes Feld
+help-rf-save = Raster speichern
+help-rf-rebase = Datei neu lesen (Konflikt), Eingabe behalten
+help-rf-close = schließen
+ag-grid-active = Raster { $grid } (aktiv)
+ag-grid-other = RASTER IN VORBEREITUNG: { $grid } (nicht auf Sendung)
+ag-grids-title = Raster des Knotens
+ag-grids-keys = Eingabe ansehen · a aktivieren · c kopieren · Esc
+ag-grids-none = kein Raster (das Rasterverzeichnis ist leer)
+ag-grids-no-file = keine Datei (das zuletzt angewandte Raster bleibt)
+ag-grids-rules = { $n ->
+    [one] { $n } Regel
+   *[other] { $n } Regeln
+}
+ag-grids-unreadable = nicht lesbar
+ag-grids-active = aktiv
+ag-grids-viewed = angezeigt
+ag-activate-title = Raster aktivieren
+ag-activate-body = Raster { $grid } geht auf Sendung: es ersetzt das aktive Raster, ab sofort.
+ag-activate-yes = Aktivieren
+ag-copy-title = Raster { $grid } kopieren
+ag-copy-name = Name des neuen Rasters
+ag-copy-need-name = Einen Namen angeben (z. B. sommer)
+ag-new-title = Neues Event
+ag-new-kind = Art der Regel:
+ag-grid-unreadable = Raster nicht lesbar
+ag-grid-toml-broken = Die Datei { $grid } ist nicht lesbar: von Hand korrigieren (oder `stationctl schedule show`).
+ag-rule-missing-title = Regel nicht gefunden
+ag-rule-missing = Die Regel { $rule } steht nicht in der Datei { $grid } (seitdem von Hand geändert?): `r` zum Neuladen.
+ag-delete-title = Regel löschen
+ag-delete-body = Die Regel { $rule } wird aus der Datei { $grid } entfernt.
+ag-delete-active = Das ist das aktive Raster: die Sendung ändert sich sofort.
+ag-delete-other = Raster in Vorbereitung: die Sendung ändert sich nicht.
+ag-delete-yes = Löschen
+done-rule-deleted = Regel { $rule } aus { $grid } gelöscht
+done-grid-activated = aktives Raster: { $grid } ({ $n } Regeln)
+done-grid-not-activated = { $grid } ist nicht aktiviert
+done-grid-not-saved = { $grid } ist nicht gespeichert
+done-grid-conflict = { $grid } hat sich seit dem Lesen geändert: nichts geschrieben, neu laden (r) und erneut versuchen
+done-grid-copied = Raster { $to } angelegt (Kopie von { $from }), nicht aktiv
+done-grid-exists = das Raster { $grid } existiert bereits: nichts geschrieben
+done-grid-more = { $n ->
+    [one] {" "}(und { $n } weiteres Problem)
+   *[other] {" "}(und { $n } weitere Probleme)
+}
+gdiag-not-allowed = Feld einer anderen Regelart
+gdiag-bad-time = Uhrzeit als HH:MM (00:00 bis 23:59)
+gdiag-bad-date = Datum als JJJJ-MM-TT
+gdiag-bad-weekday = Tag: mon, tue, wed, thu, fri, sat, sun, ohne Doppelung
+gdiag-schema-version = Rasterversion nicht unterstützt
+gdiag-duplicate-id = diese id gehört schon einer anderen Regel
+gdiag-several-floors = nur eine Grundlage (base_rotation) pro Raster
+gdiag-zero-window = Beginn und Ende gleich: der Abschnitt deckt nichts ab
+gdiag-dates-reversed = das Enddatum liegt vor dem Startdatum
+gdiag-out-of-range = Zahl außerhalb des Bereichs
+gdiag-unknown-dj = DJ fehlt in der DJ-Datei
+gdiag-no-live = Live-Slot ohne Abschnitt [live] in stationd.toml
+gdiag-dj-file = DJ-Datei nicht lesbar: { $detail }
+gdiag-file = Rasterdatei nicht lesbar: { $detail }
+rf-title-new = Neue Regel: { $kind }
+rf-title-edit = Regel { $id }
+rf-grid-active = im aktiven Raster { $grid } (beim Speichern angewandt)
+rf-grid-other = im Raster { $grid } (in Vorbereitung, nicht auf Sendung)
+rf-modified = geändert
+rf-local-times = Uhrzeiten und Daten in der Zeitzone des Senders
+rf-id = id
+rf-playlist = Playlist
+rf-dj = DJ
+rf-start = Beginn
+rf-end = Ende
+rf-anchor = Termin
+rf-anchor-at = einmal am Tag, zu fester Uhrzeit
+rf-anchor-minute = jede Stunde, zur Minute
+rf-anchor-every = mehrmals pro Stunde
+rf-at = Uhrzeit
+rf-every-minutes = alle (Min.)
+rf-minute = Minute
+rf-mode = Modus
+rf-expiry = Verfall
+rf-cadence = Takt
+rf-cadence-elapsed = verstrichene Zeit
+rf-cadence-tracks = Anzahl Titel
+rf-min-elapsed = höchstens alle
+rf-min-tracks = höchstens alle (Titel)
+rf-days = Tage
+rf-days-all = (nichts angekreuzt = jeden Tag)
+rf-date-start = ab
+rf-date-end = bis
+rf-hint-time = HH:MM, Senderzeit
+rf-hint-end = HH:MM; leer = bis zum nächsten Abschnitt; vor dem Beginn = über Mitternacht
+rf-hint-every-minutes = 1 bis 1439, ab Mitternacht gezählt (45 → 00:45 01:30 … 23:15)
+rf-hint-minute = 0 bis 59, ein Termin pro Stunde (0 → :00, 58 → :58)
+rf-hint-expiry = 30s, 5m, 2h; leer = verfällt nie
+rf-hint-duration = 30s, 15m, 2h, 1d
+rf-hint-tracks = eine Anzahl Titel (1 oder mehr)
+rf-hint-date = JJJJ-MM-TT; leer = unbegrenzt; beide gleich = nur an diesem Tag
+rf-hint-days = ← → zum Wählen, Leertaste zum Ankreuzen
+rf-hint-playlist = Eingabe: aus der Liste wählen, oder den ref tippen
+rf-pick-playlist = Playlist der Regel
+rf-preview = Der Tag mit der Änderung
+rf-preview-bases = Grundlagen:
+rf-preview-marks = { $n ->
+    [one] Diese Regel, { $n } Mal:
+   *[other] Diese Regel, { $n } Mal:
+}
+rf-preview-none = Diese Regel spielt an diesem Tag nicht (Tage, Daten, Uhrzeit, oder eine Regel mit Vorrang).
+rf-preview-invalid = der Tag wird hochgerechnet, sobald das Raster fehlerfrei ist
+rf-preview-others = { $n ->
+    [one] { $n } weiterer Termin an diesem Tag
+   *[other] { $n } weitere Termine an diesem Tag
+}
+rf-other-problems = Weitere Probleme des Rasters (sie verhindern auch das Speichern):
+rf-saving = wird gespeichert…
+rf-saved = Regel { $id } in { $grid } gespeichert (Raster in Vorbereitung)
+rf-saved-applied = Regel { $id } in { $grid } gespeichert: auf Sendung
+rf-invalid = nichts geschrieben: die mit ✗ markierten Felder korrigieren
+rf-conflict = die Datei hat sich seit dem Öffnen geändert: nichts geschrieben — Strg+R liest sie neu und behält die Eingabe
+rf-rebasing = Datei wird neu gelesen…
+rf-rebased = Datei neu gelesen, Eingabe übertragen: prüfen, dann Strg+S
+rf-confirm-quit = ungespeicherte Änderungen: nochmals Esc zum Verwerfen

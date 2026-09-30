@@ -451,7 +451,11 @@ enum LibraryCommand {
 #[derive(Subcommand, Debug)]
 enum ScheduleCommand {
     /// List the grid rules without advancing playback state.
-    List,
+    List {
+        /// List this grid file of the node instead of the applied grid.
+        #[arg(long)]
+        grid: Option<String>,
+    },
     /// Resolve which source the grid would pull now (or at a given instant).
     /// This is the live resolver path, so it persists side effects (a consumed
     /// AtClock mark, an Every reset) exactly as a real track boundary would.
@@ -467,12 +471,45 @@ enum ScheduleCommand {
         /// Path to the grid .toml file
         path: PathBuf,
     },
-    /// Validate and install a grid.toml: rebuilds the rule index (family A),
-    /// preserving the durable playback state (family B). Rejects atomically.
+    /// Validate and install a grid.toml: it becomes the ACTIVE grid file of
+    /// the node (written by stationd, replaced) and is applied — the rule
+    /// index is rebuilt (family A), the durable playback state kept (family
+    /// B). Rejects atomically.
     Apply {
         /// Path to the grid .toml file
         path: PathBuf,
     },
+    /// The grid files of the node ([grid] path), the active one marked.
+    Grids,
+    /// Print a grid file of the node (default: the active grid) with its revision.
+    Show {
+        /// Grid name (e.g. `grid`, `ete.toml`). Omitted → the active grid.
+        name: Option<String>,
+        /// Write it to this file (to edit it, then `schedule save`).
+        #[arg(long)]
+        file: Option<PathBuf>,
+    },
+    /// Write a grid file of the node from a local TOML (stationd validates,
+    /// writes, and applies it if it is the active grid).
+    Save {
+        /// Grid name (e.g. `grid`, `ete.toml`).
+        name: String,
+        /// The TOML to write.
+        path: PathBuf,
+        /// Revision the edit started from (`schedule show`); omitted = create.
+        #[arg(long, conflicts_with = "force")]
+        revision: Option<String>,
+        /// Replace the file whatever its revision.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Make a grid file the active grid: validated, applied, remembered.
+    Activate {
+        /// Grid name (e.g. `ete`).
+        name: String,
+    },
+    /// Re-read the active grid file and apply it (after editing it by hand).
+    Reload,
     /// Export the current grid back to TOML (stdout, or a file with --out).
     Export {
         /// Only export these rule ids (repeatable). Omitted → the whole grid.
@@ -494,6 +531,12 @@ enum ScheduleCommand {
         /// Window length in seconds. Default: 24h.
         #[arg(long, default_value_t = 86_400)]
         window: i64,
+        /// Project this grid file of the node instead of the applied grid.
+        #[arg(long, conflicts_with = "draft")]
+        grid: Option<String>,
+        /// Project this local TOML (nothing applied).
+        #[arg(long)]
+        draft: Option<PathBuf>,
     },
     /// Sizing check: does the grid have enough media? For each rule, size the
     /// pool of the playlist it references and grade it (OK / ⚠ thin / ✗
@@ -502,6 +545,12 @@ enum ScheduleCommand {
         /// Only check these rule ids (repeatable). Omitted → the whole grid.
         #[arg(long = "rule")]
         rules: Vec<String>,
+        /// Check this grid file of the node instead of the applied grid.
+        #[arg(long, conflicts_with = "draft")]
+        grid: Option<String>,
+        /// Check this local TOML (nothing applied).
+        #[arg(long)]
+        draft: Option<PathBuf>,
     },
 }
 
@@ -675,9 +724,12 @@ async fn main() -> anyhow::Result<()> {
             println!("shutdown requested");
         }
         Command::Playlist(cmd) => playlist_command(&args.addr, cmd).await?,
-        Command::Schedule(ScheduleCommand::List) => {
+        Command::Schedule(ScheduleCommand::List { grid }) => {
             let mut sched = ScheduleServiceClient::connect(args.addr.clone()).await?;
-            let reply = sched.list_rules(schedule::ListRulesRequest {}).await?.into_inner();
+            let reply = sched
+                .list_rules(schedule::ListRulesRequest { grid: grid.unwrap_or_default(), draft_toml: String::new() })
+                .await?
+                .into_inner();
             if reply.rules.is_empty() {
                 println!("(no rules in the view)");
             }
@@ -718,16 +770,20 @@ async fn main() -> anyhow::Result<()> {
         Command::Schedule(ScheduleCommand::Validate { path }) => {
             let content = read_grid_toml(&path)?;
             let mut sched = ScheduleServiceClient::connect(args.addr.clone()).await?;
-            // A rejected grid comes back as a gRPC error (invalid_argument);
-            // `?` surfaces the joined diagnostics and exits non-zero.
-            sched
+            let reply = sched
                 .validate_grid(ApplyGridRequest {
                     files: vec![GridFile {
                         path: path.display().to_string(),
                         toml: content,
                     }],
                 })
-                .await?;
+                .await?
+                .into_inner();
+            if !reply.ok {
+                println!("invalid: {}", path.display());
+                print_grid_diagnostics(&reply.diagnostics);
+                std::process::exit(1);
+            }
             println!("valid:  {}", path.display());
         }
         Command::Schedule(ScheduleCommand::Apply { path }) => {
@@ -742,7 +798,15 @@ async fn main() -> anyhow::Result<()> {
                 })
                 .await?
                 .into_inner();
+            if !reply.ok {
+                println!("rejected: {} (nothing written, nothing applied)", path.display());
+                print_grid_diagnostics(&reply.diagnostics);
+                std::process::exit(1);
+            }
             println!("applied: {}", path.display());
+            if !reply.grid.is_empty() {
+                println!("written: grid file {} (the active grid)", reply.grid);
+            }
             println!("rules:   {}", reply.applied_rule_ids.len());
             for id in &reply.applied_rule_ids {
                 println!("  - {id}");
@@ -771,12 +835,125 @@ async fn main() -> anyhow::Result<()> {
                 None => print!("{toml}"),
             }
         }
-        Command::Schedule(ScheduleCommand::Preview { at, window }) => {
+        Command::Schedule(ScheduleCommand::Grids) => {
+            let mut sched = ScheduleServiceClient::connect(args.addr.clone()).await?;
+            let reply = sched.list_grids(schedule::ListGridsRequest {}).await?.into_inner();
+            if reply.grids.is_empty() {
+                println!("(no grid file)");
+            }
+            for g in &reply.grids {
+                let mark = if g.active { "*" } else { " " };
+                let rules = match (g.revision.is_empty(), g.rules) {
+                    (true, _) => "no file (the grid last applied stays)".to_string(),
+                    (false, Some(n)) => format!("{n} rule(s)"),
+                    (false, None) => "unreadable".to_string(),
+                };
+                let rev: String = g.revision.trim_start_matches("sha256:").chars().take(12).collect();
+                println!("{mark} {:<24} {rules:<12} {rev}", g.name);
+                if let Some(p) = &g.problem {
+                    let at = if p.field_path.is_empty() { String::new() } else { format!("{}: ", p.field_path) };
+                    println!("    problem: {at}{}", p.message);
+                }
+            }
+            println!();
+            println!("active: {}", reply.active);
+        }
+        Command::Schedule(ScheduleCommand::Show { name, file }) => {
+            let mut sched = ScheduleServiceClient::connect(args.addr.clone()).await?;
+            let g = sched
+                .get_grid(schedule::GetGridRequest { name: name.unwrap_or_default() })
+                .await?
+                .into_inner();
+            if !g.exists {
+                anyhow::bail!("grid `{}` has no file yet: create it with `schedule save {} <file>`", g.name, g.name);
+            }
+            match file {
+                Some(path) => {
+                    std::fs::write(&path, &g.toml)
+                        .map_err(|e| anyhow::anyhow!("cannot write {}: {e}", path.display()))?;
+                    println!("grid:     {}{}", g.name, if g.active { " (active)" } else { "" });
+                    println!("written:  {}", path.display());
+                    println!("revision: {}", g.revision);
+                }
+                None => {
+                    eprintln!("# grid {}{}, revision {}", g.name, if g.active { " (active)" } else { "" }, g.revision);
+                    print!("{}", g.toml);
+                }
+            }
+            if g.differs_from_applied {
+                eprintln!("note: this file is not what is applied (edited since, or invalid): `schedule reload` applies it");
+            }
+        }
+        Command::Schedule(ScheduleCommand::Save { name, path, revision, force }) => {
+            let toml = read_grid_toml(&path)?;
+            let mut sched = ScheduleServiceClient::connect(args.addr.clone()).await?;
+            let mut req = schedule::SaveGridRequest {
+                name: name.clone(),
+                toml,
+                expected_revision: revision.unwrap_or_default(),
+            };
+            let mut r = sched.save_grid(req.clone()).await?.into_inner();
+            if r.conflict && force && !r.revision.is_empty() {
+                req.expected_revision = r.revision.clone();
+                r = sched.save_grid(req).await?.into_inner();
+            }
+            if r.conflict {
+                if r.revision.is_empty() {
+                    anyhow::bail!("grid `{name}` has no file any more: save it without --revision to create it");
+                }
+                anyhow::bail!(
+                    "grid `{name}` exists (revision {}): pass --revision <rev> (from `schedule show {name} --file`) \
+                     or --force to replace it",
+                    r.revision
+                );
+            }
+            if !r.ok {
+                println!("not saved:");
+                print_grid_diagnostics(&r.diagnostics);
+                std::process::exit(1);
+            }
+            println!("{} {name}", if r.created { "created:" } else { "saved:  " });
+            println!("revision: {}", r.revision);
+            println!("{}", if r.applied { "applied: it is the active grid" } else { "not applied: not the active grid (`schedule activate`)" });
+        }
+        Command::Schedule(ScheduleCommand::Activate { name }) => {
+            let mut sched = ScheduleServiceClient::connect(args.addr.clone()).await?;
+            let r = sched.activate_grid(schedule::ActivateGridRequest { name: name.clone() }).await?.into_inner();
+            if !r.ok {
+                println!("refused: {name} has problems; the active grid is still {}", r.name);
+                print_grid_diagnostics(&r.diagnostics);
+                std::process::exit(1);
+            }
+            println!("active:  {}", r.name);
+            println!("rules:   {}", r.rules);
+        }
+        Command::Schedule(ScheduleCommand::Reload) => {
+            let mut sched = ScheduleServiceClient::connect(args.addr.clone()).await?;
+            let r = sched.reload_grid(schedule::ReloadGridRequest {}).await?.into_inner();
+            if r.missing {
+                println!("no file for the active grid {}: the grid last applied stays on air", r.name);
+                std::process::exit(1);
+            }
+            if !r.ok {
+                println!("refused: {} has problems; the grid last applied stays on air", r.name);
+                print_grid_diagnostics(&r.diagnostics);
+                std::process::exit(1);
+            }
+            println!("reloaded: {}", r.name);
+            println!("rules:    {}", r.rules);
+        }
+        Command::Schedule(ScheduleCommand::Preview { at, window, grid, draft }) => {
+            let draft_toml = match &draft {
+                Some(p) => read_grid_toml(p)?,
+                None => String::new(),
+            };
             let mut sched = ScheduleServiceClient::connect(args.addr.clone()).await?;
             let reply = sched
                 .preview(PreviewRequest {
                     from: at.map(|seconds| ::prost_types::Timestamp { seconds, nanos: 0 }),
                     window: Some(::prost_types::Duration { seconds: window, nanos: 0 }),
+                    grid: grid.unwrap_or_default(),
+                    draft_toml,
                 })
                 .await?
                 .into_inner();
@@ -864,11 +1041,29 @@ async fn main() -> anyhow::Result<()> {
                     println!("  - EVERY  {pl}{rule}");
                 }
             }
+            // Live DJ connection windows: laid over the programme, listed apart.
+            if !reply.live.is_empty() {
+                println!();
+                println!("live (DJ connection windows):");
+                for w in reply.live {
+                    let opens = if w.open_before {
+                        format!("(open before) {}", w.opens_local)
+                    } else {
+                        w.opens_local
+                    };
+                    let closes = if w.closes_at.is_some() { w.closes_local } else { "(still open)".into() };
+                    println!("  - {:<12} {opens} → {closes}  [{}]", w.dj, w.rule_id);
+                }
+            }
         }
-        Command::Schedule(ScheduleCommand::Check { rules }) => {
+        Command::Schedule(ScheduleCommand::Check { rules, grid, draft }) => {
+            let draft_toml = match &draft {
+                Some(p) => read_grid_toml(p)?,
+                None => String::new(),
+            };
             let mut sched = ScheduleServiceClient::connect(args.addr.clone()).await?;
             let reply = sched
-                .check_coverage(CheckCoverageRequest { rule_ids: rules })
+                .check_coverage(CheckCoverageRequest { rule_ids: rules, grid: grid.unwrap_or_default(), draft_toml })
                 .await?
                 .into_inner();
             if reply.entries.is_empty() {
@@ -2226,6 +2421,22 @@ fn print_diagnostics(ds: &[playlist::Diagnostic]) {
         }
         let extra = if extra.is_empty() { String::new() } else { format!(" ({})", extra.join("; ")) };
         println!("  {:<7} {field}: {}{extra}", severity_label(d), d.message);
+    }
+}
+
+fn print_grid_diagnostics(ds: &[schedule::GridDiagnostic]) {
+    for d in ds {
+        let field = if d.field_path.is_empty() { "(file)" } else { d.field_path.as_str() };
+        let rule = if d.rule_id.is_empty() { String::new() } else { format!(" [{}]", d.rule_id) };
+        let mut extra = Vec::new();
+        if !d.rejected.is_empty() {
+            extra.push(format!("got: {}", d.rejected));
+        }
+        if !d.expected.is_empty() {
+            extra.push(format!("expected: {}", d.expected));
+        }
+        let extra = if extra.is_empty() { String::new() } else { format!(" ({})", extra.join("; ")) };
+        println!("  error   {field}{rule}: {}{extra}", d.message);
     }
 }
 

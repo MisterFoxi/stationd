@@ -77,10 +77,15 @@ message DayPart {
 // ── Rendez-vous à l'horloge absolue (recalculable depuis now seul) ──────────
 message AtClock {
   string playlist_ref = 1;
-  // Repères dans l'heure. Réutilise la sémantique alignment=hour : minutes
-  // 0, N, 2N… < 60 ; N doit diviser proprement (1..60). Ex. 15 → :00 :15 :30 :45.
-  uint32 every_minutes = 2;         // 1..60
-  // OU une heure fixe unique si every_minutes = 0.
+  // Exactement un ancrage parmi every_minutes, minute, at.
+  // Toutes les N minutes (1..1439) comptées depuis minuit : repères N, 2N…
+  // dans la journée, jamais 00:00. Ex. 45 → 00:45 01:30 … 23:15.
+  // 0 = pas cet ancrage.
+  uint32 every_minutes = 2;
+  // OU un repère par heure, à cette minute (0..59) : top horaire, décalé
+  // ou non (58 → :58 chaque heure).
+  optional uint32 minute = 6;
+  // OU une heure fixe unique par jour.
   WallClock at = 3;
 
   Mode mode = 4;                    // UNSPECIFIED → SOFT
@@ -209,10 +214,27 @@ message IndicativeRule {
 
 service ScheduleService {
   // CRUD grille (comme playlists : apply/validate/export sur TOML → contrat).
+  // ApplyGrid : le TOML envoyé DEVIENT le fichier de la grille active (écrit
+  // par stationd, remplacé), puis est appliqué. Invalide : ok = false +
+  // diagnostics, rien d'écrit ni d'appliqué.
   rpc ApplyGrid(ApplyGridRequest)   returns (ApplyGridResponse);
+  // Rien d'écrit ni d'appliqué : tous les problèmes, chacun sur son champ.
   rpc ValidateGrid(ApplyGridRequest) returns (ValidateGridResponse);
   rpc ExportGrid(ExportGridRequest) returns (ExportGridResponse);
   rpc ListRules(ListRulesRequest)   returns (ListRulesResponse);
+
+  // Fichiers de grille (`[grid] path`, `grid/` par défaut) : plusieurs
+  // grilles, UNE active (choix gardé en base ; aucune = grid.toml). Le
+  // fichier actif fait foi : relu au démarrage et par ReloadGrid ; absent ou
+  // invalide, la dernière grille appliquée reste à l'antenne.
+  rpc ListGrids(ListGridsRequest)       returns (ListGridsResponse);
+  rpc GetGrid(GetGridRequest)           returns (GetGridResponse);
+  // Écrit par stationd (révision = empreinte du contenu, conflit si le
+  // fichier a changé, écriture atomique relue) ; appliquée si c'est la
+  // grille active.
+  rpc SaveGrid(SaveGridRequest)         returns (SaveGridResponse);
+  rpc ActivateGrid(ActivateGridRequest) returns (ActivateGridResponse);
+  rpc ReloadGrid(ReloadGridRequest)     returns (ActivateGridResponse);
 
   // Le résolveur en direct : ce que Liquidsoap demande à chaque frontière.
   // Remplace l'Activate stub du slice comme vrai point d'entrée.
@@ -240,20 +262,140 @@ service ScheduleService {
 
 message GridFile { string path = 1; string toml = 2; }
 message ApplyGridRequest    { repeated GridFile files = 1; }
-message ApplyGridResponse   { bool ok = 1; repeated string applied_rule_ids = 2; }  // diagnostics : réutiliser playlist.v1.Diagnostic
-message ValidateGridResponse{ bool ok = 1; }
+message ApplyGridResponse {
+  bool ok = 1;
+  repeated string applied_rule_ids = 2;
+  repeated GridDiagnostic diagnostics = 3;   // ok = false : pourquoi
+  string grid = 4;                           // le fichier de grille écrit (la grille active)
+}
+message ValidateGridResponse {
+  bool ok = 1;
+  repeated GridDiagnostic diagnostics = 2;
+}
+
+// Un problème d'une grille, sur son champ. `field_path` dans la grammaire :
+// `rule[3].start` (règles numérotées à partir de 1, dans l'ordre du
+// fichier), `schema_version` ; vide = le fichier entier.
+message GridDiagnostic {
+  string file       = 1;   // fichier envoyé / grille concernée
+  string field_path = 2;
+  string rule_id    = 3;   // la règle, quand le problème est dans une règle
+  string rejected   = 4;   // valeur rejetée, telle qu'écrite
+  string expected   = 5;   // valeurs admises quand elles sont finies
+  string message    = 6;   // phrase anglaise (stationctl) ; les clients traduisent par `code`
+  Code   code       = 7;
+  enum Code {
+    CODE_UNSPECIFIED   = 0;
+    SYNTAX             = 1;   // TOML illisible
+    UNKNOWN_FIELD      = 2;
+    MISSING_FIELD      = 3;
+    BAD_VALUE          = 4;   // type ou forme invalide (ex. kind inconnu)
+    NOT_ALLOWED        = 5;   // champ d'un autre kind
+    CONFLICT           = 6;   // champs qui s'excluent (every_minutes / minute / at…)
+    BAD_DURATION       = 7;   // 30s, 15m, 2h, 1d
+    BAD_TIME           = 8;   // HH:MM
+    BAD_DATE           = 9;   // YYYY-MM-DD
+    BAD_WEEKDAY        = 10;  // mon … sun, sans doublon
+    SCHEMA_VERSION     = 11;
+    DUPLICATE_ID       = 12;
+    SEVERAL_FLOORS     = 13;  // plus d'un base_rotation
+    ZERO_WINDOW        = 14;  // start = end
+    DATES_REVERSED     = 15;  // date_end avant date_start
+    OUT_OF_RANGE       = 16;  // every_minutes hors 1..1439, minute > 59, min_tracks < 1
+    UNKNOWN_REF        = 17;  // playlist inconnue
+    BAD_REF            = 18;  // ref invalide
+    UNKNOWN_DJ         = 19;  // dj absent du fichier des DJ
+    NO_LIVE            = 20;  // règle live sans [live]
+    DJ_FILE_UNREADABLE = 21;
+    FILE_UNREADABLE    = 22;  // le fichier de grille ne se lit pas (droits, disque…)
+  }
+}
+
+message ListGridsRequest {}
+message ListGridsResponse {
+  repeated GridInfo grids = 1;
+  string active = 2;
+}
+message GridInfo {
+  string name     = 1;   // fichier du répertoire des grilles (« grid.toml »)
+  string revision = 2;   // vide = pas de fichier (grille active sans fichier)
+  bool   active   = 3;
+  optional uint32 rules = 4;   // absent = ne se lit pas
+  // Pourquoi elle ne s'appliquerait pas telle quelle (le premier problème) ;
+  // absent = rien. Pour l'active : aussi l'échec du dernier chargement
+  // (démarrage, reload) — la dernière grille appliquée est restée.
+  GridDiagnostic problem = 5;
+}
+
+message GetGridRequest { string name = 1; }   // vide = la grille active
+message GetGridResponse {
+  string name     = 1;
+  string toml     = 2;   // le fichier, commentaires compris ; vide = pas encore de fichier
+  string revision = 3;   // vide = pas de fichier
+  bool   active   = 4;
+  bool   exists   = 5;
+  // Grille active : le fichier ne dit plus ce qui est appliqué (modifié à la
+  // main depuis, ou invalide donc pas appliqué).
+  bool   differs_from_applied = 6;
+}
+
+message SaveGridRequest {
+  string name = 1;
+  string toml = 2;
+  string expected_revision = 3;   // vide = création (conflit si le fichier existe)
+}
+message SaveGridResponse {
+  bool ok = 1;                    // écrit (et appliqué si active)
+  bool conflict = 2;              // révision périmée : rien d'écrit
+  string revision = 3;            // après écriture ; l'actuelle sinon
+  repeated GridDiagnostic diagnostics = 4;
+  bool created = 5;
+  bool applied = 6;               // c'est la grille active : elle est à l'antenne
+}
+
+message ActivateGridRequest { string name = 1; }
+message ReloadGridRequest {}
+message ActivateGridResponse {
+  bool ok = 1;
+  string name = 2;                // la grille active
+  uint32 rules = 3;
+  bool missing = 4;               // pas de fichier : la dernière grille appliquée reste
+  repeated GridDiagnostic diagnostics = 5;   // ok = false : pourquoi (rien n'a changé)
+}
 message ExportGridRequest   { repeated string rule_ids = 1; }
 message ExportGridResponse  { repeated GridFile files = 1; }
-message ListRulesRequest    {}
+message ListRulesRequest {
+  string grid = 1;          // une grille du nœud au lieu de la grille appliquée
+  string draft_toml = 2;    // ou un brouillon (l'emporte)
+}
 message ListRulesResponse   { repeated Rule rules = 1; }
 
 message PreviewRequest {
   google.protobuf.Timestamp from = 1;      // absent → maintenant
   google.protobuf.Duration  window = 2;    // ex. 24h
+  // Projeter autre chose que la grille appliquée, sans rien appliquer :
+  // `draft_toml` (un brouillon) l'emporte sur `grid` (un fichier de grille).
+  // Invalide (grammaire) → invalid_argument.
+  string grid = 3;
+  string draft_toml = 4;
 }
 message PreviewResponse {
   repeated Occurrence occurrences = 1;      // timeline ordonnée, instants réels
   repeated IndicativeRule indicative = 2;   // règles en jeu mais non projetables
+  // Fenêtres de connexion des DJ (règles `live`) sur la projection, dans
+  // l'ordre d'ouverture. Posées sur le programme, jamais dans `occurrences`.
+  repeated LiveWindow live = 3;
+}
+
+// Une fenêtre de connexion d'un DJ vue par le preview (minute près).
+message LiveWindow {
+  string rule_id = 1;
+  string dj = 2;                             // id du fichier des DJ
+  google.protobuf.Timestamp opens_at = 3;    // 1re minute ouverte DANS la projection
+  string opens_local = 4;
+  bool open_before = 5;                      // déjà ouverte au début : ouverte plus tôt
+  google.protobuf.Timestamp closes_at = 6;   // 1re minute fermée ; absent = encore ouverte à la fin
+  string closes_local = 7;
 }
 
 // Horloge manuelle. `real = true` → repasse en temps réel. Sinon `at` (s'il
@@ -288,6 +430,8 @@ enum Verdict {
 message CheckCoverageRequest {
   // Vide → toute la grille (règles activées). Sinon restreint à ces rule_ids.
   repeated string rule_ids = 1;
+  string grid = 2;          // comme PreviewRequest
+  string draft_toml = 3;
 }
 
 message CheckCoverageResponse {
@@ -303,8 +447,41 @@ message CoverageEntry {
   optional uint64 selected_count = 4;      // médias du pool ; absent = non mesurable (remote/queue)
   google.protobuf.Duration total_duration = 5; // durée cumulée du pool ; absente = inconnue
   Verdict verdict = 6;
-  string detail = 7;                       // ce qui a fait le verdict (axe + seuil)
+  string detail = 7;                       // ce qui a fait le verdict, en français (stationctl)
   repeated CoverageMember members = 8;     // décomposition d'un groupe (vide sinon)
+  repeated CoverageReason reasons = 9;     // la même chose en opcodes (à traduire) ; vide = ok
+}
+
+// Une cause de verdict : opcode + paramètres typés, traduits par le client
+// (jamais de texte à afficher envoyé par stationd, dossier TUI D12).
+message CoverageReason {
+  enum Code {
+    CODE_UNSPECIFIED = 0;
+    POOL_EMPTY = 1;             // pool vide
+    TRACK_REPEAT = 2;           // no_same_track_within `window` > pool `pool_ms`
+    TITLE_REPEAT = 3;           // no_same_title_within `window` > pool `pool_ms`
+    ARTIST_REPEAT = 4;          // no_same_artist_within : `count` artiste(s) distinct(s)
+    ARTIST_NOT_EVALUATED = 5;   // no_same_artist_within non évalué (agrégat de groupe)
+    LIMIT_UNMET = 6;            // limit `limit` > `count` médias distincts
+    FINITE_SHORT = 7;           // source finie `pool_ms` < créneau `need_ms`
+    MEMBERS_EMPTY_ABORT = 8;    // membres vides `refs` → abort
+    MEMBERS_EMPTY_SKIP = 9;     // membres vides `refs` → skip (dégradé)
+    MEMBERS_LOOP = 10;          // membres sous-dimensionnés `refs` → boucle
+    BAD_REF = 11;               // ref invalide (`error`)
+    UNKNOWN_PLAYLIST = 12;      // playlist inconnue
+    UNREADABLE_PLAYLIST = 13;   // playlist illisible (`error`)
+    UNRESOLVABLE = 14;          // pool non résolvable (`error`)
+    RUNTIME_LOOP = 15;          // membre : runtime `need_ms` > pool `pool_ms` → boucle
+    TAKE_REPEAT = 16;           // membre : take `limit` > `count` pistes → répétition
+  }
+  Code code = 1;
+  string window = 2;             // fenêtre anti-répétition telle qu'écrite (« 2h »)
+  optional uint64 pool_ms = 3;
+  optional uint64 need_ms = 4;
+  optional uint64 count = 5;
+  optional uint64 limit = 6;     // limit, ou take d'un membre
+  repeated string refs = 7;
+  string error = 8;              // message technique relayé tel quel (non traduit)
 }
 
 // Un membre d'un groupe, dimensionné à part (localise le maillon faible).
@@ -314,6 +491,7 @@ message CoverageMember {
   google.protobuf.Duration total_duration = 3;
   Verdict verdict = 4;
   string detail = 5;
+  repeated CoverageReason reasons = 6;
 }
 
 // ──────────────────────────────────────────────────────────────

@@ -9,8 +9,10 @@
 #
 # Le script installe compose.yaml, stationd.example.toml, examples/
 # (playlists et grille d'exemple, remplacés à chaque passage) et, la
-# première fois, .env. Il ne modifie jamais le contenu de stationd.toml, grid.toml,
-# playlist/, radio/ ni data/ ; il (ré)applique seulement les droits.
+# première fois, .env. Il ne modifie jamais le contenu de stationd.toml,
+# grid/, playlist/, radio/ ni data/ ; il (ré)applique seulement les droits.
+# Grilles : grid/ (une active, grid.toml par défaut). Un ancien grid.toml à
+# la racine est déplacé dans grid/ s'il n'y en a pas déjà un.
 # Le compte qui lance sudo rejoint le groupe stationd : config, grille,
 # playlists et radio/ s'éditent sans sudo ; data/ reste le répertoire de
 # stationd (le groupe n'y crée ni n'y supprime rien).
@@ -50,11 +52,15 @@ id stationd >/dev/null 2>&1 \
 # Droits (réappliqués à chaque passage) : répertoires partagés en 2770 — le
 # setgid donne au groupe stationd ce que l'administrateur y crée ; data/ :
 # répertoire en 0750 (le groupe n'y crée ni n'y supprime rien).
-install -d -m 2770 -o stationd -g stationd "$dir" "$dir/playlist" "$dir/radio"
+install -d -m 2770 -o stationd -g stationd "$dir" "$dir/playlist" "$dir/radio" "$dir/grid"
 install -d -m 0750 -o stationd -g stationd "$dir/data"
-find "$dir/playlist" "$dir/radio" -mindepth 1 -type d -exec chmod 2770 {} +
-chgrp -R stationd "$dir/playlist" "$dir/radio"
-chmod -R g+rwX "$dir/playlist" "$dir/radio"
+if [ -f "$dir/grid.toml" ] && [ ! -e "$dir/grid/grid.toml" ]; then
+  mv "$dir/grid.toml" "$dir/grid/grid.toml"
+  echo "grid.toml déplacé dans $dir/grid/ (répertoire des grilles)."
+fi
+find "$dir/playlist" "$dir/radio" "$dir/grid" -mindepth 1 -type d -exec chmod 2770 {} +
+chgrp -R stationd "$dir/playlist" "$dir/radio" "$dir/grid"
+chmod -R g+rwX "$dir/playlist" "$dir/radio" "$dir/grid"
 find "$dir" -maxdepth 1 -name '*.toml' -exec chgrp stationd {} + -exec chmod g+rw {} +
 
 admin="${SUDO_USER:-}"

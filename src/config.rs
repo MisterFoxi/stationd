@@ -9,6 +9,9 @@ pub struct Config {
     pub database: DatabaseConfig,
     pub media: MediaConfig,
     pub playlist: PlaylistConfig,
+    /// Grid files (optional section: `grid/` by default).
+    #[serde(default)]
+    pub grid: GridConfig,
     #[serde(default)]
     pub logging: LoggingConfig,
     /// Plugins declared for this station (order + enable flag + opaque config).
@@ -678,6 +681,28 @@ pub struct PlaylistConfig {
     /// them. Edited both by a human (editor / `git pull`) and by stationd
     /// itself — never by `api`.
     pub path: PathBuf,
+}
+
+/// `[grid]` — the grid files. Several grids may be prepared there, ONE is
+/// active (chosen by `stationctl schedule activate`, kept in the database;
+/// none = `grid.toml`). The active file is the source of truth, re-read at
+/// start-up and by `schedule reload`; stationd writes the files itself
+/// (`schedule save`, the TUI).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GridConfig {
+    #[serde(default = "default_grid_path")]
+    pub path: PathBuf,
+}
+
+impl Default for GridConfig {
+    fn default() -> Self {
+        Self { path: default_grid_path() }
+    }
+}
+
+fn default_grid_path() -> PathBuf {
+    PathBuf::from("grid")
 }
 
 #[derive(Debug, Deserialize)]

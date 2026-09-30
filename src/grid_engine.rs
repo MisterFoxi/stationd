@@ -109,6 +109,25 @@ pub struct IndicativeRule {
 pub struct GridPreview {
     pub occurrences: Vec<PreviewOccurrence>,
     pub indicative: Vec<IndicativeRule>,
+    /// Live connection windows over the projection (the grid's `live`
+    /// rules, `resolver::live_window`), in opening order. They lay over the
+    /// programme, never inside `occurrences`.
+    pub live: Vec<LiveProjection>,
+}
+
+/// A live DJ connection window seen by a preview: when DJ `dj` may connect.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveProjection {
+    pub rule_id: String,
+    pub dj: String,
+    /// First minute of the window inside the projection (the window start
+    /// when `open_before` is false).
+    pub opens: Epoch,
+    pub opens_local: String,
+    /// Already open at the start of the projection: it opened earlier.
+    pub open_before: bool,
+    /// First minute it is no longer open; `None` = still open at the end.
+    pub closes: Option<(Epoch, String)>,
 }
 
 /// A grid decision plus the concrete media it resolves to (see
@@ -180,6 +199,9 @@ pub struct CoverageMember {
     pub stats: PoolStats,
     pub verdict: Verdict,
     pub detail: String,
+    /// What made the verdict, as opcodes (a client translates them; `detail`
+    /// is their French rendering for `stationctl`). Empty = ok.
+    pub reasons: Vec<Reason>,
 }
 
 /// One grid rule and the sizing of the pool its playlist resolves to.
@@ -191,7 +213,105 @@ pub struct CoverageEntry {
     pub stats: PoolStats,
     pub verdict: Verdict,
     pub detail: String,
+    /// What made the verdict, as opcodes ([`CoverageMember::reasons`]).
+    pub reasons: Vec<Reason>,
     pub members: Vec<CoverageMember>,
+}
+
+/// One cause of a coverage verdict — an opcode with typed parameters, never
+/// a sentence: clients translate (dossier TUI, D12). [`Reason::text`] is the
+/// French line `stationctl schedule check` has always printed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Reason {
+    /// The pool holds no media.
+    PoolEmpty,
+    /// `no_same_track_within` longer than the pool: a track replays.
+    TrackRepeat { window: String, pool_ms: u64 },
+    /// `no_same_title_within` longer than the pool: a song replays.
+    TitleRepeat { window: String, pool_ms: u64 },
+    /// `no_same_artist_within` with fewer than two distinct artists.
+    ArtistRepeat { artists: u64 },
+    /// `no_same_artist_within` not evaluated (group aggregate). Not a fault.
+    ArtistNotEvaluated,
+    /// `limit` above the number of distinct media.
+    LimitUnmet { limit: u64, count: u64 },
+    /// A finite source shorter than the slot it must fill.
+    FiniteShort { pool_ms: u64, need_ms: u64 },
+    /// Empty group members, policy `abort`: the group fails.
+    MembersEmptyAbort { refs: Vec<String> },
+    /// Empty group members, policy `skip`: degraded.
+    MembersEmptySkip { refs: Vec<String> },
+    /// Members whose quota exceeds their pool: they loop in their slot.
+    MembersLoop { refs: Vec<String> },
+    /// The rule's playlist ref is not a valid ref.
+    BadRef { error: String },
+    /// The rule's playlist is not known.
+    UnknownPlaylist,
+    /// The playlist's TOML no longer parses.
+    UnreadablePlaylist { error: String },
+    /// The pool could not be resolved (transitive ref, filter…).
+    Unresolvable { error: String },
+    /// A member `runtime` budget above its pool: it loops in its slot.
+    RuntimeLoop { need_ms: u64, pool_ms: u64 },
+    /// A member `take` above its distinct tracks: it repeats.
+    TakeRepeat { take: u64, count: u64 },
+}
+
+impl Reason {
+    /// The French line of `stationctl schedule check` (unchanged wording).
+    pub fn text(&self) -> String {
+        match self {
+            Reason::PoolEmpty => "pool vide".into(),
+            Reason::TrackRepeat { window, pool_ms } => format!(
+                "no_same_track_within {window} : pool {} < {window} (rejeu de piste forcé)",
+                fmt_hms(*pool_ms)
+            ),
+            Reason::TitleRepeat { window, pool_ms } => format!(
+                "no_same_title_within {window} : pool {} < {window} (rejeu de morceau forcé)",
+                fmt_hms(*pool_ms)
+            ),
+            Reason::ArtistRepeat { artists } => {
+                format!("no_same_artist_within : {artists} artiste(s) distinct(s) (rejeu d'artiste forcé)")
+            }
+            Reason::ArtistNotEvaluated => "no_same_artist_within non évalué (agrégat de groupe)".into(),
+            Reason::LimitUnmet { limit, count } => {
+                format!("limit {limit} : {count} média(s) distinct(s) dans le pool")
+            }
+            Reason::FiniteShort { pool_ms, need_ms } => format!(
+                "source finie {} < créneau {} (ne remplit pas)",
+                fmt_hms(*pool_ms),
+                fmt_hms(*need_ms)
+            ),
+            Reason::MembersEmptyAbort { refs } => format!("membre(s) vide(s) [{}] → abort", refs.join(", ")),
+            Reason::MembersEmptySkip { refs } => {
+                format!("membre(s) vide(s) [{}] → skip (dégradé)", refs.join(", "))
+            }
+            Reason::MembersLoop { refs } => {
+                format!("membre(s) sous-dimensionné(s) [{}] → boucle dans le slot", refs.join(", "))
+            }
+            Reason::BadRef { error } => format!("ref invalide : {error}"),
+            Reason::UnknownPlaylist => "ref cassée : playlist inconnue".into(),
+            Reason::UnreadablePlaylist { error } => format!("playlist illisible : {error}"),
+            Reason::Unresolvable { error } => format!("pool non résolvable : {error}"),
+            Reason::RuntimeLoop { need_ms, pool_ms } => format!(
+                "budget runtime {} > pool {} → boucle dans le slot",
+                fmt_hms(*need_ms),
+                fmt_hms(*pool_ms)
+            ),
+            Reason::TakeRepeat { take, count } => {
+                format!("take {take} > {count} piste(s) distincte(s) → répétition")
+            }
+        }
+    }
+}
+
+/// `detail` of an entry or member: its reasons in French, or « ok ».
+fn detail_of(reasons: &[Reason]) -> String {
+    if reasons.is_empty() {
+        "ok".to_string()
+    } else {
+        reasons.iter().map(Reason::text).collect::<Vec<_>>().join(" ; ")
+    }
 }
 
 /// The whole grid's sizing report ([`GridEngine::check_coverage`]).
@@ -280,29 +400,30 @@ fn make_entry(
     kind: &'static str,
     stats: PoolStats,
     verdict: Verdict,
-    detail: String,
+    reasons: Vec<Reason>,
     members: Vec<CoverageMember>,
 ) -> CoverageEntry {
-    CoverageEntry { rule_id, playlist_ref, kind, stats, verdict, detail, members }
+    let detail = detail_of(&reasons);
+    CoverageEntry { rule_id, playlist_ref, kind, stats, verdict, detail, reasons, members }
 }
 
-/// Grade a resolved pool against both axes. Returns the verdict, a detail line
-/// naming what fired, and the per-member breakdown (empty for a leaf).
+/// Grade a resolved pool against both axes. Returns the verdict, the reasons
+/// that fired, and the per-member breakdown (empty for a leaf).
 fn verdict_for(
     playlist: &crate::playlist::Playlist,
     inspection: &PoolInspection,
     demand: Demand,
-) -> (Verdict, String, Vec<CoverageMember>) {
+) -> (Verdict, Vec<Reason>, Vec<CoverageMember>) {
     let stats = inspection.stats;
     let members = member_breakdown(inspection);
 
     // Empty pool → the rule can never produce: hard fail, nothing else matters.
     if stats.selected_count == Some(0) {
-        return (Verdict::Insufficient, "pool vide".into(), members);
+        return (Verdict::Insufficient, vec![Reason::PoolEmpty], members);
     }
 
     let mut verdict = Verdict::Ok;
-    let mut reasons: Vec<String> = Vec::new();
+    let mut reasons: Vec<Reason> = Vec::new();
     let bc = playlist.broadcast.as_ref();
 
     // --- Axis A: the playlist's own demands (anti-repetition + limit) ---
@@ -314,10 +435,7 @@ fn verdict_for(
                 let need_ms = need_s.saturating_mul(1000);
                 if have_ms < need_ms {
                     verdict = verdict.worst(Verdict::Thin);
-                    reasons.push(format!(
-                        "no_same_track_within {d} : pool {} < {d} (rejeu de piste forcé)",
-                        fmt_hms(have_ms)
-                    ));
+                    reasons.push(Reason::TrackRepeat { window: d.clone(), pool_ms: have_ms });
                 }
             }
         }
@@ -330,10 +448,7 @@ fn verdict_for(
                 let need_ms = need_s.saturating_mul(1000);
                 if have_ms < need_ms {
                     verdict = verdict.worst(Verdict::Thin);
-                    reasons.push(format!(
-                        "no_same_title_within {d} : pool {} < {d} (rejeu de morceau forcé)",
-                        fmt_hms(have_ms)
-                    ));
+                    reasons.push(Reason::TitleRepeat { window: d.clone(), pool_ms: have_ms });
                 }
             }
         }
@@ -344,11 +459,9 @@ fn verdict_for(
                 // of tracks per window; this is the honest lower guard.)
                 Some(a) if a < 2 => {
                     verdict = verdict.worst(Verdict::Thin);
-                    reasons.push(format!(
-                        "no_same_artist_within : {a} artiste(s) distinct(s) (rejeu d'artiste forcé)"
-                    ));
+                    reasons.push(Reason::ArtistRepeat { artists: a });
                 }
-                None => reasons.push("no_same_artist_within non évalué (agrégat de groupe)".into()),
+                None => reasons.push(Reason::ArtistNotEvaluated),
                 _ => {}
             }
         }
@@ -357,9 +470,7 @@ fn verdict_for(
         if let Some(count) = stats.selected_count {
             if count < limit as u64 {
                 verdict = verdict.worst(Verdict::Thin);
-                reasons.push(format!(
-                    "limit {limit} : {count} média(s) distinct(s) dans le pool"
-                ));
+                reasons.push(Reason::LimitUnmet { limit: limit as u64, count });
             }
         }
     }
@@ -371,11 +482,7 @@ fn verdict_for(
                 let need_ms = (secs.max(0) as u64).saturating_mul(1000);
                 if have_ms < need_ms {
                     verdict = verdict.worst(Verdict::Thin);
-                    reasons.push(format!(
-                        "source finie {} < créneau {} (ne remplit pas)",
-                        fmt_hms(have_ms),
-                        fmt_hms(need_ms)
-                    ));
+                    reasons.push(Reason::FiniteShort { pool_ms: have_ms, need_ms });
                 }
             }
         }
@@ -383,10 +490,10 @@ fn verdict_for(
 
     // --- Group members: emptiness sinks the group; an under-sized quota loops ---
     if inspection.group.is_some() {
-        let empty: Vec<&str> = members
+        let empty: Vec<String> = members
             .iter()
             .filter(|m| m.stats.selected_count == Some(0))
-            .map(|m| m.r#ref.as_str())
+            .map(|m| m.r#ref.clone())
             .collect();
         if !empty.is_empty() {
             let policy = playlist
@@ -396,35 +503,28 @@ fn verdict_for(
             match policy {
                 crate::playlist::MemberUnavailable::Abort => {
                     verdict = verdict.worst(Verdict::Insufficient);
-                    reasons.push(format!("membre(s) vide(s) [{}] → abort", empty.join(", ")));
+                    reasons.push(Reason::MembersEmptyAbort { refs: empty });
                 }
                 crate::playlist::MemberUnavailable::Skip => {
                     verdict = verdict.worst(Verdict::Thin);
-                    reasons.push(format!(
-                        "membre(s) vide(s) [{}] → skip (dégradé)",
-                        empty.join(", ")
-                    ));
+                    reasons.push(Reason::MembersEmptySkip { refs: empty });
                 }
             }
         }
         // A non-empty member whose quota exceeds its pool loops within its slot
         // (the case this check exists for). Signalled, never blocking.
-        let looping: Vec<&str> = members
+        let looping: Vec<String> = members
             .iter()
             .filter(|m| m.stats.selected_count != Some(0) && m.verdict == Verdict::Thin)
-            .map(|m| m.r#ref.as_str())
+            .map(|m| m.r#ref.clone())
             .collect();
         if !looping.is_empty() {
             verdict = verdict.worst(Verdict::Thin);
-            reasons.push(format!(
-                "membre(s) sous-dimensionné(s) [{}] → boucle dans le slot",
-                looping.join(", ")
-            ));
+            reasons.push(Reason::MembersLoop { refs: looping });
         }
     }
 
-    let detail = if reasons.is_empty() { "ok".to_string() } else { reasons.join(" ; ") };
-    (verdict, detail, members)
+    (verdict, reasons, members)
 }
 
 /// Per-member breakdown of a group inspection (empty for a leaf). Each member
@@ -437,8 +537,9 @@ fn member_breakdown(inspection: &PoolInspection) -> Vec<CoverageMember> {
     g.members
         .iter()
         .map(|m| {
-            let (verdict, detail) = member_verdict(m);
-            CoverageMember { r#ref: m.r#ref.clone(), stats: m.stats, verdict, detail }
+            let (verdict, reasons) = member_verdict(m);
+            let detail = detail_of(&reasons);
+            CoverageMember { r#ref: m.r#ref.clone(), stats: m.stats, verdict, detail, reasons }
         })
         .collect()
 }
@@ -449,40 +550,30 @@ fn member_breakdown(inspection: &PoolInspection) -> Vec<CoverageMember> {
 /// the check: make the loops visible). Unknown pool size (remote/queue) → no
 /// false alarm. A member with no quota (weighted/rotate) is judged on emptiness
 /// only.
-fn member_verdict(m: &crate::pool_inspection::InspectedMember) -> (Verdict, String) {
+fn member_verdict(m: &crate::pool_inspection::InspectedMember) -> (Verdict, Vec<Reason>) {
     use crate::playlist::MemberQuota;
     if m.stats.selected_count == Some(0) {
-        return (Verdict::Insufficient, "pool vide".to_string());
+        return (Verdict::Insufficient, vec![Reason::PoolEmpty]);
     }
     match &m.quota {
         Some(MemberQuota::Runtime(secs)) => {
             if let Some(have_ms) = m.stats.total_duration_ms {
                 let need_ms = (*secs).saturating_mul(1000);
                 if have_ms < need_ms {
-                    return (
-                        Verdict::Thin,
-                        format!(
-                            "budget runtime {} > pool {} → boucle dans le slot",
-                            fmt_hms(need_ms),
-                            fmt_hms(have_ms)
-                        ),
-                    );
+                    return (Verdict::Thin, vec![Reason::RuntimeLoop { need_ms, pool_ms: have_ms }]);
                 }
             }
-            (Verdict::Ok, "ok".to_string())
+            (Verdict::Ok, Vec::new())
         }
         Some(MemberQuota::Take(n)) => {
             if let Some(count) = m.stats.selected_count {
                 if count < *n as u64 {
-                    return (
-                        Verdict::Thin,
-                        format!("take {n} > {count} piste(s) distincte(s) → répétition"),
-                    );
+                    return (Verdict::Thin, vec![Reason::TakeRepeat { take: *n as u64, count }]);
                 }
             }
-            (Verdict::Ok, "ok".to_string())
+            (Verdict::Ok, Vec::new())
         }
-        None => (Verdict::Ok, "ok".to_string()),
+        None => (Verdict::Ok, Vec::new()),
     }
 }
 
@@ -630,7 +721,20 @@ impl GridEngine {
     /// `INSUFFICIENT` entry rather than aborting the report — the point is to
     /// surface every problem at once. Only infrastructure (SQLite) propagates.
     pub async fn check_coverage(&self, rule_ids: &[String]) -> Result<CoverageReport, EngineError> {
-        let grid = grid_index::load_grid(&self.pool).await?;
+        self.check_coverage_of(None, rule_ids).await
+    }
+
+    /// [`GridEngine::check_coverage`] of `grid` (a draft, or a grid that is
+    /// not applied); `None` = the applied grid.
+    pub async fn check_coverage_of(
+        &self,
+        grid: Option<Grid>,
+        rule_ids: &[String],
+    ) -> Result<CoverageReport, EngineError> {
+        let grid = match grid {
+            Some(g) => g,
+            None => grid_index::load_grid(&self.pool).await?,
+        };
         let want: Option<HashSet<&str>> =
             (!rule_ids.is_empty()).then(|| rule_ids.iter().map(String::as_str).collect());
 
@@ -654,14 +758,14 @@ impl GridEngine {
 
     async fn coverage_for_rule(&self, rule: &Rule, grid: &Grid) -> Result<CoverageEntry, EngineError> {
         let (kind, playlist_ref, demand) = classify_rule(rule, grid);
-        let fail = |detail: String| {
+        let fail = |reason: Reason| {
             make_entry(
                 rule.id.clone(),
                 playlist_ref.clone(),
                 kind,
                 PoolStats::default(),
                 Verdict::Insufficient,
-                detail,
+                vec![reason],
                 Vec::new(),
             )
         };
@@ -669,14 +773,14 @@ impl GridEngine {
         // Broken / unsafe ref → nothing to size.
         let key = match crate::playlist::normalize_ref(&playlist_ref) {
             Ok(k) => k,
-            Err(msg) => return Ok(fail(format!("ref invalide : {msg}"))),
+            Err(msg) => return Ok(fail(Reason::BadRef { error: msg.to_string() })),
         };
         let Some(toml) = crate::store::playlist_toml_by_ref(&self.pool, &key).await? else {
-            return Ok(fail("ref cassée : playlist inconnue".into()));
+            return Ok(fail(Reason::UnknownPlaylist));
         };
         let playlist = match crate::playlist::Playlist::parse(&toml) {
             Ok(p) => p,
-            Err(e) => return Ok(fail(format!("playlist illisible : {e}"))),
+            Err(e) => return Ok(fail(Reason::UnreadablePlaylist { error: e.to_string() })),
         };
 
         // Size the pool (read-only). Only SQLite is infra and propagates; a
@@ -685,10 +789,10 @@ impl GridEngine {
         let inspection = match pool_inspection::inspect_ref_at(&self.pool, &key, self.effective_now(None).0).await {
             Ok(i) => i,
             Err(crate::selection::SelectionError::Sqlx(e)) => return Err(EngineError::Sqlx(e)),
-            Err(e) => return Ok(fail(format!("pool non résolvable : {e}"))),
+            Err(e) => return Ok(fail(Reason::Unresolvable { error: e.to_string() })),
         };
 
-        let (verdict, detail, members) = verdict_for(&playlist, &inspection, demand);
+        let (verdict, reasons, members) = verdict_for(&playlist, &inspection, demand);
         // `playlist_ref` is still borrowed by the `fail` closure above; clone
         // rather than move so there is no borrow/move conflict.
         Ok(make_entry(
@@ -697,7 +801,7 @@ impl GridEngine {
             kind,
             inspection.stats,
             verdict,
-            detail,
+            reasons,
             members,
         ))
     }
@@ -886,6 +990,43 @@ impl GridEngine {
         if errors.is_empty() { Ok(()) } else { Err(GridOpError::Invalid(errors)) }
     }
 
+    /// Problems of `rules` against the station: unknown or invalid playlist
+    /// refs, `live` rules without `[live]` or with a DJ absent from the DJ
+    /// file — each on its rule's field.
+    pub async fn diagnose_rules(&self, rules: &[Rule]) -> Result<Vec<grid_toml::GridDiag>, EngineError> {
+        let items: Vec<(usize, &Rule)> = rules.iter().enumerate().map(|(i, r)| (i + 1, r)).collect();
+        self.diagnose_rules_at(&items).await
+    }
+
+    /// [`GridEngine::diagnose_rules`] of rules given with their number in
+    /// the file (the ones that parsed, when others did not).
+    pub async fn diagnose_rules_at(&self, rules: &[(usize, &Rule)]) -> Result<Vec<grid_toml::GridDiag>, EngineError> {
+        let known = self.known_playlist_keys().await?;
+        let mut out = grid_toml::diagnose_refs_at(rules, &known);
+        if rules.iter().any(|(_, r)| matches!(r.kind, RuleKind::Live { .. })) {
+            match &self.live_djs {
+                None => out.extend(grid_toml::diagnose_djs_at(rules, None)),
+                Some(path) => match crate::live::load_djs(path) {
+                    Ok(djs) => {
+                        let ids: HashSet<String> = djs.into_iter().map(|d| d.id).collect();
+                        out.extend(grid_toml::diagnose_djs_at(rules, Some(&ids)));
+                    }
+                    Err(e) => out.push(grid_toml::dj_file_unreadable(e.to_string())),
+                },
+            }
+        }
+        Ok(out)
+    }
+
+    /// Replace the applied grid by `rules` (already judged valid): index
+    /// rebuilt (family A), `Every` counters reconciled, never reset (family B).
+    pub async fn replace_rules(&self, rules: &[Rule]) -> Result<(), EngineError> {
+        grid_index::replace_grid(&self.pool, rules).await?;
+        self.sync_grid().await?;
+        self.control.bump_air();
+        Ok(())
+    }
+
     pub async fn validate_grid(&self, files: &[(String, String)]) -> Result<(), GridOpError> {
         let rules = Self::parse_all(files).map_err(GridOpError::Invalid)?;
         self.check_refs(&rules).await
@@ -940,7 +1081,22 @@ impl GridEngine {
         from: Epoch,
         window_secs: i64,
     ) -> Result<GridPreview, EngineError> {
-        let loaded = grid_index::load_grid(&self.pool).await?;
+        self.preview_of(None, from, window_secs).await
+    }
+
+    /// [`GridEngine::preview`] of `grid` (a draft, or a grid that is not
+    /// applied) instead of the applied one — nothing applied, nothing stored.
+    /// `None` = the applied grid.
+    pub async fn preview_of(
+        &self,
+        grid: Option<Grid>,
+        from: Epoch,
+        window_secs: i64,
+    ) -> Result<GridPreview, EngineError> {
+        let loaded = match grid {
+            Some(g) => g,
+            None => grid_index::load_grid(&self.pool).await?,
+        };
 
         // Track-counted Every rules: not projectable on the clock → returned
         // once as indicative (enabled only — a disabled rule isn't in play).
@@ -998,6 +1154,22 @@ impl GridEngine {
         }
         let mut occurrences: Vec<PreviewOccurrence> = Vec::new();
         let mut prev_key: Option<(Origin, String, String)> = None;
+        // Live windows: one open occurrence per DJ at most (the most recent).
+        let mut djs: Vec<String> = grid
+            .rules
+            .iter()
+            .filter(|r| r.enabled)
+            .filter_map(|r| match &r.kind {
+                RuleKind::Live { dj, .. } => Some(dj.clone()),
+                _ => None,
+            })
+            .collect();
+        djs.sort();
+        djs.dedup();
+        let mut live: Vec<LiveProjection> = Vec::new();
+        // Per DJ: (occurrence token, index in `live`) of the window open now.
+        let mut live_open: std::collections::HashMap<String, (String, usize)> =
+            std::collections::HashMap::new();
         // Current pool predicates are time-independent: reuse an inspection
         // within this request, never across previews (a rescan must be visible).
         let mut pool_memo: std::collections::HashMap<String, crate::pool_inspection::PoolInspection> =
@@ -1018,6 +1190,29 @@ impl GridEngine {
             if decision.origin == Origin::Every {
                 if let Some(id) = &decision.rule_id {
                     sim.every.entry(id.clone()).or_default().last_played = Some(epoch);
+                }
+            }
+
+            for dj in &djs {
+                let now_open = crate::resolver::live_window(&grid, dj, local);
+                let token = now_open.as_ref().map(|w| w.occurrence.clone());
+                let before = live_open.get(dj).map(|(t, _)| t.clone());
+                if token == before {
+                    continue;
+                }
+                if let Some((_, i)) = live_open.remove(dj) {
+                    live[i].closes = Some((epoch, fmt_local(&local, &self.tz)));
+                }
+                if let Some(w) = now_open {
+                    live_open.insert(dj.clone(), (w.occurrence.clone(), live.len()));
+                    live.push(LiveProjection {
+                        rule_id: w.rule_id,
+                        dj: dj.clone(),
+                        opens: epoch,
+                        opens_local: fmt_local(&local, &self.tz),
+                        open_before: secs == from.0 && w.opened_ago_min > 0,
+                        closes: None,
+                    });
                 }
             }
 
@@ -1052,7 +1247,7 @@ impl GridEngine {
             secs += 60;
         }
 
-        Ok(GridPreview { occurrences, indicative })
+        Ok(GridPreview { occurrences, indicative, live })
     }
 
     /// Resolve the source to pull at a track boundary for instant `now`, and
@@ -2239,6 +2434,53 @@ mode = "dynamic""#;
         assert!(occ.iter().any(|o| o.epoch == at(9, 30) && o.origin == Origin::Every));
         // An elapsed Every is projected onto the timeline, not indicative.
         assert!(pv.indicative.is_empty());
+    }
+
+    #[tokio::test]
+    async fn preview_projects_live_windows_apart_from_the_timeline() {
+        use crate::resolver::WallClock;
+        let (_dir, eng) = engine().await; // tz = UTC
+        preview_leaves(&eng.pool, &["general", "evening"]).await;
+        insert_rule(&eng.pool, &rule("floor", RuleKind::BaseRotation { playlist_ref: "general".into() }))
+            .await
+            .unwrap();
+        // A live slot at 20:00, until the next slot starts (the 22:00 day part).
+        insert_rule(
+            &eng.pool,
+            &rule("dj-alex", RuleKind::Live { dj: "alex".into(), start: WallClock { hour: 20, minute: 0 } }),
+        )
+        .await
+        .unwrap();
+        insert_rule(
+            &eng.pool,
+            &rule(
+                "late",
+                RuleKind::DayPart {
+                    playlist_ref: "evening".into(),
+                    start: WallClock { hour: 22, minute: 0 },
+                    end: Some(WallClock { hour: 23, minute: 0 }),
+                },
+            ),
+        )
+        .await
+        .unwrap();
+
+        let pv = eng.preview(at(19, 0), 4 * 3600).await.unwrap();
+        assert_eq!(pv.live.len(), 1, "{:?}", pv.live);
+        let w = &pv.live[0];
+        assert_eq!((w.rule_id.as_str(), w.dj.as_str()), ("dj-alex", "alex"));
+        assert_eq!(w.opens, at(20, 0));
+        assert!(!w.open_before);
+        assert_eq!(w.closes.as_ref().map(|c| c.0), Some(at(22, 0)));
+        // Never on the ordered timeline: it selects no playlist.
+        assert!(pv.occurrences.iter().all(|o| o.rule_id != "dj-alex"));
+
+        // A projection that starts inside the window says it opened earlier.
+        let pv = eng.preview(at(21, 0), 3600).await.unwrap();
+        assert_eq!(pv.live.len(), 1);
+        assert!(pv.live[0].open_before);
+        assert_eq!(pv.live[0].opens, at(21, 0));
+        assert!(pv.live[0].closes.is_none(), "still open at the end of the projection");
     }
 
     #[tokio::test]

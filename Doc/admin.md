@@ -75,13 +75,18 @@ Réveils automatiques (core) : audience devenue inconnue, DJ qui prend l'antenne
 | `playlist reload` | La vue devient exactement le répertoire : `sync` + retrait des playlists dont le fichier a disparu. Une playlist disparue mais encore référencée (règle de grille, groupe qui reste) est gardée et signalée ; erreur = code ≠ 0 | — |
 | `playlist export <REF>` | Affiche le TOML que stationd applique pour cette playlist (signale sur stderr si le fichier en diffère) ; `--file` : le fichier lui-même, commentaires compris, et sa révision (stderr) | `<REF>` : ref (`emission/intro`) ou UUID ; `--out <fichier>` (défaut stdout) ; `--file` |
 | `playlist remove <REF> --yes` | Supprime la playlist : son fichier sous `[playlist] path` et son entrée. Refusé tant qu'une règle de grille ou un groupe la référence. L'état de lecture (curseur, épisodes joués, file) est gardé | `<REF>` : ref ou UUID ; `--yes` obligatoire ; `--revision <rev>` (refus si le fichier a changé depuis) |
-| `schedule validate <PATH>` | Valide une grille sans l'installer ; rejet = code ≠ 0 | `<PATH>` : `grid.toml` |
-| `schedule apply <PATH>` | Valide et installe la grille (atomique) ; l'état de lecture est conservé | `<PATH>` |
+| `schedule validate <PATH>` | Valide une grille sans l'installer : chaque problème sur son champ (`rule[3].start`), la valeur rejetée et les valeurs admises ; les refs des règles lisibles sont jugées aussi ; rejet = code ≠ 0 | `<PATH>` : `grid.toml` |
+| `schedule apply <PATH>` | Valide la grille, l'**écrit comme fichier de la grille active** (remplacé, commentaires compris) et l'installe (atomique) ; l'état de lecture est conservé. Invalide = rien d'écrit ni d'appliqué | `<PATH>` |
+| `schedule grids` | Fichiers de grille du nœud (`[grid] path`, défaut `grid/`), la grille active marquée `*`, règles, révision, et ce qui l'empêcherait d'être appliquée | — |
+| `schedule show [NAME]` | Affiche une grille du nœud (défaut : l'active) et sa révision ; signale si le fichier actif diffère de ce qui est appliqué | `--file <fichier>` : l'écrire en local pour l'éditer |
+| `schedule save <NAME> <PATH>` | stationd valide, **écrit le fichier** `<NAME>` sous `[grid] path` (atomique, relu) et l'applique si c'est la grille active. Crée si absent ; remplacer demande la révision. Invalide = rien d'écrit | `--revision <rev>` (de `show --file`) ou `--force` |
+| `schedule activate <NAME>` | La grille `<NAME>` devient l'active : validée, appliquée, choix gardé (survit au redémarrage). Invalide ou absente = refus, l'active ne change pas | `<NAME>` : `ete` ou `ete.toml` |
+| `schedule reload` | Relit le fichier de la grille active et l'applique (après une édition à la main). Absent ou invalide : la dernière grille appliquée reste, code ≠ 0 | — |
 | `schedule export` | Réécrit la grille courante en TOML | `--rule <id>` (répétable) ; `--out <fichier>` (défaut stdout) |
 | `schedule list` | Règles de la grille (lecture seule) | — |
 | `schedule next` | Source que la grille jouerait maintenant. **Consomme** comme un vrai bord de piste (repère `at_clock`, remise à zéro `every`) | `--at <epoch s UTC>` |
-| `schedule preview` | Projection de la grille sur une fenêtre, en UTC et en heure locale | `--at <epoch>` (défaut maintenant) ; `--window <s>` (défaut 86400) |
-| `schedule check` | Assez de médias par règle ? OK / ⚠ juste / ✗ insuffisant ; un ✗ = code ≠ 0 | `--rule <id>` (répétable) |
+| `schedule preview` | Projection de la grille sur une fenêtre, en UTC et en heure locale ; puis les `every` au compteur et les fenêtres de connexion des DJ (`live`) | `--at <epoch>` (défaut maintenant) ; `--window <s>` (défaut 86400) ; `--grid <nom>` (une grille du nœud) ou `--draft <fichier>` (un brouillon local) au lieu de la grille appliquée — rien n'est appliqué |
+| `schedule check` | Assez de médias par règle ? OK / ⚠ juste / ✗ insuffisant ; un ✗ = code ≠ 0 | `--rule <id>` (répétable) ; `--grid <nom>` / `--draft <fichier>` |
 | `queue push <REF> <MEDIA>` | Ajoute un média au tampon d'une playlist `queue` (demande d'auditeur, injection DJ) ; refusé si `max_len` atteint | `<REF>` : playlist queue ; `<MEDIA>` : chemin relatif |
 | `override push` | Contenu poussé devant la grille. `soft` = au prochain bord de piste. Un média absent du disque est refusé tout de suite (`NotFound`) | `--media <chemin>` ou `--playlist <ref>` ; `--hard` (coupe maintenant ; dégradé en soft sans Liquidsoap ou en pause/veille) ; `--expiry 30s\|5m\|2h` (défaut jamais périmé) ; `--tracks <n>` (playlist, défaut 1) |
 | `override list` | Overrides en attente, dans l'ordre de passage | — |
@@ -174,5 +179,9 @@ Un DJ qui prend l'antenne réveille une station en veille ; `station stop` est r
 **Changement de `[liquidsoap]`, `[icecast]` ou des sorties.** `make restart-air` : stationd réécrit le `.liq` et `icecast.xml`, puis Icecast et Liquidsoap sont relancés ; `make check-liq` pour valider le script.
 
 **Nouvelle grille.** `stationctl schedule validate grid.toml`, `schedule check`, `schedule preview`, puis `schedule apply grid.toml`.
+
+**Préparer une grille sans toucher l'antenne.** `stationctl schedule save ete ete.toml` (écrite dans `grid/`, pas appliquée), `schedule preview --grid ete`, `schedule check --grid ete`, puis `schedule activate ete` le jour venu ; `schedule activate grid` pour revenir.
+
+**Modifier la grille active.** `stationctl schedule show --file g.toml` (note la révision), éditer, `schedule save grid g.toml --revision <rev>` : écrite et appliquée ; si quelqu'un l'a modifiée entre-temps, conflit, rien n'est écrasé. Édition à la main dans `grid/` : `schedule reload`.
 
 **Livraison.** `make package` (`ARGS=--allow-dirty` si besoin) → `dist/stationd-<tag>.tar`, à copier sur le nœud puis `install.sh`.

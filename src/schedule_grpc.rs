@@ -11,6 +11,7 @@
 use tonic::{Request, Response, Status};
 
 use crate::grid_engine::{EngineError, GridEngine, GridOpError};
+use crate::grid_files::{GridFileError, GridFiles};
 use crate::resolver::{Epoch, Origin};
 
 // Keep the existing public path available to callers.
@@ -26,11 +27,92 @@ use schedule::{
 
 pub struct ScheduleGrpc {
     engine: GridEngine,
+    /// The grid files (`[grid] path`). Absent (tests): the file RPCs answer
+    /// `failed_precondition`, `ApplyGrid` applies without writing a file.
+    files: Option<GridFiles>,
 }
 
 impl ScheduleGrpc {
     pub fn new(engine: GridEngine) -> Self {
-        Self { engine }
+        Self { engine, files: None }
+    }
+
+    /// With the grid files: the engine is theirs.
+    pub fn with_files(files: GridFiles) -> Self {
+        Self { engine: files.engine().clone(), files: Some(files) }
+    }
+
+    #[allow(clippy::result_large_err)] // a gRPC handler's error is a Status
+    fn files(&self) -> Result<&GridFiles, Status> {
+        self.files.as_ref().ok_or_else(|| Status::failed_precondition("no grid directory configured"))
+    }
+
+    /// The grid to project / size: a draft, a grid file, or the applied one.
+    async fn source(&self, grid: &str, draft: &str) -> Result<Option<crate::resolver::Grid>, Status> {
+        if grid.trim().is_empty() && draft.is_empty() {
+            return Ok(None);
+        }
+        match &self.files {
+            Some(f) => f.source(grid, draft).await.map_err(map_file_error),
+            None if !draft.is_empty() => {
+                let (rules, diags) = crate::grid_toml::diagnose(draft);
+                match rules {
+                    Some(rules) => Ok(Some(crate::resolver::Grid { rules })),
+                    None => Err(Status::invalid_argument(
+                        diags.iter().map(|d| d.message.clone()).collect::<Vec<_>>().join("; "),
+                    )),
+                }
+            }
+            None => Err(Status::failed_precondition("no grid directory configured")),
+        }
+    }
+}
+
+/// A grid problem as sent: opcode + field, never a sentence to show (D12).
+fn map_grid_diag(file: &str, d: crate::grid_toml::GridDiag) -> schedule::GridDiagnostic {
+    use crate::grid_toml::GridCode as G;
+    use schedule::grid_diagnostic::Code as C;
+    let code = match d.code {
+        G::Syntax => C::Syntax,
+        G::UnknownField => C::UnknownField,
+        G::MissingField => C::MissingField,
+        G::BadValue => C::BadValue,
+        G::NotAllowed => C::NotAllowed,
+        G::Conflict => C::Conflict,
+        G::BadDuration => C::BadDuration,
+        G::BadTime => C::BadTime,
+        G::BadDate => C::BadDate,
+        G::BadWeekday => C::BadWeekday,
+        G::SchemaVersion => C::SchemaVersion,
+        G::DuplicateId => C::DuplicateId,
+        G::SeveralFloors => C::SeveralFloors,
+        G::ZeroWindow => C::ZeroWindow,
+        G::DatesReversed => C::DatesReversed,
+        G::OutOfRange => C::OutOfRange,
+        G::UnknownRef => C::UnknownRef,
+        G::BadRef => C::BadRef,
+        G::UnknownDj => C::UnknownDj,
+        G::NoLive => C::NoLive,
+        G::DjFileUnreadable => C::DjFileUnreadable,
+        G::FileUnreadable => C::FileUnreadable,
+    };
+    schedule::GridDiagnostic {
+        file: file.to_string(),
+        field_path: d.field,
+        rule_id: d.rule_id,
+        rejected: d.rejected,
+        expected: d.expected,
+        message: d.message,
+        code: code as i32,
+    }
+}
+
+fn map_file_error(e: GridFileError) -> Status {
+    match e {
+        GridFileError::BadName(m) => Status::invalid_argument(m),
+        GridFileError::NotFound(n) => Status::not_found(format!("no grid `{n}` in the grid directory")),
+        e @ GridFileError::Invalid { .. } => Status::invalid_argument(e.to_string()),
+        e => Status::internal(e.to_string()),
     }
 }
 
@@ -138,6 +220,78 @@ fn map_verdict(v: crate::grid_engine::Verdict) -> schedule::Verdict {
     }
 }
 
+/// A coverage reason as an opcode + typed parameters (D12: no text to show).
+fn map_reason(r: crate::grid_engine::Reason) -> schedule::CoverageReason {
+    use crate::grid_engine::Reason as R;
+    use schedule::coverage_reason::Code;
+    let mut out = schedule::CoverageReason::default();
+    let code = match r {
+        R::PoolEmpty => Code::PoolEmpty,
+        R::TrackRepeat { window, pool_ms } => {
+            out.window = window;
+            out.pool_ms = Some(pool_ms);
+            Code::TrackRepeat
+        }
+        R::TitleRepeat { window, pool_ms } => {
+            out.window = window;
+            out.pool_ms = Some(pool_ms);
+            Code::TitleRepeat
+        }
+        R::ArtistRepeat { artists } => {
+            out.count = Some(artists);
+            Code::ArtistRepeat
+        }
+        R::ArtistNotEvaluated => Code::ArtistNotEvaluated,
+        R::LimitUnmet { limit, count } => {
+            out.limit = Some(limit);
+            out.count = Some(count);
+            Code::LimitUnmet
+        }
+        R::FiniteShort { pool_ms, need_ms } => {
+            out.pool_ms = Some(pool_ms);
+            out.need_ms = Some(need_ms);
+            Code::FiniteShort
+        }
+        R::MembersEmptyAbort { refs } => {
+            out.refs = refs;
+            Code::MembersEmptyAbort
+        }
+        R::MembersEmptySkip { refs } => {
+            out.refs = refs;
+            Code::MembersEmptySkip
+        }
+        R::MembersLoop { refs } => {
+            out.refs = refs;
+            Code::MembersLoop
+        }
+        R::BadRef { error } => {
+            out.error = error;
+            Code::BadRef
+        }
+        R::UnknownPlaylist => Code::UnknownPlaylist,
+        R::UnreadablePlaylist { error } => {
+            out.error = error;
+            Code::UnreadablePlaylist
+        }
+        R::Unresolvable { error } => {
+            out.error = error;
+            Code::Unresolvable
+        }
+        R::RuntimeLoop { need_ms, pool_ms } => {
+            out.need_ms = Some(need_ms);
+            out.pool_ms = Some(pool_ms);
+            Code::RuntimeLoop
+        }
+        R::TakeRepeat { take, count } => {
+            out.limit = Some(take);
+            out.count = Some(count);
+            Code::TakeRepeat
+        }
+    };
+    out.code = code as i32;
+    out
+}
+
 fn map_coverage_member(
     m: crate::grid_engine::CoverageMember,
 ) -> Result<schedule::CoverageMember, Status> {
@@ -147,6 +301,7 @@ fn map_coverage_member(
         total_duration: m.stats.total_duration_ms.map(ms_to_duration).transpose()?,
         verdict: map_verdict(m.verdict) as i32,
         detail: m.detail,
+        reasons: m.reasons.into_iter().map(map_reason).collect(),
     })
 }
 
@@ -161,6 +316,7 @@ fn map_coverage_entry(
         total_duration: e.stats.total_duration_ms.map(ms_to_duration).transpose()?,
         verdict: map_verdict(e.verdict) as i32,
         detail: e.detail,
+        reasons: e.reasons.into_iter().map(map_reason).collect(),
         members: e
             .members
             .into_iter()
@@ -220,28 +376,150 @@ impl ScheduleService for ScheduleGrpc {
         request: Request<ApplyGridRequest>,
     ) -> Result<Response<ApplyGridResponse>, Status> {
         let files = grid_files(request.into_inner().files);
-        let applied_rule_ids = self
-            .engine
-            .apply_grid(&files)
-            .await
-            .map_err(map_grid_op_error)?;
-        Ok(Response::new(ApplyGridResponse {
-            ok: true,
-            applied_rule_ids,
-        }))
+        let Some(gf) = &self.files else {
+            let applied_rule_ids = self.engine.apply_grid(&files).await.map_err(map_grid_op_error)?;
+            return Ok(Response::new(ApplyGridResponse { ok: true, applied_rule_ids, ..Default::default() }));
+        };
+        match gf.apply_external(&files).await {
+            Ok((grid, applied_rule_ids)) => {
+                Ok(Response::new(ApplyGridResponse { ok: true, applied_rule_ids, diagnostics: Vec::new(), grid }))
+            }
+            Err(GridFileError::Invalid { name, diags }) => Ok(Response::new(ApplyGridResponse {
+                ok: false,
+                diagnostics: diags.into_iter().map(|d| map_grid_diag(&name, d)).collect(),
+                ..Default::default()
+            })),
+            Err(e) => Err(map_file_error(e)),
+        }
     }
 
-    /// Dry-run of `apply_grid`: same parse + ref checks, nothing written.
+    /// Dry-run of `apply_grid`: every problem of each file, nothing written.
     async fn validate_grid(
         &self,
         request: Request<ApplyGridRequest>,
     ) -> Result<Response<ValidateGridResponse>, Status> {
         let files = grid_files(request.into_inner().files);
-        self.engine
-            .validate_grid(&files)
-            .await
-            .map_err(map_grid_op_error)?;
-        Ok(Response::new(ValidateGridResponse { ok: true }))
+        let mut diagnostics = Vec::new();
+        let mut all = Vec::new();
+        for (path, text) in &files {
+            let (items, mut diags) = crate::grid_toml::diagnose_partial(text);
+            let refs: Vec<(usize, &crate::resolver::Rule)> = items.iter().map(|(n, r)| (*n, r)).collect();
+            diags.extend(self.engine.diagnose_rules_at(&refs).await.map_err(|e| Status::internal(e.to_string()))?);
+            // File order: a rule's grammar and refs together.
+            crate::grid_toml::in_file_order(&mut diags);
+            diagnostics.extend(diags.into_iter().map(|d| map_grid_diag(path, d)));
+            all.extend(items.into_iter().map(|(_, r)| r));
+        }
+        // Across files (several files merged into one grid): ids, floor.
+        if files.len() > 1 && diagnostics.is_empty() {
+            diagnostics.extend(crate::grid_toml::diagnose_set(&all).into_iter().map(|mut d| {
+                d.field.clear(); // a position in the merged set means nothing in a file
+                map_grid_diag("", d)
+            }));
+        }
+        Ok(Response::new(ValidateGridResponse { ok: diagnostics.is_empty(), diagnostics }))
+    }
+
+    async fn list_grids(
+        &self,
+        _request: Request<schedule::ListGridsRequest>,
+    ) -> Result<Response<schedule::ListGridsResponse>, Status> {
+        let f = self.files()?;
+        let grids = f.list().await.map_err(map_file_error)?;
+        let active = grids.iter().find(|g| g.active).map(|g| g.name.clone()).unwrap_or_default();
+        Ok(Response::new(schedule::ListGridsResponse {
+            grids: grids
+                .into_iter()
+                .map(|g| {
+                    let problem = g.problem.map(|d| map_grid_diag(&g.name, d));
+                    schedule::GridInfo {
+                        name: g.name,
+                        revision: g.revision,
+                        active: g.active,
+                        rules: g.rules.map(|n| n as u32),
+                        problem,
+                    }
+                })
+                .collect(),
+            active,
+        }))
+    }
+
+    async fn get_grid(
+        &self,
+        request: Request<schedule::GetGridRequest>,
+    ) -> Result<Response<schedule::GetGridResponse>, Status> {
+        let g = self.files()?.get(&request.into_inner().name).await.map_err(map_file_error)?;
+        Ok(Response::new(schedule::GetGridResponse {
+            name: g.name,
+            toml: g.toml,
+            revision: g.revision,
+            active: g.active,
+            exists: g.exists,
+            differs_from_applied: g.differs_from_applied,
+        }))
+    }
+
+    async fn save_grid(
+        &self,
+        request: Request<schedule::SaveGridRequest>,
+    ) -> Result<Response<schedule::SaveGridResponse>, Status> {
+        let req = request.into_inner();
+        let s = self.files()?.save(&req.name, &req.toml, &req.expected_revision).await.map_err(map_file_error)?;
+        let name = crate::grid_files::normalize_name(&req.name).unwrap_or(req.name);
+        Ok(Response::new(schedule::SaveGridResponse {
+            ok: s.ok,
+            conflict: s.conflict,
+            revision: s.revision,
+            diagnostics: s.diagnostics.into_iter().map(|d| map_grid_diag(&name, d)).collect(),
+            created: s.created,
+            applied: s.applied,
+        }))
+    }
+
+    async fn activate_grid(
+        &self,
+        request: Request<schedule::ActivateGridRequest>,
+    ) -> Result<Response<schedule::ActivateGridResponse>, Status> {
+        let f = self.files()?;
+        match f.activate(&request.into_inner().name).await {
+            Ok(n) => Ok(Response::new(schedule::ActivateGridResponse {
+                ok: true,
+                name: f.active().await.map_err(map_file_error)?,
+                rules: n as u32,
+                ..Default::default()
+            })),
+            Err(GridFileError::Invalid { name, diags }) => Ok(Response::new(schedule::ActivateGridResponse {
+                ok: false,
+                name: f.active().await.map_err(map_file_error)?,
+                diagnostics: diags.into_iter().map(|d| map_grid_diag(&name, d)).collect(),
+                ..Default::default()
+            })),
+            Err(e) => Err(map_file_error(e)),
+        }
+    }
+
+    async fn reload_grid(
+        &self,
+        _request: Request<schedule::ReloadGridRequest>,
+    ) -> Result<Response<schedule::ActivateGridResponse>, Status> {
+        let f = self.files()?;
+        let name = f.active().await.map_err(map_file_error)?;
+        match f.reload().await {
+            Ok(crate::grid_files::Loaded::Applied(n)) => {
+                Ok(Response::new(schedule::ActivateGridResponse { ok: true, name, rules: n as u32, ..Default::default() }))
+            }
+            Ok(crate::grid_files::Loaded::Missing) => {
+                Ok(Response::new(schedule::ActivateGridResponse { ok: false, name, missing: true, ..Default::default() }))
+            }
+            Err(GridFileError::Invalid { name, diags }) => Ok(Response::new(schedule::ActivateGridResponse {
+                ok: false,
+                diagnostics: diags.into_iter().map(|d| map_grid_diag(&name, d)).collect(),
+                name,
+                ..Default::default()
+            })),
+            Err(e) => Err(map_file_error(e)),
+        }
     }
 
     /// Project the current index back to a single `grid.toml`.
@@ -264,11 +542,14 @@ impl ScheduleService for ScheduleGrpc {
 
     async fn list_rules(
         &self,
-        _request: Request<ListRulesRequest>,
+        request: Request<ListRulesRequest>,
     ) -> Result<Response<ListRulesResponse>, Status> {
-        let mut rules = self.engine.list_rules().await
-            .map_err(|e| Status::internal(e.to_string()))?
-            .into_iter().map(map_rule).collect::<Result<Vec<_>, _>>()?;
+        let req = request.into_inner();
+        let rules = match self.source(&req.grid, &req.draft_toml).await? {
+            Some(g) => g.rules,
+            None => self.engine.list_rules().await.map_err(|e| Status::internal(e.to_string()))?,
+        };
+        let mut rules = rules.into_iter().map(map_rule).collect::<Result<Vec<_>, _>>()?;
         rules.sort_by(|a, b| a.id.cmp(&b.id));
         Ok(Response::new(ListRulesResponse { rules }))
     }
@@ -287,9 +568,10 @@ impl ScheduleService for ScheduleGrpc {
         };
         // Absent window → 24h; a non-positive window yields no occurrences.
         let window_secs = req.window.map(|d| d.seconds).unwrap_or(24 * 3600);
+        let grid = self.source(&req.grid, &req.draft_toml).await?;
         let preview = self
             .engine
-            .preview(from, window_secs)
+            .preview_of(grid, from, window_secs)
             .await
             .map_err(map_next_error)?;
         let occurrences = preview
@@ -326,7 +608,26 @@ impl ScheduleService for ScheduleGrpc {
                 playlist_ref: i.playlist_ref,
             })
             .collect();
-        Ok(Response::new(PreviewResponse { occurrences, indicative }))
+        let live = preview
+            .live
+            .into_iter()
+            .map(|w| {
+                let (closes_at, closes_local) = match w.closes {
+                    Some((e, l)) => (Some(prost_types::Timestamp { seconds: e.0, nanos: 0 }), l),
+                    None => (None, String::new()),
+                };
+                schedule::LiveWindow {
+                    rule_id: w.rule_id,
+                    dj: w.dj,
+                    opens_at: Some(prost_types::Timestamp { seconds: w.opens.0, nanos: 0 }),
+                    opens_local: w.opens_local,
+                    open_before: w.open_before,
+                    closes_at,
+                    closes_local,
+                }
+            })
+            .collect();
+        Ok(Response::new(PreviewResponse { occurrences, indicative, live }))
     }
 
     /// Sizing check (read-only): « does the grid have enough media? ». Delegates
@@ -337,9 +638,11 @@ impl ScheduleService for ScheduleGrpc {
         &self,
         request: Request<CheckCoverageRequest>,
     ) -> Result<Response<CheckCoverageResponse>, Status> {
+        let req = request.into_inner();
+        let grid = self.source(&req.grid, &req.draft_toml).await?;
         let report = self
             .engine
-            .check_coverage(&request.into_inner().rule_ids)
+            .check_coverage_of(grid, &req.rule_ids)
             .await
             .map_err(map_next_error)?;
         let entries = report
@@ -433,12 +736,13 @@ fn map_rule(rule: crate::resolver::Rule) -> Result<schedule::Rule, Status> {
             playlist_ref, start: Some(wall(start)), end: end.map(wall),
         }),
         RuleKind::AtClock { playlist_ref, anchor, mode, expiry_secs } => {
-            let (every_minutes, at) = match anchor {
-                ClockAnchor::EveryMinutes(n) => (n, None),
-                ClockAnchor::At(w) => (0, Some(wall(w))),
+            let (every_minutes, minute, at) = match anchor {
+                ClockAnchor::EveryMinutes(n) => (n, None, None),
+                ClockAnchor::Minute(m) => (0, Some(u32::from(m)), None),
+                ClockAnchor::At(w) => (0, None, Some(wall(w))),
             };
             Kind::AtClock(schedule::AtClock {
-                playlist_ref, every_minutes, at,
+                playlist_ref, every_minutes, minute, at,
                 mode: match mode { Mode::Soft => schedule::at_clock::Mode::Soft as i32,
                                    Mode::Hard => schedule::at_clock::Mode::Hard as i32 },
                 expiry: expiry_secs.map(duration).transpose()?,

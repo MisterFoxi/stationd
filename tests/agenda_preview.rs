@@ -70,6 +70,7 @@ mode = "dynamic""#;
                     nanos: 0,
                 }),
                 window: Some(prost_types::Duration { seconds, nanos: 0 }),
+                ..Default::default()
             }))
             .await
             .unwrap()

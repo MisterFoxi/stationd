@@ -144,12 +144,12 @@ pub async fn load_grid(pool: &SqlitePool) -> Result<Grid, GridLoadError> {
             }
             "at_clock" => {
                 let (r, every_min, ah, am, mode, exp) = at_clock.get(&id).ok_or_else(missing)?.clone();
-                let anchor = match every_min {
-                    Some(n) => ClockAnchor::EveryMinutes(n as u32),
-                    None => ClockAnchor::At(WallClock {
-                        hour: ah.unwrap_or(0) as u8,
-                        minute: am.unwrap_or(0) as u8,
-                    }),
+                // every_minutes, OR at_minute alone (one mark per hour), OR
+                // at_hour + at_minute (one fixed time of day) — CHECK of 0026.
+                let anchor = match (every_min, ah, am) {
+                    (Some(n), _, _) => ClockAnchor::EveryMinutes(n as u32),
+                    (None, None, m) => ClockAnchor::Minute(m.unwrap_or(0) as u8),
+                    (None, Some(h), m) => ClockAnchor::At(WallClock { hour: h as u8, minute: m.unwrap_or(0) as u8 }),
                 };
                 RuleKind::AtClock {
                     playlist_ref: r,
@@ -275,6 +275,7 @@ async fn insert_rule_in_tx(
         RuleKind::AtClock { playlist_ref, anchor, mode, expiry_secs } => {
             let (every_min, at_h, at_m) = match anchor {
                 ClockAnchor::EveryMinutes(n) => (Some(*n as i64), None, None),
+                ClockAnchor::Minute(m) => (None, None, Some(*m as i64)),
                 ClockAnchor::At(wc) => (None, Some(wc.hour as i64), Some(wc.minute as i64)),
             };
             sqlx::query(
@@ -436,9 +437,25 @@ mod tests {
         )
         .await
         .unwrap();
+        insert_rule(
+            &pool,
+            &rule(
+                "top",
+                RuleKind::AtClock {
+                    playlist_ref: "tops".into(),
+                    anchor: ClockAnchor::Minute(58),
+                    mode: Mode::Soft,
+                    expiry_secs: None,
+                },
+            ),
+        )
+        .await
+        .unwrap();
 
         let grid = load_grid(&pool).await.unwrap();
-        assert_eq!(grid.rules.len(), 4);
+        assert_eq!(grid.rules.len(), 5);
+        let top = grid.rules.iter().find(|r| r.id == "top").unwrap();
+        assert!(matches!(top.kind, RuleKind::AtClock { anchor: ClockAnchor::Minute(58), .. }), "{:?}", top.kind);
 
         let morning = grid.rules.iter().find(|r| r.id == "morning").unwrap();
         assert_eq!(morning.validity.days.len(), 2);

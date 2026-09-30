@@ -7,7 +7,7 @@
 use std::future::Future;
 use std::time::{Duration, Instant};
 
-use stationd_proto::{broadcast, library, liquidsoap, live, onair, playlist, plugin, stats, station};
+use stationd_proto::{broadcast, library, liquidsoap, live, onair, playlist, plugin, schedule, stats, station};
 use tonic::transport::{Channel, Endpoint};
 
 /// Délai maximal d'une lecture simple (dossier §18 de la v1, conservé).
@@ -204,6 +204,92 @@ pub async fn media_card(channel: Channel, path: String) -> MediaCard {
         plays(CARD_WINDOWS[3]),
     );
     MediaCard { playlists: playlists.map(|r| r.playlists), plays: vec![a, b, c, d], tags }
+}
+
+/// Ce que lit l'agenda : la projection de la grille sur une fenêtre, les
+/// règles (leur description) et la couverture (les verdicts). Chaque source
+/// a son propre résultat.
+#[derive(Debug, Clone)]
+pub struct AgendaRead {
+    pub preview: Read<schedule::PreviewResponse>,
+    pub rules: Read<Vec<schedule::Rule>>,
+    pub coverage: Read<schedule::CheckCoverageResponse>,
+    /// Les grilles du nœud (laquelle est active).
+    pub grids: Read<schedule::ListGridsResponse>,
+}
+
+/// `Preview` de `[from, from + window)` (secondes), `ListRules`,
+/// `CheckCoverage` (toute la grille), en parallèle — de la grille `grid`
+/// (un fichier du nœud ; vide = la grille appliquée).
+pub async fn agenda_read(channel: Channel, from: i64, window: i64, grid: String) -> AgendaRead {
+    use stationd_proto::prost_types::{Duration as PDuration, Timestamp};
+    let mut a = schedule::schedule_service_client::ScheduleServiceClient::new(channel);
+    let mut b = a.clone();
+    let mut c = a.clone();
+    let mut d = a.clone();
+    let req = schedule::PreviewRequest {
+        from: Some(Timestamp { seconds: from, nanos: 0 }),
+        window: Some(PDuration { seconds: window, nanos: 0 }),
+        grid: grid.clone(),
+        draft_toml: String::new(),
+    };
+    let (preview, rules, coverage, grids) = tokio::join!(
+        bounded(a.preview(req)),
+        bounded(b.list_rules(schedule::ListRulesRequest { grid: grid.clone(), draft_toml: String::new() })),
+        bounded(c.check_coverage(schedule::CheckCoverageRequest { rule_ids: Vec::new(), grid, draft_toml: String::new() })),
+        bounded(d.list_grids(schedule::ListGridsRequest {})),
+    );
+    AgendaRead { preview, rules: rules.map(|r| r.rules), coverage, grids }
+}
+
+fn sched(channel: Channel) -> schedule::schedule_service_client::ScheduleServiceClient<Channel> {
+    schedule::schedule_service_client::ScheduleServiceClient::new(channel)
+}
+
+/// Le texte d'une grille à modifier : le fichier (commentaires compris) et
+/// sa révision ; sans fichier, la grille appliquée (création à l'écriture).
+pub async fn grid_text(channel: Channel, name: String) -> Read<schedule::GetGridResponse> {
+    let mut g = bounded(sched(channel.clone()).get_grid(schedule::GetGridRequest { name })).await?;
+    if !g.exists && g.active {
+        let x = bounded(sched(channel).export_grid(schedule::ExportGridRequest { rule_ids: Vec::new() })).await?;
+        g.toml = x.files.into_iter().map(|f| f.toml).collect::<Vec<_>>().join("\n");
+    }
+    Ok(g)
+}
+
+/// Ce que l'éditeur de règle demande après une frappe : les diagnostics du
+/// brouillon et la projection de la journée avec la modification.
+#[derive(Debug, Clone)]
+pub struct DraftCheck {
+    pub validate: Read<schedule::ValidateGridResponse>,
+    pub preview: Read<schedule::PreviewResponse>,
+}
+
+pub async fn check_draft(channel: Channel, name: String, toml: String, from: i64, window: i64) -> DraftCheck {
+    use stationd_proto::prost_types::{Duration as PDuration, Timestamp};
+    let mut a = sched(channel);
+    let mut b = a.clone();
+    let files = vec![schedule::GridFile { path: name, toml: toml.clone() }];
+    let (validate, preview) = tokio::join!(
+        bounded(a.validate_grid(schedule::ApplyGridRequest { files })),
+        bounded(b.preview(schedule::PreviewRequest {
+            from: Some(Timestamp { seconds: from, nanos: 0 }),
+            window: Some(PDuration { seconds: window, nanos: 0 }),
+            grid: String::new(),
+            draft_toml: toml,
+        })),
+    );
+    DraftCheck { validate, preview }
+}
+
+/// `SaveGrid` : écrit (et applique si active), ou dit pourquoi non.
+pub async fn save_grid(channel: Channel, name: String, toml: String, expected_revision: String) -> Read<schedule::SaveGridResponse> {
+    bounded(sched(channel).save_grid(schedule::SaveGridRequest { name, toml, expected_revision })).await
+}
+
+/// `ActivateGrid`.
+pub async fn activate_grid(channel: Channel, name: String) -> Read<schedule::ActivateGridResponse> {
+    bounded(sched(channel).activate_grid(schedule::ActivateGridRequest { name })).await
 }
 
 /// Ce que la TUI demande au flux de l'antenne : le maximum servi, chaque

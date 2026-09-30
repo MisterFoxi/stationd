@@ -16,6 +16,14 @@ library_path = "./media"
 [playlist]
 path = "./playlist"
 
+# Optional — the grid files (default "./grid"). Several grids may be
+# prepared there; ONE is active (`stationctl schedule activate <name>`, kept
+# in the database; none chosen = grid.toml). The active file is re-read at
+# start-up and by `schedule reload`; `schedule save` / `apply` and the TUI
+# write the files through stationd.
+[grid]
+path = "./grid"
+
 # Optional — defaults to "info" if absent
 [logging]
 level = "info"

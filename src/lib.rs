@@ -17,6 +17,7 @@ pub mod db;
 pub mod draw;
 pub mod episode_play;
 pub mod grid_engine;
+pub mod grid_files;
 pub mod grid_index;
 pub mod grid_store;
 pub mod grid_toml;

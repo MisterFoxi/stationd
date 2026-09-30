@@ -141,7 +141,7 @@ slots for DJs. When several rules apply, the highest priority wins:
 |---|---|
 | `base_rotation` | The floor: covers any time nothing else does. |
 | `day_part` | A time window (`start`/`end`, optional `days`). Windows crossing midnight are supported. Without `end`, the day part is **open**: it runs until the next start of another day part (a programme grid where each show lasts until the next one); its `days` apply to the day it started. |
-| `at_clock` | A fixed time (`at = "08:00"`, or `every_minutes`). `soft`: at the next track boundary. `hard`: cut in on the second (the current track is interrupted), and outranks everything except overrides; a hard mark that cannot be cut (station paused, more than 10 s late) airs soft instead. Optional `expiry`. |
+| `at_clock` | Exactly one anchor: `at = "08:00"` (one fixed time a day), `minute = 58` (every hour at :58 — `minute = 0` is the top of the hour), or `every_minutes = 45` (every N minutes counted from midnight, 1..1439: 00:45, 01:30 … 23:15 — never 00:00 itself, so two cadences do not all start together at midnight). `soft`: at the next track boundary. `hard`: cut in on the second (the current track is interrupted), and outranks everything except overrides; a hard mark that cannot be cut (station paused, more than 10 s late) airs soft instead. Optional `expiry`. |
 | `every` | A cooldown: every N tracks (`min_tracks`) or every elapsed duration. |
 | `live` | A DJ slot (`dj`, `start`, optional `days`; no `end`, no playlist): the DJ may connect from `start` until the next `day_part` or `live` starts. It selects nothing: the programme underneath goes on until the DJ connects. See *Live DJ*. |
 
@@ -184,6 +184,19 @@ min_tracks = 4
 `stationctl schedule preview` projects the grid over the next hours without
 waiting for the clock, in UTC and in local time (useful across DST changes).
 `schedule check` tells you whether each rule has enough media behind it.
+
+**Several grids, one active.** Grids are files of the grid directory
+(`[grid] path`, `./grid` by default). One of them is active — `grid.toml`
+until `stationctl schedule activate <name>` chooses another (the choice is
+kept in the database). The active file is the source of truth: re-read at
+start-up and by `schedule reload`; a missing or invalid active file never
+empties the air (the grid last applied stays, and `schedule grids` says why).
+stationd writes the files itself: `schedule save <name> <file>` (with the
+`--revision` read by `schedule show <name> --file`; a file changed since is
+a conflict, never overwritten), `schedule apply <file>` (becomes the active
+file). `schedule preview` / `check` take `--grid <name>` or `--draft <file>`
+to look at a grid before activating it. `schedule validate` lists every
+problem, each on its field (`rule[3].start`).
 
 ### Broadcast control and overrides
 
@@ -346,6 +359,9 @@ library_path = "/mnt/nfs/radio"
 
 [playlist]
 path = "./playlist"
+
+[grid]                             # optional: the grid files (one active)
+path = "./grid"
 
 [liquidsoap]
 script_path    = "./data/station.liq"
@@ -522,7 +538,8 @@ sudo stationd-<tag>/install.sh            # [--dir /opt/stationd] [--media /mnt/
   compose.yaml  .env               installed by install.sh
   stationd.example.toml            installed by install.sh (reference)
   examples/                        installed by install.sh: sample playlists + grid (refreshed each run)
-  stationd.toml  grid.toml …       yours — never touched by install.sh
+  stationd.toml …                  yours — never touched by install.sh
+  grid/                            grid files (one active); an old ./grid.toml is moved here
   playlist/  radio/                playlists; your own fallback / noise files (optional)
   data/                            written by stationd (database, station.liq, icecast.xml)
 ```
@@ -533,7 +550,7 @@ media path and its group — applied in the container at start-up). It starts
 the station when `stationd.toml` exists; otherwise it stops there.
 
 Permissions: the account running `sudo` joins the group `stationd` (log in
-again once): `stationd.toml`, `grid.toml`, `playlist/` and `radio/` are edited
+again once): `stationd.toml`, `grid/`, `playlist/` and `radio/` are edited
 without `sudo`. The shared directories are `2770 stationd:stationd` (setgid:
 what you create belongs to the group) and stationd writes with `umask 007`,
 so the files it writes stay editable by the group; `data/` is `0750` (the
@@ -572,6 +589,7 @@ docker compose exec -u stationd station stationctl status
 | `library scan` \| `list` \| `genres` | Scan the media root, list the index (`--genre`), genre inventory |
 | `playlist add` \| `sync` \| `list` | Register or reconcile playlist TOML files |
 | `schedule validate` \| `apply` \| `export` \| `list` | Manage the grid |
+| `schedule grids` \| `show` \| `save` \| `activate` \| `reload` | Grid files of the node, the active grid |
 | `schedule preview` \| `check` | Project the grid over time; check each rule has enough media |
 | `station state` \| `pause` \| `resume` \| `stop-when-idle` \| `wake` \| `next` | Broadcast control |
 | `station stop [--force]` \| `start` | Stop stationd itself until `start` (marker `data/stationd.stopped`; `start` runs in the container) |

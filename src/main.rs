@@ -69,6 +69,7 @@ async fn main() -> anyhow::Result<()> {
     info!(db_path = ?cfg.database.path, "SQLite database");
     info!(media_path = ?cfg.media.library_path, "media library");
     info!(playlist_path = ?cfg.playlist.path, "playlist directory (source of truth)");
+    info!(grid_path = ?cfg.grid.path, "grid directory (the active grid file is the source of truth)");
     info!(station_timezone = %cfg.station.timezone, "timezone");
 
     if !cfg.media.library_path.exists() {
@@ -135,6 +136,20 @@ async fn main() -> anyhow::Result<()> {
         None => engine,
     };
     engine.sync_grid().await?;
+
+    // Grid files: the ACTIVE grid file is the source of truth — re-read and
+    // applied now. Missing or invalid: the grid last applied stays on air
+    // (never an empty air), loudly, and `schedule grids` says why.
+    let grid_files = stationd::grid_files::GridFiles::new(cfg.grid.path.clone(), db_pool.clone(), engine.clone());
+    match grid_files.load_at_startup().await? {
+        (name, Ok(stationd::grid_files::Loaded::Applied(n))) => info!(grid = %name, rules = n, "active grid applied"),
+        (name, Ok(stationd::grid_files::Loaded::Missing)) => warn!(
+            grid = %name,
+            dir = ?cfg.grid.path,
+            "active grid file missing: the grid last applied stays on air (`stationctl schedule save|apply` writes it)"
+        ),
+        (name, Err(e)) => tracing::error!(grid = %name, error = %e, "active grid file NOT applied: the grid last applied stays on air"),
+    }
 
     // Live DJs (optional `[live]`): the harbor hooks decide every login from
     // the DJ file (re-read at each attempt) and the grid's `live` slots. A bad
@@ -300,7 +315,7 @@ async fn main() -> anyhow::Result<()> {
         plugins: Some(plugins.clone()),
     });
 
-    let schedule_service = ScheduleGrpc::new(engine);
+    let schedule_service = ScheduleGrpc::with_files(grid_files);
 
     // Media library: single owning actor over the `media` view. The heavy scan
     // runs off the async runtime (spawn_blocking); scans are serialised by the

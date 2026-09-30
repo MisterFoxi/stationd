@@ -432,7 +432,10 @@ impl Antenne {
                     Outcome::Unknown | Outcome::Unspecified => (tr!("played-end-unknown"), s.muted()),
                 };
                 Row::new(vec![
-                    Cell::from(Span::styled(t.started_at.map(|e| hm(tz, e)).unwrap_or_default(), s.label())),
+                    Cell::from(Span::styled(
+                        t.started_at.and_then(|e| crate::store::local_day_hm(tz, e)).unwrap_or_default(),
+                        s.label(),
+                    )),
                     Cell::from(label(t)),
                     Cell::from(Span::styled(mmss(t.duration_ms), s.label())),
                     Cell::from(Span::styled(end, style)),
@@ -440,9 +443,11 @@ impl Antenne {
                 ])
             })
             .collect();
+        // `JJ/MM HH:MM`, suffixé ` UTC` tant que le fuseau est inconnu.
+        let when_w = if tz.is_some() { 11 } else { 15 };
         let widths = if inner.width >= 90 {
             vec![
-                Constraint::Length(5),
+                Constraint::Length(when_w),
                 Constraint::Fill(3),
                 Constraint::Length(7),
                 Constraint::Length(end_w),
@@ -450,7 +455,7 @@ impl Antenne {
             ]
         } else {
             vec![
-                Constraint::Length(5),
+                Constraint::Length(when_w),
                 Constraint::Fill(1),
                 Constraint::Length(6),
                 Constraint::Length(end_w),

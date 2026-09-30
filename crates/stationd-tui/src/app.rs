@@ -57,6 +57,8 @@ pub struct Global {
     pending_action: Option<Action>,
     /// Un écran demande d'en ouvrir un autre (n° du registre).
     pending_switch: Option<usize>,
+    /// Message d'un écran pour la ligne de statut.
+    pending_status: Option<String>,
     /// Ce qu'un écran confie à celui qu'il ouvre (médias à ajouter à une
     /// playlist…) ; l'écran ouvert le prend à son entrée.
     pub handoff: Option<Handoff>,
@@ -69,6 +71,8 @@ pub enum Handoff {
     /// nouvelle, `None`) avec ces médias ajoutés — rien n'est enregistré
     /// avant `Ctrl+S`.
     AddFiles { reference: Option<String>, files: Vec<String> },
+    /// Montrer la playlist `reference` dans la liste (depuis l'agenda).
+    Select { reference: String },
 }
 
 impl SalsaContext<AppEvent, Error> for Global {
@@ -92,6 +96,7 @@ impl Global {
             pending_modal: None,
             pending_action: None,
             pending_switch: None,
+            pending_status: None,
             handoff: None,
         }
     }
@@ -99,6 +104,11 @@ impl Global {
     /// Un écran ouvre une modale (confirmation, formulaire).
     pub fn open(&mut self, modal: Modal) {
         self.pending_modal = Some(modal);
+    }
+
+    /// Un écran écrit dans la ligne de statut.
+    pub fn set_status(&mut self, msg: String) {
+        self.pending_status = Some(msg);
     }
 
     /// Un écran lance une action sans confirmation.
@@ -143,6 +153,8 @@ pub enum AppEvent {
     PlaylistChoices(u64, u64, Result<Vec<stationd_proto::playlist::PlaylistSummary>, String>),
     /// Écran Playlists : réponses et minuteries (voir `screens::playlists`).
     Playlists(Box<crate::screens::PlEvent>),
+    /// Agenda et éditeur de règle : réponses et minuteries.
+    Agenda(Box<crate::screens::AgEvent>),
 }
 
 impl From<RenderedEvent> for AppEvent {
@@ -484,7 +496,8 @@ pub fn event(event: &AppEvent, state: &mut Scenery, ctx: &mut Global) -> Result<
         | AppEvent::MediaCard(..)
         | AppEvent::MediaTags(..)
         | AppEvent::PlaylistChoices(..)
-        | AppEvent::Playlists(..) => {}
+        | AppEvent::Playlists(..)
+        | AppEvent::Agenda(..) => {}
         AppEvent::Event(Event::Resize(..)) => return Ok(Control::Changed),
         AppEvent::Event(e) => {
             if let Some(k) = press(e) {
@@ -548,6 +561,9 @@ pub fn event(event: &AppEvent, state: &mut Scenery, ctx: &mut Global) -> Result<
     }
     let active = state.active;
     let r = state.screens[active].event(event, ctx)?;
+    if let Some(msg) = ctx.pending_status.take() {
+        state.status.status(0, msg);
+    }
     if let Some(m) = ctx.pending_modal.take() {
         state.modal = Some(m);
         return Ok(Control::Changed);

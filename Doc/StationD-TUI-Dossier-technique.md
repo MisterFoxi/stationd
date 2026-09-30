@@ -1,6 +1,6 @@
 # StationD — Dossier technique de la TUI
 
-Version 2.7 — 29 septembre 2026
+Version 2.9 — 30 septembre 2026
 Statut : refonte complète (remplace la v1.0 du 25/09). Document vivant : il suit les besoins, pas l'inverse.
 Socle : Rust + Ratatui + rat-salsa / rat-widget, client gRPC pur de `stationd`.
 
@@ -160,8 +160,16 @@ Tranché : **`PlaylistService` dédié** (`proto/playlist_v1.proto`, réécrit),
 
 ### 3.6 À ajouter — Grille
 
-- `ValidateGrid` et `ApplyGrid` doivent renvoyer des `Diagnostic` (fichier, chemin de champ, valeur rejetée, attendu), même format que les playlists (§3.5). Le proto le prévoit en commentaire ; sans ça, l'éditeur de règle ne peut pas dire ce qui ne va pas.
-- `ScheduleService.SaveGrid { GridFile, expected_revision }` : même mécanisme que le `Save` des playlists (§3.5 : écriture par stationd, révision, conflit).
+**Fait (lot 6a, 2026-09-29)** — ce que l'Agenda lit sans éditer :
+- `PreviewResponse.live` (`LiveWindow` : règle, DJ, ouverture, fermeture — absente = encore ouverte à la fin —, `open_before`) : les fenêtres de connexion des règles `live` sur la projection (`resolver::live_window` minute par minute), à part de la timeline. `stationctl schedule preview` les liste après les `every` au compteur.
+- `CoverageEntry.reasons` / `CoverageMember.reasons` (`CoverageReason` : `Code` + paramètres typés — fenêtre, `pool_ms`, `need_ms`, `count`, `limit`, `refs`, `error` technique relayé) : les causes du verdict en opcodes (D12). `detail` reste leur rendu français pour `stationctl schedule check`, mot pour mot (`grid_engine::Reason::text`).
+
+**Fait (lot 5, 2026-09-30)** — grilles en fichiers, une active :
+- Les grilles sont les fichiers de `[grid] path` (`grid/` par défaut, dans le répertoire unique du nœud ; `install.sh` y déplace un ancien `grid.toml` de la racine). **Une seule est active** : choisie par `ActivateGrid` (validée, appliquée, choix gardé en base — table `grid_active`, migration `0025` ; aucune = `grid.toml`). Le fichier actif fait foi : relu et appliqué au démarrage et par `ReloadGrid` ; absent ou invalide, la dernière grille appliquée reste à l'antenne (jamais d'antenne vide) et `ListGrids` dit pourquoi. Métier : `src/grid_files.rs`.
+- `ListGrids` (nom, révision, active, nombre de règles, premier problème en `GridDiagnostic`), `GetGrid` (fichier avec commentaires, révision, écart avec l'appliqué), `SaveGrid { name, toml, expected_revision }` (même mécanisme que le `Save` des playlists : révision = empreinte, conflit, écriture atomique relue ; appliquée si c'est l'active), `ActivateGrid`, `ReloadGrid`. `ApplyGrid` écrit désormais le TOML reçu comme fichier de la grille active (file-first : sinon un redémarrage l'aurait défait).
+- `ValidateGrid` / `ApplyGrid` / `SaveGrid` / `ActivateGrid` rendent des `GridDiagnostic` : code (22 opcodes : syntaxe, champ inconnu / manquant / d'une autre nature, heure, date, jour, durée, id en double, deux planchers, fenêtre nulle, dates inversées, ref inconnue, DJ inconnu…), `field_path` (`rule[3].start`), règle, valeur rejetée, valeurs admises. Tous les problèmes : ceux de chaque règle, puis les refs et DJ des règles lisibles (`grid_toml::diagnose` / `diagnose_partial`).
+- `Preview`, `CheckCoverage`, `ListRules` acceptent `grid` (un fichier du nœud) ou `draft_toml` (un brouillon) : projeter / dimensionner une grille avant de l'activer, rien d'appliqué.
+- CLI : `schedule grids|show|save|activate|reload`, `list|preview|check --grid <nom>`, `preview|check --draft <fichier>` ; `validate` / `apply` listent les diagnostics.
 
 ### 3.7 À ajouter — Événements
 
@@ -337,7 +345,7 @@ Onglets : `1` Antenne · `2` Contrôle · `3` Playlists · `4` Agenda · `5` Mé
 - **À l'antenne** : titre/artiste (repli nom de fichier + « titre non renseigné »), progression, playlist, membre de groupe, règle, origine (OVERRIDE avec sa source, FALLBACK, LIVE avec le DJ).
 - **Playlists** : en cours (●) puis les suivantes avec heure (issue de `Preview`) ; règles au compteur à part, sans heure.
 - **À suivre** : 1re ligne = préchargé (certain, sans `~`), puis théoriques `~` ; notes d'incertitude en pied. Heure estimée absente dès qu'une durée est inconnue.
-- **Joués** : 20 derniers, issue (diffusé / coupé / sauté) ; `PageDown` en bas de liste charge la suite via `History`.
+- **Joués** : 20 derniers, date et heure de début (`JJ/MM HH:MM`, heure de la station), issue (diffusé / coupé / sauté) ; `PageDown` en bas de liste charge la suite via `History`.
 - **Incidents** : une ligne de playlist fautive est en rouge, suivie de sa raison (« pool vide : rien ne passera », « rien de jouable ») ; en pied d'« À suivre », les incidents prévus et constatés passent avant les autres notes, en rouge (§3.3 bis).
 - Actions : `Espace` pause (confirmée) / reprise / réveil · `n` suivant (confirmation nommant le morceau et le suivant prévu) · `o` pousser un override (formulaire, puis confirmation) · `+`/`-` changer X — faits au lot 2. `Entrée` détail (fiche média + pourquoi ce titre) · `p` aller à la playlist : plus tard.
 - 80×24 : À l'antenne + onglets Playlists / À suivre / Joués au lieu de trois panneaux.
@@ -402,10 +410,25 @@ Autres actions : `E` éditer le TOML brut (éditeur intégré, puis `Save` — u
 
 ### 5.4 Agenda (`4`)
 
+**Fait (lot 6a, lecture)** — `screens/agenda.rs`, `agenda.rs` (mise en forme pure, testée) ; une lecture = `Preview` de la période (commencée une heure plus tôt : les rendez-vous en retard qu'une projection neuve rejoue à sa première minute tombent hors de l'écran, et la base active à minuit est connue) + `ListRules` + `CheckCoverage`, en parallèle, n° de requête (une réponse tardive d'une autre période est ignorée) ; relecture en échec sur la même période = données gardées marquées anciennes, sur une autre période = rien sous de nouvelles dates.
+- Jour : créneaux de 15/30/60 min en temps réel entre deux minuits civils (25 h → 25 lignes à 60 min, heure répétée `02:00+02` / `02:00+01`, heure sautée absente, décalage affiché sur toute la journée d'un changement d'heure) ; bande de couleur de la base (une couleur par playlist, nom écrit là où elle commence ; une base qui change sous un rendez-vous commence avec lui) ; colonne `♪` quand une fenêtre live est ouverte ; repères du créneau (`!` hard, `*` soft, `♪` ouverture live) puis `+N` ; `▶` maintenant. Inspecteur à droite (≥ 110 colonnes, sinon `Entrée` en plein écran) : bases, repères et fenêtres live du créneau, chacun avec sa règle décrite (`ListRules` : fenêtre, cadence, soft/hard, péremption, jours, dates, désactivée), son pool, la décomposition du groupe (take / runtime / offset) et son verdict de couverture avec ses causes traduites ; `Tab` choisit l'élément, `p` ouvre sa playlist dans Playlists (`Handoff::Select`). Sous la vue (jour et semaine) : la zone **hors horloge** — les `every` de la période, à l'intervalle comme au compteur de pistes (playlist, cadence, règle), car leur heure réelle dépend du dernier passage ou du nombre de pistes ; au plus 5 lignes, le reste via `l` — puis la légende.
+- Semaine (`v`) : 7 colonnes (≥ 100 colonnes) aux heures civiles du pas, case = de cette heure à la ligne suivante (l'heure répétée tient dans la case de 02:00, l'heure sautée est marquée), base en couleur, nom là où elle commence, repères : leur signe s'il n'y en a qu'un, sinon leur nombre ; `Entrée` ouvre le jour sur ce créneau. Sous 100 colonnes : un résumé par jour (bases avec leur heure de début, repères par nature).
+- Couverture (`c`) : `CheckCoverage` trié pire en tête (verdict, règle, nature, playlist, pool) ; détail de la règle choisie : description, causes, membres avec leur verdict. `p` ouvre la playlist.
+- Navigation : `[` / `]` jour ou semaine, `t` aujourd'hui (curseur sur maintenant), `g` calendrier du mois (flèches, PgPréc/PgSuiv, `t`, Entrée), `+` / `-` pas (le curseur garde son heure), `r` relire.
+- Les `every` à l'intervalle ne sont plus posés sur la ligne du temps (2026-09-30) : `stationctl schedule preview` les projette toujours depuis le début de la projection, l'Agenda les range hors horloge.
+
+**Fait (lot 6b, 2026-09-30, édition)** — `screens/ruleform.rs`, `gridraft.rs` (le TOML de la grille modifié par `toml_edit`, une règle à la fois, commentaires gardés, valeurs écrites telles que saisies) :
+- Grille regardée : l'active par défaut ; `G` liste les grilles du nœud (active ●, affichée, règles, premier problème traduit) : `Entrée` affiche une grille en préparation (bandeau orange « GRILLE EN PRÉPARATION », projection / couverture / règles de CE fichier), `a` l'active (confirmation), `c` la copie sous un nouveau nom.
+- `n` (vue jour) : nature (tranche, rendez-vous, every, live, plancher), puis formulaire pré-rempli au créneau choisi — id libre `evt-AAAAMMJJ-HHMM`, heure de début / du rendez-vous ; aucune date imposée (règle récurrente par défaut). `l` (jour, semaine) : toutes les règles de la grille, y compris hors horloge, désactivées ou d'autres jours — `Entrée`/`e` modifier, `d` supprimer, `n` nouvelle. `e` : la règle de l'élément choisi dans l'inspecteur (`Tab`). `d` : suppression (confirmation qui dit si l'antenne change).
+- Formulaire par nature (id, activée, playlist — `Entrée` ouvre le sélecteur —, DJ, début / fin, repère à heure fixe ou toutes les N min, soft / hard, péremption, cadence temps / pistes, jours à cocher, dates) ; aide de format sous le champ. 300 ms après une frappe : `ValidateGrid` du brouillon (✗ et raison traduite sous le champ fautif ; problèmes du reste de la grille listés à part : ils bloquent aussi) et `Preview` du brouillon sur la journée (bases avec leur règle, repères de CETTE règle, ou « ne joue pas ce jour-là »).
+- `Ctrl+S` : `SaveGrid` avec la révision lue ; active = à l'antenne aussitôt. Conflit : rien d'écrit, `Ctrl+R` relit le fichier et y reporte la saisie (la règle retrouvée par son id ; disparue = ajoutée). `Échap` sur une saisie modifiée : deuxième `Échap` pour abandonner.
+- `u` : heures en UTC ou en heure de la station (jours, créneaux, repères, inspecteur, semaine ; le curseur garde son instant). Les règles restent en heure civile de la station (la grammaire) : le formulaire le dit, la légende aussi.
+- Écarts : pas de comparaison côte à côte au conflit (le report de la saisie la remplace) ; pas de changement de nature d'une règle (la supprimer, en créer une autre) ; DJ saisi à la main (pas de liste des DJ par RPC).
+
 **Jour** (défaut) : timeline verticale 00:00→24:00 dans le fuseau station.
 - Bandes de fond : base active (`day_part`, `base_rotation`), une couleur par playlist, nom dans la bande. Un `day_part` qui traverse minuit est dessiné sur les deux jours.
-- Repères : `at_clock` (heure exacte, soft/hard), `every` temporel (`~`), créneaux `live` (DJ).
-- Sous la timeline : règles au compteur (indicatif), sans heure.
+- Repères : `at_clock` (heure exacte, soft/hard), créneaux `live` (DJ).
+- Sous la timeline : zone hors horloge, les `every` (à l'intervalle ou au compteur), sans heure.
 - Inspecteur : règle, playlist, pool (`selected_count`, `total_duration`), décomposition de groupe (membres, `take`/`runtime`, offsets), verdict `CheckCoverage` (pool vide, anti-répétition intenable, source trop courte) en couleur.
 - Heures répétées ou sautées au changement d'heure : affichées avec leur décalage UTC (`at_local` du preview).
 
@@ -464,8 +487,8 @@ Vues déclaratives des plugins chargés (§4.3). Base de chaque plugin : `DbInfo
 | 2 ✅ | TUI : Contrôle (+ actions depuis Antenne : pause, suivant, override) ; stationd : incidents de grille (prévus / constatés, ligne fautive) | 1 |
 | 3 ✅ | stationd : `PlaylistService` (`Validate` / `PreviewPool` / `Save`, écriture + révision, diagnostics par champ), `SearchMedia` | — |
 | 4 ✅ | TUI : Médias (4a : recherche, filtres, tri, pages, override ; 4b : fiche, sélection multiple, ajout à une statique, mise en file) ; Playlists (4b : liste + éditeur) ; stationd : références dans `List`, `Containing`, `Plays.key` | 3 |
-| 5 | stationd : diagnostics de grille, `SaveGrid` | — |
-| 6 | TUI : Agenda (jour, semaine, couverture, édition) | 5 pour l'édition |
+| 5 ✅ | stationd : grilles en fichiers (une active), diagnostics de grille, `SaveGrid`, projection d'un brouillon | — |
+| 6 ✅ | TUI : Agenda (6a jour, semaine, couverture ; 6b édition, grilles, UTC) | 5 pour l'édition |
 | 7 | stationd : `ScanWatch`, `EventService`, `PluginService.Call/Views`, `media_meta_write` | — |
 | 8 | Plugin `tags` (Type + tags libres, méthodes §5.6, reprise de `TXXX:Type`) + TUI : Type dans Médias, Tags, Système, Plugins | 7 |
 

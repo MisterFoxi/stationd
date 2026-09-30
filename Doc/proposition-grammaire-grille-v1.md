@@ -10,7 +10,7 @@ Un seul fichier grid.toml, conteneur [[rule]]. Divergence assumée avec les play
 stationd seul writer, modèle apply/export (comme les playlists). Le TOML est canonique ; les tables grid_* (famille A) sont une projection reconstructible : apply fait DROP + rebuild. L'état de lecture (famille B, compteurs Every / tokens AtClock) n'est jamais dérivé du fichier et apply n'y touche pas.
 No-silent-failure : clé inconnue, champ inapplicable au kind, ou combinaison interdite → rejet. Une grille invalide ne remplace pas la dernière grille valide.
 playlist_ref = chemin relatif de playlist, sans extension .toml, résolution insensible à la casse (cf. contrat playlists). Une ref introuvable est rejetée à l'apply — jamais avalée.
-Fuseau = config de station (IANA, obligatoire), jamais répété dans la règle. Toutes les heures civiles (start/end, at, repères every_minutes) s'entendent dans ce fuseau ; la conversion epoch↔civil (le seul point DST) vit dans clock.rs. Cf. time.md.
+Fuseau = config de station (IANA, obligatoire), jamais répété dans la règle. Toutes les heures civiles (start/end, at, repères every_minutes et minute) s'entendent dans ce fuseau ; la conversion epoch↔civil (le seul point DST) vit dans clock.rs. Cf. time.md.
 2. Racine du document
 Champ	Type	Obligatoire	Règle
 schema_version	entier	oui	exactement 1
@@ -34,7 +34,7 @@ Les champs spécifiques au kind sont gouvernés par les sections suivantes. Un c
 kind	Ancrage	Champs propres	Rôle
 base_rotation	aucun	—	le plancher : toujours résolvable, priorité la plus basse
 day_part	plage horaire	start, end	sélectionne la base active sur un créneau
-at_clock	horloge murale	every_minutes | at, mode, expiry	rendez-vous absolu qui ponctue la base
+at_clock	horloge murale	every_minutes | minute | at, mode, expiry	rendez-vous absolu qui ponctue la base
 every	dernier passage	min_tracks | min_elapsed	cooldown glissant qui ponctue la base
 live	heure de début	dj, start	ouvre la fenêtre de connexion d'un DJ (harbor) ; ne sélectionne rien
 Sélection vs injection. base_rotation et day_part résolvent la base (« quel plancher maintenant »). at_clock et every n'écrasent pas la base, ils l'injectent ponctuellement ; la base reprend derrière.
@@ -58,8 +58,9 @@ Chevauchement : la fenêtre la plus étroite gagne (la plus spécifique), égali
 Exactement un ancrage (jamais fusionnés — le piège AzuraCast d'un champ « intervalle » lu de deux façons) :
 
 Champ	Type	Sémantique
-every_minutes	entier 1–60	repères à :00, :N, :2N … < 60 dans chaque heure. Ex. 15 → :00 :15 :30 :45. N doit diviser proprement (repère résiduel plus court accepté si non).
-at	HH:MM	un repère fixe unique (ex. 08:00 flash légal)
+every_minutes	entier 1–1439	toutes les N minutes comptées depuis minuit : repères N, 2N … dans la journée, jamais 00:00 (deux cadences ne démarrent pas toutes ensemble à minuit). Ex. 45 → 00:45 01:30 … 23:15. Révisé le 2026-09-30 : avant, repères :00 :N … recalés à chaque heure (45 donnait :00 :45, soit 45 puis 15 min).
+minute	entier 0–59	un repère par heure, à :MM (top horaire, décalé ou non : 0 → :00, 58 → :58). Ajouté le 2026-09-30 (migration 0026).
+at	HH:MM	un repère fixe unique par jour (ex. 08:00 flash légal)
 Plus :
 
 Champ	Type	Défaut	Rôle

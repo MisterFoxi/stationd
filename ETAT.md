@@ -5,7 +5,7 @@ sans reconstruire le contexte. À distinguer des docs de `Doc/` (décisions
 d'architecture durables) : ce fichier-ci est volatil, à mettre à jour à
 chaque session.
 
-Dernière mise à jour : 2026-09-29 (A4 lot 4b + édition des tags des médias).
+Dernière mise à jour : 2026-09-30 (A4 lots 5 et 6b : grilles en fichiers, édition dans l'Agenda).
 
 
 ## Où on en est en une phrase
@@ -413,9 +413,83 @@ durée `s`/`m`/`h`/`d` (`parse_duration_secs`) ; sans date de création = aucun
 - Tests : fenêtre qui glisse (materialize à now, now+7 j, now+9 j), sans
   date exclu, SQL / refus, recherche.
 
-**Suivant** : valider 4b sur devstationd, puis lot 5 (stationd : diagnostics
-de grille, `SaveGrid`) et lot 6 (Agenda). Reste de Médias : Type / tags et
-panneaux de répartition (lot 8), jauge de scan (lot 7).
+**Lot 6a fait (2026-09-29) — Agenda en lecture** (jour, semaine,
+couverture). 539 tests daemon + 60 TUI verts ; clippy : TUI propre, daemon
+sans nouvel avertissement. Essayé en réel dans l'env de préparation
+(stationd sans Liquidsoap, grille et playlists de `examples/`, TUI en
+120×35, 120×40, 100×30, 80×24 ; fr/de) : jour, inspecteur, semaine en grille
+et en liste, couverture, calendrier, `p` vers Playlists, nuit du 25/10 (25 h).
+**À valider sur devstationd.** Dossier §3.6, §5.4 ; `Doc/admin.md`.
+- stationd (D3, D12), chacun visible en CLI :
+  - `PreviewResponse.live` (`LiveWindow`) : fenêtres de connexion des règles
+    `live` projetées minute par minute (`GridPreview.live`,
+    `LiveProjection`) ; `stationctl schedule preview` les liste à la fin.
+  - `CoverageEntry.reasons` / `CoverageMember.reasons` (`CoverageReason`,
+    17 codes + paramètres typés) : les causes du verdict en opcodes.
+    `grid_engine::Reason` remplace les chaînes ; `detail` en est le rendu
+    français (`Reason::text`), mot pour mot comme avant (tests existants
+    inchangés, `schedule check` identique).
+- TUI : `src/agenda.rs` (découpage pur : minuits civils, créneaux réels,
+  cases de la semaine avec heure sautée / répétée, bandes et repères tirés
+  de `Preview` ; testé sur les nuits de mars et d'octobre), `screens/agenda.rs`
+  (vues, inspecteur, calendrier), `rpc::agenda_read` (`Preview` + `ListRules`
+  + `CheckCoverage` en parallèle), `Handoff::Select` (Playlists sélectionne la
+  playlist, relit la liste, dit si elle manque), styles de bandes,
+  `stationd-proto` réexporte `prost_types`. Traductions fr/en/de.
+- Choix d'affichage : la projection est demandée une heure avant minuit
+  (rendez-vous en retard rejoués à la 1re minute d'une projection neuve →
+  hors écran ; base active à minuit connue) ; une base qui change sous un
+  rendez-vous commence avec lui (22:00, pas 22:02).
+
+**Correctif 2026-09-30 — `draw::rng` laissait un verrou d'écriture** (test
+`draws_move_on_and_scopes_are_independent` en échec « database is locked » sur
+devstationd, suite complète en 306 s) : le `INSERT … RETURNING` du compteur de
+tirages était lu par `fetch_one`, qui rend la ligne après le premier pas — la
+transaction d'écriture restait ouverte après l'appel, et l'écrivain suivant
+sur une autre connexion du pool attendait (échec passé le délai d'attente,
+sur une machine chargée ; à l'antenne : un tirage pouvait bloquer jusqu'à 5 s).
+`fetch_all` à la place ; test `a_draw_releases_its_write_lock_before_returning`
+(écrivain sans attente juste après un tirage : 50/50 en échec avant, 0 après).
+
+**Lot 5 fait (2026-09-30) — grilles en fichiers, une active.** 548 tests
+daemon verts, clippy sans nouvel avertissement ; essayé en réel (stationctl :
+grids, apply qui écrit le fichier actif, validate avec diagnostics, save /
+conflit, activate, redémarrage qui recharge l'active, fichier cassé à la main
+→ refusé, la grille appliquée reste). **À valider sur devstationd** (et au
+premier `install.sh` : `grid.toml` de la racine déplacé dans `grid/`).
+- `[grid] path` (défaut `grid`), `src/grid_files.rs` (liste, lecture, `save`
+  avec révision, `activate`, `reload`, chargement au démarrage, `apply`
+  → fichier actif), migration `0025_grid_active.sql`.
+- `grid_toml::diagnose` / `diagnose_partial` : tous les problèmes, chacun sur
+  `rule[n].champ`, codes `GridCode` ; `parse_grid` inchangé (premier
+  problème, mêmes messages). Refs et DJ : `diagnose_refs_at` /
+  `diagnose_djs_at`, `GridEngine::diagnose_rules(_at)`.
+- `GridEngine::preview_of` / `check_coverage_of` (une grille donnée au lieu
+  de l'appliquée), `replace_rules`.
+- Proto `schedule_v1` : `ListGrids`, `GetGrid`, `SaveGrid`, `ActivateGrid`,
+  `ReloadGrid`, `GridDiagnostic` (22 codes), `ValidateGridResponse` /
+  `ApplyGridResponse` avec diagnostics (plus d'erreur gRPC pour une grille
+  refusée : `ok = false`), `grid` / `draft_toml` sur `Preview`,
+  `CheckCoverage`, `ListRules`.
+- CLI : `schedule grids|show|save|activate|reload`, `--grid` / `--draft`.
+- `install.sh` crée `grid/` (2770) et y déplace `grid.toml`.
+
+**Lot 6b fait (2026-09-30) — créer / modifier un event dans l'Agenda.**
+64 tests TUI verts, clippy propre ; essayé en réel (130×40, 120×34) : event
+créé au créneau (tranche 10:30 ce jour seulement) → à l'antenne, heure
+modifiée, grille copiée (`ete2`), affichée en préparation, règle supprimée
+dedans, grille activée, bascule UTC. **À valider sur devstationd.** Dossier §5.4.
+- `gridraft.rs` (la règle dans le TOML par `toml_edit`), `screens/ruleform.rs`
+  (formulaire, diagnostics, journée avec la modification, `Ctrl+S`, conflit
+  → `Ctrl+R` relit et reporte la saisie), Agenda : `n` / `e` / `d`, `G`
+  (grilles : voir, `a` activer, `c` copier), `u` (UTC / heure station).
+- Actions : `ActivateGrid`, `SaveGrid` (suppression), `CopyGrid`.
+- Les heures des règles restent civiles station (grammaire) : dit dans le
+  formulaire et dans la légende en mode UTC.
+
+**Suivant** : valider 4b, 6a, 5 et 6b sur devstationd. Reste de Médias :
+Type / tags et panneaux de répartition (lot 8), jauge de scan (lot 7) ;
+lot A (login) avant tout usage distant.
 
 ### Après l'alpha (non bloquant)
 
@@ -440,6 +514,42 @@ panneaux de répartition (lot 8), jauge de scan (lot 7).
 ---
 
 ## Fait
+
+### — Agenda : zone « hors horloge » pour les `every` (2026-09-30) —
+
+- Les `every` (à l'intervalle `min_elapsed` comme au compteur `min_tracks`)
+  ne sont plus sur la ligne du temps (fini les `~` projetés) : ils ont leur
+  zone encadrée sous la vue jour et semaine (playlist, cadence, règle), car
+  leur heure réelle suit le dernier passage ou le nombre de pistes. Au plus
+  5 lignes, le reste par `l`. `Projection.floating` (ids de règle vus dans
+  la période), `MarkKind::Every` supprimé ; légende et résumé de semaine
+  sans `~`. `stationctl schedule preview` inchangé.
+- Agenda : plus de dates imposées à la création (`n`) ; `l` liste toutes
+  les règles de la grille pour les modifier / supprimer.
+
+
+### — `at_clock` : ancrage `minute`, `every_minutes` compté depuis minuit (2026-09-30) —
+
+- **Constat** : `every_minutes = N` posait les repères :00, :N, :2N… recalés
+  à chaque heure : 45 donnait :00 :45, soit 45 puis 15 min ; et un top décalé
+  (:58 chaque heure) n'était pas exprimable.
+- **`every_minutes = N`** (1..1439) : toutes les N minutes **comptées depuis
+  minuit**, repères N, 2N… dans la journée, **jamais 00:00** (deux cadences,
+  30 et 45, ne démarrent pas ensemble à minuit). 45 → 00:45 01:30 … 23:15 ;
+  60 → 01:00 … 23:00. Aucune contrainte sur N (7 marche : 00:07 00:14 …).
+- **`minute = MM`** (nouveau, 0..59) : un repère par heure à :MM ;
+  `minute = 0` = top horaire (00:00 compris), `minute = 58` = top décalé.
+- `at = "HH:MM"` inchangé. Un seul ancrage par règle (`CONFLICT` sinon).
+- **Moteur** : `ClockAnchor::Minute(u8)`, `at_clock_due` raisonne en minutes
+  depuis minuit. Index `grid_at_clock` reconstruit (migration **0026** :
+  `at_minute` seul admis ; **0027** : `every_minutes` 1..1439). Proto `AtClock.minute`
+  (`optional uint32`, champ 6).
+- **TUI** : « repère » = une fois par jour / chaque heure à la minute /
+  plusieurs fois par heure ; libellés « à :58 de chaque heure », « toutes
+  les 45 min à partir de 00:45 ».
+- **Changement de comportement** : un `every_minutes` existant ne passe plus
+  à 00:00 (ex. 60 → 01:00…23:00). Pour un top à chaque heure, minuit
+  compris : `minute = 0` (fait dans `examples/grid.toml`).
 
 ### — Dev : build release sur la branche `main` (2026-09-28) —
 

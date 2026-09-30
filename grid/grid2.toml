@@ -18,19 +18,6 @@ playlist_ref = "rotation"
 
 
 
-[[rule]]
-id="TransFM"
-kind ="at_clock"
-at = "09:00"
-playlist_ref="transfm"
-
-[[rule]]
-id="RockFM"
-kind ="at_clock"
-at = "10:00"
-expiry ="30m"
-playlist_ref="rockfm"
-
 
 #[[rule]]
 #id="Classic"
@@ -41,31 +28,9 @@ playlist_ref="rockfm"
 
 
 [[rule]]
-id="test"
-playlist_ref="test"
-kind="day_part"
-start="14:30"
-end = "15:50"
+id = "novelties"
+kind= "every"
+min_tracks = 20
+playlist_ref="freshsongs"
 
 
-
-[[rule]]
-id="Filler"
-kind = "day_part"
-playlist_ref="Filler"
-start = "06:00"
-end = "08:00"
-
-
-
-
-# L'émission Homestone : au-dessus du plancher, sur un créneau. Si un membre
-# est vide (épisode manquant) et le groupe est en abort → on retombe sur le
-# plancher au lieu du dead-air.
-[[rule]]
-id = "homestone"
-kind = "day_part"
-playlist_ref = "homestone-chronicles/homestone-chronicles"
-start = "16:00"
-end   = "17:00"
-days  = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]

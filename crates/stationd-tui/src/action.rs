@@ -52,6 +52,13 @@ pub enum Action {
     SetTags { targets: Vec<(String, String)>, edit: Box<TagChanges> },
     Plugin { name: String, verb: PluginVerb },
     Shutdown { force: bool },
+    /// La grille `name` devient l'active (`ScheduleService.ActivateGrid`).
+    ActivateGrid { name: String },
+    /// Écrit une grille déjà modifiée (suppression d'une règle) avec la
+    /// révision lue ; `done` = message en cas de succès.
+    SaveGrid { name: String, toml: String, revision: String, done: String },
+    /// Nouvelle grille `to`, copie du fichier `from` (non active).
+    CopyGrid { from: String, to: String },
 }
 
 /// Une liste de valeurs à écrire (genres, `Type`…).
@@ -464,6 +471,43 @@ pub async fn run(action: Action, channel: Channel, tz: Option<jiff::tz::TimeZone
                 ..Done::msg(if r.parked { tr!("done-shutdown") } else { tr!("done-shutdown-fallback") })
             })
         }
+        Action::ActivateGrid { name } => {
+            let r = rpc::activate_grid(channel, name.clone()).await?;
+            if r.ok {
+                Ok(Done::msg(tr!("done-grid-activated", grid = r.name, n = r.rules)))
+            } else {
+                Err(grid_refusal(&tr!("done-grid-not-activated", grid = name), &r.diagnostics))
+            }
+        }
+        Action::SaveGrid { name, toml, revision, done } => {
+            let r = rpc::save_grid(channel, name.clone(), toml, revision).await?;
+            match (r.ok, r.conflict) {
+                (true, _) => Ok(Done::msg(done)),
+                (_, true) => Err(tr!("done-grid-conflict", grid = name)),
+                _ => Err(grid_refusal(&tr!("done-grid-not-saved", grid = name), &r.diagnostics)),
+            }
+        }
+        Action::CopyGrid { from, to } => {
+            let g = rpc::grid_text(channel.clone(), from.clone()).await?;
+            let r = rpc::save_grid(channel, to.clone(), g.toml, String::new()).await?;
+            match (r.ok, r.conflict) {
+                (true, _) => Ok(Done::msg(tr!("done-grid-copied", from = from, to = to))),
+                (_, true) => Err(tr!("done-grid-exists", grid = to)),
+                _ => Err(grid_refusal(&tr!("done-grid-not-saved", grid = to), &r.diagnostics)),
+            }
+        }
+    }
+}
+
+/// Un refus de grille : la raison, puis le premier problème traduit.
+fn grid_refusal(head: &str, diags: &[stationd_proto::schedule::GridDiagnostic]) -> String {
+    match diags.first() {
+        Some(d) => {
+            let at = if d.rule_id.is_empty() { d.field_path.clone() } else { d.rule_id.clone() };
+            let more = if diags.len() > 1 { tr!("done-grid-more", n = diags.len() as i64 - 1) } else { String::new() };
+            format!("{head} — {at} : {}{more}", crate::screens::grid_diag_text(d))
+        }
+        None => head.to_string(),
     }
 }
 

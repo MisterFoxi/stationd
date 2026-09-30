@@ -553,13 +553,13 @@ pub fn parse_with_diagnostics(text: &str) -> Result<Playlist, Diag> {
     }
 }
 
-fn join_path(base: &str, name: &str) -> String {
+pub(crate) fn join_path(base: &str, name: &str) -> String {
     if base.is_empty() { name.to_string() } else { format!("{base}.{name}") }
 }
 
 /// `unknown field `x`, expected one of `a`, `b`` → (UnknownField, x, "a, b");
 /// `missing field `x`` → (MissingField, x, -); anything else → BadValue.
-fn classify_serde_error(msg: &str) -> (DiagCode, Option<String>, Option<String>) {
+pub(crate) fn classify_serde_error(msg: &str) -> (DiagCode, Option<String>, Option<String>) {
     let quoted = |s: &str| -> Option<String> {
         let a = s.find('`')?;
         let b = s[a + 1..].find('`')?;
@@ -583,7 +583,7 @@ fn classify_serde_error(msg: &str) -> (DiagCode, Option<String>, Option<String>)
     (DiagCode::BadValue, None, None)
 }
 
-fn line_col(text: &str, offset: usize) -> (usize, usize) {
+pub(crate) fn line_col(text: &str, offset: usize) -> (usize, usize) {
     let before = &text[..offset.min(text.len())];
     let line = before.matches('\n').count() + 1;
     let col = before.rsplit('\n').next().map_or(0, |l| l.chars().count()) + 1;
@@ -593,7 +593,7 @@ fn line_col(text: &str, offset: usize) -> (usize, usize) {
 /// The field path of the innermost key / table whose text contains the byte
 /// range `start..end` of the document (1-based indexes for arrays of
 /// tables). Empty = root.
-fn path_at(doc: &toml_edit::ImDocument<&str>, start: usize, end: usize) -> String {
+pub(crate) fn path_at(doc: &toml_edit::ImDocument<&str>, start: usize, end: usize) -> String {
     let offset = start;
     // (path, start, end) of every key/value and table header; the smallest
     // range containing `offset` wins, else the last header before it.

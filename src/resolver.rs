@@ -152,9 +152,13 @@ pub enum RuleKind {
 /// Where an AtClock's rendez-vous falls within the hour.
 #[derive(Debug, Clone, Copy)]
 pub enum ClockAnchor {
-    /// Marks at minutes 0, N, 2N… < 60 (N divides the hour cleanly, 1..=60).
-    /// e.g. 15 → :00 :15 :30 :45. Reuses the `alignment = "hour"` semantics.
+    /// Every N minutes, counted from local midnight: marks N, 2N, 3N…
+    /// minutes after 00:00, within the day (45 → 00:45 01:30 … 23:15; 60 →
+    /// 01:00 … 23:00). Never 00:00 itself: cadences do not all collide there.
     EveryMinutes(u32),
+    /// One mark per hour, at this minute (0..=59): `Minute(58)` → :58 every
+    /// hour — the top of the hour, possibly offset.
+    Minute(u8),
     /// A single fixed time-of-day (e.g. legal top-of-hour news at 08:00).
     At(WallClock),
 }
@@ -580,22 +584,35 @@ fn at_clock_due(
     now: LocalNow,
 ) -> Option<String> {
     let now_min = now.wall.minutes();
-    let mark_min = match anchor {
-        ClockAnchor::EveryMinutes(n) if n >= 1 && n <= 60 => (now.wall.minute as u32 / n) * n,
+    // The repère at or before `now`, in minutes since local midnight.
+    let mark_abs = match anchor {
+        // N, 2N, 3N… minutes after midnight — never 00:00 itself, so two
+        // cadences (30, 45) do not all start together at midnight.
+        ClockAnchor::EveryMinutes(n) if n >= 1 => {
+            let mark = (now_min / n) * n;
+            if mark == 0 {
+                return None; // before the first repère of the day (N after midnight)
+            }
+            mark
+        }
         ClockAnchor::EveryMinutes(_) => return None, // invalid N (validated upstream)
+        ClockAnchor::Minute(m) if m < 60 => {
+            let mark = now.wall.hour as u32 * 60 + m as u32;
+            if now_min < mark {
+                return None; // repère not reached yet this hour
+            }
+            mark
+        }
+        ClockAnchor::Minute(_) => return None, // invalid minute (validated upstream)
         ClockAnchor::At(at) => {
+            let mark = at.hour as u32 * 60 + at.minute as u32;
             // Only within the same hour as the fixed mark.
-            if at.hour as u32 != now.wall.hour as u32 {
+            if at.hour != now.wall.hour || now_min < mark {
                 return None;
             }
-            at.minute as u32
+            mark
         }
     };
-    // For EveryMinutes the mark is within the current hour by construction.
-    let mark_abs = now.wall.hour as u32 * 60 + mark_min;
-    if now_min < mark_abs {
-        return None; // repère not reached yet this hour
-    }
     let delay_secs = (now_min - mark_abs) as u64 * 60;
     if let Some(expiry) = expiry_secs {
         if delay_secs > expiry {
@@ -603,8 +620,8 @@ fn at_clock_due(
         }
     }
     let mark = WallClock {
-        hour: now.wall.hour,
-        minute: mark_min as u8,
+        hour: (mark_abs / 60) as u8,
+        minute: (mark_abs % 60) as u8,
     };
     Some(occurrence_token(rule_id, now.date, mark))
 }
@@ -697,6 +714,43 @@ mod tests {
             validity: Validity::default(),
             kind: RuleKind::Every { playlist_ref: r.into(), cadence: Cadence::Tracks(n) },
         }
+    }
+
+    #[test]
+    fn every_minutes_counts_from_midnight_and_skips_it() {
+        let grid = Grid { rules: vec![base("floor", "general"), at_clock("pl", "p45", 45, Mode::Soft, Some(60))] };
+        let token = |h, m| resolve_next(now_at(h, m), &grid, &PlaybackState::default()).mark_taken;
+        // Not at midnight: the first repère is 00:45.
+        assert_eq!(winner(&grid, now_at(0, 0)).as_deref(), Some("general"));
+        assert_eq!(winner(&grid, now_at(0, 44)).as_deref(), Some("general"));
+        for (h, m) in [(0, 45), (1, 30), (2, 15), (3, 0), (23, 15)] {
+            assert_eq!(winner(&grid, now_at(h, m)).as_deref(), Some("p45"), "{h}:{m}");
+            let t = token(h, m).unwrap();
+            assert!(t.ends_with(&format!("T{h:02}:{m:02}")), "{t}");
+        }
+        // Between two repères, past the expiry: nothing.
+        assert_eq!(winner(&grid, now_at(1, 0)).as_deref(), Some("general"));
+        // A 7-minute cadence: 00:07, 00:14 … 01:03 (63 = 9 × 7).
+        let seven = Grid { rules: vec![base("floor", "general"), at_clock("s", "p7", 7, Mode::Soft, Some(0))] };
+        assert_eq!(winner(&seven, now_at(1, 3)).as_deref(), Some("p7"));
+        assert_eq!(winner(&seven, now_at(1, 0)).as_deref(), Some("general"));
+    }
+
+    #[test]
+    fn a_minute_anchor_marks_every_hour_at_that_minute() {
+        let mut news = at_clock("news", "flash", 60, Mode::Soft, Some(60));
+        if let RuleKind::AtClock { anchor, .. } = &mut news.kind {
+            *anchor = ClockAnchor::Minute(58);
+        }
+        let grid = Grid { rules: vec![base("floor", "general"), news] };
+        // Before :58 nothing; at :58 of any hour, the flash; past its expiry, gone.
+        assert_eq!(winner(&grid, now_at(9, 57)).as_deref(), Some("general"));
+        assert_eq!(winner(&grid, now_at(9, 58)).as_deref(), Some("flash"));
+        assert_eq!(winner(&grid, now_at(14, 58)).as_deref(), Some("flash"));
+        assert_eq!(winner(&grid, now_at(14, 59)).as_deref(), Some("flash"));
+        assert_eq!(winner(&grid, now_at(15, 0)).as_deref(), Some("general"));
+        let d = resolve_next(now_at(14, 58), &grid, &PlaybackState::default());
+        assert!(d.mark_taken.as_deref().is_some_and(|t| t.ends_with("T14:58")), "{:?}", d.mark_taken);
     }
 
     #[test]

@@ -98,6 +98,8 @@ pub struct Playlists {
     opening: Option<u64>,
     /// Choix du mode d'une nouvelle playlist (`n`).
     new_mode: Option<usize>,
+    /// Playlist à montrer dès que la liste est lue (depuis l'agenda).
+    reveal: Option<String>,
 }
 
 impl Default for Playlists {
@@ -119,6 +121,7 @@ impl Default for Playlists {
             editor: None,
             opening: None,
             new_mode: None,
+            reveal: None,
         }
     }
 }
@@ -155,6 +158,23 @@ impl Playlists {
             Sort::Mode => v.sort_by(|a, b| a.mode.cmp(&b.mode).then(a.rel_path.cmp(&b.rel_path))),
         }
         v
+    }
+
+    /// Sélectionne la playlist `reference` (casse ignorée, comme les refs de
+    /// la grille) ; le filtre est vidé pour qu'elle soit visible. Rend faux
+    /// si la liste ne la contient pas.
+    fn reveal(&mut self, reference: &str, ctx: &mut Global) -> bool {
+        let Some(p) = self.rows.iter().find(|p| p.rel_path.eq_ignore_ascii_case(reference)) else {
+            return false;
+        };
+        let key = key_of(p);
+        self.filter.set_text("");
+        self.filtering = false;
+        if self.selected.as_deref() != Some(key.as_str()) {
+            self.selected = Some(key);
+            self.settle(ctx);
+        }
+        true
     }
 
     fn index(&self) -> usize {
@@ -405,7 +425,15 @@ impl Screen for Playlists {
     }
 
     fn enter(&mut self, ctx: &mut Global) -> Result<(), Error> {
-        if let Some(Handoff::AddFiles { reference, files }) = ctx.handoff.take() {
+        let handoff = ctx.handoff.take();
+        if let Some(Handoff::Select { reference }) = &handoff {
+            // Relue pour la trouver à jour ; un brouillon ouvert reste ouvert
+            // (la liste la montre à sa fermeture).
+            self.reveal = Some(reference.clone());
+            self.load(ctx);
+            return Ok(());
+        }
+        if let Some(Handoff::AddFiles { reference, files }) = handoff {
             match (reference, self.editor.as_mut()) {
                 // Un brouillon est déjà ouvert sur cette playlist : on y ajoute.
                 (Some(r), Some(ed)) if editor_ref_is(ed, &r) => ed.add_files(&files, ctx),
@@ -469,6 +497,14 @@ impl Screen for Playlists {
                             Ok(rows) => {
                                 self.rows = rows.clone();
                                 self.error = None;
+                                if let Some(r) = self.reveal.take()
+                                    && !self.reveal(&r, ctx)
+                                {
+                                    ctx.open(Modal::Info(Info {
+                                        title: tr!("pl-reveal-missing-title"),
+                                        lines: vec![tr!("pl-reveal-missing", playlist = r)],
+                                    }));
+                                }
                                 // La sélection reste sur sa playlist si elle existe encore.
                                 let vis = self.visible();
                                 let still = self.selected.as_ref().is_some_and(|k| vis.iter().any(|p| key_of(p) == *k));

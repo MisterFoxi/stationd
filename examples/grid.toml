@@ -51,13 +51,15 @@ kind         = "every"
 playlist_ref = "dedicaces"
 min_elapsed  = "30m"
 
-# Top horaire : un jingle en début d'heure, à la fin de la piste en cours
-# (soft) ; abandonné s'il n'a pas pu passer dans les 5 minutes.
+# Top horaire : un jingle à :00 de chaque heure (`minute = 58` le mettrait à
+# :58), à la fin de la piste en cours (soft) ; abandonné s'il n'a pas pu
+# passer dans les 5 minutes. Une cadence : `every_minutes` (comptée depuis
+# minuit : 45 → 00:45 01:30 … 23:15).
 [[rule]]
 id            = "top-horaire"
 kind          = "at_clock"
 playlist_ref  = "jingles"
-every_minutes = 60
+minute        = 0
 mode          = "soft"
 expiry        = "5m"
 
