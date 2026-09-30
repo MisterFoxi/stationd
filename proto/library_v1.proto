@@ -62,6 +62,110 @@ service LibraryService {
   // seulement (mp3, wav, aiff) : autre format = failed_precondition ; valeur
   // invalide = invalid_argument.
   rpc SetTags(SetTagsRequest) returns (SetTagsResponse);
+
+  // Avancement du scan : l'état courant, puis chaque changement (phase,
+  // fichiers lus / trouvés), et comment le dernier s'est terminé. Le flux
+  // se termine à l'arrêt de stationd.
+  rpc WatchScan(WatchScanRequest) returns (stream ScanStatus);
+
+  // Les valeurs par ORIGINE, parmi les médias disponibles : le genre du
+  // fichier (TCON, origin = ""), puis chaque TXXX source du plugin
+  // custom-tags (ex. "Type"), même vide. Effectifs, graphies (plus d'une =
+  // incohérence), médias sans valeur. Rempli par le scan (vide avant le
+  // premier scan qui suit la migration 0028).
+  rpc ListTagValues(ListTagValuesRequest) returns (ListTagValuesResponse);
+
+  // Renommer une valeur d'une origine sur toute la bibliothèque (fusion si
+  // `to` existe déjà). `dry_run` : l'aperçu seul (fichiers, playlists dont un
+  // filtre genre la nomme), rien d'écrit. Sinon fichier par fichier, comme
+  // SetTags (relu, vérifié) : un événement par fichier, puis le bilan ; un
+  // fichier en échec est rapporté, les autres continuent.
+  rpc RenameTagValue(RenameTagValueRequest) returns (stream RenameTagValueEvent);
+}
+
+message WatchScanRequest {}
+
+message ScanStatus {
+  Phase phase = 1;
+  // READING : fichiers lus / fichiers audio trouvés par le parcours.
+  // ANALYZING : mp3 analysés / mp3 sans BPM à analyser.
+  uint64 done = 2;
+  uint64 total = 3;
+  int64 started_at = 4;      // epoch s, 0 = jamais
+  ScanEnd last = 5;          // absent = aucun scan depuis le démarrage
+
+  enum Phase {
+    PHASE_UNSPECIFIED = 0;
+    IDLE = 1;                // pas de scan en cours
+    LISTING = 2;             // parcours des dossiers
+    READING = 3;             // lecture des tags, fichier par fichier
+    ANALYZING = 4;           // estimation des BPM manquants
+    PLUGINS = 5;             // on_scan des plugins
+    WRITING = 6;             // réécriture des valeurs dérivées
+    INDEXING = 7;            // réconciliation de l'index
+  }
+}
+
+message ScanEnd {
+  int64 finished_at = 1;
+  bool ok = 2;
+  string error = 3;          // ok = false
+  uint32 found = 4;
+  uint32 skipped = 5;
+  uint32 present = 6;
+  uint32 unavailable = 7;
+  uint32 vanished = 8;
+}
+
+message ListTagValuesRequest {}
+
+message ListTagValuesResponse {
+  repeated TagOrigin origins = 1;
+}
+
+message TagOrigin {
+  string origin = 1;                // "" = genre du fichier (TCON)
+  repeated TagValueCount values = 2; // trié par clé repliée
+  uint32 without = 3;               // médias disponibles sans valeur
+}
+
+message TagValueCount {
+  string value = 1;                 // la graphie la plus fréquente
+  uint32 count = 2;                 // médias qui la portent
+  repeated string spellings = 3;
+}
+
+message RenameTagValueRequest {
+  string origin = 1;
+  string from = 2;
+  string to = 3;
+  bool dry_run = 4;
+}
+
+message RenameTagValueEvent {
+  oneof event {
+    RenamePreview preview = 1;      // dry_run : seul événement
+    uint64 started = 2;             // nombre de fichiers à changer
+    RenameFile file = 3;
+    RenameDone done = 4;
+  }
+}
+
+message RenamePreview {
+  repeated string files = 1;
+  repeated string playlists = 2;    // noms des playlists dont un filtre genre nomme la valeur
+  bool merges = 3;                  // `to` existe déjà pour cette origine
+}
+
+message RenameFile {
+  string rel_path = 1;
+  string error = 2;                 // vide = changé (ou valeur déjà absente)
+}
+
+message RenameDone {
+  uint64 changed = 1;
+  uint64 unchanged = 2;
+  uint64 failed = 3;
 }
 
 message GetTagsRequest {

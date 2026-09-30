@@ -21,7 +21,7 @@
 use std::path::{Path, PathBuf};
 
 use sqlx::SqlitePool;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::media::{self, ScanError, ScanReport};
 use crate::media_tags::{self, StandardTags, TagEdit, TagError};
@@ -95,6 +95,22 @@ enum Command {
         edit: TagEdit,
         reply: oneshot::Sender<Result<TagsWritten, LibraryError>>,
     },
+    TagInventory {
+        reply: oneshot::Sender<Result<Vec<media_index::OriginInventory>, LibraryError>>,
+    },
+    RenamePreview {
+        origin: String,
+        from: String,
+        to: String,
+        reply: oneshot::Sender<Result<RenamePreview, LibraryError>>,
+    },
+    Rename {
+        origin: String,
+        from: String,
+        to: String,
+        steps: mpsc::Sender<RenameStep>,
+        reply: oneshot::Sender<Result<(), LibraryError>>,
+    },
 }
 
 /// The tags of a file and their revision, with what the editor needs
@@ -126,9 +142,121 @@ pub struct TagsWritten {
 #[derive(Clone)]
 pub struct LibraryHandle {
     tx: mpsc::Sender<Command>,
+    status: watch::Receiver<ScanStatus>,
+}
+
+/// Where a scan is. `phase` = `Idle` between scans; `last` = how the last
+/// one ended (kept until the next one ends).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ScanStatus {
+    pub phase: ScanPhase,
+    /// Files read so far / audio files found by the walk (`Reading`).
+    pub done: u64,
+    pub total: u64,
+    /// Epoch seconds, 0 = never.
+    pub started_at: i64,
+    pub last: Option<ScanEnd>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ScanPhase {
+    #[default]
+    Idle,
+    /// Walking the directories (counting the audio files).
+    Listing,
+    /// Reading each file's tags.
+    Reading,
+    /// Estimating missing BPMs (a plugin asked for it).
+    Analyzing,
+    /// The plugins' `on_scan`.
+    Plugins,
+    /// Writing derived values back into the files.
+    Writing,
+    /// Reconciling the index.
+    Indexing,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScanEnd {
+    pub finished_at: i64,
+    /// `Ok` = the counts; `Err` = why it failed.
+    pub result: Result<ScanCounts, String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ScanCounts {
+    pub found: u64,
+    pub skipped: u64,
+    pub present: u64,
+    pub unavailable: u64,
+    pub vanished: u64,
+}
+
+/// One step of a rename across the library.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RenameStep {
+    /// The files to change are known.
+    Started { files: u64 },
+    /// One file done (`error` = why it was not changed).
+    File { rel_path: String, error: Option<String> },
+    /// All done.
+    Finished { changed: u64, unchanged: u64, failed: u64 },
+}
+
+/// What a rename would touch: the files, and the playlists whose filters
+/// name the value (they select differently afterwards).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RenamePreview {
+    pub files: Vec<String>,
+    pub playlists: Vec<String>,
+    /// `to` already exists for this origin: the rename merges into it.
+    pub merges: bool,
 }
 
 impl LibraryHandle {
+    /// The scan's progress, current value then each change.
+    pub fn watch_scan(&self) -> watch::Receiver<ScanStatus> {
+        self.status.clone()
+    }
+
+    /// Values per origin (the file's genre, then each `custom-tags` source).
+    pub async fn tag_inventory(&self) -> Result<Vec<media_index::OriginInventory>, LibraryError> {
+        let (reply, rx) = oneshot::channel();
+        self.tx.send(Command::TagInventory { reply }).await.map_err(|_| LibraryError::ActorGone)?;
+        rx.await.map_err(|_| LibraryError::ActorGone)?
+    }
+
+    /// What renaming `from` into `to` for `origin` would touch.
+    pub async fn rename_preview(&self, origin: String, from: String, to: String) -> Result<RenamePreview, LibraryError> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::RenamePreview { origin, from, to, reply })
+            .await
+            .map_err(|_| LibraryError::ActorGone)?;
+        rx.await.map_err(|_| LibraryError::ActorGone)?
+    }
+
+    /// Rename `from` into `to` for `origin`, file by file (merging when `to`
+    /// exists). Each step is sent on `steps`; returns once all are done. A
+    /// file that fails is reported and the rename goes on.
+    pub async fn rename(
+        &self,
+        origin: String,
+        from: String,
+        to: String,
+        steps: mpsc::Sender<RenameStep>,
+    ) -> Result<(), LibraryError> {
+        if from.trim().is_empty() || to.trim().is_empty() {
+            return Err(LibraryError::BadFilter("empty value".into()));
+        }
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Command::Rename { origin, from, to, steps, reply })
+            .await
+            .map_err(|_| LibraryError::ActorGone)?;
+        rx.await.map_err(|_| LibraryError::ActorGone)?
+    }
+
     /// Trigger a full scan + reconciliation. Serialised with every other
     /// library command by the owning task.
     pub async fn scan(&self) -> Result<ScanOutcome, LibraryError> {
@@ -229,11 +357,22 @@ pub fn spawn(pool: SqlitePool, root: PathBuf) -> LibraryHandle {
 /// set, runs each scan through the plugins' `on_scan` before indexing.
 pub fn spawn_with(pool: SqlitePool, root: PathBuf, plugins: Option<PluginHandle>) -> LibraryHandle {
     let (tx, mut rx) = mpsc::channel::<Command>(32);
+    let (status_tx, status) = watch::channel(ScanStatus::default());
+    let status_tx = std::sync::Arc::new(status_tx);
     tokio::spawn(async move {
         while let Some(cmd) = rx.recv().await {
             match cmd {
                 Command::Scan { reply } => {
-                    let _ = reply.send(do_scan(&pool, &root, plugins.as_ref()).await);
+                    let _ = reply.send(scan_journaled(&pool, &root, plugins.as_ref(), &status_tx).await);
+                }
+                Command::TagInventory { reply } => {
+                    let _ = reply.send(tag_inventory(&pool, plugins.as_ref()).await);
+                }
+                Command::RenamePreview { origin, from, to, reply } => {
+                    let _ = reply.send(rename_preview(&pool, &origin, &from, &to).await);
+                }
+                Command::Rename { origin, from, to, steps, reply } => {
+                    let _ = reply.send(rename(&pool, &root, plugins.as_ref(), &origin, &from, &to, &steps).await);
                 }
                 Command::List { only_available, genres, reply } => {
                     let out = media_index::list(&pool, only_available, &genres)
@@ -264,7 +403,262 @@ pub fn spawn_with(pool: SqlitePool, root: PathBuf, plugins: Option<PluginHandle>
             }
         }
     });
-    LibraryHandle { tx }
+    LibraryHandle { tx, status }
+}
+
+type StatusTx = std::sync::Arc<watch::Sender<ScanStatus>>;
+
+/// How the BPM analysis of a scan went, into the journal (the log has a
+/// line per file): estimated, not estimated, and why by kind.
+fn journal_bpm(tally: &crate::bpm_analysis::Tally) {
+    use crate::events::{record, Code, Component, Level};
+    if tally.estimated == 0 && tally.failed.is_empty() {
+        return;
+    }
+    let mut params = vec![
+        ("estimated".to_string(), tally.estimated.to_string()),
+        ("failed".to_string(), tally.failed.len().to_string()),
+    ];
+    for (kind, n) in tally.by_kind() {
+        params.push((format!("failed_{}", kind.as_str()), n.to_string()));
+    }
+    let level = if tally.failed.is_empty() { Level::Info } else { Level::Warn };
+    record(level, Component::Library, Code::BpmAnalyzed, params);
+}
+
+/// FFmpeg is there for the BPM analysis; otherwise the analysis is skipped
+/// for this scan and said once (not once per file).
+fn ffmpeg_ready() -> bool {
+    match crate::bpm_analysis::ffmpeg_available() {
+        Ok(()) => true,
+        Err(why) => {
+            tracing::error!(reason = %why, "BPM analysis skipped: FFmpeg unavailable");
+            false
+        }
+    }
+}
+
+/// A scan, its progress published and its outcome in the journal.
+async fn scan_journaled(
+    pool: &SqlitePool,
+    root: &Path,
+    plugins: Option<&PluginHandle>,
+    status: &StatusTx,
+) -> Result<ScanOutcome, LibraryError> {
+    use crate::events::{record, Code, Component, Level};
+    status.send_modify(|s| {
+        s.phase = ScanPhase::Listing;
+        s.done = 0;
+        s.total = 0;
+        s.started_at = now_epoch_seconds();
+    });
+    record(Level::Info, Component::Library, Code::ScanStarted, std::iter::empty::<(&str, &str)>());
+    let out = do_scan(pool, root, plugins, Some(status)).await;
+    let result = match &out {
+        Ok(o) => {
+            let c = ScanCounts {
+                found: o.report.found() as u64,
+                skipped: o.report.skipped_count() as u64,
+                present: o.stats.present as u64,
+                unavailable: o.stats.unavailable as u64,
+                vanished: o.stats.vanished as u64,
+            };
+            record(
+                if c.skipped > 0 { Level::Warn } else { Level::Info },
+                Component::Library,
+                Code::ScanFinished,
+                [
+                    ("found", c.found),
+                    ("skipped", c.skipped),
+                    ("present", c.present),
+                    ("unavailable", c.unavailable),
+                    ("vanished", c.vanished),
+                ],
+            );
+            Ok(c)
+        }
+        Err(e) => {
+            record(Level::Error, Component::Library, Code::ScanFailed, [("error", e.to_string())]);
+            Err(e.to_string())
+        }
+    };
+    status.send_modify(|s| {
+        s.phase = ScanPhase::Idle;
+        s.last = Some(ScanEnd { finished_at: now_epoch_seconds(), result });
+    });
+    out
+}
+
+fn phase(status: Option<&StatusTx>, phase: ScanPhase) {
+    if let Some(s) = status {
+        s.send_modify(|s| s.phase = phase);
+    }
+}
+
+/// The file's own genres (`TCON`), before the plugins add theirs.
+fn file_genres(report: &ScanReport) -> std::collections::BTreeMap<String, Vec<String>> {
+    report.media.iter().map(|m| (m.rel_path.clone(), m.genres.clone())).collect()
+}
+
+/// Where each value comes from: the file's genres (origin `""`), then the
+/// values of the user frames the `custom-tags` plugin reads as genres
+/// (origin = the source's name as declared).
+fn tag_values(
+    report: &ScanReport,
+    file_genres: &std::collections::BTreeMap<String, Vec<String>>,
+    sources: &[String],
+) -> media_index::TagValues {
+    let mut out = media_index::TagValues::new();
+    for m in &report.media {
+        let mut pairs: Vec<(String, String)> = Vec::new();
+        for g in file_genres.get(&m.rel_path).into_iter().flatten() {
+            pairs.push((String::new(), g.clone()));
+        }
+        for t in report.custom_tags.get(&m.rel_path).into_iter().flatten() {
+            if let Some(src) = sources.iter().find(|s| s.trim().eq_ignore_ascii_case(t.name.trim())) {
+                pairs.push((src.trim().to_string(), t.value.clone()));
+            }
+        }
+        out.insert(m.rel_path.clone(), pairs);
+    }
+    out
+}
+
+async fn sources_of(plugins: Option<&PluginHandle>) -> Vec<String> {
+    match plugins {
+        Some(p) => p.tag_hints().await.genre_sources,
+        None => Vec::new(),
+    }
+}
+
+async fn tag_inventory(
+    pool: &SqlitePool,
+    plugins: Option<&PluginHandle>,
+) -> Result<Vec<media_index::OriginInventory>, LibraryError> {
+    let mut origins = vec![String::new()];
+    origins.extend(sources_of(plugins).await.into_iter().map(|s| s.trim().to_string()));
+    Ok(media_index::tag_inventory(pool, &origins).await?)
+}
+
+/// Names of the playlists whose `genre` filters name `value` (case folded).
+async fn playlists_naming(pool: &SqlitePool, value: &str) -> Result<Vec<String>, LibraryError> {
+    let key = media_index::genre_key(value);
+    let rows: Vec<(String, String)> = sqlx::query_as("SELECT name, toml FROM playlists ORDER BY name").fetch_all(pool).await?;
+    let names = |v: &toml::Value| -> bool {
+        match v {
+            toml::Value::String(s) => media_index::genre_key(s) == key,
+            toml::Value::Array(a) => a.iter().any(|x| x.as_str().is_some_and(|s| media_index::genre_key(s) == key)),
+            _ => false,
+        }
+    };
+    let mut out = Vec::new();
+    for (name, text) in rows {
+        let Ok(p) = crate::playlist::Playlist::parse(&text) else { continue };
+        if p.selection.filter.iter().any(|f| f.field == "genre" && names(&f.value)) {
+            out.push(name);
+        }
+    }
+    Ok(out)
+}
+
+async fn rename_preview(pool: &SqlitePool, origin: &str, from: &str, to: &str) -> Result<RenamePreview, LibraryError> {
+    let files = media_index::files_with_value(pool, origin, from).await?;
+    let merges = media_index::genre_key(from) != media_index::genre_key(to)
+        && !media_index::files_with_value(pool, origin, to).await?.is_empty();
+    Ok(RenamePreview { files, playlists: playlists_naming(pool, from).await?, merges })
+}
+
+/// `values` with every spelling of `from` replaced by `to`, once (a value
+/// already there is not doubled). `None` = `from` is not among them.
+fn renamed(values: &[String], from: &str, to: &str) -> Option<Vec<String>> {
+    let key = media_index::genre_key(from);
+    if !values.iter().any(|v| media_index::genre_key(v) == key) {
+        return None;
+    }
+    let mut out: Vec<String> = Vec::new();
+    for v in values {
+        let v = if media_index::genre_key(v) == key { to.trim().to_string() } else { v.clone() };
+        if !out.iter().any(|x| media_index::genre_key(x) == media_index::genre_key(&v)) {
+            out.push(v);
+        }
+    }
+    Some(out)
+}
+
+async fn rename(
+    pool: &SqlitePool,
+    root: &Path,
+    plugins: Option<&PluginHandle>,
+    origin: &str,
+    from: &str,
+    to: &str,
+    steps: &mpsc::Sender<RenameStep>,
+) -> Result<(), LibraryError> {
+    use crate::events::{record, Code, Component, Level};
+    let files = media_index::files_with_value(pool, origin, from).await?;
+    // The watcher may have gone: the rename carries on regardless.
+    let _ = steps.send(RenameStep::Started { files: files.len() as u64 }).await;
+    let (mut changed, mut unchanged, mut failed) = (0u64, 0u64, 0u64);
+    for rel_path in files {
+        let outcome = rename_one(pool, root, plugins, origin, from, to, &rel_path).await;
+        let error = match outcome {
+            Ok(true) => {
+                changed += 1;
+                None
+            }
+            Ok(false) => {
+                unchanged += 1;
+                None
+            }
+            Err(e) => {
+                failed += 1;
+                Some(e.to_string())
+            }
+        };
+        let _ = steps.send(RenameStep::File { rel_path, error }).await;
+    }
+    record(
+        if failed > 0 { Level::Warn } else { Level::Info },
+        Component::Library,
+        Code::TagRenamed,
+        [
+            ("origin", origin.to_string()),
+            ("from", from.to_string()),
+            ("to", to.to_string()),
+            ("files", changed.to_string()),
+            ("failed", failed.to_string()),
+        ],
+    );
+    let _ = steps.send(RenameStep::Finished { changed, unchanged, failed }).await;
+    Ok(())
+}
+
+/// One file of a rename: read, change the value where it is written, write
+/// with the revision just read. `Ok(false)` = the value was no longer there.
+async fn rename_one(
+    pool: &SqlitePool,
+    root: &Path,
+    plugins: Option<&PluginHandle>,
+    origin: &str,
+    from: &str,
+    to: &str,
+    rel_path: &str,
+) -> Result<bool, LibraryError> {
+    let read = get_tags(pool, root, plugins, rel_path.to_string()).await?;
+    let mut edit = TagEdit::default();
+    if origin.is_empty() {
+        let Some(genres) = renamed(&read.tags.genres, from, to) else { return Ok(false) };
+        edit.genres = Some(genres);
+    } else {
+        let Some(values) = renamed(&read.tags.user_values(origin), from, to) else { return Ok(false) };
+        edit.user.insert(origin.to_string(), values);
+    }
+    let written = set_tags(pool, root, plugins, rel_path.to_string(), read.revision, edit).await?;
+    if written.conflict {
+        // Changed between the read and the write (by someone else): say so.
+        return Err(LibraryError::Tags(TagError::Io(format!("{rel_path} changed during the rename: not written"))));
+    }
+    Ok(true)
 }
 
 fn now_epoch_seconds() -> i64 {
@@ -376,6 +770,7 @@ async fn refresh_file(
     plugins: Option<&PluginHandle>,
     mut report: ScanReport,
 ) -> Result<Option<MediaRow>, LibraryError> {
+    let values = tag_values(&report, &file_genres(&report), &sources_of(plugins).await);
     if let Some(plugins) = plugins {
         enrich(&mut report, plugins).await;
     }
@@ -389,7 +784,9 @@ async fn refresh_file(
     .map_err(|e| LibraryError::Join(e.to_string()))??;
     let Some(m) = report.media.first() else { return Ok(None) };
     let meta = report.metadata.get(&m.rel_path).cloned().unwrap_or_default();
-    Ok(media_index::refresh_one_with(pool, m, Some(&meta), now_epoch_seconds()).await?)
+    let row = media_index::refresh_one_with(pool, m, Some(&meta), now_epoch_seconds()).await?;
+    media_index::replace_tag_values(pool, &values, false).await?;
+    Ok(row)
 }
 
 async fn set_tags(
@@ -438,6 +835,12 @@ async fn set_tags(
     };
     let row = refresh_file(pool, root, plugins, report).await?;
     tracing::info!(media = %rel_path, "media tags written");
+    crate::events::record(
+        crate::events::Level::Info,
+        crate::events::Component::Library,
+        crate::events::Code::TagsWritten,
+        [("media", rel_path.clone())],
+    );
     // What the editor shows next: the file as it is now (write-back included).
     let tags = get_tags(pool, root, plugins, rel_path).await?;
     Ok(TagsWritten { conflict: false, tags, row })
@@ -450,31 +853,65 @@ async fn do_scan(
     pool: &SqlitePool,
     root: &Path,
     plugins: Option<&PluginHandle>,
+    status: Option<&StatusTx>,
 ) -> Result<ScanOutcome, LibraryError> {
     let write_root = root.to_path_buf();
     let root = root.to_path_buf();
-    let mut report: ScanReport = tokio::task::spawn_blocking(move || media::scan_library(&root))
-        .await
-        .map_err(|e| LibraryError::Join(e.to_string()))??;
+    let progress_tx = status.cloned();
+    let mut report: ScanReport = tokio::task::spawn_blocking(move || {
+        media::scan_library_with(&root, &mut |done, total| {
+            if let Some(s) = &progress_tx {
+                s.send_modify(|s| {
+                    s.phase = ScanPhase::Reading;
+                    s.done = done as u64;
+                    s.total = total as u64;
+                });
+            }
+        })
+    })
+    .await
+    .map_err(|e| LibraryError::Join(e.to_string()))??;
+    let values = tag_values(&report, &file_genres(&report), &sources_of(plugins).await);
     if let Some(plugins) = plugins {
-        if plugins.analyze_missing_bpm().await {
-            let analysis_root = write_root.clone();
-            report = tokio::task::spawn_blocking(move || {
-                crate::bpm_analysis::analyze_missing(&analysis_root, &mut report);
-                report
-            }).await.map_err(|e| LibraryError::Join(e.to_string()))?;
+        match plugins.bpm_analysis().await {
+            Some(Ok(range)) if ffmpeg_ready() => {
+                phase(status, ScanPhase::Analyzing);
+                let analysis_root = write_root.clone();
+                let progress_tx = status.cloned();
+                let (r, tally) = tokio::task::spawn_blocking(move || {
+                    let tally = crate::bpm_analysis::analyze_missing_in(&analysis_root, &mut report, range, &mut |done, total| {
+                        if let Some(s) = &progress_tx {
+                            s.send_modify(|s| {
+                                s.done = done as u64;
+                                s.total = total as u64;
+                            });
+                        }
+                    });
+                    (report, tally)
+                })
+                .await
+                .map_err(|e| LibraryError::Join(e.to_string()))?;
+                report = r;
+                journal_bpm(&tally);
+            }
+            Some(Err(why)) => tracing::error!(reason = %why, "BPM analysis skipped: tempo.analyze_range unusable"),
+            _ => {}
         }
+        phase(status, ScanPhase::Plugins);
         enrich(&mut report, plugins).await;
     }
     apply_manual(&mut report);
+    phase(status, ScanPhase::Writing);
     // Host-owned MP3 writes run off the async runtime, after enrichment.
     let (report, originals) = tokio::task::spawn_blocking(move || {
         let originals = crate::scan_writeback::apply(&write_root, &mut report)?;
         Ok::<_, TagError>((report, originals))
     }).await.map_err(|e| LibraryError::Join(e.to_string()))??;
+    phase(status, ScanPhase::Indexing);
     let stats = media_index::replace_library_with_writeback(
         pool, &report.media, &report.metadata, &originals, now_epoch_seconds(),
     ).await?;
+    media_index::replace_tag_values(pool, &values, true).await?;
     Ok(ScanOutcome { report, stats })
 }
 
@@ -641,6 +1078,80 @@ mod tests {
         assert_eq!(w.tags.tempo, None);
         // Outside the root: not found.
         assert!(matches!(lib.get_tags("../x.wav".into()).await, Err(LibraryError::Tags(TagError::NotFound(_)))));
+    }
+
+    /// Give `rel` the file genres `genres`.
+    async fn genres_of(lib: &LibraryHandle, rel: &str, genres: &[&str]) {
+        let read = lib.get_tags(rel.into()).await.unwrap();
+        let edit = TagEdit { genres: Some(genres.iter().map(|g| g.to_string()).collect()), ..Default::default() };
+        assert!(!lib.set_tags(rel.into(), read.revision, edit).await.unwrap().conflict);
+    }
+
+    #[tokio::test]
+    async fn values_are_counted_per_origin_and_renamed_file_by_file() {
+        let db_dir = tempfile::tempdir().unwrap();
+        let media_dir = tempfile::tempdir().unwrap();
+        for f in ["a.wav", "b.wav", "c.wav"] {
+            wav(&media_dir.path().join(f));
+        }
+        let pool = db::init(&db_dir.path().join("t.db")).await.unwrap();
+        let lib = spawn(pool.clone(), media_dir.path().to_path_buf());
+        let status = lib.watch_scan();
+        lib.scan().await.unwrap();
+        {
+            let s = status.borrow();
+            assert_eq!(s.phase, ScanPhase::Idle);
+            assert_eq!((s.done, s.total), (3, 3));
+            assert!(matches!(&s.last, Some(ScanEnd { result: Ok(c), .. }) if c.found == 3));
+        }
+        genres_of(&lib, "a.wav", &["Jazz", "Soul"]).await;
+        genres_of(&lib, "b.wav", &["jazz"]).await;
+        genres_of(&lib, "c.wav", &["Swing"]).await;
+        sqlx::query("INSERT INTO playlists (id, name, toml) VALUES ('p1', 'Du jazz', ?1)")
+            .bind("name = \"Du jazz\"\n[selection]\nmode = \"dynamic\"\n[[selection.filter]]\nfield = \"genre\"\nop = \"has\"\nvalue = \"JAZZ\"\n")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // The file's genre: every value, all spellings together, and who has none.
+        let inv = lib.tag_inventory().await.unwrap();
+        assert_eq!(inv.len(), 1);
+        assert_eq!(inv[0].origin, "");
+        assert_eq!(inv[0].without, 0);
+        let jazz = inv[0].values.iter().find(|v| v.value.eq_ignore_ascii_case("jazz")).unwrap();
+        assert_eq!((jazz.count, jazz.spellings.len()), (2, 2));
+
+        // Preview: two files, the playlist that filters on it, a merge.
+        let p = lib.rename_preview(String::new(), "jazz".into(), "swing".into()).await.unwrap();
+        assert_eq!(p.files, ["a.wav", "b.wav"]);
+        assert_eq!(p.playlists, ["Du jazz"]);
+        assert!(p.merges);
+
+        // Rename: each file told, then the tally; values merged, not doubled.
+        let (tx, mut rx) = mpsc::channel(16);
+        lib.rename(String::new(), "jazz".into(), "Swing".into(), tx).await.unwrap();
+        let mut steps = Vec::new();
+        while let Some(s) = rx.recv().await {
+            steps.push(s);
+        }
+        assert_eq!(steps.first(), Some(&RenameStep::Started { files: 2 }));
+        assert_eq!(steps.last(), Some(&RenameStep::Finished { changed: 2, unchanged: 0, failed: 0 }));
+        assert_eq!(lib.get_tags("a.wav".into()).await.unwrap().tags.genres, ["Swing", "Soul"]);
+        assert_eq!(lib.get_tags("b.wav".into()).await.unwrap().tags.genres, ["Swing"]);
+        let inv = lib.tag_inventory().await.unwrap();
+        let names: Vec<(&str, usize)> = inv[0].values.iter().map(|v| (v.value.as_str(), v.count)).collect();
+        assert_eq!(names, [("Soul", 1), ("Swing", 3)]);
+        // The index (what playlists see) followed.
+        assert_eq!(media_index::list(&pool, true, &["jazz".into()]).await.unwrap().len(), 0);
+        assert_eq!(media_index::list(&pool, true, &["swing".into()]).await.unwrap().len(), 3);
+    }
+
+    #[test]
+    fn a_rename_replaces_every_spelling_once() {
+        let v = |xs: &[&str]| xs.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(renamed(&v(&["Jazz", "soul", "JAZZ"]), "jazz", "Swing"), Some(v(&["Swing", "soul"])));
+        assert_eq!(renamed(&v(&["Swing", "jazz"]), "jazz", "swing"), Some(v(&["Swing"])));
+        assert_eq!(renamed(&v(&["soul"]), "jazz", "Swing"), None);
     }
 }
 

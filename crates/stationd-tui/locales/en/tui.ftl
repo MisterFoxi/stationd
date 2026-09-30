@@ -167,10 +167,6 @@ planned-coming = Coming
 planned-lot = batch { $lot }
 planned-plugin-missing = plugin “{ $plugin }” not loaded
 planned-unavailable = Unavailable: { $reason }
-planned-tags-1 = Types: declared values, counts, media without a Type
-planned-tags-2 = Free tags: create, rename, merge
-planned-system-1 = Health: stationd, Liquidsoap, Icecast (mounts), live
-planned-system-2 = Live events, broadcast statistics
 planned-plugins-1 = Views declared by the loaded plugins
 planned-plugins-2 = Each plugin's database (info, read-only query)
 
@@ -1032,3 +1028,196 @@ rf-conflict = the file changed since it was opened: nothing written — Ctrl+R r
 rf-rebasing = rereading the file…
 rf-rebased = file reread, input carried over: check, then Ctrl+S
 rf-confirm-quit = unsaved changes: Esc again to drop them
+
+# ── Journal, scan, Tags, System (lots 7–8) ──────────────────────────────
+key-b = b
+key-end = End
+rpc-too-old = this stationd does not know this function (update it)
+stream-closed = stream closed by stationd
+journal-opening = journal: opening…
+help-cancel = cancel
+help-back = back
+help-reload = reload
+help-search-apply = keep the search
+help-search-clear = clear the search
+control-scan-running = scan running
+scan-phase-listing = walking the folders…
+scan-phase-reading = reading files { $done } / { $total }
+scan-phase-analyzing = estimating BPMs { $done } / { $total }
+scan-phase-plugins = plugins (on_scan)…
+scan-phase-writing = writing derived values…
+scan-phase-indexing = updating the index…
+
+sys-state = State
+sys-journal = Journal
+sys-stats = Statistics
+sys-stationd = stationd
+sys-station = station
+sys-version = version
+sys-uptime = up for
+sys-pid = process
+sys-timezone = time zone
+sys-journal-field = journal
+sys-journal-open = following ({ $n } events)
+sys-liquidsoap = Liquidsoap
+sys-not-configured = not configured
+sys-ls-air = air
+sys-ls-on-air = on air
+sys-ls-last-pull = last request
+sys-ls-started = tracks started
+sys-ls-control = control socket
+sys-ok = ok
+sys-icecast = Icecast
+sys-ic-server = server
+sys-ic-last-read = last read
+sys-ic-audience = listeners
+sys-ic-problem = problem
+sys-mount-absent = missing
+sys-mount-no-source = no source
+sys-mount-ok = fed
+sys-mount-rate = { $declared } kbit/s declared, { $real } received
+sys-mount-rate-declared = { $declared } kbit/s declared
+sys-live = Live
+sys-live-on-air = on air
+sys-live-nobody = nobody
+sys-live-harbor = harbor
+sys-live-refused = last refusal
+sys-scan = Library
+sys-scan-running = scan
+sys-scan-last = last scan
+sys-scan-last-ok = { $when }: { $found } files, { $skipped } skipped
+sys-scan-last-failed = { $when }: failed — { $error }
+sys-scan-none = no scan since stationd started
+
+help-journal-scroll = scroll up / down (pause)
+help-journal-follow = follow live
+help-journal-level = level
+help-journal-component = component
+help-journal-search = search
+journal-level = level
+journal-level-all = all
+journal-level-warn = warnings and errors
+journal-level-error = errors
+journal-component = component
+journal-component-all = all
+journal-following = live
+journal-paused = paused — { $n } new (End to resume)
+journal-search = search
+journal-empty = nothing to show
+
+evc-station = station
+evc-broadcast = broadcast
+evc-grid = grid
+evc-library = library
+evc-plugin = plugin
+evc-live = live
+evc-liquidsoap = Liquidsoap
+evc-icecast = Icecast
+evc-unknown = ?
+
+ev-started = stationd started (version { $version }, “{ $station }”)
+ev-stopping-request = shutdown requested
+ev-stopping-signal = shutting down ({ $signal })
+ev-broadcast-state = broadcast: { $from } → { $to } (by { $by })
+ev-listeners = listeners: { $count }
+ev-audience-unknown = audience unknown (Icecast unreadable)
+ev-track-chosen = chosen: { $media } ({ $playlist }, { $origin })
+ev-track-fallback = nothing to air: safety fallback ({ $origin })
+ev-override-pushed = { $mode } override: { $what } (by { $by })
+ev-grid-applied = grid { $grid } applied ({ $rules } rules)
+ev-grid-refused = grid { $grid } refused ({ $problems } problems): the previous grid stays on air
+ev-grid-unreadable = grid { $grid } unreadable: { $error }
+ev-incident-hard-not-cut = hard rendez-vous { $rule } with nothing to air ({ $playlist }): no cut
+ev-incident-source-empty = { $rule }: { $playlist } gave nothing, the grid falls through
+ev-live-started = live: { $dj } on air ({ $rule })
+ev-live-ended = live ended: { $dj } ({ $reason })
+ev-scan-started = library scan started
+ev-scan-finished = scan finished: { $found } files, { $skipped } skipped, { $vanished } vanished
+ev-scan-failed = scan failed: { $error }
+ev-tags-written = tags written: { $media }
+ev-tag-renamed = { $origin }: “{ $from }” → “{ $to }” ({ $files } files, { $failed } failed)
+ev-plugin-failed = plugin { $plugin } failed ({ $phase }): { $reason }
+ev-plugin-quarantined = plugin { $plugin } quarantined ({ $failures } failures)
+ev-plugin-state = plugin { $plugin }: { $state }
+ev-unknown = unknown event (stationd newer than the TUI?)
+
+stats-window = window
+stats-window-30m = last 30 minutes
+stats-window-24h = last 24 hours
+stats-window-7d = last 7 days
+stats-window-30d = last 30 days
+stats-by = by
+stats-by-playlist = playlist
+stats-by-leaf = leaf playlist
+stats-by-rule = rule
+stats-by-origin = origin
+stats-by-media = media
+stats-by-artist = artist
+stats-aired = aired
+stats-picked = picked
+stats-last = last
+stats-none = nothing aired in this window
+stats-unknown = (unknown)
+stats-total = total: { $aired } aired, { $picked } picked
+help-stats-window = window
+help-stats-by = grouping
+
+tags-origin-file = file genre
+tags-no-source = no custom-tags source (Type…): only the file genre is shown
+tags-value = value
+tags-count = media
+tags-spellings = spellings: { $list }
+tags-empty = no value known yet — a library scan collects them (Control › Library)
+tags-without = { $origin }: { $n ->
+    [one] 1 media without a value
+   *[other] { $n } media without a value
+}
+tags-summary = { $n } values · sorted by { $sort }
+tags-sort-name = name
+tags-sort-count = count
+help-tags-origin = next origin
+help-tags-rename = rename / merge
+help-tags-sort = sort by name / count
+help-tags-preview = see what changes
+help-tags-apply = rename
+tags-rename-title = { $origin }: rename “{ $from }”
+tags-rename-hint = New value (an existing value = merge). Every spelling is replaced.
+tags-rename-preview-title = { $origin }: preview
+tags-rename-unexpected = unexpected answer from stationd
+tags-rename-nothing = no available media carries this value
+tags-rename-files = { $n ->
+    [one] 1 file will be rewritten
+   *[other] { $n } files will be rewritten
+}
+tags-rename-merges = “{ $to }” already exists: both values will be merged
+tags-rename-no-playlist = no playlist filters on this value
+tags-rename-playlists = { $n ->
+    [one] 1 playlist filters on this value (it will select differently):
+   *[other] { $n } playlists filter on this value (they will select differently):
+}
+tags-rename-confirm = Enter: rename · Esc: cancel
+tags-rename-running-title = { $origin }: renaming
+tags-rename-progress = { $done } / { $total } files
+tags-rename-failed-n = { $n } failed
+tags-rename-done-title = { $origin }: rename finished
+tags-rename-report = { $changed } rewritten, { $unchanged } already without it, { $failed } failed
+tags-rename-broken = interrupted: { $reason }
+
+help-media-type = set a Type
+help-media-type-write = write
+media-type-title = { $source } — { $n } media
+media-type-title-loading = Type
+media-type-no-source = no custom-tags source (Type…) declared: use e for tags
+media-type-other = ＋ other value…
+media-type-remove = — remove
+media-type-new = new value
+media-type-confirm = { $source } = “{ $value }” for { $n } media
+media-type-confirm-remove = remove { $source } from { $n } media
+ev-bpm-analyzed = BPMs estimated: { $estimated }
+ev-bpm-analyzed-failed = BPMs estimated: { $estimated }, not estimated: { $failed } ({ $why })
+bpm-fail-decode = cannot decode
+bpm-fail-too-short = too short
+bpm-fail-no-rhythm = no rhythm
+bpm-fail-weak = weak pulse
+bpm-fail-competing = competing rhythms
+bpm-fail-disagree = sections disagree

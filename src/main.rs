@@ -20,6 +20,7 @@ use stationd::live_grpc::live::live_service_server::LiveServiceServer;
 use stationd::stats_grpc::{stats::stats_service_server::StatsServiceServer, StatsGrpc};
 use stationd::live_grpc::LiveGrpc;
 use stationd::onair_grpc::{proto::on_air_service_server::OnAirServiceServer, OnAirGrpc};
+use stationd::events_grpc::{proto::event_service_server::EventServiceServer, EventsGrpc};
 use stationd::playlist_grpc::{proto::playlist_service_server::PlaylistServiceServer, PlaylistGrpc};
 use stationd::grid_engine::GridEngine;
 use stationd::station_control::StationControl;
@@ -48,14 +49,28 @@ async fn main() -> anyhow::Result<()> {
 
     let cfg = config::Config::load(&args.config)?;
 
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| cfg.logging.level.clone().into()),
-        )
-        .init();
+    // Logs to stderr, and every warn / error line into the station journal
+    // (`stationctl events`, the TUI's Système screen).
+    {
+        use tracing_subscriber::layer::SubscriberExt;
+        use tracing_subscriber::util::SubscriberInitExt;
+        tracing_subscriber::registry()
+            .with(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| cfg.logging.level.clone().into()),
+            )
+            .with(tracing_subscriber::fmt::layer())
+            .with(stationd::events::layer())
+            .init();
+    }
 
     info!(station = %cfg.station.name, "stationd starting");
+    stationd::events::record(
+        stationd::events::Level::Info,
+        stationd::events::Component::Station,
+        stationd::events::Code::Started,
+        [("version", env!("CARGO_PKG_VERSION").to_string()), ("station", cfg.station.name.clone())],
+    );
 
     // Operator's stop marker: under s6 stationd is never launched while it
     // exists (`stationctl station start` removes it first). Found here = an
@@ -120,6 +135,17 @@ async fn main() -> anyhow::Result<()> {
         },
     );
     control.attach_plugins(plugins.clone());
+    // The BPM analysis (custom-tags) decodes with FFmpeg: say at start-up if
+    // it is missing, rather than at the first scan.
+    match plugins.bpm_analysis().await {
+        Some(Ok(_)) => {
+            if let Err(why) = stationd::bpm_analysis::ffmpeg_available() {
+                tracing::error!(reason = %why, "custom-tags asks for the BPM analysis but FFmpeg is unavailable: it will be skipped");
+            }
+        }
+        Some(Err(why)) => tracing::error!(reason = %why, "custom-tags asks for the BPM analysis with an unusable window: it will be skipped"),
+        None => {}
+    }
     let plugin_service = PluginGrpc::new(plugins.clone());
     let mut broadcast_service =
         BroadcastGrpc::new(control.clone()).with_media_root(cfg.media.library_path.clone());
@@ -148,7 +174,7 @@ async fn main() -> anyhow::Result<()> {
             dir = ?cfg.grid.path,
             "active grid file missing: the grid last applied stays on air (`stationctl schedule save|apply` writes it)"
         ),
-        (name, Err(e)) => tracing::error!(grid = %name, error = %e, "active grid file NOT applied: the grid last applied stays on air"),
+        (name, Err(e)) => tracing::error!(event = "grid_refused", grid = %name, error = %e, "active grid file NOT applied: the grid last applied stays on air"),
     }
 
     // Live DJs (optional `[live]`): the harbor hooks decide every login from
@@ -327,7 +353,11 @@ async fn main() -> anyhow::Result<()> {
         cfg.media.library_path.clone(),
         Some(plugins),
     );
-    let library_service = LibraryGrpc::new(library);
+    // Raised as soon as a shutdown is requested: the endless streams (on-air
+    // `Watch`, journal, scan progress) end, so the graceful shutdown does not
+    // wait for their clients.
+    let (stopping_tx, stopping_rx) = tokio::sync::watch::channel(false);
+    let library_service = LibraryGrpc::new(library).with_stopping(stopping_rx.clone());
 
     let addr = cfg.server.grpc_bind.parse()?;
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
@@ -346,7 +376,7 @@ async fn main() -> anyhow::Result<()> {
     let playlist_service =
         PlaylistGrpc::new(db_pool.clone(), cfg.playlist.path.clone(), Some(control.clone()));
 
-    info!(%addr, "gRPC server listening (status, quit, playlist, schedule, library, plugin, broadcast, liquidsoap, icecast, live, stats, onair)");
+    info!(%addr, "gRPC server listening (status, quit, playlist, schedule, library, plugin, broadcast, liquidsoap, icecast, live, stats, onair, events)");
 
     // Three ways to shut down cleanly: via `stationctl quit` or `stationctl
     // station stop` (shutdown_rx, triggered by the service's `quit` /
@@ -357,21 +387,27 @@ async fn main() -> anyhow::Result<()> {
     // All three converge on the same shutdown — `serve_with_shutdown` waits
     // for this future to resolve before tearing down the server.
     let mut sigterm = signal(SignalKind::terminate())?;
-    // Raised as soon as a shutdown is requested: the endless streams (on-air
-    // `Watch`) end, so the graceful shutdown does not wait for their clients.
-    let (stopping_tx, stopping_rx) = tokio::sync::watch::channel(false);
     let shutdown_signal = async move {
-        tokio::select! {
+        let by = tokio::select! {
             _ = shutdown_rx => {
                 info!("shutdown requested (`quit` / `station stop`)");
+                "request"
             }
             _ = tokio::signal::ctrl_c() => {
                 info!("shutdown requested (Ctrl+C / SIGINT)");
+                "sigint"
             }
             _ = sigterm.recv() => {
                 info!("shutdown requested (SIGTERM, e.g. systemctl stop)");
+                "sigterm"
             }
-        }
+        };
+        stationd::events::record(
+            stationd::events::Level::Info,
+            stationd::events::Component::Station,
+            stationd::events::Code::Stopping,
+            [("by", by)],
+        );
         let _ = stopping_tx.send(true);
     };
 
@@ -386,6 +422,7 @@ async fn main() -> anyhow::Result<()> {
         .add_service(IcecastServiceServer::new(icecast_service))
         .add_service(LiveServiceServer::new(live_service))
         .add_service(StatsServiceServer::new(StatsGrpc::new(db_pool.clone())))
+        .add_service(EventServiceServer::new(EventsGrpc::new(stopping_rx.clone())))
         .add_service(OnAirServiceServer::new(OnAirGrpc::new(onair, stopping_rx)))
         .serve_with_shutdown(addr, shutdown_signal)
         .await?;

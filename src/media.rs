@@ -404,12 +404,21 @@ pub fn scan_file(root: &Path, full: &Path) -> Result<ScanReport, SkipReason> {
 /// collected into the report rather than aborting the scan. A missing / non-
 /// directory root is the one hard error.
 pub fn scan_library(root: &Path) -> Result<ScanReport, ScanError> {
+    scan_library_with(root, &mut |_, _| {})
+}
+
+/// [`scan_library`], saying how far it is: `progress(done, total)` once the
+/// directory walk has counted the audio files (`done = 0`), then after each
+/// file read.
+pub fn scan_library_with(root: &Path, progress: &mut dyn FnMut(usize, usize)) -> Result<ScanReport, ScanError> {
     if !root.is_dir() {
         return Err(ScanError::BadRoot(root.to_path_buf()));
     }
 
     let mut report = ScanReport::default();
 
+    // Walk first (cheap: names only), so the reading has a total.
+    let mut files = Vec::new();
     for entry in WalkDir::new(root).follow_links(false) {
         let entry = match entry {
             Ok(e) => e,
@@ -429,8 +438,13 @@ pub fn scan_library(root: &Path) -> Result<ScanReport, ScanError> {
         if !entry.file_type().is_file() || !is_audio_ext(entry.path()) {
             continue;
         }
+        files.push(entry.into_path());
+    }
 
-        match read_one(root, entry.path()) {
+    let total = files.len();
+    progress(0, total);
+    for (i, path) in files.iter().enumerate() {
+        match read_one(root, path) {
             Ok((media, custom)) => {
                 if !custom.is_empty() {
                     report.custom_tags.insert(media.rel_path.clone(), custom);
@@ -438,11 +452,11 @@ pub fn scan_library(root: &Path) -> Result<ScanReport, ScanError> {
                 report.media.push(media);
             }
             Err(reason) => {
-                let path = to_rel_path(root, entry.path())
-                    .unwrap_or_else(|| entry.path().to_string_lossy().replace('\\', "/"));
+                let path = to_rel_path(root, path).unwrap_or_else(|| path.to_string_lossy().replace('\\', "/"));
                 report.skipped.push(ScanSkip { path, reason });
             }
         }
+        progress(i + 1, total);
     }
 
     // Stable output regardless of directory-walk order (nicer diffs, tests).

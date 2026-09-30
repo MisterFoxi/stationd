@@ -302,10 +302,12 @@ pub async fn row(pool: &SqlitePool, rel_path: &str) -> Result<Option<MediaRow>, 
 pub async fn prune_unavailable(pool: &SqlitePool, seen_before: Option<i64>) -> Result<u64, sqlx::Error> {
     let mut tx = pool.begin().await?;
     let cond = "available = 0 AND (?1 IS NULL OR scanned_at < ?1)";
-    sqlx::query(&format!("DELETE FROM media_genre WHERE rel_path IN (SELECT rel_path FROM media WHERE {cond})"))
-        .bind(seen_before)
-        .execute(&mut *tx)
-        .await?;
+    for table in ["media_genre", "media_tag"] {
+        sqlx::query(&format!("DELETE FROM {table} WHERE rel_path IN (SELECT rel_path FROM media WHERE {cond})"))
+            .bind(seen_before)
+            .execute(&mut *tx)
+            .await?;
+    }
     let r = sqlx::query(&format!("DELETE FROM media WHERE {cond}")).bind(seen_before).execute(&mut *tx).await?;
     tx.commit().await?;
     Ok(r.rows_affected())
@@ -699,6 +701,125 @@ pub async fn genres(pool: &SqlitePool, only_available: bool) -> Result<GenreInve
         .collect();
 
     Ok(GenreInventory { genres, untagged: untagged as usize })
+}
+
+/// Where each value of a file comes from: `(origin, value)` per `rel_path`;
+/// origin `""` = the file's genre (`TCON`), otherwise the user frame it was
+/// read from (a `custom-tags` source, e.g. `Type`).
+pub type TagValues = std::collections::BTreeMap<String, Vec<(String, String)>>;
+
+/// Record the origins of the values (`media_tag`). `full` = a whole-library
+/// scan: rows of files not in `values` go too; otherwise only the files
+/// given are replaced (a tag edit).
+pub async fn replace_tag_values(pool: &SqlitePool, values: &TagValues, full: bool) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    if full {
+        sqlx::query("DELETE FROM media_tag").execute(&mut *tx).await?;
+    }
+    for (rel_path, pairs) in values {
+        if !full {
+            sqlx::query("DELETE FROM media_tag WHERE rel_path = ?1").bind(rel_path).execute(&mut *tx).await?;
+        }
+        for (origin, value) in pairs {
+            if value.trim().is_empty() {
+                continue;
+            }
+            sqlx::query("INSERT OR IGNORE INTO media_tag (rel_path, origin, value, value_key) VALUES (?1, ?2, ?3, ?4)")
+                .bind(rel_path)
+                .bind(origin)
+                .bind(value.trim())
+                .bind(genre_key(value))
+                .execute(&mut *tx)
+                .await?;
+        }
+    }
+    tx.commit().await
+}
+
+/// One value of an origin, all spellings together (case folded).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TagValueCount {
+    /// The most frequent spelling.
+    pub value: String,
+    /// Media carrying it.
+    pub count: usize,
+    /// Every spelling seen (more than one = inconsistent).
+    pub spellings: Vec<String>,
+}
+
+/// The values of one origin (`""` = the file's genre).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OriginInventory {
+    pub origin: String,
+    /// Sorted by folded key.
+    pub values: Vec<TagValueCount>,
+    /// Available media with no value for this origin.
+    pub without: usize,
+}
+
+/// Values per origin among the AVAILABLE media: `origins` first (the file's
+/// genre, then the declared sources, even when empty), then any other origin
+/// still recorded.
+pub async fn tag_inventory(pool: &SqlitePool, origins: &[String]) -> Result<Vec<OriginInventory>, sqlx::Error> {
+    use std::collections::{BTreeMap, BTreeSet, HashMap};
+    let mut all: Vec<String> = origins.to_vec();
+    let recorded: Vec<(String,)> = sqlx::query_as("SELECT DISTINCT origin FROM media_tag ORDER BY origin").fetch_all(pool).await?;
+    for (o,) in recorded {
+        if !all.iter().any(|x| x.eq_ignore_ascii_case(&o)) {
+            all.push(o);
+        }
+    }
+    let mut out = Vec::with_capacity(all.len());
+    for origin in all {
+        let pairs: Vec<(String, String)> = sqlx::query_as(
+            "SELECT t.value, t.rel_path FROM media_tag t JOIN media m ON m.rel_path = t.rel_path
+             WHERE m.available = 1 AND t.origin = ?1 COLLATE NOCASE",
+        )
+        .bind(&origin)
+        .fetch_all(pool)
+        .await?;
+        let (without,): (i64,) = sqlx::query_as(
+            "SELECT count(*) FROM media m WHERE m.available = 1
+             AND NOT EXISTS (SELECT 1 FROM media_tag t WHERE t.rel_path = m.rel_path AND t.origin = ?1 COLLATE NOCASE)",
+        )
+        .bind(&origin)
+        .fetch_one(pool)
+        .await?;
+        let mut buckets: BTreeMap<String, (BTreeSet<String>, HashMap<String, usize>)> = BTreeMap::new();
+        for (value, rel_path) in pairs {
+            let e = buckets.entry(genre_key(&value)).or_default();
+            e.0.insert(rel_path);
+            *e.1.entry(value).or_default() += 1;
+        }
+        let values = buckets
+            .into_values()
+            .map(|(media, spellings)| {
+                let value = spellings
+                    .iter()
+                    .max_by(|(a, na), (b, nb)| na.cmp(nb).then_with(|| b.cmp(a)))
+                    .map(|(s, _)| s.clone())
+                    .unwrap_or_default();
+                let mut all: Vec<String> = spellings.into_keys().collect();
+                all.sort();
+                TagValueCount { value, count: media.len(), spellings: all }
+            })
+            .collect();
+        out.push(OriginInventory { origin, values, without: without as usize });
+    }
+    Ok(out)
+}
+
+/// Available media carrying `value` (case folded) from `origin`.
+pub async fn files_with_value(pool: &SqlitePool, origin: &str, value: &str) -> Result<Vec<String>, sqlx::Error> {
+    let rows: Vec<(String,)> = sqlx::query_as(
+        "SELECT DISTINCT t.rel_path FROM media_tag t JOIN media m ON m.rel_path = t.rel_path
+         WHERE m.available = 1 AND t.origin = ?1 COLLATE NOCASE AND t.value_key = ?2 ORDER BY t.rel_path",
+    )
+    .bind(origin)
+    .bind(genre_key(value))
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(|(p,)| p).collect())
 }
 
 /// Flip a media row to unavailable — e.g. its file vanished from disk between

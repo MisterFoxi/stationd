@@ -7,7 +7,7 @@
 use std::future::Future;
 use std::time::{Duration, Instant};
 
-use stationd_proto::{broadcast, library, liquidsoap, live, onair, playlist, plugin, schedule, stats, station};
+use stationd_proto::{broadcast, events, icecast, library, liquidsoap, live, onair, playlist, plugin, schedule, stats, station};
 use tonic::transport::{Channel, Endpoint};
 
 /// Délai maximal d'une lecture simple (dossier §18 de la v1, conservé).
@@ -70,6 +70,7 @@ pub struct BannerRead {
     pub live: Read<live::LiveStatus>,
     pub overrides: Read<Vec<broadcast::Override>>,
     pub plugins: Read<Vec<plugin::PluginInfo>>,
+    pub icecast: Read<icecast::IcecastStatus>,
 }
 
 pub async fn read_banner(channel: Channel) -> BannerRead {
@@ -78,15 +79,17 @@ pub async fn read_banner(channel: Channel) -> BannerRead {
     let mut bc2 = bc.clone();
     let mut ls = liquidsoap::liquidsoap_service_client::LiquidsoapServiceClient::new(channel.clone());
     let mut lv = live::live_service_client::LiveServiceClient::new(channel.clone());
-    let mut pl = plugin::plugin_service_client::PluginServiceClient::new(channel);
+    let mut pl = plugin::plugin_service_client::PluginServiceClient::new(channel.clone());
+    let mut ic = icecast::icecast_service_client::IcecastServiceClient::new(channel);
 
-    let (status, state, ls_status, live_status, overrides, plugins) = tokio::join!(
+    let (status, state, ls_status, live_status, overrides, plugins, ic_status) = tokio::join!(
         bounded(st.status(station::StatusRequest {})),
         bounded(bc.get_state(broadcast::GetStateRequest {})),
         bounded(ls.get_status(liquidsoap::GetStatusRequest {})),
         bounded(lv.get_status(live::GetStatusRequest {})),
         bounded(bc2.list_overrides(broadcast::ListOverridesRequest {})),
         bounded(pl.list(plugin::PluginListRequest {})),
+        bounded(ic.get_status(icecast::GetStatusRequest {})),
     );
 
     BannerRead {
@@ -97,6 +100,7 @@ pub async fn read_banner(channel: Channel) -> BannerRead {
         live: live_status,
         overrides: overrides.map(|r| r.overrides),
         plugins: plugins.map(|r| r.plugins),
+        icecast: ic_status,
     }
 }
 
@@ -320,6 +324,51 @@ pub fn next_delay(previous: Duration, stationd_ok: bool) -> Duration {
     } else {
         (previous * 2).clamp(POLL_OK, POLL_MAX)
     }
+}
+
+/// Ouvre un flux serveur : délai borné pour l'ouverture seulement.
+async fn open_stream<T>(
+    call: impl Future<Output = Result<tonic::Response<tonic::Streaming<T>>, tonic::Status>>,
+) -> Result<tonic::Streaming<T>, String> {
+    match tokio::time::timeout(READ_TIMEOUT, call).await {
+        Ok(Ok(r)) => Ok(r.into_inner()),
+        Ok(Err(status)) if status.code() == tonic::Code::Unimplemented => Err(crate::tr!("rpc-too-old")),
+        Ok(Err(status)) => Err(status_text(&status)),
+        Err(_) => Err(crate::tr!("rpc-timeout", s = READ_TIMEOUT.as_secs())),
+    }
+}
+
+/// Le journal de la station : les derniers événements, puis au fil de l'eau.
+pub async fn watch_events(channel: Channel) -> Result<tonic::Streaming<events::Event>, String> {
+    let mut cli = events::event_service_client::EventServiceClient::new(channel);
+    open_stream(cli.watch(events::WatchEventsRequest { backlog: 2000, follow: true })).await
+}
+
+/// L'avancement du scan de la bibliothèque.
+pub async fn watch_scan(channel: Channel) -> Result<tonic::Streaming<library::ScanStatus>, String> {
+    let mut cli = library::library_service_client::LibraryServiceClient::new(channel);
+    open_stream(cli.watch_scan(library::WatchScanRequest {})).await
+}
+
+/// Les valeurs par origine (genre du fichier, sources `custom-tags`).
+pub async fn tag_values(channel: Channel) -> Read<library::ListTagValuesResponse> {
+    let mut cli = library::library_service_client::LibraryServiceClient::new(channel);
+    bounded(cli.list_tag_values(library::ListTagValuesRequest {})).await
+}
+
+/// Renommer une valeur : aperçu (`dry_run`) ou exécution, en flux.
+pub async fn rename_value(
+    channel: Channel,
+    req: library::RenameTagValueRequest,
+) -> Result<tonic::Streaming<library::RenameTagValueEvent>, String> {
+    let mut cli = library::library_service_client::LibraryServiceClient::new(channel);
+    open_stream(cli.rename_tag_value(req)).await
+}
+
+/// `StatsService.Plays`.
+pub async fn plays(channel: Channel, req: stats::PlaysRequest) -> Read<stats::PlaysResponse> {
+    let mut cli = stats::stats_service_client::StatsServiceClient::new(channel);
+    bounded(cli.plays(req)).await
 }
 
 #[cfg(test)]

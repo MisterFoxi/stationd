@@ -189,6 +189,9 @@ level = "info"
 # enabled = true
 # analyze_missing = true          # Default: estimate missing MP3 BPM offline.
 # Requires FFmpeg; writes TBPM and TXXX:tempo without playing on air.
+# analyze_range = [70, 180]       # Default. Half / double time are folded into
+#                                 # this window (a whole octave: upper ≥ 2 × lower).
+#                                 # A true 60 BPM reads 120 here; [50, 100] keeps it.
 # source_tags = ["BPM"]
 # [[plugin.config.tempo.range]]
 # max = 79.999

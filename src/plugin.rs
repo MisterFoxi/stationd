@@ -186,6 +186,57 @@ pub enum PluginEvent {
     LiveEnded { dj: String, reason: String, at: i64 },
 }
 
+/// The facts the plugins hear are also the station's: into the journal.
+/// Listener samples only when the count changes (a sample every few
+/// seconds would drown the rest).
+static LAST_LISTENERS: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(-1);
+
+fn journal(event: &PluginEvent) {
+    use crate::events::{record, Code, Component, Level};
+    use std::sync::atomic::Ordering;
+    match event {
+        PluginEvent::TrackResolved { media_path, playlist_ref, rule_id, origin } => record(
+            Level::Info,
+            Component::Grid,
+            Code::TrackChosen,
+            [
+                ("media", media_path.clone().unwrap_or_default()),
+                ("playlist", playlist_ref.clone().unwrap_or_default()),
+                ("rule", rule_id.clone().unwrap_or_default()),
+                ("origin", origin.clone()),
+            ],
+        ),
+        PluginEvent::ListenersSampled { count, .. } => {
+            if LAST_LISTENERS.swap(i64::from(*count), Ordering::Relaxed) != i64::from(*count) {
+                record(Level::Info, Component::Icecast, Code::Listeners, [("count", count.to_string())]);
+            }
+        }
+        PluginEvent::BroadcastStateChanged { from, to, by } => record(
+            Level::Info,
+            Component::Broadcast,
+            Code::BroadcastState,
+            [("from", from.clone()), ("to", to.clone()), ("by", by.clone())],
+        ),
+        PluginEvent::LiveStarted { dj, rule_id, .. } => {
+            record(Level::Info, Component::Live, Code::LiveStarted, [("dj", dj.clone()), ("rule", rule_id.clone())])
+        }
+        PluginEvent::LiveEnded { dj, reason, .. } => {
+            record(Level::Info, Component::Live, Code::LiveEnded, [("dj", dj.clone()), ("reason", reason.clone())])
+        }
+    }
+}
+
+/// An unknown audience (a failed read) is said once, until a count comes back.
+pub fn journal_audience_unknown() {
+    LAST_LISTENERS.store(-1, std::sync::atomic::Ordering::Relaxed);
+    crate::events::record(
+        crate::events::Level::Warn,
+        crate::events::Component::Icecast,
+        crate::events::Code::AudienceUnknown,
+        std::iter::empty::<(&str, &str)>(),
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Host surface (A2): what a plugin may call on the core
 // ---------------------------------------------------------------------------
@@ -394,6 +445,25 @@ impl PluginDecl {
             }
         }
         TagHints { genre_sources: strings(self.config.get("tags")), tempo_labels }
+    }
+
+    /// The window BPM estimates are folded into: `tempo.analyze_range =
+    /// [lo, hi]`, else [`crate::bpm_analysis::DEFAULT_RANGE`]. `Err` = an
+    /// unusable range (said, the analysis is then skipped).
+    fn bpm_range(&self) -> Result<(f64, f64), String> {
+        let Some(v) = self.config.get("tempo").and_then(|t| t.get("analyze_range")) else {
+            return Ok(crate::bpm_analysis::DEFAULT_RANGE);
+        };
+        let nums: Option<Vec<f64>> = v.as_array().map(|a| {
+            a.iter().filter_map(|x| x.as_float().or_else(|| x.as_integer().map(|i| i as f64))).collect()
+        });
+        match nums.as_deref() {
+            Some([lo, hi]) if v.as_array().is_some_and(|a| a.len() == 2) => {
+                crate::bpm_analysis::check_range((*lo, *hi))?;
+                Ok((*lo, *hi))
+            }
+            _ => Err("tempo.analyze_range must be two numbers [lo, hi] (BPM)".into()),
+        }
     }
 
     fn requests_bpm_analysis(&self) -> bool {
@@ -642,7 +712,17 @@ impl Slot {
 
     /// Record a runtime hook failure; quarantine past the sliding-window limit.
     fn note_failure(&mut self, phase: Phase, reason: String) {
-        tracing::warn!(plugin = %self.decl.name, ?phase, %reason, "plugin hook failed");
+        tracing::warn!(event = "plugin_failed", plugin = %self.decl.name, ?phase, %reason, "plugin hook failed");
+        crate::events::record(
+            crate::events::Level::Warn,
+            crate::events::Component::Plugin,
+            crate::events::Code::PluginFailed,
+            [
+                ("plugin", self.decl.name.clone()),
+                ("phase", format!("{phase:?}").to_lowercase()),
+                ("reason", reason.clone()),
+            ],
+        );
         let now = Instant::now();
         self.failures.push_back(now);
         while let Some(&front) = self.failures.front() {
@@ -654,7 +734,13 @@ impl Slot {
         }
         if self.failures.len() as u32 >= MAX_FAILURES {
             let failures = self.failures.len() as u32;
-            tracing::warn!(plugin = %self.decl.name, failures, "plugin quarantined");
+            tracing::warn!(event = "plugin_quarantined", plugin = %self.decl.name, failures, "plugin quarantined");
+            crate::events::record(
+                crate::events::Level::Error,
+                crate::events::Component::Plugin,
+                crate::events::Code::PluginQuarantined,
+                [("plugin", self.decl.name.clone()), ("failures", failures.to_string()), ("reason", reason.clone())],
+            );
             self.plugin = None;
             self.state = PluginState::Quarantined { reason, failures };
         }
@@ -697,7 +783,7 @@ fn build_plugin(decl: &PluginDecl, host: &Host) -> Result<Box<dyn Plugin>, Strin
 
 enum Msg {
     List(oneshot::Sender<Vec<PluginInfo>>),
-    AnalyzeMissingBpm(oneshot::Sender<bool>),
+    AnalyzeMissingBpm(oneshot::Sender<Option<Result<(f64, f64), String>>>),
     TagHints(oneshot::Sender<TagHints>),
     Control {
         name: String,
@@ -789,9 +875,16 @@ impl PluginHandle {
 
     /// Current runtime state, so stopped/quarantined plugins cannot trigger analysis.
     pub async fn analyze_missing_bpm(&self) -> bool {
+        self.bpm_analysis().await.is_some()
+    }
+
+    /// The BPM analysis a loaded `custom-tags` asks for: `None` = none;
+    /// `Some(Ok(window))` = analyse, folding into `window`; `Some(Err)` =
+    /// asked with an unusable `tempo.analyze_range`.
+    pub async fn bpm_analysis(&self) -> Option<Result<(f64, f64), String>> {
         let (reply, rx) = oneshot::channel();
-        if self.tx.send(Msg::AnalyzeMissingBpm(reply)).await.is_err() { return false; }
-        rx.await.unwrap_or(false)
+        if self.tx.send(Msg::AnalyzeMissingBpm(reply)).await.is_err() { return None; }
+        rx.await.unwrap_or(None)
     }
 
     /// Fire-and-forget: emit an event to the plugins. Never blocks the caller;
@@ -800,6 +893,7 @@ impl PluginHandle {
         if self.sim.is_some() {
             return; // a simulated decision is not a fact: plugins never hear of it
         }
+        journal(&event);
         let _ = self.tx.try_send(Msg::Event(event));
     }
 
@@ -993,10 +1087,11 @@ pub fn spawn_env(mut decls: Vec<PluginDecl>, env: PluginEnv) -> PluginHandle {
                     let _ = reply.send(hints);
                 }
                 Msg::AnalyzeMissingBpm(reply) => {
-                    let enabled = slots.iter().any(|slot| {
-                        matches!(slot.state, PluginState::Loaded) && slot.decl.requests_bpm_analysis()
-                    });
-                    let _ = reply.send(enabled);
+                    let asked = slots
+                        .iter()
+                        .find(|slot| matches!(slot.state, PluginState::Loaded) && slot.decl.requests_bpm_analysis())
+                        .map(|slot| slot.decl.bpm_range());
+                    let _ = reply.send(asked);
                 }
                 Msg::List(reply) => {
                     let _ = reply.send(slots.iter().map(Slot::info).collect());
@@ -1006,7 +1101,14 @@ pub fn spawn_env(mut decls: Vec<PluginDecl>, env: PluginEnv) -> PluginHandle {
                         None => Err(format!("unknown plugin `{name}`")),
                         Some(slot) => {
                             apply_action(slot, action, &env);
-                            Ok(slot.info())
+                            let info = slot.info();
+                            crate::events::record(
+                                crate::events::Level::Info,
+                                crate::events::Component::Plugin,
+                                crate::events::Code::PluginState,
+                                [("plugin", info.name.clone()), ("state", info.state.clone())],
+                            );
+                            Ok(info)
                         }
                     };
                     let _ = reply.send(res);
@@ -2523,6 +2625,19 @@ mod bpm_policy_tests {
         custom.name = "logger".into();
         assert!(!custom.requests_bpm_analysis());
     }
+    #[test]
+    fn the_bpm_window_is_read_and_checked() {
+        let decl = |extra: &str| -> PluginDecl {
+            toml::from_str(&format!("name = 'custom-tags'\n[config.tempo]\nenabled = true\n{extra}")).unwrap()
+        };
+        assert_eq!(decl("").bpm_range(), Ok(crate::bpm_analysis::DEFAULT_RANGE));
+        assert_eq!(decl("analyze_range = [50, 100]").bpm_range(), Ok((50.0, 100.0)));
+        assert_eq!(decl("analyze_range = [60.5, 130]").bpm_range(), Ok((60.5, 130.0)));
+        assert!(decl("analyze_range = [70, 120]").bpm_range().unwrap_err().contains("twice"));
+        assert!(decl("analyze_range = [70]").bpm_range().is_err());
+        assert!(decl("analyze_range = 'x'").bpm_range().is_err());
+    }
+
     #[tokio::test]
     async fn unloaded_plugin_does_not_trigger_analysis() {
         let declaration: PluginDecl = toml::from_str("name = 'custom-tags'\nwasm = '/does/not/exist.wasm'\n[config.tempo]\nenabled = true").unwrap();

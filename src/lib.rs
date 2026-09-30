@@ -16,6 +16,8 @@ pub mod config;
 pub mod db;
 pub mod draw;
 pub mod episode_play;
+pub mod events;
+pub mod events_grpc;
 pub mod grid_engine;
 pub mod grid_files;
 pub mod grid_index;

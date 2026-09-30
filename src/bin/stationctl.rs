@@ -5,7 +5,8 @@
 
 use clap::{Parser, Subcommand};
 
-use stationd::proto::{broadcast, icecast, library, liquidsoap, live, onair, playlist, plugin, schedule, station, stats};
+use stationd::proto::{broadcast, events, icecast, library, liquidsoap, live, onair, playlist, plugin, schedule, station, stats};
+use events::event_service_client::EventServiceClient;
 
 use station::station_client::StationClient;
 use station::{QuitRequest, ShutdownRequest, StatusRequest};
@@ -116,6 +117,19 @@ enum Command {
         #[arg(long)]
         follow: bool,
     },
+    /// The station journal: typed facts (state, grid, scan, tags, plugins…)
+    /// and every warn / error line, oldest first
+    Events {
+        /// How many past events (max 2000)
+        #[arg(long, default_value_t = 50)]
+        last: u32,
+        /// Keep printing events as they happen (Ctrl+C to stop)
+        #[arg(long)]
+        follow: bool,
+        /// Only this level and above
+        #[arg(long, value_enum)]
+        level: Option<EventLevel>,
+    },
     Stats {
         /// Window up to now: 30m, 24h, 7d…
         #[arg(long, default_value = "24h")]
@@ -143,6 +157,13 @@ enum OnairCommand {
         #[arg(long, default_value_t = 30)]
         limit: u32,
     },
+}
+
+#[derive(clap::ValueEnum, Clone, Copy, Debug)]
+enum EventLevel {
+    Info,
+    Warn,
+    Error,
 }
 
 #[derive(clap::ValueEnum, Clone, Copy, Debug)]
@@ -335,7 +356,32 @@ enum LibraryCommand {
     /// Scan the configured media root and reconcile the index. Heavy work runs
     /// off the async runtime server-side; a skipped audio file is reported,
     /// not fatal (the scan itself succeeds).
-    Scan,
+    Scan {
+        /// Show the progress on stderr while it runs
+        #[arg(long)]
+        progress: bool,
+    },
+    /// Where the scan is (phase, files read / found) and how the last one ended
+    ScanStatus {
+        /// Keep printing each change (Ctrl+C to stop)
+        #[arg(long)]
+        follow: bool,
+    },
+    /// Values per origin among the available media: the file's genre, then
+    /// each custom-tags source (Type…), with counts, spellings, media without
+    Values,
+    /// Rename a value of one origin across the library (merged into `to` if
+    /// it exists), file by file; --dry-run shows the files and the playlists
+    /// whose genre filters name it
+    Rename {
+        from: String,
+        to: String,
+        /// The custom-tags source (e.g. Type); default: the file's genre
+        #[arg(long, default_value = "")]
+        origin: String,
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Show the standard tags of a media file, read from the file itself,
     /// and their revision (for `library tag --revision`).
     Tags {
@@ -1204,9 +1250,25 @@ async fn main() -> anyhow::Result<()> {
                 println!("index genres: {}", if m.genres.is_empty() { "-".into() } else { m.genres.join(", ") });
             }
         }
-        Command::Library(LibraryCommand::Scan) => {
+        Command::Library(LibraryCommand::Scan { progress }) => {
             let mut lib = LibraryServiceClient::connect(args.addr.clone()).await?;
+            let watcher = if progress {
+                let mut w = lib.clone();
+                Some(tokio::spawn(async move {
+                    let Ok(r) = w.watch_scan(library::WatchScanRequest {}).await else { return };
+                    let mut st = r.into_inner();
+                    while let Ok(Some(s)) = st.message().await {
+                        eprint!("\r{:<60}", scan_line(&s));
+                    }
+                }))
+            } else {
+                None
+            };
             let reply = lib.scan(ScanRequest {}).await?.into_inner();
+            if let Some(w) = watcher {
+                w.abort();
+                eprintln!();
+            }
             println!("found:       {}", reply.found);
             println!("skipped:     {}", reply.skipped);
             println!("present:     {}", reply.present);
@@ -1324,6 +1386,83 @@ async fn main() -> anyhow::Result<()> {
             } else {
                 for m in &reply.media {
                     println!("{}", fmt_media_line(m));
+                }
+            }
+        }
+        Command::Library(LibraryCommand::ScanStatus { follow }) => {
+            let mut lib = LibraryServiceClient::connect(args.addr.clone()).await?;
+            let mut st = lib.watch_scan(library::WatchScanRequest {}).await?.into_inner();
+            while let Some(s) = st.message().await? {
+                println!("{}", scan_line(&s));
+                if let Some(e) = &s.last {
+                    if !follow || s.phase == library::scan_status::Phase::Idle as i32 {
+                        let when = epoch_utc(e.finished_at);
+                        if e.ok {
+                            println!(
+                                "last scan:   ended {when}: found {}, skipped {}, present {}, vanished {}, unavailable {}",
+                                e.found, e.skipped, e.present, e.vanished, e.unavailable
+                            );
+                        } else {
+                            println!("last scan:   FAILED {when}: {}", e.error);
+                        }
+                    }
+                }
+                if !follow {
+                    break;
+                }
+            }
+        }
+        Command::Library(LibraryCommand::Values) => {
+            let mut lib = LibraryServiceClient::connect(args.addr.clone()).await?;
+            let reply = lib.list_tag_values(library::ListTagValuesRequest {}).await?.into_inner();
+            for o in &reply.origins {
+                let name = if o.origin.is_empty() { "genre (file, TCON)".to_string() } else { format!("{} (TXXX source)", o.origin) };
+                println!("{name}");
+                for v in &o.values {
+                    let variants = if v.spellings.len() > 1 {
+                        format!("  [spellings: {}]", v.spellings.join(" | "))
+                    } else {
+                        String::new()
+                    };
+                    println!("  {:>5}  {}{variants}", v.count, v.value);
+                }
+                println!("  {:>5}  (none)", o.without);
+            }
+        }
+        Command::Library(LibraryCommand::Rename { from, to, origin, dry_run }) => {
+            use library::rename_tag_value_event::Event;
+            let mut lib = LibraryServiceClient::connect(args.addr.clone()).await?;
+            let mut st = lib
+                .rename_tag_value(library::RenameTagValueRequest { origin, from, to, dry_run })
+                .await?
+                .into_inner();
+            while let Some(ev) = st.message().await? {
+                match ev.event {
+                    Some(Event::Preview(p)) => {
+                        println!("files:     {}", p.files.len());
+                        for f in &p.files {
+                            println!("  {f}");
+                        }
+                        if p.merges {
+                            println!("merge:     the new value already exists: merged into it");
+                        }
+                        if p.playlists.is_empty() {
+                            println!("playlists: none filters on it");
+                        } else {
+                            println!("playlists whose genre filter names it (they will select differently):");
+                            for n in &p.playlists {
+                                println!("  {n}");
+                            }
+                        }
+                    }
+                    Some(Event::Started(n)) => println!("{n} file(s) to change"),
+                    Some(Event::File(f)) if f.error.is_empty() => println!("  ok      {}", f.rel_path),
+                    Some(Event::File(f)) => println!("  FAILED  {}: {}", f.rel_path, f.error),
+                    Some(Event::Done(d)) => {
+                        println!("changed: {}, unchanged: {}, failed: {}", d.changed, d.unchanged, d.failed);
+                        anyhow::ensure!(d.failed == 0, "{} file(s) not renamed", d.failed);
+                    }
+                    None => {}
                 }
             }
         }
@@ -1666,6 +1805,25 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
+        Command::Events { last, follow, level } => {
+            let tz = match StationClient::connect(args.addr.clone()).await {
+                Ok(mut c) => c.status(StatusRequest {}).await.map(|r| onair_tz(&r.into_inner().timezone)).ok(),
+                Err(_) => None,
+            }
+            .unwrap_or_else(jiff::tz::TimeZone::system);
+            let min = match level {
+                None | Some(EventLevel::Info) => 1,
+                Some(EventLevel::Warn) => 2,
+                Some(EventLevel::Error) => 3,
+            };
+            let mut cli = EventServiceClient::connect(args.addr.clone()).await?;
+            let mut st = cli.watch(events::WatchEventsRequest { backlog: last.max(1), follow }).await?.into_inner();
+            while let Some(e) = st.message().await? {
+                if e.level >= min {
+                    println!("{}", event_line(&e, &tz));
+                }
+            }
+        }
         Command::Stats { since, by, limit, key } => {
             let by = match by {
                 StatsBy::Playlist => PlaysBy::Playlist,
@@ -1993,6 +2151,47 @@ fn stationd_root(root: Option<&PathBuf>) -> PathBuf {
     root.cloned()
         .or_else(|| std::env::var_os("STATIOND_ROOT").map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from("."))
+}
+
+// ----- journal / scan --------------------------------------------------------
+
+/// One journal event, in English (D12: stationctl renders the codes itself).
+fn event_line(e: &events::Event, tz: &jiff::tz::TimeZone) -> String {
+    use events::event::{Code, Component, Level};
+    let when = jiff::Timestamp::from_millisecond(e.at_ms)
+        .map(|t| t.to_zoned(tz.clone()).strftime("%Y-%m-%d %H:%M:%S").to_string())
+        .unwrap_or_default();
+    let level = Level::try_from(e.level).map(|l| l.as_str_name()).unwrap_or("?");
+    let component = Component::try_from(e.component).map(|c| c.as_str_name().to_lowercase()).unwrap_or_default();
+    let param = |n: &str| e.params.iter().find(|p| p.name == n).map(|p| p.value.as_str()).unwrap_or("");
+    let rest = |skip: &[&str]| {
+        e.params
+            .iter()
+            .filter(|p| !skip.contains(&p.name.as_str()))
+            .map(|p| format!("{}={}", p.name, p.value))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let what = match Code::try_from(e.code).unwrap_or(Code::Unspecified) {
+        Code::Log => format!("{}  {}", param("message"), rest(&["message", "target"])),
+        c => format!("{}  {}", c.as_str_name().to_lowercase(), rest(&[])),
+    };
+    format!("{when}  {level:<5}  {component:<10}  {}", what.trim_end())
+}
+
+fn scan_line(s: &library::ScanStatus) -> String {
+    use library::scan_status::Phase;
+    let phase = Phase::try_from(s.phase).map(|p| p.as_str_name().to_lowercase()).unwrap_or_default();
+    match Phase::try_from(s.phase).unwrap_or(Phase::Unspecified) {
+        Phase::Idle | Phase::Unspecified => "scan:        idle".to_string(),
+        Phase::Reading => format!("scan:        reading {}/{}", s.done, s.total),
+        Phase::Analyzing => format!("scan:        estimating BPM {}/{}", s.done, s.total),
+        _ => format!("scan:        {phase} ({} files)", s.total),
+    }
+}
+
+fn epoch_utc(epoch: i64) -> String {
+    jiff::Timestamp::from_second(epoch).map(|t| t.strftime("%Y-%m-%d %H:%M:%S UTC").to_string()).unwrap_or_default()
 }
 
 // ----- onair ---------------------------------------------------------------

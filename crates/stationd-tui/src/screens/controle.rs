@@ -361,6 +361,21 @@ impl Controle {
     }
 
     fn render_library(&self, area: Rect, buf: &mut Buffer, store: &Store, s: &Styles) {
+        // Un scan en cours (lancé d'ici, d'ailleurs, ou par `stationctl`) :
+        // sa jauge, le reste en dessous.
+        let area = match (super::systeme::scan_progress(store), &store.scan) {
+            (Some(txt), Some(sc)) => {
+                let [run_a, rest] = Layout::vertical([Constraint::Length(3), Constraint::Fill(1)]).areas(area);
+                let mut lines = vec![field(tr!("control-scan-running"), Span::styled(txt, s.accent()), s)];
+                use stationd_proto::library::scan_status::Phase;
+                if sc.phase == Phase::Reading as i32 || sc.phase == Phase::Analyzing as i32 {
+                    lines.push(Line::raw(super::systeme::gauge(sc.done, sc.total, (area.width as usize).saturating_sub(10).min(40))));
+                }
+                Paragraph::new(lines).render(run_a, buf);
+                rest
+            }
+            _ => area,
+        };
         let Some(r) = &store.last_scan else {
             Paragraph::new(vec![
                 Line::styled(tr!("control-scan-none"), s.muted()),

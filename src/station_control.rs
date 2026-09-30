@@ -338,6 +338,12 @@ impl StationControl {
         copy
     }
 
+    /// The station's own control (plugins attached), not a simulation copy
+    /// nor a test double: only its facts go into the journal.
+    fn is_real(&self) -> bool {
+        self.plugins.get().is_some()
+    }
+
     // ----- grid incidents (on-air view) ------------------------------------
 
     /// Remember a grid incident. The same (kind, rule) again updates its
@@ -351,7 +357,7 @@ impl StationControl {
         origin: &str,
         at: Epoch,
     ) {
-        {
+        let first = {
             let mut g = self.lock();
             let same = |i: &Incident| i.kind == kind && i.rule_id.as_deref() == rule_id && i.playlist_ref == playlist_ref;
             let mut entry = match g.incidents.iter().position(same) {
@@ -368,10 +374,25 @@ impl StationControl {
             };
             entry.at = at;
             entry.count += 1;
+            let first = entry.count == 1;
             g.incidents.push_back(entry);
             while g.incidents.len() > MAX_INCIDENTS {
                 g.incidents.pop_front();
             }
+            first
+        };
+        // Once per incident (the same one again only updates its entry).
+        if first && self.is_real() {
+            crate::events::record(
+                crate::events::Level::Warn,
+                crate::events::Component::Grid,
+                crate::events::Code::GridIncident,
+                [
+                    ("kind", match kind { IncidentKind::HardNotCut => "hard_not_cut", IncidentKind::SourceEmpty => "source_empty" }.to_string()),
+                    ("rule", rule_id.unwrap_or_default().to_string()),
+                    ("playlist", playlist_ref.to_string()),
+                ],
+            );
         }
         self.bump_meta();
     }
@@ -631,6 +652,7 @@ impl StationControl {
         self.wake_if_sleeping("audience-unknown");
         if forgot {
             self.bump_meta();
+            crate::plugin::journal_audience_unknown();
         }
         forgot
     }
@@ -710,6 +732,10 @@ impl StationControl {
             && matches!(self.state(), BroadcastState::Running | BroadcastState::Draining)
             && self.live_dj().is_none();
         let degraded = req.mode == OverrideMode::Hard && !air_live;
+        let what = match &content {
+            OverrideContent::Media(p) => ("media", p.clone()),
+            OverrideContent::Playlist(r) => ("playlist", r.clone()),
+        };
         let outcome = {
             let mut g = self.lock();
             if g.overrides.len() >= MAX_PENDING_OVERRIDES {
@@ -740,6 +766,18 @@ impl StationControl {
             tracing::info!(id = outcome.id, source, mode = ?req.mode, "override queued");
         }
         let mode = if degraded { OverrideMode::Soft } else { req.mode };
+        if self.is_real() {
+            crate::events::record(
+                crate::events::Level::Info,
+                crate::events::Component::Broadcast,
+                crate::events::Code::OverridePushed,
+                [
+                    (what.0, what.1),
+                    ("mode", if mode == OverrideMode::Hard { "hard" } else { "soft" }.to_string()),
+                    ("by", source.to_string()),
+                ],
+            );
+        }
         self.to_air(AirEvent::Override { id: outcome.id, mode });
         self.bump_air();
         Ok(outcome)

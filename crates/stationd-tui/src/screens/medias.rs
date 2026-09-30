@@ -3,8 +3,8 @@
 //! demande (curseur serveur). Fiche d'un média (`Entrée` : métadonnées,
 //! playlists qui peuvent le diffuser, diffusions), sélection multiple
 //! (`Espace`) et actions sur la sélection : ajout à une playlist statique
-//! (brouillon ouvert dans Playlists), mise en file, override. Type / tags
-//! (plugin `tags`) viendront au lot 8.
+//! (brouillon ouvert dans Playlists), mise en file, override, tags (`e`),
+//! `Type` (`t`, première source `custom-tags`).
 //!
 //! La même recherche sert de sélecteur de médias au brouillon d'une playlist
 //! statique (`Medias::new(true)`).
@@ -33,6 +33,8 @@ use stationd_proto::library::{Media, SearchMediaRequest, SearchMediaResponse};
 
 use super::ops;
 use super::tagform::{TagForm, TagOutcome};
+use super::tags::TagsEvent;
+use super::typepick::{TypeOutcome, TypePick};
 use super::picker::{PlaylistPicker, Picked as PickedPlaylist, mode_label};
 use crate::action::Action;
 use crate::app::{AppEvent, Global, Handoff};
@@ -182,6 +184,8 @@ pub struct Medias {
     tags_targets: Vec<String>,
     /// Éditeur des tags ouvert.
     tagform: Option<TagForm>,
+    /// Choix d'un `Type` ouvert (`t`).
+    typepick: Option<TypePick>,
 }
 
 impl Default for Medias {
@@ -238,6 +242,7 @@ impl Medias {
             tags_req: None,
             tags_targets: Vec::new(),
             tagform: None,
+            typepick: None,
         }
     }
 
@@ -376,6 +381,46 @@ impl Medias {
             let r = crate::rpc::tag_form_data(channel, first).await;
             Ok(Control::Event(AppEvent::MediaTags(owner, id, Box::new(r))))
         });
+    }
+
+    /// `t` : affecter une valeur de la première source (`Type`) aux médias
+    /// visés.
+    fn pick_type(&mut self, ctx: &mut Global) {
+        let targets = self.targets();
+        if targets.is_empty() {
+            return;
+        }
+        self.request += 1;
+        self.typepick = Some(TypePick::new(self.request, targets.len()));
+        self.tags_targets = targets;
+        let (owner, id, channel) = (self.owner, self.request, ctx.channel.clone());
+        ctx.spawn_async(async move {
+            let r = crate::rpc::tag_values(channel).await.map(|x| x.origins);
+            Ok(Control::Event(AppEvent::Tags(Box::new(TagsEvent::TypeValues(owner, id, r)))))
+        });
+    }
+
+    /// Écrit la valeur choisie (`None` = retirée) : un média tout de suite,
+    /// un lot après confirmation.
+    fn assign_type(&mut self, source: String, value: Option<String>, ctx: &mut Global) {
+        use crate::action::{ListEdit, TagChanges};
+        let targets = std::mem::take(&mut self.tags_targets);
+        if targets.is_empty() || source.is_empty() {
+            return;
+        }
+        let changes = TagChanges { sources: vec![(source.clone(), ListEdit::Replace(value.iter().cloned().collect()))], ..Default::default() };
+        let n = targets.len();
+        let action = Action::SetTags { targets: targets.into_iter().map(|p| (p, String::new())).collect(), edit: Box::new(changes) };
+        if n == 1 {
+            ctx.request(action);
+            return;
+        }
+        let line = match &value {
+            Some(v) => tr!("media-type-confirm", n = n, source = source, value = v.clone()),
+            None => tr!("media-type-confirm-remove", n = n, source = source),
+        };
+        let c = crate::dialog::Confirm::new(tr!("confirm-tags-title"), vec![line], tr!("confirm-tags-yes"), action).danger();
+        ctx.open(crate::dialog::Modal::Confirm(c));
     }
 
     /// Après une action (tags écrits…) : relit la page et la fiche, la
@@ -754,10 +799,35 @@ impl Medias {
                 }
                 return Control::Changed;
             }
+            AppEvent::Tags(ev) => {
+                if let TagsEvent::TypeValues(owner, id, r) = &**ev
+                    && *owner == self.owner
+                    && let Some(p) = self.typepick.as_mut()
+                    && p.request == *id
+                {
+                    p.set(r.clone());
+                    return Control::Changed;
+                }
+                return Control::Continue;
+            }
             AppEvent::Event(_) => {}
             _ => return Control::Continue,
         }
         let AppEvent::Event(e) = event else { return Control::Continue };
+
+        // Choix d'un Type ouvert : il capture tout.
+        if let Some(p) = self.typepick.as_mut() {
+            match p.handle(e) {
+                TypeOutcome::Pending => {}
+                TypeOutcome::Cancel => self.typepick = None,
+                TypeOutcome::Chosen(v) => {
+                    let source = p.source().unwrap_or_default().to_string();
+                    self.typepick = None;
+                    self.assign_type(source, v, ctx);
+                }
+            }
+            return Control::Changed;
+        }
 
         // Éditeur de tags ouvert : il capture tout.
         if let Some(f) = self.tagform.as_mut() {
@@ -860,6 +930,7 @@ impl Medias {
                 KeyCode::Char('p') => self.open_chooser(Purpose::AddToStatic, ctx),
                 KeyCode::Char('f') => self.open_chooser(Purpose::Enqueue, ctx),
                 KeyCode::Char('e') => self.edit_tags(ctx),
+                KeyCode::Char('t') => self.pick_type(ctx),
                 _ => return Control::Unchanged,
             }
             return Control::Changed;
@@ -893,6 +964,7 @@ impl Medias {
             KeyCode::Char('p') => self.open_chooser(Purpose::AddToStatic, ctx),
             KeyCode::Char('f') => self.open_chooser(Purpose::Enqueue, ctx),
             KeyCode::Char('e') => self.edit_tags(ctx),
+            KeyCode::Char('t') => self.pick_type(ctx),
             _ => {
                 if !self.key(k, ctx) {
                     return Control::Continue;
@@ -951,11 +1023,23 @@ impl Medias {
             let cursor = f.render(area, buf, &ctx.theme);
             ctx.set_screen_cursor(cursor);
         }
+        if let Some(p) = self.typepick.as_mut() {
+            let cursor = p.render(area, buf, &ctx.theme);
+            ctx.set_screen_cursor(cursor);
+        }
     }
 
     /// Raccourcis du moment (aide et ligne du bas).
     pub fn keys(&self) -> &'static [KeyHelp] {
-        if self.tagform.is_some() {
+        if self.typepick.as_ref().is_some_and(|p| p.typing()) {
+            &[(k!("key-enter"), k!("help-media-type-write")), (k!("key-esc"), k!("help-back"))]
+        } else if self.typepick.is_some() {
+            &[
+                (k!("key-up-down"), k!("help-select")),
+                (k!("key-enter"), k!("help-media-type-write")),
+                (k!("key-esc"), k!("help-cancel")),
+            ]
+        } else if self.tagform.is_some() {
             &[
                 (k!("key-ctrl-s"), k!("help-tags-write")),
                 (k!("key-enter"), k!("help-tags-list")),
@@ -968,6 +1052,7 @@ impl Medias {
                 (k!("key-esc"), k!("help-close")),
                 (k!("key-up-down"), k!("help-card-prev-next")),
                 (k!("key-e"), k!("help-media-edit-tags")),
+                (k!("key-t"), k!("help-media-type")),
                 (k!("key-o"), k!("help-override")),
                 (k!("key-p"), k!("help-media-to-playlist")),
                 (k!("key-f"), k!("help-media-enqueue")),
@@ -987,6 +1072,7 @@ impl Medias {
                 (k!("key-enter"), k!("help-media-card")),
                 (k!("key-space"), k!("help-media-mark")),
                 (k!("key-e"), k!("help-media-edit-tags")),
+                (k!("key-t"), k!("help-media-type")),
                 (k!("key-p"), k!("help-media-to-playlist")),
                 (k!("key-f"), k!("help-media-enqueue")),
                 (k!("key-o"), k!("help-override")),
@@ -1002,7 +1088,7 @@ impl Medias {
 
     /// Une saisie est en cours (texte de recherche ou filtre du sélecteur).
     pub fn typing_text(&self) -> bool {
-        self.editing || self.chooser.is_some() || self.card.is_some() || self.tagform.is_some()
+        self.editing || self.chooser.is_some() || self.card.is_some() || self.tagform.is_some() || self.typepick.is_some()
     }
 }
 

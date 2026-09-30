@@ -45,5 +45,9 @@ pub mod playlist {
     tonic::include_proto!("webradio.playlist.v1");
 }
 
+pub mod events {
+    tonic::include_proto!("webradio.events.v1");
+}
+
 /// Les types bien connus (horodatages, durées) des messages générés.
 pub use prost_types;

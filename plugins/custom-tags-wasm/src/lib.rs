@@ -84,6 +84,10 @@ pub struct Tempo {
     /// Host policy; the guest only classifies the provided BPM.
     #[serde(default = "analysis_enabled")]
     pub analyze_missing: bool,
+    /// Host policy too: the window estimates are folded into, `[lo, hi]`
+    /// (checked by the host).
+    #[serde(default)]
+    pub analyze_range: Option<[f64; 2]>,
     #[serde(default)]
     pub enabled: bool,
     #[serde(default = "bpm_tags")]
@@ -353,5 +357,7 @@ mod analysis_config_tests {
         assert!(config.tempo.unwrap().analyze_missing);
         let config = parse_config(r#"{"tempo":{"enabled":true,"analyze_missing":false,"range":[{"value":"any"}]}}"#).unwrap();
         assert!(!config.tempo.unwrap().analyze_missing);
+        let config = parse_config(r#"{"tempo":{"enabled":true,"analyze_range":[50,100],"range":[{"value":"any"}]}}"#).unwrap();
+        assert_eq!(config.tempo.unwrap().analyze_range, Some([50.0, 100.0]));
     }
 }

@@ -49,6 +49,7 @@ Variables générales : `DC` (défaut `docker compose`), `SVC` (service, défaut
 | Commande | Effet | Paramètres |
 | --- | --- | --- |
 | `status` | Nom de la station, fuseau, uptime, pid | — |
+| `events` | Le journal de la station, du plus ancien au plus récent : faits typés (démarrage, état de diffusion, grille appliquée / refusée, incident de grille, override, live, scan, tags écrits, renommage, plugin en échec / en quarantaine…) et chaque ligne `warn` / `error` du journal de stationd. En mémoire, 2000 derniers, vide à chaque démarrage (le journal de l'hôte garde tout) | `--last <n>` (défaut 50) ; `--follow` ; `--level info\|warn\|error` (ce niveau et au-dessus) |
 | `quit` | stationd sort proprement ; son superviseur (s6) le relance : c'est un **redémarrage** | — |
 | `station state` | État de diffusion + dernier échantillon d'auditeurs (`unknown` = jamais lu ou Icecast illisible). stationd injoignable + marqueur présent → `STOPPED by the operator since …`, code **3** | `--root <dir>` : répertoire de travail de stationd (défaut `$STATIOND_ROOT`, sinon le répertoire courant) |
 | `station stop` | **Arrêt opérateur** : la piste en cours va au bout, puis bruit de fond ; stationd s'arrête et n'est plus relancé, même après redémarrage du conteneur ou de l'hôte, jusqu'à `station start` (marqueur `data/stationd.stopped`). Liquidsoap et Icecast restent debout. Refusé si un DJ est à l'antenne | `--force` : déconnecte d'abord le DJ |
@@ -99,7 +100,10 @@ Réveils automatiques (core) : audience devenue inconnue, DJ qui prend l'antenne
 
 | Commande | Effet | Paramètres |
 | --- | --- | --- |
-| `library scan` | Scanne `[media] library_path` et réconcilie l'index ; un fichier illisible est signalé, pas bloquant. Un fichier disparu reste dans l'index, marqué indisponible : `vanished` = disparus **à ce scan**, `unavailable` = disparus au total | — |
+| `library scan` | Scanne `[media] library_path` et réconcilie l'index ; un fichier illisible est signalé, pas bloquant. Un fichier disparu reste dans l'index, marqué indisponible : `vanished` = disparus **à ce scan**, `unavailable` = disparus au total | `--progress` : l'avancement sur stderr (phase, fichiers lus / trouvés) |
+| `library scan-status` | Où en est le scan (phase, fichiers lus / trouvés) et comment le dernier s'est terminé — qu'il ait été lancé d'ici, de la TUI ou d'ailleurs | `--follow` : chaque changement |
+| `library values` | Les valeurs **par origine**, parmi les médias disponibles : le genre du fichier (`TCON`), puis chaque source `custom-tags` (`Type`…) même vide ; effectifs, graphies (plus d'une = incohérence), médias sans valeur. Rempli par le scan (vide avant le premier scan après la migration 0028) | — |
+| `library rename <DE> <VERS>` | Renomme une valeur d'une origine sur toute la bibliothèque, toutes graphies confondues ; `VERS` existe déjà = fusion. Fichier par fichier, comme `library tag` (relu, vérifié, index à jour) ; un fichier en échec est listé, les autres continuent, code ≠ 0 s'il y en a. Les playlists dont un filtre `genre` nomme la valeur choisiront autrement : `--dry-run` les liste avec les fichiers | `--origin <source>` (ex. `Type` ; défaut : genre du fichier) ; `--dry-run` |
 | `library prune` | Oublie les médias disparus (lignes indisponibles et leurs genres). L'historique de diffusion garde leur chemin et leur artiste (plus leur titre) | `--older-than <durée>` (seulement ceux vus pour la dernière fois il y a plus de, ex. `30d`) |
 | `library list` | Index des médias (disponibles seulement par défaut) | `--all` (inclut les fichiers disparus) ; `--genre <g>` (répétable, OU) ; `--by-genre` (groupé par genre) |
 | `library genres` | Nombre de médias par genre + sans genre | `--all` |

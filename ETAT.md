@@ -515,6 +515,67 @@ lot A (login) avant tout usage distant.
 
 ## Fait
 
+### — Analyse des BPM : octaves, avancement, blocage FFmpeg (2026-09-30) —
+
+- **Octaves** : les trois sections du morceau étaient refusées dès qu'une
+  était lue en double / demi-temps (`122.9, 245.8, 245.9` → rien). Chaque
+  estimation est maintenant ramenée dans une fenêtre d'une octave
+  (`tempo.analyze_range`, défaut `[70, 180]`, vérifiée : bornes 20..400,
+  haut ≥ 2 × bas) puis alignée sur les autres ; accord à 4 % comme avant.
+  Un vrai 60 BPM se lit 120 avec la fenêtre par défaut. Le plugin
+  `custom-tags-wasm` accepte la clé (à recompiler).
+- Restent refusés (rien écrit) : rythmes concurrents non harmoniques,
+  pulsation faible, sans rythme, trop court, décodage impossible.
+- **Blocage** : les messages de FFmpeg n'étaient lus que sur 8 Ko ; un
+  fichier abîmé (plus de 64 Ko d'erreurs) remplissait le tuyau et FFmpeg
+  attendait jusqu'au délai de 45 s. Les deux sorties sont maintenant lues
+  jusqu'au bout (test avec FFmpeg réel).
+- **Avancement** : phase `analyzing` avec mp3 analysés / à analyser (TUI,
+  `library scan-status`, `scan --progress`).
+- **Bilan** au journal : fait `BPM_ANALYZED` (estimés, non estimés, par
+  cause) ; le log garde une ligne par fichier (pas doublée au journal).
+- **FFmpeg absent** : dit une fois au démarrage et à chaque scan (au lieu
+  d'une ligne par fichier), analyse sautée. Les images `docker/` installent
+  FFmpeg depuis le 28/09 : une image plus ancienne est à reconstruire.
+
+
+### — Tags et Système : journal, avancement du scan, valeurs par origine (2026-09-30) —
+
+558 tests daemon + 68 TUI verts, clippy sans nouvel avertissement. Essayé
+en réel (stationctl et TUI contre stationd). **À valider sur devstationd.**
+Voie **native** retenue pour les tags (pas de plugin `tags`, pas de
+`PluginService.Call` / `media_meta_write`) — dossier §3.7, §3.8, §5.6, §5.7.
+- **Journal** (`src/events.rs`, `proto/events_v1.proto`,
+  `EventService.Watch`) : en mémoire, 2000 derniers, vide à chaque
+  démarrage. Faits typés (code + paramètres, D12) : démarrage / arrêt, état
+  de diffusion, auditeurs (au changement), audience inconnue, piste choisie,
+  override, grille appliquée / refusée, incident de grille (une fois),
+  live, scan, tags écrits, renommage, plugin en échec / quarantaine / état.
+  Chaque ligne `warn` / `error` de `tracing` y entre aussi (code `LOG`,
+  texte tel quel) — une ligne avec un champ `event = "…"` est déjà un fait
+  typé, pas doublée. Faits de simulation exclus (`StationControl::is_real` :
+  plugins attachés). `stationctl events [--last n] [--follow] [--level]`.
+- **Avancement du scan** : `media::scan_library_with` (parcours puis
+  lecture, rappel par fichier), phases (parcours, lecture, BPM, plugins,
+  réécriture, index) dans un `watch` de l'acteur bibliothèque ;
+  `LibraryService.WatchScan`, `stationctl library scan --progress`,
+  `library scan-status [--follow]`.
+- **Valeurs par origine** : migration **0028** `media_tag (rel_path,
+  origin, value, value_key)` — origin `""` = genre du fichier (TCON),
+  sinon la source `custom-tags` (`Type`) — remplie au scan et après chaque
+  écriture de tags (vide avant le premier scan). `ListTagValues`,
+  `RenameTagValue` (aperçu : fichiers, playlists dont un filtre `genre` la
+  nomme, fusion ; exécution fichier par fichier en flux, échecs rapportés,
+  jamais interrompue par le client). `library values`, `library rename`.
+- **TUI** : écran **Tags** (onglet par origine, effectifs, graphies,
+  médias sans valeur, `e` renommer / fusionner avec aperçu, jauge, bilan) ;
+  écran **Système** (État, Journal avec pause / filtres / recherche,
+  Statistiques `Plays` par fenêtre et regroupement) ; Médias `t` = affecter
+  un `Type` (un média sans question, un lot après confirmation) ; jauge du
+  scan dans Contrôle › Bibliothèque ; Icecast lu avec le bandeau.
+- Reste du lot 8 : écran Plugins (vues déclaratives).
+
+
 ### — Agenda : zone « hors horloge » pour les `every` (2026-09-30) —
 
 - Les `every` (à l'intervalle `min_elapsed` comme au compteur `min_tracks`)

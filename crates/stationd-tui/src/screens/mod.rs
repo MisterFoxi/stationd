@@ -10,7 +10,10 @@ mod picker;
 mod planned;
 mod playlists;
 mod ruleform;
+mod systeme;
 mod tagform;
+mod tags;
+mod typepick;
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -20,6 +23,8 @@ use planned::Planned;
 pub use agenda::AgEvent;
 pub use ruleform::diag_text as grid_diag_text;
 pub use playlists::PlEvent;
+pub use systeme::SysEvent;
+pub use tags::TagsEvent;
 
 /// Rang de l'écran Playlists dans le registre (ouvert depuis Médias).
 pub const PLAYLISTS: usize = 2;
@@ -38,18 +43,8 @@ pub fn registry() -> Vec<Box<dyn Screen>> {
         Box::new(playlists::Playlists::default()),
         Box::new(agenda::Agenda::default()),
         Box::new(medias::Medias::default()),
-        Box::new(Planned {
-            title: k!("screen-tags"),
-            lot: 8,
-            summary: &[k!("planned-tags-1"), k!("planned-tags-2")],
-            plugin: Some("tags"),
-        }),
-        Box::new(Planned {
-            title: k!("screen-system"),
-            lot: 8,
-            summary: &[k!("planned-system-1"), k!("planned-system-2")],
-            plugin: None,
-        }),
+        Box::new(tags::Tags::default()),
+        Box::new(systeme::Systeme::default()),
         Box::new(Planned {
             title: k!("screen-plugins"),
             lot: 8,

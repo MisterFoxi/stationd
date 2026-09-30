@@ -312,6 +312,7 @@ impl GridFiles {
             self.engine.replace_rules(&rules).await.map_err(|e| {
                 GridFileError::Io(format!("{name} written but not applied ({e}): run `schedule reload`"))
             })?;
+            journal_applied(&name, rules.len());
             self.clear_problem();
         }
         Ok(Saved {
@@ -386,6 +387,7 @@ impl GridFiles {
         write_atomic(&self.path(&name), &text)
             .map_err(|e| GridFileError::Io(format!("could not write grid {name}: {e}")))?;
         self.engine.replace_rules(&rules).await?;
+        journal_applied(&name, rules.len());
         self.clear_problem();
         Ok((name, rules.iter().map(|r| r.id.clone()).collect()))
     }
@@ -398,10 +400,26 @@ impl GridFiles {
             return Err(GridFileError::Invalid { name: name.to_string(), diags });
         };
         self.engine.replace_rules(&rules).await?;
+        journal_applied(name, rules.len());
         Ok(Some(rules.len()))
     }
 
-    fn note(&self, _name: &str, r: &Result<Option<usize>, GridFileError>) {
+    fn note(&self, name: &str, r: &Result<Option<usize>, GridFileError>) {
+        // Start-up / reload: a refused active grid goes into the journal (the
+        // grid last applied stays on air).
+        let refused = match r {
+            Ok(_) => None,
+            Err(GridFileError::Invalid { diags, .. }) => Some(("problems", diags.len().to_string())),
+            Err(e) => Some(("error", e.to_string())),
+        };
+        if let Some(why) = refused {
+            crate::events::record(
+                crate::events::Level::Error,
+                crate::events::Component::Grid,
+                crate::events::Code::GridRefused,
+                [("grid", name.to_string()), (why.0, why.1)],
+            );
+        }
         let problem = match r {
             // No file: `ListGrids` shows it without revision.
             Ok(_) => None,
@@ -414,6 +432,16 @@ impl GridFiles {
     fn clear_problem(&self) {
         *self.problem.lock().expect("grid problem lock") = None;
     }
+}
+
+/// A grid put on air, into the journal.
+fn journal_applied(name: &str, rules: usize) {
+    crate::events::record(
+        crate::events::Level::Info,
+        crate::events::Component::Grid,
+        crate::events::Code::GridApplied,
+        [("grid", name.to_string()), ("rules", rules.to_string())],
+    );
 }
 
 #[cfg(test)]

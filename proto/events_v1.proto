@@ -1,0 +1,88 @@
+// events_v1.proto
+// ─────────────────────────────────────────────────────────────────────────
+// Le JOURNAL de la station (src/events.rs) : ce qui s'est passé, dans
+// l'ordre — faits typés (changement d'état, grille appliquée, scan, tags
+// écrits, plugin en quarantaine…) et chaque ligne `warn` / `error` du
+// journal de stationd. Vue d'exploitation, en mémoire, bornée, vide à chaque
+// démarrage ; rien ne la relit pour décider.
+//
+// D12 : aucun texte d'affichage — un fait = un code + des paramètres nommés,
+// traduits par chaque client. Exception : Code.LOG porte le texte de la
+// ligne de journal (`message`), montré tel quel.
+// ─────────────────────────────────────────────────────────────────────────
+syntax = "proto3";
+
+package webradio.events.v1;
+
+service EventService {
+  // Les `backlog` derniers événements, puis (si `follow`) les suivants au
+  // fil de l'eau. Le flux se termine à l'arrêt de stationd.
+  rpc Watch(WatchEventsRequest) returns (stream Event);
+}
+
+message WatchEventsRequest {
+  // 0 → 200 ; plafonné à la capacité du journal (2000).
+  uint32 backlog = 1;
+  // false : le backlog seul, puis fin du flux.
+  bool follow = 2;
+}
+
+message Event {
+  uint64 seq = 1;            // croissant depuis 1 à chaque démarrage
+  int64 at_ms = 2;           // epoch, millisecondes
+  Level level = 3;
+  Component component = 4;
+  Code code = 5;
+  repeated Param params = 6; // dans l'ordre du fait
+
+  enum Level {
+    LEVEL_UNSPECIFIED = 0;
+    INFO = 1;
+    WARN = 2;
+    ERROR = 3;
+  }
+
+  enum Component {
+    COMPONENT_UNSPECIFIED = 0;
+    STATION = 1;
+    BROADCAST = 2;
+    GRID = 3;
+    LIBRARY = 4;
+    PLUGIN = 5;
+    LIVE = 6;
+    LIQUIDSOAP = 7;
+    ICECAST = 8;
+  }
+
+  // Paramètres de chaque code entre parenthèses.
+  enum Code {
+    CODE_UNSPECIFIED = 0;
+    LOG = 1;                  // (message, target, champs de la ligne)
+    STARTED = 2;              // (version, station)
+    STOPPING = 3;             // (by : request, sigint, sigterm)
+    BROADCAST_STATE = 4;      // (from, to, by)
+    LISTENERS = 5;            // (count)
+    AUDIENCE_UNKNOWN = 6;     // ()
+    TRACK_CHOSEN = 7;         // (media, playlist, rule, origin)
+    OVERRIDE_PUSHED = 8;      // (media ou playlist, mode, by)
+    GRID_APPLIED = 9;         // (grid, rules)
+    GRID_REFUSED = 10;        // (grid, problems | error)
+    GRID_INCIDENT = 11;       // (kind, rule, playlist)
+    LIVE_STARTED = 12;        // (dj, rule)
+    LIVE_ENDED = 13;          // (dj, reason)
+    SCAN_STARTED = 14;        // ()
+    SCAN_FINISHED = 15;       // (found, skipped, present, unavailable, vanished)
+    SCAN_FAILED = 16;         // (error)
+    TAGS_WRITTEN = 17;        // (media)
+    TAG_RENAMED = 18;         // (from, to, files, failed)
+    PLUGIN_FAILED = 19;       // (plugin, phase, reason)
+    PLUGIN_QUARANTINED = 20;  // (plugin, failures, reason)
+    PLUGIN_STATE = 21;        // (plugin, state)
+    BPM_ANALYZED = 22;        // (estimated, failed, failed_<decode|too_short|no_rhythm|weak|competing|disagree>)
+  }
+}
+
+message Param {
+  string name = 1;
+  string value = 2;
+}

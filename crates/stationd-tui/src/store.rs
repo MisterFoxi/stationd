@@ -7,7 +7,7 @@
 use std::time::{Duration, Instant};
 
 use jiff::tz::TimeZone;
-use stationd_proto::{broadcast, liquidsoap, live, onair, plugin, station};
+use stationd_proto::{broadcast, events, icecast, library, liquidsoap, live, onair, plugin, station};
 
 use crate::rpc::BannerRead;
 
@@ -82,7 +82,18 @@ pub struct Store {
     pub onair_link: Result<(), String>,
     /// Rapport du dernier scan lancé depuis cette TUI.
     pub last_scan: Option<stationd_proto::library::ScanResponse>,
+    pub icecast: Sourced<icecast::IcecastStatus>,
+    /// Le journal de la station (flux `EventService.Watch`), le plus ancien
+    /// en tête, borné comme celui de stationd.
+    pub journal: std::collections::VecDeque<events::Event>,
+    /// Le flux du journal est-il ouvert ? `Err` = pourquoi il ne l'est pas.
+    pub journal_link: Result<(), String>,
+    /// Où en est le scan (flux `LibraryService.WatchScan`).
+    pub scan: Option<library::ScanStatus>,
 }
+
+/// Événements gardés (la capacité du journal de stationd).
+pub const JOURNAL_MAX: usize = 2000;
 
 impl Store {
     pub fn new(addr: &str) -> Self {
@@ -100,6 +111,10 @@ impl Store {
             onair: None,
             onair_link: Err(crate::tr!("onair-stream-opening")),
             last_scan: None,
+            icecast: Sourced::default(),
+            journal: std::collections::VecDeque::new(),
+            journal_link: Err(crate::tr!("journal-opening")),
+            scan: None,
         }
     }
 
@@ -127,7 +142,25 @@ impl Store {
         self.live.apply(read.live, at);
         self.overrides.apply(read.overrides, at);
         self.plugins.apply(read.plugins, at);
+        self.icecast.apply(read.icecast, at);
         ok
+    }
+
+    /// Un événement du journal. `fresh` = premier d'un flux (re)ouvert : le
+    /// flux renvoie son historique, qui remplace le nôtre (stationd a pu
+    /// redémarrer, ses numéros repartent de 1).
+    pub fn apply_journal(&mut self, ev: events::Event, fresh: bool) {
+        if fresh {
+            self.journal.clear();
+        }
+        self.journal_link = Ok(());
+        if self.journal.back().is_some_and(|l| l.seq >= ev.seq) && !fresh {
+            return;
+        }
+        if self.journal.len() == JOURNAL_MAX {
+            self.journal.pop_front();
+        }
+        self.journal.push_back(ev);
     }
 
     /// Un instantané de l'antenne arrive : on ignore un instantané plus
@@ -209,7 +242,27 @@ mod tests {
             live: Err("x".into()),
             overrides: Err("x".into()),
             plugins: Err("x".into()),
+            icecast: Err("x".into()),
         }
+    }
+
+    fn event(seq: u64) -> events::Event {
+        events::Event { seq, ..Default::default() }
+    }
+
+    #[test]
+    fn the_journal_keeps_order_and_restarts_with_a_fresh_stream() {
+        let mut st = Store::new("x");
+        st.apply_journal(event(1), true);
+        st.apply_journal(event(2), false);
+        // Already seen (a replay): ignored.
+        st.apply_journal(event(2), false);
+        assert_eq!(st.journal.iter().map(|e| e.seq).collect::<Vec<_>>(), [1, 2]);
+        // A reopened stream (stationd restarted, numbers from 1 again): its
+        // backlog replaces ours.
+        st.apply_journal(event(1), true);
+        assert_eq!(st.journal.iter().map(|e| e.seq).collect::<Vec<_>>(), [1]);
+        assert!(st.journal_link.is_ok());
     }
 
     fn status(tz: &str, up: u64) -> station::StatusReply {

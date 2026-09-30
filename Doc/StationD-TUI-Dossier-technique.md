@@ -1,6 +1,6 @@
 # StationD — Dossier technique de la TUI
 
-Version 2.9 — 30 septembre 2026
+Version 3.0 — 30 septembre 2026
 Statut : refonte complète (remplace la v1.0 du 25/09). Document vivant : il suit les besoins, pas l'inverse.
 Socle : Rust + Ratatui + rat-salsa / rat-widget, client gRPC pur de `stationd`.
 
@@ -171,11 +171,19 @@ Tranché : **`PlaylistService` dédié** (`proto/playlist_v1.proto`, réécrit),
 - `Preview`, `CheckCoverage`, `ListRules` acceptent `grid` (un fichier du nœud) ou `draft_toml` (un brouillon) : projeter / dimensionner une grille avant de l'activer, rien d'appliqué.
 - CLI : `schedule grids|show|save|activate|reload`, `list|preview|check --grid <nom>`, `preview|check --draft <fichier>` ; `validate` / `apply` listent les diagnostics.
 
-### 3.7 À ajouter — Événements
+### 3.7 Événements — fait (2026-09-30)
+
+**Fait** : `proto/events_v1.proto`, `EventService.Watch { backlog, follow }` → flux d'`Event { seq, at_ms, level, component, code, params }`. `src/events.rs` : journal en mémoire (2000 derniers, vide à chaque démarrage), faits typés (codes + paramètres nommés, D12) et chaque ligne `warn` / `error` de `tracing` (code `LOG`, texte gardé tel quel ; une ligne qui porte un champ `event` est déjà un fait typé, pas doublée). Faits : démarrage / arrêt, état de diffusion, auditeurs (au changement), audience inconnue, piste choisie, override, grille appliquée / refusée, incident de grille (une fois par incident), live, scan (début, fin, échec), tags écrits, renommage, plugin en échec / en quarantaine / changé d'état. Le flux suivi se termine à l'arrêt de stationd. CLI : `stationctl events [--last n] [--follow] [--level]`. Avancement du scan : `LibraryService.WatchScan` (phase, fichiers lus / trouvés, fin du dernier), `stationctl library scan --progress`, `library scan-status [--follow]`.
+
+Prévu à l'origine :
 
 - `EventService.Watch` : flux des événements déjà émis en interne pour les plugins (`BroadcastStateChanged`, `ListenersSampled`, début/fin de piste, apply, erreurs plugin…), borné, avec niveau et composant. Alimente la vue Système et la ligne de statut.
 
-### 3.8 À ajouter — Plugins (générique, sans notion de tag)
+### 3.8 Plugins (générique, sans notion de tag) — tags : voie native retenue (2026-09-30)
+
+**Décision (2026-09-30)** : l'écriture des tags étant native (`SetTags`, sources `custom-tags` comme `Type`, genres `TCON`), l'écran Tags ne passe pas par un plugin `tags` : `PluginService.Call/Views`, `on_call` et `media_meta_write` ne sont pas faits (restent possibles pour des vues de plugins, écran Plugins). Ajouté à la place : `LibraryService.ListTagValues` (valeurs par origine — genre du fichier, puis chaque source —, effectifs, graphies, médias sans valeur ; table `media_tag`, migration 0028, remplie par le scan) et `LibraryService.RenameTagValue` (aperçu `dry_run` : fichiers, playlists dont un filtre `genre` nomme la valeur, fusion ; exécution fichier par fichier en flux, échecs rapportés). CLI : `library values`, `library rename`.
+
+Prévu à l'origine :
 
 - `PluginService.Call { plugin, method, payload_json } → { ok, payload_json | error }` : stationd transmet au plugin via un nouveau point d'entrée `on_call(method, payload)`. Borné (timeout), soumis au même régime d'échec/quarantaine que les hooks. CLI : `stationctl plugin call <plugin> <method> '<json>'`.
 - `PluginService.Views { plugin }` : description **déclarative** des écrans qu'un plugin propose (§4.3).
@@ -453,7 +461,11 @@ Navigation : `[`/`]` jour ou semaine précédente/suivante, `t` aujourd'hui, `g`
 - `s` scan (jauge, rapport des fichiers écartés), `o` pousser en override, `q` mettre en file.
 - Sélection multiple (`Espace`) → actions en lot (tags, ajout à une playlist statique en brouillon).
 
-### 5.6 Tags (`6`) — si le plugin `tags` est chargé
+### 5.6 Tags (`6`)
+
+**Fait (2026-09-30, voie native)** : un onglet par origine (`Tab`) — genre du fichier, puis chaque source `custom-tags` ; valeurs avec effectif en barres, graphies incohérentes signalées, médias sans valeur ; tri nom / effectif (`s`), relire (`r`). `e` : renommer ou fusionner la valeur — saisie (préremplie, Entrée) → aperçu (fichiers, fusion, playlists qui filtrent dessus) → Entrée → avancement fichier par fichier (jauge) → bilan (réécrits, déjà sans la valeur, échecs listés) ; un renommage lancé n'est pas interrompu. Médias : `t` affecte une valeur de la première source (`Type`) à la ligne ou aux marqués — valeurs les plus employées en tête, « autre valeur… », « retirer » ; un média s'écrit sans question, un lot après confirmation (`SetTags`, comme `e`). Pas de tags libres `TXXX:Tags` (plugin non fait) : une source de plus dans `custom-tags` en tient lieu.
+
+Prévu à l'origine :
 
 Parle uniquement au plugin via `PluginService.Call`. Méthodes attendues du plugin (contrat à figer avec lui) : `types` (valeurs de Type + effectifs), `set_type` (par média ou par lot), `list` (tags libres + effectifs), `get` / `set` / `add` / `remove` (par média ou par lot), `create`, `rename`, `merge`.
 - Deux panneaux : **Types** (valeurs déclarées, effectifs, médias sans Type) et **Tags** (tags libres, effectifs, médias sans tag).
@@ -464,6 +476,10 @@ Parle uniquement au plugin via `PluginService.Call`. Méthodes attendues du plug
 - Absent si le plugin n'est pas chargé ; son état apparaît dans Contrôle › Plugins.
 
 ### 5.7 Système (`7`)
+
+**Fait (2026-09-30)** : trois sections (`Tab`). **État** : stationd (station, version — du fait de démarrage —, uptime, pid, fuseau, journal suivi), Liquidsoap (antenne, à l'antenne, dernière demande, pistes démarrées, socket de contrôle), Icecast (serveur, dernière lecture, auditeurs, problème, chaque mount : présent / sans source / alimenté, débit annoncé et reçu, auditeurs), live (à l'antenne, harbor, dernier refus), bibliothèque (scan en cours avec jauge, sinon le dernier). Icecast est lu avec le bandeau (2 s). **Journal** : suivi en continu par l'application (flux rouvert après une coupure, historique remplacé), défile seul, `↑` / PgPréc met en pause (« N nouveaux »), `Fin` reprend ; `l` niveau (tout / avertissements / erreurs), `c` composant, `/` recherche dans le texte traduit. **Statistiques** : `Plays`, `w` fenêtre 30 min / 24 h / 7 j / 30 j, `b` regroupement (playlist, feuille, règle, origine, média, artiste), barres des diffusés + diffusés / choisis / dernier, total. Contrôle › Bibliothèque montre aussi la jauge du scan en cours.
+
+Prévu à l'origine :
 
 - État : stationd (uptime, version), Liquidsoap (`GetStatus` : dernières demandes, dernier `/next`, `on_air_kind`), Icecast (serveur, dernière lecture, problème, audience, mounts : présent, source connectée, débit annoncé/réel), live (fichier des DJ lisible, nombre de DJ).
 - Événements (`EventService.Watch`) : défilement auto, pause en remontant, filtres niveau/composant, recherche.
@@ -489,8 +505,8 @@ Vues déclaratives des plugins chargés (§4.3). Base de chaque plugin : `DbInfo
 | 4 ✅ | TUI : Médias (4a : recherche, filtres, tri, pages, override ; 4b : fiche, sélection multiple, ajout à une statique, mise en file) ; Playlists (4b : liste + éditeur) ; stationd : références dans `List`, `Containing`, `Plays.key` | 3 |
 | 5 ✅ | stationd : grilles en fichiers (une active), diagnostics de grille, `SaveGrid`, projection d'un brouillon | — |
 | 6 ✅ | TUI : Agenda (6a jour, semaine, couverture ; 6b édition, grilles, UTC) | 5 pour l'édition |
-| 7 | stationd : `ScanWatch`, `EventService`, `PluginService.Call/Views`, `media_meta_write` | — |
-| 8 | Plugin `tags` (Type + tags libres, méthodes §5.6, reprise de `TXXX:Type`) + TUI : Type dans Médias, Tags, Système, Plugins | 7 |
+| 7 ✅ | stationd : `WatchScan`, `EventService` ; `ListTagValues` / `RenameTagValue` (voie native, §3.8) — `PluginService.Call/Views` et `media_meta_write` non faits | — |
+| 8 (✅ sauf Plugins) | TUI : Type dans Médias (`t`), Tags, Système ; Plugins (vues déclaratives) reste à faire | 7 |
 
 Chaque RPC ajouté a sa commande `stationctl` dans le même lot.
 

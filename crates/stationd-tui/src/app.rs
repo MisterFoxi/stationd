@@ -155,6 +155,17 @@ pub enum AppEvent {
     Playlists(Box<crate::screens::PlEvent>),
     /// Agenda et éditeur de règle : réponses et minuteries.
     Agenda(Box<crate::screens::AgEvent>),
+    /// Un événement du journal ; `true` = premier d'un flux (re)ouvert.
+    Journal(Box<stationd_proto::events::Event>, bool),
+    /// Le flux du journal est fermé ou n'a pas pu s'ouvrir.
+    JournalLost(String),
+    /// Où en est le scan.
+    Scan(Box<stationd_proto::library::ScanStatus>),
+    /// Le flux du scan est fermé : son état n'est plus connu.
+    ScanLost,
+    /// Écrans Tags et Système : réponses (voir `screens::tags`, `screens::systeme`).
+    Tags(Box<crate::screens::TagsEvent>),
+    System(Box<crate::screens::SysEvent>),
 }
 
 impl From<RenderedEvent> for AppEvent {
@@ -214,6 +225,8 @@ pub fn init(state: &mut Scenery, ctx: &mut Global) -> Result<(), Error> {
     state.clock = Some(ctx.add_timer(TimerDef::new().repeat_forever().timer(Duration::from_secs(1))));
     spawn_banner_poll(ctx);
     spawn_onair_watch(ctx);
+    spawn_watch(ctx, rpc::watch_events, |e, fresh| AppEvent::Journal(Box::new(e), fresh), AppEvent::JournalLost);
+    spawn_watch(ctx, rpc::watch_scan, |s, _| AppEvent::Scan(Box::new(s)), |_| AppEvent::ScanLost);
     state.status.status(0, tr!("status-connecting"));
     state.active().enter(ctx)?;
     Ok(())
@@ -275,6 +288,48 @@ fn spawn_onair_watch(ctx: &Global) {
                         return Ok(Control::Continue);
                     }
                 }
+            }
+            delay = rpc::next_delay(delay, false);
+            tokio::time::sleep(delay).await;
+        }
+    });
+}
+
+/// Tâche de fond : suit un flux serveur et le rouvre après une coupure
+/// (délai croissant plafonné). `item(x, premier)` et `lost(raison)` font
+/// l'événement envoyé à la boucle.
+fn spawn_watch<T, O, F>(ctx: &Global, open: O, item: fn(T, bool) -> AppEvent, lost: fn(String) -> AppEvent)
+where
+    T: Send + 'static,
+    O: Fn(Channel) -> F + Send + 'static,
+    F: std::future::Future<Output = Result<tonic::Streaming<T>, String>> + Send,
+{
+    let channel = ctx.channel.clone();
+    ctx.spawn_async_ext(move |chan| async move {
+        let mut delay = rpc::POLL_OK;
+        loop {
+            let why = match open(channel.clone()).await {
+                Ok(mut stream) => {
+                    let mut fresh = true;
+                    loop {
+                        match stream.message().await {
+                            Ok(Some(x)) => {
+                                delay = rpc::POLL_OK;
+                                let ev = item(x, fresh);
+                                fresh = false;
+                                if chan.send(Ok(Control::Event(ev))).await.is_err() {
+                                    return Ok(Control::Continue);
+                                }
+                            }
+                            Ok(None) => break tr!("stream-closed"),
+                            Err(status) => break rpc::status_text(&status),
+                        }
+                    }
+                }
+                Err(e) => e,
+            };
+            if chan.send(Ok(Control::Event(lost(why)))).await.is_err() {
+                return Ok(Control::Continue);
             }
             delay = rpc::next_delay(delay, false);
             tokio::time::sleep(delay).await;
@@ -468,6 +523,22 @@ pub fn event(event: &AppEvent, state: &mut Scenery, ctx: &mut Global) -> Result<
             ctx.store.onair_link = Err(why.clone());
             return Ok(Control::Changed);
         }
+        AppEvent::Journal(ev, fresh) => {
+            ctx.store.apply_journal((**ev).clone(), *fresh);
+            return Ok(Control::Changed);
+        }
+        AppEvent::JournalLost(why) => {
+            ctx.store.journal_link = Err(why.clone());
+            return Ok(Control::Changed);
+        }
+        AppEvent::Scan(s) => {
+            ctx.store.scan = Some((**s).clone());
+            return Ok(Control::Changed);
+        }
+        AppEvent::ScanLost => {
+            ctx.store.scan = None;
+            return Ok(Control::Changed);
+        }
         AppEvent::ActionDone(r) => {
             match r {
                 Ok(done) => {
@@ -497,7 +568,9 @@ pub fn event(event: &AppEvent, state: &mut Scenery, ctx: &mut Global) -> Result<
         | AppEvent::MediaTags(..)
         | AppEvent::PlaylistChoices(..)
         | AppEvent::Playlists(..)
-        | AppEvent::Agenda(..) => {}
+        | AppEvent::Agenda(..)
+        | AppEvent::Tags(..)
+        | AppEvent::System(..) => {}
         AppEvent::Event(Event::Resize(..)) => return Ok(Control::Changed),
         AppEvent::Event(e) => {
             if let Some(k) = press(e) {

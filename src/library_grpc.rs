@@ -69,11 +69,63 @@ fn edit_of(r: &SetTagsRequest) -> TagEdit {
 
 pub struct LibraryGrpc {
     handle: LibraryHandle,
+    /// `true` once the daemon shuts down: open streams end. `None` (tests):
+    /// they end when their client leaves.
+    stopping: Option<tokio::sync::watch::Receiver<bool>>,
 }
 
 impl LibraryGrpc {
     pub fn new(handle: LibraryHandle) -> Self {
-        Self { handle }
+        Self { handle, stopping: None }
+    }
+
+    /// Streams (`WatchScan`) end when `stopping` turns `true`.
+    pub fn with_stopping(mut self, stopping: tokio::sync::watch::Receiver<bool>) -> Self {
+        self.stopping = Some(stopping);
+        self
+    }
+}
+
+/// Resolves once the daemon shuts down; never without a `stopping`.
+async fn stopped(stopping: &mut Option<tokio::sync::watch::Receiver<bool>>) {
+    match stopping {
+        Some(rx) => {
+            let _ = rx.wait_for(|s| *s).await;
+        }
+        None => std::future::pending().await,
+    }
+}
+
+fn scan_status(s: &crate::library_actor::ScanStatus) -> library::ScanStatus {
+    use crate::library_actor::ScanPhase as P;
+    use library::scan_status::Phase;
+    let phase = match s.phase {
+        P::Idle => Phase::Idle,
+        P::Listing => Phase::Listing,
+        P::Reading => Phase::Reading,
+        P::Analyzing => Phase::Analyzing,
+        P::Plugins => Phase::Plugins,
+        P::Writing => Phase::Writing,
+        P::Indexing => Phase::Indexing,
+    };
+    library::ScanStatus {
+        phase: phase as i32,
+        done: s.done,
+        total: s.total,
+        started_at: s.started_at,
+        last: s.last.as_ref().map(|e| match &e.result {
+            Ok(c) => library::ScanEnd {
+                finished_at: e.finished_at,
+                ok: true,
+                error: String::new(),
+                found: c.found as u32,
+                skipped: c.skipped as u32,
+                present: c.present as u32,
+                unavailable: c.unavailable as u32,
+                vanished: c.vanished as u32,
+            },
+            Err(why) => library::ScanEnd { finished_at: e.finished_at, ok: false, error: why.clone(), ..Default::default() },
+        }),
     }
 }
 
@@ -191,6 +243,115 @@ impl LibraryService for LibraryGrpc {
             total: page.total,
             next_cursor: page.next.map(|c| c.encode()).unwrap_or_default(),
         }))
+    }
+
+    type WatchScanStream = tokio_stream::wrappers::ReceiverStream<Result<library::ScanStatus, Status>>;
+
+    async fn watch_scan(
+        &self,
+        _request: Request<library::WatchScanRequest>,
+    ) -> Result<Response<Self::WatchScanStream>, Status> {
+        let mut rx = self.handle.watch_scan();
+        let mut stopping = self.stopping.clone();
+        let (tx, out) = tokio::sync::mpsc::channel(8);
+        tokio::spawn(async move {
+            let first = scan_status(&rx.borrow_and_update());
+            if tx.send(Ok(first)).await.is_err() {
+                return;
+            }
+            loop {
+                tokio::select! {
+                    _ = stopped(&mut stopping) => break,
+                    changed = rx.changed() => {
+                        if changed.is_err() {
+                            break;
+                        }
+                        let s = scan_status(&rx.borrow_and_update());
+                        if tx.send(Ok(s)).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+        Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(out)))
+    }
+
+    async fn list_tag_values(
+        &self,
+        _request: Request<library::ListTagValuesRequest>,
+    ) -> Result<Response<library::ListTagValuesResponse>, Status> {
+        let origins = self.handle.tag_inventory().await.map_err(map_error)?;
+        Ok(Response::new(library::ListTagValuesResponse {
+            origins: origins
+                .into_iter()
+                .map(|o| library::TagOrigin {
+                    origin: o.origin,
+                    values: o
+                        .values
+                        .into_iter()
+                        .map(|v| library::TagValueCount { value: v.value, count: v.count as u32, spellings: v.spellings })
+                        .collect(),
+                    without: o.without as u32,
+                })
+                .collect(),
+        }))
+    }
+
+    type RenameTagValueStream = tokio_stream::wrappers::ReceiverStream<Result<library::RenameTagValueEvent, Status>>;
+
+    async fn rename_tag_value(
+        &self,
+        request: Request<library::RenameTagValueRequest>,
+    ) -> Result<Response<Self::RenameTagValueStream>, Status> {
+        use crate::library_actor::RenameStep;
+        use library::rename_tag_value_event::Event;
+        let r = request.into_inner();
+        if r.from.trim().is_empty() || r.to.trim().is_empty() {
+            return Err(Status::invalid_argument("`from` and `to` must not be empty"));
+        }
+        let (tx, out) = tokio::sync::mpsc::channel(32);
+        if r.dry_run {
+            let p = self.handle.rename_preview(r.origin, r.from, r.to).await.map_err(map_error)?;
+            let ev = library::RenameTagValueEvent {
+                event: Some(Event::Preview(library::RenamePreview {
+                    files: p.files,
+                    playlists: p.playlists,
+                    merges: p.merges,
+                })),
+            };
+            let _ = tx.send(Ok(ev)).await;
+            return Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(out)));
+        }
+        let handle = self.handle.clone();
+        let (steps_tx, mut steps) = tokio::sync::mpsc::channel(32);
+        tokio::spawn(async move {
+            let run = tokio::spawn(async move { handle.rename(r.origin, r.from, r.to, steps_tx).await });
+            while let Some(step) = steps.recv().await {
+                let event = match step {
+                    RenameStep::Started { files } => Event::Started(files),
+                    RenameStep::File { rel_path, error } => {
+                        Event::File(library::RenameFile { rel_path, error: error.unwrap_or_default() })
+                    }
+                    RenameStep::Finished { changed, unchanged, failed } => {
+                        Event::Done(library::RenameDone { changed, unchanged, failed })
+                    }
+                };
+                // The client may leave: the rename goes on (stopping half-way
+                // would leave the library half renamed).
+                let _ = tx.send(Ok(library::RenameTagValueEvent { event: Some(event) })).await;
+            }
+            match run.await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    let _ = tx.send(Err(map_error(e))).await;
+                }
+                Err(e) => {
+                    let _ = tx.send(Err(Status::internal(e.to_string()))).await;
+                }
+            }
+        });
+        Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(out)))
     }
 
     async fn scan(&self, _request: Request<ScanRequest>) -> Result<Response<ScanResponse>, Status> {

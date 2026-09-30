@@ -168,10 +168,6 @@ planned-coming = À venir
 planned-lot = lot { $lot }
 planned-plugin-missing = plugin « { $plugin } » non chargé
 planned-unavailable = Indisponible : { $reason }
-planned-tags-1 = Types : valeurs déclarées, effectifs, médias sans Type
-planned-tags-2 = Tags libres : créer, renommer, fusionner
-planned-system-1 = Santé : stationd, Liquidsoap, Icecast (mounts), live
-planned-system-2 = Événements en direct, statistiques de diffusion
 planned-plugins-1 = Vues déclarées par les plugins chargés
 planned-plugins-2 = Base de chaque plugin (info, requête en lecture seule)
 
@@ -1036,3 +1032,202 @@ rf-conflict = le fichier a changé depuis l'ouverture : rien n'est écrit — Ct
 rf-rebasing = relecture du fichier…
 rf-rebased = fichier relu, saisie reportée : vérifier puis Ctrl+S
 rf-confirm-quit = modifications non enregistrées : Échap encore pour les abandonner
+
+# ── Journal, scan, Tags, Système (lot 7–8) ──────────────────────────────
+key-b = b
+key-end = Fin
+rpc-too-old = ce stationd ne connaît pas cette fonction (à mettre à jour)
+stream-closed = flux fermé par stationd
+journal-opening = journal : ouverture…
+help-cancel = annuler
+help-back = revenir
+help-reload = relire
+help-search-apply = garder la recherche
+help-search-clear = effacer la recherche
+control-scan-running = scan en cours
+scan-phase-listing = parcours des dossiers…
+scan-phase-reading = lecture des fichiers { $done } / { $total }
+scan-phase-analyzing = estimation des BPM { $done } / { $total }
+scan-phase-plugins = plugins (on_scan)…
+scan-phase-writing = écriture des valeurs dérivées…
+scan-phase-indexing = mise à jour de l'index…
+
+sys-state = État
+sys-journal = Journal
+sys-stats = Statistiques
+sys-stationd = stationd
+sys-station = station
+sys-version = version
+sys-uptime = en marche depuis
+sys-pid = processus
+sys-timezone = fuseau
+sys-journal-field = journal
+sys-journal-open = suivi ({ $n } événements)
+sys-liquidsoap = Liquidsoap
+sys-not-configured = non configuré
+sys-ls-air = antenne
+sys-ls-on-air = à l'antenne
+sys-ls-last-pull = dernière demande
+sys-ls-started = pistes démarrées
+sys-ls-control = socket de contrôle
+sys-ok = ok
+sys-icecast = Icecast
+sys-ic-server = serveur
+sys-ic-last-read = dernière lecture
+sys-ic-audience = auditeurs
+sys-ic-problem = problème
+sys-mount-absent = absent
+sys-mount-no-source = sans source
+sys-mount-ok = alimenté
+sys-mount-rate = { $declared } kbit/s annoncés, { $real } reçus
+sys-mount-rate-declared = { $declared } kbit/s annoncés
+sys-live = Live
+sys-live-on-air = à l'antenne
+sys-live-nobody = personne
+sys-live-harbor = harbor
+sys-live-refused = dernier refus
+sys-scan = Bibliothèque
+sys-scan-running = scan
+sys-scan-last = dernier scan
+sys-scan-last-ok = { $when } : { $found } fichiers, { $skipped } écartés
+sys-scan-last-failed = { $when } : échec — { $error }
+sys-scan-none = aucun scan depuis le démarrage de stationd
+
+help-journal-scroll = remonter / redescendre (pause)
+help-journal-follow = suivre en direct
+help-journal-level = niveau
+help-journal-component = composant
+help-journal-search = rechercher
+journal-level = niveau
+journal-level-all = tout
+journal-level-warn = avertissements et erreurs
+journal-level-error = erreurs
+journal-component = composant
+journal-component-all = tous
+journal-following = en direct
+journal-paused = en pause — { $n } nouveaux (Fin pour reprendre)
+journal-search = recherche
+journal-empty = rien à montrer
+
+evc-station = station
+evc-broadcast = diffusion
+evc-grid = grille
+evc-library = bibliothèque
+evc-plugin = plugin
+evc-live = live
+evc-liquidsoap = Liquidsoap
+evc-icecast = Icecast
+evc-unknown = ?
+
+ev-started = stationd démarré (version { $version }, « { $station } »)
+ev-stopping-request = arrêt demandé
+ev-stopping-signal = arrêt ({ $signal })
+ev-broadcast-state = diffusion : { $from } → { $to } (par { $by })
+ev-listeners = auditeurs : { $count }
+ev-audience-unknown = audience inconnue (lecture Icecast impossible)
+ev-track-chosen = choisi : { $media } ({ $playlist }, { $origin })
+ev-track-fallback = rien à diffuser : filet de sécurité ({ $origin })
+ev-override-pushed = override { $mode } : { $what } (par { $by })
+ev-grid-applied = grille { $grid } appliquée ({ $rules } règles)
+ev-grid-refused = grille { $grid } refusée ({ $problems } problèmes) : la grille d'avant reste à l'antenne
+ev-grid-unreadable = grille { $grid } illisible : { $error }
+ev-incident-hard-not-cut = rendez-vous hard { $rule } sans rien à diffuser ({ $playlist }) : pas de coupe
+ev-incident-source-empty = { $rule } : { $playlist } n'a rien donné, la grille passe au niveau suivant
+ev-live-started = live : { $dj } à l'antenne ({ $rule })
+ev-live-ended = live terminé : { $dj } ({ $reason })
+ev-scan-started = scan de la bibliothèque lancé
+ev-scan-finished = scan terminé : { $found } fichiers, { $skipped } écartés, { $vanished } disparus
+ev-scan-failed = scan en échec : { $error }
+ev-tags-written = tags écrits : { $media }
+ev-tag-renamed = { $origin } : « { $from } » → « { $to } » ({ $files } fichiers, { $failed } échecs)
+ev-plugin-failed = plugin { $plugin } en échec ({ $phase }) : { $reason }
+ev-plugin-quarantined = plugin { $plugin } en quarantaine ({ $failures } échecs)
+ev-plugin-state = plugin { $plugin } : { $state }
+ev-unknown = événement inconnu (stationd plus récent que la TUI ?)
+
+stats-window = fenêtre
+stats-window-30m = 30 dernières minutes
+stats-window-24h = 24 dernières heures
+stats-window-7d = 7 derniers jours
+stats-window-30d = 30 derniers jours
+stats-by = par
+stats-by-playlist = playlist
+stats-by-leaf = playlist feuille
+stats-by-rule = règle
+stats-by-origin = origine
+stats-by-media = média
+stats-by-artist = artiste
+stats-aired = diffusés
+stats-picked = choisis
+stats-last = dernier
+stats-none = rien de diffusé sur cette fenêtre
+stats-unknown = (inconnu)
+stats-total = total : { $aired } diffusés, { $picked } choisis
+help-stats-window = fenêtre
+help-stats-by = regroupement
+
+tags-origin-file = genre du fichier
+tags-no-source = aucune source custom-tags (Type…) : seul le genre du fichier est montré
+tags-value = valeur
+tags-count = médias
+tags-spellings = graphies : { $list }
+tags-empty = aucune valeur connue — un scan de la bibliothèque les relève (Contrôle › Bibliothèque)
+tags-without = { $origin } : { $n ->
+    [one] 1 média sans valeur
+   *[other] { $n } médias sans valeur
+}
+tags-summary = { $n } valeurs · tri par { $sort }
+tags-sort-name = nom
+tags-sort-count = effectif
+help-tags-origin = origine suivante
+help-tags-rename = renommer / fusionner
+help-tags-sort = trier par nom / effectif
+help-tags-preview = voir ce qui change
+help-tags-apply = renommer
+tags-rename-title = { $origin } : renommer « { $from } »
+tags-rename-hint = Nouvelle valeur (une valeur existante = fusion). Toutes les graphies sont remplacées.
+tags-rename-preview-title = { $origin } : aperçu
+tags-rename-unexpected = réponse inattendue de stationd
+tags-rename-nothing = aucun média disponible ne porte cette valeur
+tags-rename-files = { $n ->
+    [one] 1 fichier sera réécrit
+   *[other] { $n } fichiers seront réécrits
+}
+tags-rename-merges = « { $to } » existe déjà : les deux valeurs seront fusionnées
+tags-rename-no-playlist = aucune playlist ne filtre sur cette valeur
+tags-rename-playlists = { $n ->
+    [one] 1 playlist filtre sur cette valeur (elle choisira autrement) :
+   *[other] { $n } playlists filtrent sur cette valeur (elles choisiront autrement) :
+}
+tags-rename-confirm = Entrée : renommer · Échap : annuler
+tags-rename-running-title = { $origin } : renommage en cours
+tags-rename-progress = { $done } / { $total } fichiers
+tags-rename-failed-n = { $n ->
+    [one] 1 échec
+   *[other] { $n } échecs
+}
+tags-rename-done-title = { $origin } : renommage terminé
+tags-rename-report = { $changed } réécrits, { $unchanged } déjà sans la valeur, { $failed } échecs
+tags-rename-broken = interrompu : { $reason }
+
+help-media-type = affecter un Type
+help-media-type-write = écrire
+media-type-title = { $source } — { $n ->
+    [one] 1 média
+   *[other] { $n } médias
+}
+media-type-title-loading = Type
+media-type-no-source = aucune source custom-tags (Type…) déclarée : utiliser e pour les tags
+media-type-other = ＋ autre valeur…
+media-type-remove = — retirer
+media-type-new = nouvelle valeur
+media-type-confirm = { $source } = « { $value } » pour { $n } médias
+media-type-confirm-remove = retirer { $source } de { $n } médias
+ev-bpm-analyzed = BPM estimés : { $estimated }
+ev-bpm-analyzed-failed = BPM estimés : { $estimated }, non estimés : { $failed } ({ $why })
+bpm-fail-decode = décodage impossible
+bpm-fail-too-short = trop court
+bpm-fail-no-rhythm = pas de rythme
+bpm-fail-weak = pulsation faible
+bpm-fail-competing = rythmes concurrents
+bpm-fail-disagree = sections en désaccord
