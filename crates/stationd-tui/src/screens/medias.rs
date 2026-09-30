@@ -367,18 +367,20 @@ impl Medias {
         });
     }
 
-    /// `e` : modifier les tags du média (ou des marqués). Les tags du fichier
-    /// (du premier du lot) et les genres connus sont lus d'abord ; le
-    /// formulaire s'ouvre à leur arrivée.
+    /// `e` : modifier les tags du média (ou des marqués). Les tags des
+    /// fichiers (tous ceux du lot, pour montrer ce qu'ils portent) et les
+    /// genres connus sont lus d'abord ; le formulaire s'ouvre à leur arrivée.
     fn edit_tags(&mut self, ctx: &mut Global) {
         let targets = self.targets();
-        let Some(first) = targets.first().cloned() else { return };
+        if targets.is_empty() {
+            return;
+        }
         self.request += 1;
         self.tags_req = Some(self.request);
-        self.tags_targets = targets;
+        self.tags_targets = targets.clone();
         let (owner, id, channel) = (self.owner, self.request, ctx.channel.clone());
         ctx.spawn_async(async move {
-            let r = crate::rpc::tag_form_data(channel, first).await;
+            let r = crate::rpc::tag_form_data(channel, targets).await;
             Ok(Control::Event(AppEvent::MediaTags(owner, id, Box::new(r))))
         });
     }
@@ -775,10 +777,12 @@ impl Medias {
                 if self.tags_req == Some(*id) {
                     self.tags_req = None;
                     match &**r {
-                        Ok((t, known)) => {
+                        Ok((all, known)) if !all.is_empty() => {
                             let batch = (self.tags_targets.len() > 1).then(|| self.tags_targets.clone());
-                            self.tagform = Some(TagForm::new(t.clone(), known.clone(), batch));
+                            let form = TagForm::new(all[0].clone(), known.clone(), batch);
+                            self.tagform = Some(form.with_present(all));
                         }
+                        Ok(_) => {}
                         Err(e) => ctx.open(crate::dialog::Modal::Info(crate::dialog::Info {
                             title: tr!("form-tags-read-failed"),
                             lines: vec![e.clone()],

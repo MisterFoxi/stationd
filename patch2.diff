@@ -1,0 +1,8 @@
+diff --git a/plugins/listener-stats-wasm/src/lib.rs b/plugins/listener-stats-wasm/src/lib.rs
+--- a/plugins/listener-stats-wasm/src/lib.rs
++++ b/plugins/listener-stats-wasm/src/lib.rs
+@@ -36,3 +36,3 @@
+         // No raw reply/input: an error must not accidentally log client data.
+-        return Err(Error::msg("listener-stats: database batch failed"));
++        return Err(Error::msg("listener-stats: database batch failed").into());
+     }

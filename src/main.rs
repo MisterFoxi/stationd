@@ -127,11 +127,26 @@ async fn main() -> anyhow::Result<()> {
         .parent()
         .map(|p| p.join("plugins"))
         .unwrap_or_else(|| std::path::PathBuf::from("plugins"));
+    // Read once and share immutable data across plugins. A missing/corrupt
+    // optional file must not stop broadcasting; the host reports unavailable.
+    let geoip = cfg.geoip.as_ref().and_then(|config| {
+        match stationd::geoip::Geoip::open(&config.database) {
+            Ok(reader) => {
+                info!("DB-IP City Lite loaded: IP Geolocation by DB-IP (https://db-ip.com)");
+                Some(std::sync::Arc::new(reader))
+            }
+            Err(reason) => {
+                warn!(%reason, "GeoIP unavailable; check [geoip] database and restart stationd");
+                None
+            }
+        }
+    });
     let plugins = stationd::plugin::spawn_env(
         cfg.plugins.clone(),
         stationd::plugin::PluginEnv {
             control: Some(control.clone()),
             db_dir: Some(plugin_db_dir),
+            geoip,
         },
     );
     control.attach_plugins(plugins.clone());

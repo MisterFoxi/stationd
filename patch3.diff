@@ -1,0 +1,513 @@
+diff --git a/Cargo.lock b/Cargo.lock
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -2040,2 +2040,11 @@
+ [[package]]
++name = "ipnetwork"
++version = "0.20.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "bf466541e9d546596ee94f9f69590f89473455f88372423e0008fc1a7daf100e"
++dependencies = [
++ "serde",
++]
++
++[[package]]
+ name = "is_terminal_polyfill"
+@@ -2363,2 +2372,14 @@
+ checksum = "0e7465ac9959cc2b1404e8e2367b43684a6d13790fe23056cc8c6c5a6b7bcb94"
++
++[[package]]
++name = "maxminddb"
++version = "0.24.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "d6087e5d8ea14861bb7c7f573afbc7be3798d3ef0fae87ec4fd9a4de9a127c3c"
++dependencies = [
++ "ipnetwork",
++ "log",
++ "memchr",
++ "serde",
++]
+ 
+@@ -4103,2 +4124,3 @@
+  "lofty",
++ "maxminddb",
+  "prost 0.13.5",
+diff --git a/Cargo.toml b/Cargo.toml
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -59,2 +59,5 @@
+ 
++# Local DB-IP City Lite MMDB lookups; no network or mmap feature.
++maxminddb = { version = "0.24", default-features = false }
++
+ [build-dependencies]
+diff --git a/Doc/listener-stats-v1.md b/Doc/listener-stats-v1.md
+--- a/Doc/listener-stats-v1.md
++++ b/Doc/listener-stats-v1.md
+@@ -4,2 +4,3 @@
+ migration, new HTTP dependency, public API, dashboard, or external GeoIP service.
++The host reads a local DB-IP City Lite MMDB using the maxminddb crate.
+ 
+@@ -62,21 +63,65 @@
+ 
+-## GeoIP host skeleton
++## Local DB-IP City Lite GeoIP
+ 
+-`geoip_lookup` is an ExtismHost import gated by capability `geoip`:
++After applying the DB-IP patch, the host reads the same free database bundled
++by default with AzuraCast: DB-IP City Lite in MMDB format. Download it on the
++host or inside the development container (requires curl and gzip):
++
++```sh
++sh scripts/update-dbip.sh ./data/geoip/dbip-city-lite.mmdb
++# Optional explicit monthly release:
++sh scripts/update-dbip.sh ./data/geoip/dbip-city-lite.mmdb 2026-09
++```
++
++Paths must be visible to stationd, and the file readable by its runtime user.
++For the development container, run from /src as user dev, using a writable
++persistent data directory. Production needs a persistent volume and a path
++inside that volume; /src is only the development checkout.
++
++Add this top-level section (outside any [plugin.config] or [plugin.db]):
++
++```toml
++[geoip]
++database = "./data/geoip/dbip-city-lite.mmdb"
++```
++
++Restart stationd after configuring or replacing the file. The host loads it
++once into memory (about 122 MiB for the September 2026 release) and shares it
++across plugins. No disk or network access happens per listener. The configured
++file is limited to 512 MiB and must identify itself as DBIP-City-Lite.
++An absent/invalid file produces a startup warning and leaves GeoIP unavailable;
++it does not stop broadcasting or the listener count collection. A decoding
++failure during lookup returns a host error and the guest rejects that batch.
++
++`geoip_lookup` remains an ExtismHost import gated by capability `geoip`:
+ 
+ ```json
+-{"ip":"192.0.2.1"}
++{"ip":"8.8.8.8"}
+ ```
+ 
+-The V1 response is always
+-`{"ok":true,"status":"unavailable","country":null,"city":null}` for valid
+-IPv4/IPv6. Undeclared capability or invalid input returns `ok:false` without
+-echoing the IP. There is no database download and no external network call.
+-V1 therefore does NOT supply real countries/cities yet. All observations are
+-in the unavailable bucket until a provider is implemented.
++The reply includes `ok`, `status`, `country` and `city`:
+ 
+-A future local provider can return `status:found`, an uppercase ISO alpha-2
+-`country`, and a nullable city, or `status:not_found` with null location.
+-The plugin already aggregates these responses. It caches lookups only within
+-one observation; multiple clients sharing an IP still count individually.
++- `found`: uppercase country code and a nullable city (English name).
++- `not_found`: no usable country or a private/reserved/documentation address;
++  location fields are null. IPv4-mapped IPv6 is normalized before lookup.
++- `unavailable`: no usable database was loaded; location fields are null.
++- `ok:false`: undeclared capability, invalid input or database lookup error.
++
++DB-IP's ZZ (unknown) is not recorded as a real country. The plugin caches
++lookups only within one observation; clients sharing an IP still count
++individually. The event and database schemas are unchanged: no new migration
++is needed. Historical unavailable buckets cannot be enriched retrospectively
++because raw IPs were intentionally not stored.
++
++DB-IP publishes monthly updates. Run the script again when wanted, then
++restart stationd; this patch does not create a scheduler. Downloads use HTTPS,
++a temporary file, gzip integrity checking and an MMDB marker sanity check.
++Failures preserve the installed file; successful replacement uses a rename
++on the same filesystem. This is not a cryptographic signature verification.
++
++Data attribution: [IP Geolocation by DB-IP](https://db-ip.com),
++[CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
++A future statistics page must display that linked attribution wherever it
++uses these results. This patch includes no UI and redistributes no database.
++See [DB-IP City Lite](https://db-ip.com/db/download/ip-to-city-lite).
+ 
+@@ -106,2 +151,7 @@
+ ```sh
++cargo test --lib geoip
++# Optional real-database check after downloading:
++STATIOND_TEST_DBIP=./data/geoip/dbip-city-lite.mmdb cargo test --lib reads_real_dbip -- --ignored
++# Optional host + WASM + SQLite roundtrip (build the guest first):
++STATIOND_TEST_DBIP=./data/geoip/dbip-city-lite.mmdb STATIOND_TEST_LISTENER_WASM=plugins/listener-stats-wasm/target/wasm32-unknown-unknown/release/listener_stats_wasm.wasm cargo test --lib real_dbip_wasm -- --ignored
+ cargo test --lib listener_snapshot
+diff --git a/scripts/update-dbip.sh b/scripts/update-dbip.sh
+new file mode 100644
+--- /dev/null
++++ b/scripts/update-dbip.sh
+@@ -0,0 +1,43 @@
++#!/bin/sh
++# Fetch the free monthly DB-IP City Lite MMDB, without an API key.
++# Attribution: IP Geolocation by DB-IP (https://db-ip.com), CC BY 4.0.
++# Usage: sh scripts/update-dbip.sh [destination.mmdb] [YYYY-MM]
++set -eu
++
++destination=${1:-./data/geoip/dbip-city-lite.mmdb}
++release=${2:-$(date -u +%Y-%m)}
++case "$release" in
++    [0-9][0-9][0-9][0-9]-0[1-9]|[0-9][0-9][0-9][0-9]-1[0-2]) ;;
++    *) echo 'Expected a release in YYYY-MM format' >&2; exit 1 ;;
++esac
++case "$destination" in
++    /*|./*|../*) ;;
++    *) destination=./$destination ;;
++esac
++directory=$(dirname "$destination")
++mkdir -p "$directory"
++# Same filesystem as destination: a successful rename is atomic. A failed
++# download/decompression leaves the previous database untouched.
++temporary=$(mktemp -d "$directory/.dbip.XXXXXX")
++cleanup() {
++    rm -f "$temporary/database.gz" "$temporary/database.mmdb"
++    rmdir "$temporary"
++}
++trap cleanup 0
++trap 'exit 1' 1 2 15
++curl --fail --location --silent --show-error --proto '=https' --proto-redir '=https' \
++    --connect-timeout 15 --max-time 300 --retry 2 --max-filesize 268435456 \
++    "https://download.db-ip.com/free/dbip-city-lite-$release.mmdb.gz" \
++    --output "$temporary/database.gz"
++gzip -t "$temporary/database.gz"
++gzip -dc "$temporary/database.gz" > "$temporary/database.mmdb"
++# Sanity check the MMDB metadata marker. The host validates and decodes the
++# database itself at startup; this check is not a cryptographic signature.
++tail -c 131072 "$temporary/database.mmdb" | LC_ALL=C grep -a -q 'MaxMind.com' || {
++    echo 'Downloaded file has no MMDB metadata marker' >&2
++    exit 1
++}
++chmod 0644 "$temporary/database.mmdb"
++mv -f "$temporary/database.mmdb" "$destination"
++printf 'Installed DB-IP City Lite %s at %s\n' "$release" "$destination"
++printf 'IP Geolocation by DB-IP (https://db-ip.com). Restart stationd to load it.\n'
+diff --git a/src/config.rs b/src/config.rs
+--- a/src/config.rs
++++ b/src/config.rs
+@@ -21,2 +21,5 @@
+     pub plugins: Vec<crate::plugin::PluginDecl>,
++    /// Optional local DB-IP City Lite file shared by authorized plugins.
++    #[serde(default)]
++    pub geoip: Option<crate::geoip::GeoipConfig>,
+     /// Liquidsoap wiring (optional). Absent = nothing airs: the daemon still
+diff --git a/src/geoip.rs b/src/geoip.rs
+new file mode 100644
+--- /dev/null
++++ b/src/geoip.rs
+@@ -0,0 +1,179 @@
++//! Local DB-IP City Lite reader. No HTTP and no persistence of queried IPs.
++use std::collections::BTreeMap;
++use std::io::Read;
++use std::net::IpAddr;
++use std::path::{Path, PathBuf};
++
++use maxminddb::{MaxMindDBError, Reader};
++use serde::{Deserialize, Serialize};
++
++#[derive(Debug, Clone, Deserialize)]
++#[serde(deny_unknown_fields)]
++pub struct GeoipConfig {
++    /// Operator-controlled file; relative to stationd's working directory.
++    pub database: PathBuf,
++}
++
++/// Shared immutable reader. Reload by restarting stationd after file replacement.
++pub struct Geoip {
++    reader: Reader<Vec<u8>>,
++}
++
++#[derive(Debug, PartialEq, Eq, Serialize)]
++pub struct Location {
++    pub status: &'static str,
++    pub country: Option<String>,
++    pub city: Option<String>,
++}
++
++impl Location {
++    pub fn unavailable() -> Self {
++        Self { status: "unavailable", country: None, city: None }
++    }
++
++    fn not_found() -> Self {
++        Self { status: "not_found", country: None, city: None }
++    }
++}
++
++#[derive(Default, Deserialize)]
++struct Country {
++    iso_code: Option<String>,
++}
++
++#[derive(Default, Deserialize)]
++struct City {
++    #[serde(default)]
++    names: BTreeMap<String, String>,
++}
++
++#[derive(Deserialize)]
++struct Record {
++    #[serde(default)]
++    country: Country,
++    #[serde(default)]
++    city: City,
++}
++
++impl Geoip {
++    pub fn open(path: &Path) -> Result<Self, String> {
++        // Bound allocations even if the file changes while being read.
++        const MAX_BYTES: u64 = 512 * 1024 * 1024;
++        let file = std::fs::File::open(path).map_err(|_| "cannot open GeoIP database")?;
++        let mut bytes = Vec::new();
++        file.take(MAX_BYTES + 1).read_to_end(&mut bytes)
++            .map_err(|_| "cannot read GeoIP database")?;
++        if bytes.len() as u64 > MAX_BYTES {
++            return Err("GeoIP database exceeds 512 MiB".into());
++        }
++        let reader = std::panic::catch_unwind(|| Reader::from_source(bytes))
++            .map_err(|_| "invalid GeoIP MMDB database")?
++            .map_err(|_| "invalid GeoIP MMDB database")?;
++        if reader.metadata.database_type != "DBIP-City-Lite" {
++            return Err("expected a DBIP-City-Lite MMDB database".into());
++        }
++        Ok(Self { reader })
++    }
++
++    pub fn lookup(&self, ip: IpAddr) -> Result<Location, String> {
++        let ip = match ip {
++            IpAddr::V6(v6) => v6.to_ipv4_mapped().map(IpAddr::V4).unwrap_or(ip),
++            _ => ip,
++        };
++        if non_public(ip) {
++            return Ok(Location::not_found());
++        }
++        let result = std::panic::catch_unwind(|| self.reader.lookup::<Record>(ip))
++            .map_err(|_| "GeoIP database lookup failed")?;
++        match result {
++            Ok(record) => Ok(location(record)),
++            Err(MaxMindDBError::AddressNotFoundError(_)) => Ok(Location::not_found()),
++            // Corruption is a host error, not a successful unknown lookup.
++            Err(_) => Err("GeoIP database lookup failed".into()),
++        }
++    }
++}
++
++fn location(record: Record) -> Location {
++    let Some(country) = record.country.iso_code else { return Location::not_found() };
++    let country = country.to_ascii_uppercase();
++    if country == "ZZ" || country.len() != 2 || !country.bytes().all(|b| b.is_ascii_uppercase()) {
++        return Location::not_found();
++    }
++    let city = record.city.names.get("en").map(|s| s.trim().to_string())
++        .filter(|s| !s.is_empty() && s.len() <= 256);
++    Location { status: "found", country: Some(country), city }
++}
++
++/// Exclude local, documentation, benchmarking and multicast addresses even
++/// when a database happens to associate them with a location.
++fn non_public(ip: IpAddr) -> bool {
++    match ip {
++        IpAddr::V4(ip) => {
++            let [a, b, c, _] = ip.octets();
++            ip.is_private() || ip.is_loopback() || ip.is_link_local()
++                || ip.is_documentation() || a == 0 || a >= 224
++                || (a == 100 && (64..=127).contains(&b))
++                || (a == 192 && b == 0 && c == 0)
++                || (a == 198 && (b == 18 || b == 19))
++        }
++        IpAddr::V6(ip) => {
++            let s = ip.segments();
++            ip.is_unspecified() || ip.is_loopback() || ip.is_multicast()
++                || s[0] & 0xfe00 == 0xfc00 || s[0] & 0xffc0 == 0xfe80
++                || (s[0] == 0x2001 && s[1] == 0x0db8)
++        }
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn maps_city_country_and_missing_values() {
++        let record = serde_json::from_str(r#"{"country":{"iso_code":"fr"},"city":{"names":{"en":"Paris"}}}"#).unwrap();
++        assert_eq!(location(record), Location {status: "found", country: Some("FR".into()), city: Some("Paris".into())});
++        let record = serde_json::from_str(r#"{"country":{"iso_code":"FR"}}"#).unwrap();
++        assert_eq!(location(record).city, None);
++        for data in ["{}", r#"{"country":{"iso_code":"ZZ"}}"#, r#"{"country":{"iso_code":"FRA"}}"#] {
++            assert_eq!(location(serde_json::from_str(data).unwrap()), Location::not_found());
++        }
++    }
++
++    #[test]
++    fn excludes_non_public_addresses() {
++        for ip in ["127.0.0.1", "10.1.2.3", "192.168.1.1", "100.64.0.1", "169.254.1.1",
++            "192.0.2.1", "198.18.0.1", "224.0.0.1", "255.255.255.255", "::", "::1",
++            "fc00::1", "fe80::1", "ff02::1", "2001:db8::1"] {
++            assert!(non_public(ip.parse().unwrap()), "{ip}");
++        }
++        assert!(!non_public("8.8.8.8".parse().unwrap()));
++        assert!(!non_public("2606:4700:4700::1111".parse().unwrap()));
++    }
++
++    #[test]
++    fn rejects_missing_and_invalid_files() {
++        let dir = tempfile::tempdir().unwrap();
++        assert!(Geoip::open(&dir.path().join("missing.mmdb")).is_err());
++        let path = dir.path().join("broken.mmdb");
++        std::fs::write(&path, b"not an MMDB").unwrap();
++        assert!(Geoip::open(&path).is_err());
++    }
++
++    #[test]
++    #[ignore = "requires STATIOND_TEST_DBIP pointing to a downloaded DB-IP City Lite MMDB"]
++    fn reads_real_dbip_ipv4_ipv6_and_mapped_addresses() {
++        let path = std::env::var_os("STATIOND_TEST_DBIP").expect("STATIOND_TEST_DBIP");
++        let reader = Geoip::open(Path::new(&path)).unwrap();
++        for ip in ["8.8.8.8", "1.1.1.1", "2606:4700:4700::1111"] {
++            let result = reader.lookup(ip.parse().unwrap()).unwrap();
++            assert_eq!(result.status, "found");
++            assert_eq!(result.country.as_ref().unwrap().len(), 2);
++        }
++        assert_eq!(reader.lookup("::ffff:8.8.8.8".parse().unwrap()).unwrap(),
++            reader.lookup("8.8.8.8".parse().unwrap()).unwrap());
++        assert_eq!(reader.lookup("::ffff:192.168.1.1".parse().unwrap()).unwrap(), Location::not_found());
++        assert_eq!(reader.lookup("2001:db8::1".parse().unwrap()).unwrap(), Location::not_found());
++    }
++}
+diff --git a/src/lib.rs b/src/lib.rs
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -27,2 +27,3 @@
+ pub mod grpc;
++pub mod geoip;
+ pub mod icecast;
+diff --git a/src/listener_stats_tests.rs b/src/listener_stats_tests.rs
+--- a/src/listener_stats_tests.rs
++++ b/src/listener_stats_tests.rs
+@@ -41 +41,29 @@
+ }
++
++#[test]
++#[ignore = "requires STATIOND_TEST_DBIP and STATIOND_TEST_LISTENER_WASM"]
++fn real_dbip_wasm_host_and_database_roundtrip() {
++    let mmdb = std::env::var_os("STATIOND_TEST_DBIP").expect("STATIOND_TEST_DBIP");
++    let wasm = std::env::var("STATIOND_TEST_LISTENER_WASM").expect("STATIOND_TEST_LISTENER_WASM");
++    let dir = tempfile::tempdir().unwrap();
++    let db = Arc::new(PluginDb::open(dir.path(), "listener-stats", Default::default()).unwrap());
++    let mut host = Host::new("listener-stats", &[Capability::Db, Capability::Geoip, Capability::ListenerDetails], None)
++        .with_db(db.clone());
++    host.geoip = Some(Arc::new(crate::geoip::Geoip::open(std::path::Path::new(&mmdb)).unwrap()));
++    let mut guest = WasmPlugin::new("listener-stats".into(), &wasm, &toml::Table::new(), &host).unwrap();
++    db.migrate(&guest.db_migrations().unwrap()).unwrap();
++    let event = PluginEvent::ListenerSnapshot {
++        mount: "/radio".into(), at: 1000,
++        listeners: Some(vec![crate::listener_snapshot::Listener {
++            id: "42".into(), ip: "8.8.8.8".parse().unwrap(), connected_seconds: 15, user_agent: None,
++        }]),
++    };
++    guest.on_event(&event);
++    guest.on_event(&event);
++    let result = db.query("SELECT status, country, listeners FROM listener_geo", &Default::default()).unwrap();
++    let result = serde_json::to_value(result).unwrap();
++    assert_eq!(result["rows"].as_array().unwrap().len(), 1);
++    assert_eq!(result["rows"][0][0], "found");
++    assert_eq!(result["rows"][0][1].as_str().unwrap().len(), 2);
++    assert_eq!(result["rows"][0][2], 1);
++}
+diff --git a/src/main.rs b/src/main.rs
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -129,2 +129,16 @@
+         .unwrap_or_else(|| std::path::PathBuf::from("plugins"));
++    // Read once and share immutable data across plugins. A missing/corrupt
++    // optional file must not stop broadcasting; the host reports unavailable.
++    let geoip = cfg.geoip.as_ref().and_then(|config| {
++        match stationd::geoip::Geoip::open(&config.database) {
++            Ok(reader) => {
++                info!("DB-IP City Lite loaded: IP Geolocation by DB-IP (https://db-ip.com)");
++                Some(std::sync::Arc::new(reader))
++            }
++            Err(reason) => {
++                warn!(%reason, "GeoIP unavailable; check [geoip] database and restart stationd");
++                None
++            }
++        }
++    });
+     let plugins = stationd::plugin::spawn_env(
+@@ -134,2 +148,3 @@
+             db_dir: Some(plugin_db_dir),
++            geoip,
+         },
+diff --git a/src/plugin.rs b/src/plugin.rs
+--- a/src/plugin.rs
++++ b/src/plugin.rs
+@@ -264,3 +264,3 @@
+     ListenerDetails,
+-    /// Ask the host for country/city (V1: unavailable provider).
++    /// Ask the host for country/city from its local DB-IP City Lite file.
+     Geoip,
+@@ -308,2 +308,3 @@
+     db: Option<Arc<PluginDb>>,
++    geoip: Option<Arc<crate::geoip::Geoip>>,
+     /// Set by the core around a hook it runs for a simulation: every clone
+@@ -322,2 +323,3 @@
+             db: None,
++            geoip: None,
+             simulating: Arc::new(AtomicBool::new(false)),
+@@ -534,2 +536,3 @@
+     pub db_dir: Option<PathBuf>,
++    pub geoip: Option<Arc<crate::geoip::Geoip>>,
+ }
+@@ -656,3 +659,4 @@
+     fn open_host(&mut self, env: &PluginEnv) -> Option<Host> {
+-        let host = Host::new(&self.decl.name, &self.decl.capabilities, env.control.clone());
++        let mut host = Host::new(&self.decl.name, &self.decl.capabilities, env.control.clone());
++        host.geoip = env.geoip.clone();
+         if !self.decl.has_db() {
+@@ -1056,3 +1060,3 @@
+ pub fn spawn_with(decls: Vec<PluginDecl>, control: Option<StationControl>) -> PluginHandle {
+-    spawn_env(decls, PluginEnv { control, db_dir: None })
++    spawn_env(decls, PluginEnv { control, db_dir: None, geoip: None })
+ }
+@@ -1671,4 +1675,4 @@
+ 
+-/// Stable V1 contract. No network lookup, no invented location, no IP log.
+-/// A future local MMDB provider can return status=found with country/city.
++/// Local MMDB lookup. No network call, no IP log. Missing/invalid database
++/// at startup yields unavailable; absent/reserved addresses yield not_found.
+ fn wasm_geoip_lookup(host: &Host, input: &str) -> String {
+@@ -1682,4 +1686,6 @@
+             .map_err(|_| "bad geoip_lookup input".to_string())?;
+-        let _ = request.ip;
+-        Ok(serde_json::json!({"status": "unavailable", "country": null, "city": null}))
++        match &host.geoip {
++            Some(geoip) => geoip.lookup(request.ip),
++            None => Ok(crate::geoip::Location::unavailable()),
++        }
+     }))
+@@ -2395,3 +2401,3 @@
+     fn db_env(dir: &std::path::Path) -> PluginEnv {
+-        PluginEnv { control: None, db_dir: Some(dir.to_path_buf()) }
++        PluginEnv { control: None, db_dir: Some(dir.to_path_buf()), geoip: None }
+     }
+diff --git a/stationd.example.toml b/stationd.example.toml
+--- a/stationd.example.toml
++++ b/stationd.example.toml
+@@ -70,3 +70,3 @@
+ # Build the WASM first; the path is relative to stationd's working directory.
+-# V1 GeoIP is a skeleton: country/city remain unknown (status unavailable).
++# Configure [geoip] below for local country/city lookups with DB-IP City Lite.
+ # No client IP, ID or user agent is stored by this plugin.
+@@ -78,2 +78,10 @@
+ # capabilities = ["db", "listener_details", "geoip"]
++
++# Local geolocation shared by plugins declaring capability "geoip".
++# Run: sh scripts/update-dbip.sh ./data/geoip/dbip-city-lite.mmdb
++# Restart stationd after updating the database (loaded once into memory).
++# Missing/invalid file: stats continue with status "unavailable".
++# Display "IP Geolocation by DB-IP" linking to https://db-ip.com with results.
++# [geoip]
++# database = "./data/geoip/dbip-city-lite.mmdb"
+ 

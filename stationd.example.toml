@@ -65,6 +65,26 @@ level = "info"
 # query_timeout_ms = 200   # per host call (a db_batch as a whole)
 # max_rows = 10000         # db_query result cap (more = error, not truncation)
 
+# Listener snapshots in the plugin's own database (seven-day retention).
+# Also enable listener_snapshots in [icecast] below and restart stationd.
+# Build the WASM first; the path is relative to stationd's working directory.
+# Configure [geoip] below for local country/city lookups with DB-IP City Lite.
+# No client IP, ID or user agent is stored by this plugin.
+# See Doc/listener-stats-v1.md for the event contract and query examples.
+# [[plugin]]
+# name = "listener-stats"
+# enabled = true
+# wasm = "plugins/listener-stats-wasm/target/wasm32-unknown-unknown/release/listener_stats_wasm.wasm"
+# capabilities = ["db", "listener_details", "geoip"]
+
+# Local geolocation shared by plugins declaring capability "geoip".
+# Run: sh scripts/update-dbip.sh ./data/geoip/dbip-city-lite.mmdb
+# Restart stationd after updating the database (loaded once into memory).
+# Missing/invalid file: stats continue with status "unavailable".
+# Display "IP Geolocation by DB-IP" linking to https://db-ip.com with results.
+# [geoip]
+# database = "./data/geoip/dbip-city-lite.mmdb"
+
 # Liquidsoap wiring (optional). Absent = nothing airs (scheduling only).
 # stationd writes the generated script to `script_path` at start-up (only when
 # it changed) and serves the loopback bridge Liquidsoap pulls from. Liquidsoap
@@ -151,6 +171,8 @@ level = "info"
 # admin_password = "change-me-admin"        # ASCII
 # poll_interval  = 15                       # seconds, 2..=600
 # poll_interval_sleeping = 3                # seconds while asleep, 2..=600
+# listener_snapshots = true                # opt in; default false
+# Detailed events only reach plugins with capability "listener_details".
 #
 # Optional: stationd generates Icecast's own config (icecast.xml) — one mount
 # per [[liquidsoap.output]] with its source password, UTF-8 titles, only our

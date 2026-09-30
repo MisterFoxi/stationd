@@ -720,12 +720,13 @@ card-tags-manual = von Hand gesetzt
 card-tags-auto = abgeleitet
 help-tags-write = in die Datei(en) schreiben
 help-tags-list = aus der Liste wählen (Genres)
-tags-form-keys = ↑↓ Feld · Enter Liste · ←→ Tempo · Strg+S schreiben · Esc abbrechen
+tags-form-keys = ↑↓ Feld · Enter Liste · Entf Liste leeren · ←→ Tempo · Strg+S schreiben · Esc abbrechen
 tags-genres = Genres
 tags-bpm = BPM
 tags-tempo = Tempo
 tags-creation = Erstellungsdatum
 tags-unchanged = unverändert
+tags-cleared = alle entfernt (in jeder Datei)
 tags-tempo-auto = auto (aus den BPM)
 tags-tempo-auto-now = auto (aus den BPM, derzeit { $tempo })
 tags-creation-now = auto (derzeit { $date })
@@ -733,12 +734,12 @@ tags-bad-number = { $field }: eine Zahl von 1 bis { $max } oder leer
 tags-bad-creation = Erstellungsdatum: im Format 2026-06-14T06:36:48Z (RFC 3339) oder leer
 tags-help-single = leer = Feld aus der Datei entfernt
 tags-help-batch = leer = in jeder Datei unverändert
-tags-help-list = Enter: aus den bekannten Genres wählen oder ein neues eingeben
+tags-help-list = Enter: wählen (Werte der Dateien zuerst) oder einen neuen eingeben · Entf: alle entfernen
 tags-help-tempo = ←→: ein gewähltes Label hat Vorrang vor dem aus den BPM; „auto“ kehrt zu den BPM zurück
 tags-help-bpm = das Tempo ergibt sich daraus (Bereiche von custom-tags), außer es ist von Hand gewählt
 tags-help-creation = eingegeben: hat Vorrang vor dem Datum aus dem Kommentar; leer: zurück zu diesem
 tags-picker-title = { $field }: ankreuzen (Leertaste)
-tags-picker-title-batch = { $field }: Leertaste = hinzufügen, dann entfernen, dann unverändert
+tags-picker-title-batch = { $field }: Leertaste = entfernen (vorhandener Wert) oder hinzufügen, dann unverändert
 tags-picker-keys = tippen zum Filtern · Leertaste ankreuzen · Enter bestätigen · Esc abbrechen
 tags-picker-new = ＋ neu: „{ $genre }“
 tags-picker-none = kein Genre passt: Leertaste fügt es hinzu

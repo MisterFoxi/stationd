@@ -719,12 +719,13 @@ card-tags-manual = set by hand
 card-tags-auto = derived
 help-tags-write = write into the file(s)
 help-tags-list = pick from the list (genres)
-tags-form-keys = ↑↓ field · Enter list · ←→ tempo · Ctrl+S write · Esc cancel
+tags-form-keys = ↑↓ field · Enter list · Del clear the list · ←→ tempo · Ctrl+S write · Esc cancel
 tags-genres = genres
 tags-bpm = BPM
 tags-tempo = tempo
 tags-creation = creation date
 tags-unchanged = unchanged
+tags-cleared = all removed (in each file)
 tags-tempo-auto = auto (from the BPM)
 tags-tempo-auto-now = auto (from the BPM, now { $tempo })
 tags-creation-now = auto (now { $date })
@@ -732,12 +733,12 @@ tags-bad-number = { $field }: a number from 1 to { $max }, or empty
 tags-bad-creation = creation date: as 2026-06-14T06:36:48Z (RFC 3339), or empty
 tags-help-single = empty = field removed from the file
 tags-help-batch = empty = unchanged in each file
-tags-help-list = Enter: pick from the known genres, or type a new one
+tags-help-list = Enter: pick (the files' own values first), or type a new one · Del: remove all
 tags-help-tempo = ←→: a chosen label wins over the one from the BPM; "auto" goes back to the BPM
 tags-help-bpm = the tempo comes from it (custom-tags ranges) unless chosen by hand
 tags-help-creation = typed: wins over the date from the comment; empty: back to that one
 tags-picker-title = { $field }: check (Space)
-tags-picker-title-batch = { $field }: Space = add, then remove, then unchanged
+tags-picker-title-batch = { $field }: Space = remove (value present) or add, then unchanged
 tags-picker-keys = type to filter · Space check · Enter confirm · Esc cancel
 tags-picker-new = ＋ new: "{ $genre }"
 tags-picker-none = no genre matches: Space adds it

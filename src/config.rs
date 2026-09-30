@@ -19,6 +19,9 @@ pub struct Config {
     /// (singular, like `[[rule]]`), the field stays plural in Rust.
     #[serde(default, rename = "plugin")]
     pub plugins: Vec<crate::plugin::PluginDecl>,
+    /// Optional local DB-IP City Lite file shared by authorized plugins.
+    #[serde(default)]
+    pub geoip: Option<crate::geoip::GeoipConfig>,
     /// Liquidsoap wiring (optional). Absent = nothing airs: the daemon still
     /// schedules and answers the CLI, but no `.liq` is generated and no
     /// bridge listens. Cf. `ls_script` / `ls_bridge`.
@@ -159,6 +162,9 @@ pub struct IcecastConfig {
     /// latency (plus one pull retry) when a listener comes back.
     #[serde(default = "default_icecast_poll_interval_sleeping")]
     pub poll_interval_sleeping: u64,
+    /// Opt in to detailed client sampling. IPs only reach authorized plugins.
+    #[serde(default)]
+    pub listener_snapshots: bool,
     /// `[icecast.server]` present = stationd generates Icecast's own config
     /// (`icecast.xml`). Absent = stationd only reads an Icecast configured
     /// elsewhere.
@@ -1008,6 +1014,7 @@ mod tests {
             admin_password: "x".into(),
             poll_interval: 15,
             poll_interval_sleeping: 3,
+            listener_snapshots: false,
             server: None,
         };
         assert_eq!(ic("http://icecast.lan/").authority().unwrap(), "icecast.lan:80");

@@ -151,18 +151,27 @@ pub async fn list_genres(channel: Channel) -> Read<library::ListGenresResponse> 
     bounded(cli.list_genres(library::ListGenresRequest { only_available: true })).await
 }
 
-/// Ce qu'il faut pour ouvrir l'éditeur de tags : les tags du fichier et
-/// les genres connus (toute la bibliothèque, pour les proposer).
-pub async fn tag_form_data(
-    channel: Channel,
-    rel_path: String,
-) -> Read<(library::MediaTags, Vec<library::GenreCount>)> {
+/// Tags des fichiers visés (dans l'ordre) et genres connus.
+pub type TagFormData = (Vec<library::MediaTags>, Vec<library::GenreCount>);
+
+/// Ce qu'il faut pour ouvrir l'éditeur de tags : les tags de chaque fichier
+/// visé (dans l'ordre ; un lot les relit tous pour mettre en tête les
+/// valeurs qu'ils portent) et les genres connus (toute la bibliothèque, pour
+/// les proposer). Un fichier illisible fait échouer le tout, chemin cité.
+pub async fn tag_form_data(channel: Channel, rel_paths: Vec<String>) -> Read<TagFormData> {
     let mut a = library::library_service_client::LibraryServiceClient::new(channel);
     let mut b = a.clone();
-    let (t, g) = tokio::join!(
-        bounded(a.get_tags(library::GetTagsRequest { rel_path })),
-        bounded(b.list_genres(library::ListGenresRequest { only_available: false })),
-    );
+    let tags = async move {
+        let mut out = Vec::with_capacity(rel_paths.len());
+        for rel_path in rel_paths {
+            let t = bounded(a.get_tags(library::GetTagsRequest { rel_path: rel_path.clone() }))
+                .await
+                .map_err(|e| format!("{rel_path} : {e}"))?;
+            out.push(t);
+        }
+        Read::Ok(out)
+    };
+    let (t, g) = tokio::join!(tags, bounded(b.list_genres(library::ListGenresRequest { only_available: false })));
     Ok((t?, g?.genres))
 }
 

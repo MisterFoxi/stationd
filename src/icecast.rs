@@ -211,7 +211,12 @@ pub struct IcecastClient {
     http: Client<HttpConnector, Empty<Bytes>>,
     authority: String,
     auth: String,
+    listener_snapshots: bool,
 }
+
+#[cfg(test)]
+#[path = "icecast_listener_tests.rs"]
+mod icecast_listener_tests;
 
 impl IcecastClient {
     pub fn new(cfg: &IcecastConfig) -> Result<Self, String> {
@@ -219,6 +224,7 @@ impl IcecastClient {
         Ok(Self {
             http: Client::builder(TokioExecutor::new()).build_http(),
             authority: cfg.authority()?,
+            listener_snapshots: cfg.listener_snapshots,
             auth: format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(creds)),
         })
     }
@@ -235,6 +241,14 @@ impl IcecastClient {
             .await
             .map_err(|_| format!("{}: no answer within {FETCH_TIMEOUT:?}", self.authority))??;
         parse_stats(&body)
+    }
+
+    /// The same admin authentication, response-size cap and deadline as stats.
+    pub async fn list_clients(&self, mount: &str) -> Result<Vec<crate::listener_snapshot::Listener>, String> {
+        let path = format!("/admin/listclients?mount={}", crate::listener_snapshot::mount_query(mount));
+        let body = tokio::time::timeout(FETCH_TIMEOUT, self.get(&path))
+            .await.map_err(|_| "listclients: request timed out")??;
+        crate::listener_snapshot::parse_clients(&body, mount)
     }
 
     async fn get(&self, path: &str) -> Result<String, String> {
@@ -418,26 +432,48 @@ pub fn spawn_sampler(
     monitor: IcecastMonitor,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let mut last_problem: Option<String> = None;
-        let mut first = true;
-        loop {
-            if !first {
+        // Independent futures: slow listclients must not delay the audience
+        // that controls sleep/wake. Aborting this task cancels both loops.
+        let details = async {
+            if !client.listener_snapshots {
+                return;
+            }
+            let unique: std::collections::BTreeSet<_> = mounts.iter().collect();
+            loop {
+                for mount in &unique {
+                    let listeners = client.list_clients(mount).await.ok();
+                    control.emit_event(crate::plugin::PluginEvent::ListenerSnapshot {
+                        mount: (*mount).clone(),
+                        at: control.now().0,
+                        listeners,
+                    });
+                }
                 tokio::time::sleep(sample_period(&control, every, asleep)).await;
             }
-            first = false;
-            let fetched = client.stats().await;
-            let problem = apply_sample(fetched, &mounts, &control, &monitor);
-            match (&last_problem, &problem) {
-                (_, Some(p)) if last_problem.as_ref() != Some(p) => {
-                    tracing::warn!(problem = %p, "Icecast: audience unknown (a draining station keeps playing)");
+        };
+        let totals = async {
+            let mut last_problem: Option<String> = None;
+            let mut first = true;
+            loop {
+                if !first {
+                    tokio::time::sleep(sample_period(&control, every, asleep)).await;
                 }
-                (Some(_), None) => {
-                    tracing::info!(listeners = ?control.listeners(), "Icecast: audience sampled again");
+                first = false;
+                let fetched = client.stats().await;
+                let problem = apply_sample(fetched, &mounts, &control, &monitor);
+                match (&last_problem, &problem) {
+                    (_, Some(p)) if last_problem.as_ref() != Some(p) => {
+                        tracing::warn!(problem = %p, "Icecast: audience unknown (a draining station keeps playing)");
+                    }
+                    (Some(_), None) => {
+                        tracing::info!(listeners = ?control.listeners(), "Icecast: audience sampled again");
+                    }
+                    _ => {}
                 }
-                _ => {}
+                last_problem = problem;
             }
-            last_problem = problem;
-        }
+        };
+        tokio::join!(totals, details);
     })
 }
 
@@ -701,6 +737,7 @@ mod tests {
             admin_password: password.into(),
             poll_interval: 15,
             poll_interval_sleeping: 3,
+            listener_snapshots: false,
             server: None,
         }
     }

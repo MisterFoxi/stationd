@@ -1,0 +1,15 @@
+[package]
+name = "listener-stats-wasm"
+version = "0.1.0"
+edition = "2021"
+
+# Independent guest crate, like the other stationd WASM plugins.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+extism-pdk = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

@@ -1,0 +1,1219 @@
+diff --git a/Doc/listener-stats-v1.md b/Doc/listener-stats-v1.md
+new file mode 100644
+--- /dev/null
++++ b/Doc/listener-stats-v1.md
+@@ -0,0 +1,116 @@
++# Listener stats V1
++
++Small, opt-in extension to the existing plugin architecture. No core database
++migration, new HTTP dependency, public API, dashboard, or external GeoIP service.
++
++## Enable
++
++Build the guest from the repository root:
++
++```sh
++cargo build --manifest-path plugins/listener-stats-wasm/Cargo.toml --release --target wasm32-unknown-unknown
++```
++
++Add `listener_snapshots = true` to the existing `[icecast]` section (default:
++false). Keep its existing admin credentials and polling intervals. Then add:
++
++```toml
++[[plugin]]
++name = "listener-stats"
++enabled = true
++wasm = "plugins/listener-stats-wasm/target/wasm32-unknown-unknown/release/listener_stats_wasm.wasm"
++capabilities = ["db", "listener_details", "geoip"]
++```
++
++Restart stationd after changing the Icecast configuration. Build/package the
++WASM explicitly as with the other example plugins; no binary is in this patch.
++The existing host creates `<data>/plugins/listener-stats.db` and applies the
++guest's ordered, immutable migrations before loading it. Existing DB size and
++query deadline limits apply. A failed batch rolls back completely.
++
++## Event contract
++
++`ListenerSnapshot` is separate from the unchanged `ListenersSampled` count.
++It is emitted once per managed mount after its request completes; `at` is
++station epoch seconds. Mounts are polled sequentially, deduplicated, then the
++sampler sleeps for the configured normal/sleeping interval. This is not a
++simultaneous snapshot across mounts. Detailed polling and global audience
++polling use independent futures; stopping the sampler cancels both.
++
++```json
++{"ListenerSnapshot":{"mount":"/radio.mp3","at":1790000000,"listeners":[{"id":"42","ip":"192.0.2.1","connected_seconds":120,"user_agent":"Player"}]}}
++```
++
++- `listeners: []`: successful observation of zero clients.
++- `listeners: null`: unknown (HTTP/auth/timeout/oversized/invalid XML, absent
++  mount, or inconsistent count). No invented zero or inferred departure.
++- An absent event is a gap: delivery remains best-effort; a full plugin queue
++  can drop it. Consumers must not infer continuous coverage.
++- A listener ID is scoped to a mount and Icecast process. Restarts can reuse it.
++- Only plugins declaring `listener_details` receive these events. Detailed
++  events are omitted from the core journal. IPs and user agents are transient.
++
++The HTTP client reuses Basic auth, the three-second whole-request timeout and
++the 2 MiB response cap. The parser accepts the capitalized Icecast 2.4 fields
++and lowercase/namespaced Icecast 2.5 fields, with at most 10,000 clients per
++mount. It rejects duplicates and partial responses. No forwarding header is
++trusted: behind a proxy, Icecast may report the proxy IP.
++
++Protocol references:
++[Icecast 2.4 admin implementation](https://github.com/xiph/Icecast-Server/blob/v2.4.4/src/admin.c)
++and [Icecast 2.5 admin implementation](https://github.com/xiph/Icecast-Server/blob/v2.5.0/src/admin.c).
++
++## GeoIP host skeleton
++
++`geoip_lookup` is an ExtismHost import gated by capability `geoip`:
++
++```json
++{"ip":"192.0.2.1"}
++```
++
++The V1 response is always
++`{"ok":true,"status":"unavailable","country":null,"city":null}` for valid
++IPv4/IPv6. Undeclared capability or invalid input returns `ok:false` without
++echoing the IP. There is no database download and no external network call.
++V1 therefore does NOT supply real countries/cities yet. All observations are
++in the unavailable bucket until a provider is implemented.
++
++A future local provider can return `status:found`, an uppercase ISO alpha-2
++`country`, and a nullable city, or `status:not_found` with null location.
++The plugin already aggregates these responses. It caches lookups only within
++one observation; multiple clients sharing an IP still count individually.
++
++## Storage and queries
++
++`listener_snapshot(mount, at, listeners)` stores concurrent audience, with
++NULL for failed collection. `listener_geo` stores counts grouped by status,
++country and city. Empty location strings mean unknown, not a real country.
++Neither table contains IPs, user agents or client IDs. Each event replaces
++its `(mount, at)` observation atomically, so replay does not double count.
++Two observations for the same mount within one second replace one another.
++Rows older than seven days relative to the current event are deleted on each
++write. No background cleanup runs while the plugin/station is stopped, and
++SQLite may reuse freed pages without shrinking its file.
++
++```sh
++stationctl plugin db listener-stats query "SELECT mount, at, listeners FROM listener_snapshot ORDER BY at DESC LIMIT 100"
++stationctl plugin db listener-stats query "SELECT mount, status, country, city, listeners FROM listener_geo WHERE at = (SELECT max(at) FROM listener_geo)"
++```
++
++Counts describe concurrent connections at sample time. Summing across samples
++does NOT give unique listeners. Exact sessions, connection durations, bot or
++relay classification, retention configuration and dashboards are outside V1.
++
++## Checks
++
++```sh
++cargo test --lib listener_snapshot
++cargo test --lib listener_stats_tests
++cargo test --lib icecast_listener_tests
++cargo test --test listener_stats
++cargo build --manifest-path plugins/listener-stats-wasm/Cargo.toml --release --target wasm32-unknown-unknown
++```
++
++These cover XML variants and failures, mount escaping, HTTP authentication,
++independent audience polling, capability gates, GeoIP input validation,
++aggregation, confined DB migrations, replay, rollback and retention.
+diff --git a/plugins/listener-stats-wasm/Cargo.lock b/plugins/listener-stats-wasm/Cargo.lock
+new file mode 100644
+--- /dev/null
++++ b/plugins/listener-stats-wasm/Cargo.lock
+@@ -0,0 +1,391 @@
++# This file is automatically @generated by Cargo.
++# It is not intended for manual editing.
++version = 4
++
++[[package]]
++name = "anyhow"
++version = "1.0.104"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
++
++[[package]]
++name = "autocfg"
++version = "1.5.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
++
++[[package]]
++name = "base64"
++version = "0.22.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
++
++[[package]]
++name = "bytemuck"
++version = "1.25.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "95832e849adfb21180ccb6826a99da14e5d266ae5c2e668e1602cf234f153797"
++
++[[package]]
++name = "bytes"
++version = "1.12.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
++
++[[package]]
++name = "either"
++version = "1.18.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "252afb9ae5eaa683babdc6a068b3f5726eb19e05070c731f9b2a23a7c3e8ed34"
++
++[[package]]
++name = "equivalent"
++version = "1.0.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
++
++[[package]]
++name = "extism-convert"
++version = "1.30.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "ad19858c4c462309a8f3a20abec53e8603bda1eefda26c8bfab51d5516b40cbb"
++dependencies = [
++ "anyhow",
++ "base64",
++ "bytemuck",
++ "extism-convert-macros",
++ "prost",
++ "rmp-serde",
++ "serde",
++ "serde_json",
++]
++
++[[package]]
++name = "extism-convert-macros"
++version = "1.30.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "5f2932799f6d9f9646f97b65287f6bb2addc75a0ee61e40fb24559a7540dd928"
++dependencies = [
++ "manyhow",
++ "proc-macro-crate",
++ "proc-macro2",
++ "quote",
++ "syn 2.0.119",
++]
++
++[[package]]
++name = "extism-manifest"
++version = "1.30.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "e2f59c8dadb5e0bde9a48c6ed45312e6ef625cbcd5f67c28459dbc8fe8bc0383"
++dependencies = [
++ "base64",
++ "serde",
++ "serde_json",
++]
++
++[[package]]
++name = "extism-pdk"
++version = "1.4.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "352fcb5a66eb74145a1c4a01f2bd15d59c62c85be73aac8471880c65b26b798f"
++dependencies = [
++ "anyhow",
++ "base64",
++ "extism-convert",
++ "extism-manifest",
++ "extism-pdk-derive",
++ "serde",
++ "serde_json",
++]
++
++[[package]]
++name = "extism-pdk-derive"
++version = "1.4.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "d086daea5fd844e3c5ac69ddfe36df4a9a43e7218cf7d1f888182b089b09806c"
++dependencies = [
++ "proc-macro2",
++ "quote",
++ "syn 2.0.119",
++]
++
++[[package]]
++name = "hashbrown"
++version = "0.17.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
++
++[[package]]
++name = "indexmap"
++version = "2.14.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "cc4e190f5d26ca7051642629da2c52fc03bde85a03197c99408dcd291734c855"
++dependencies = [
++ "equivalent",
++ "hashbrown",
++]
++
++[[package]]
++name = "itertools"
++version = "0.14.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "2b192c782037fadd9cfa75548310488aabdbf3d2da73885b31bd0abd03351285"
++dependencies = [
++ "either",
++]
++
++[[package]]
++name = "itoa"
++version = "1.0.18"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
++
++[[package]]
++name = "manyhow"
++version = "0.11.4"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "b33efb3ca6d3b07393750d4030418d594ab1139cee518f0dc88db70fec873587"
++dependencies = [
++ "manyhow-macros",
++ "proc-macro2",
++ "quote",
++ "syn 2.0.119",
++]
++
++[[package]]
++name = "manyhow-macros"
++version = "0.11.4"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "46fce34d199b78b6e6073abf984c9cf5fd3e9330145a93ee0738a7443e371495"
++dependencies = [
++ "proc-macro-utils",
++ "proc-macro2",
++ "quote",
++]
++
++[[package]]
++name = "memchr"
++version = "2.8.3"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
++
++[[package]]
++name = "num-traits"
++version = "0.2.19"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841"
++dependencies = [
++ "autocfg",
++]
++
++[[package]]
++name = "listener-stats-wasm"
++version = "0.1.0"
++dependencies = [
++ "extism-pdk",
++ "serde",
++ "serde_json",
++]
++
++[[package]]
++name = "proc-macro-crate"
++version = "3.5.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "e67ba7e9b2b56446f1d419b1d807906278ffa1a658a8a5d8a39dcb1f5a78614f"
++dependencies = [
++ "toml_edit",
++]
++
++[[package]]
++name = "proc-macro-utils"
++version = "0.10.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "eeaf08a13de400bc215877b5bdc088f241b12eb42f0a548d3390dc1c56bb7071"
++dependencies = [
++ "proc-macro2",
++ "quote",
++ "smallvec",
++]
++
++[[package]]
++name = "proc-macro2"
++version = "1.0.107"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "985e7ec9bb745e6ce6535b544d84d6cd6f7ad8bd711c398938ae983b91a766d9"
++dependencies = [
++ "unicode-ident",
++]
++
++[[package]]
++name = "prost"
++version = "0.14.4"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "528ac67416ff8646872a3c02cad9cc4ee5dc9f9540c9b10771855c95cb2e5ae1"
++dependencies = [
++ "bytes",
++ "prost-derive",
++]
++
++[[package]]
++name = "prost-derive"
++version = "0.14.4"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "b570b25f7617e43d59005d0990ccb79e950a423952cea19671b7a876da390adf"
++dependencies = [
++ "anyhow",
++ "itertools",
++ "proc-macro2",
++ "quote",
++ "syn 2.0.119",
++]
++
++[[package]]
++name = "quote"
++version = "1.0.47"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "1fbf4db142a473a8d80c26bbf18454ed458bf8d26c8219c331daecfdbd079001"
++dependencies = [
++ "proc-macro2",
++]
++
++[[package]]
++name = "rmp"
++version = "0.8.15"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "4ba8be72d372b2c9b35542551678538b562e7cf86c3315773cae48dfbfe7790c"
++dependencies = [
++ "num-traits",
++]
++
++[[package]]
++name = "rmp-serde"
++version = "1.3.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "72f81bee8c8ef9b577d1681a70ebbc962c232461e397b22c208c43c04b67a155"
++dependencies = [
++ "rmp",
++ "serde",
++]
++
++[[package]]
++name = "serde"
++version = "1.0.229"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "4148590afebada386688f18773da617792bf2ef03ffc1e4cbd2b1d45b023e0ba"
++dependencies = [
++ "serde_core",
++ "serde_derive",
++]
++
++[[package]]
++name = "serde_core"
++version = "1.0.229"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "67dca2c9c51e58a4791a4b1ed58308b39c64224d349a935ab5039aa360942a48"
++dependencies = [
++ "serde_derive",
++]
++
++[[package]]
++name = "serde_derive"
++version = "1.0.229"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "e7a5d71263a5a7d47b41f6b3f06ba276f10cc18b0931f1799f710578e2309348"
++dependencies = [
++ "proc-macro2",
++ "quote",
++ "syn 3.0.6",
++]
++
++[[package]]
++name = "serde_json"
++version = "1.0.151"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "c841b55ecdae098c80dcae9cf767f6f8a0c2cdb3416bbef72181df4d0fe73f14"
++dependencies = [
++ "itoa",
++ "memchr",
++ "serde",
++ "serde_core",
++ "zmij",
++]
++
++[[package]]
++name = "smallvec"
++version = "1.16.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "f9395f0f0eee849a9b707b2f06bb92a6a422090e2123bb2ef8e87a0e61892a8e"
++
++[[package]]
++name = "syn"
++version = "2.0.119"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "872831b642d1a07999a962a351ed35b955ea2cfc8f3862091e2a240a84f17297"
++dependencies = [
++ "proc-macro2",
++ "quote",
++ "unicode-ident",
++]
++
++[[package]]
++name = "syn"
++version = "3.0.6"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "8593e8e72159ed2257d083c7a454a85cbf854f37a0966d8d483aff8c8a3ebcee"
++dependencies = [
++ "proc-macro2",
++ "quote",
++ "unicode-ident",
++]
++
++[[package]]
++name = "toml_datetime"
++version = "1.1.1+spec-1.1.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "3165f65f62e28e0115a00b2ebdd37eb6f3b641855f9d636d3cd4103767159ad7"
++dependencies = [
++ "serde_core",
++]
++
++[[package]]
++name = "toml_edit"
++version = "0.25.15+spec-1.1.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "1340ea94a5856333492c9064b02c778b191dd2c853778d9609debdcdfea3a614"
++dependencies = [
++ "indexmap",
++ "toml_datetime",
++ "toml_parser",
++ "winnow",
++]
++
++[[package]]
++name = "toml_parser"
++version = "1.1.3+spec-1.1.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "1d38ac1cf9b95face32296c0a3ede1fdc270627c9d9c02a7274dd6d960dc4d56"
++dependencies = [
++ "winnow",
++]
++
++[[package]]
++name = "unicode-ident"
++version = "1.0.26"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "d245f478577f809a851594d02313b640fb437e0bb33866753cff937863096954"
++
++[[package]]
++name = "winnow"
++version = "1.0.4"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "23b97319f7b8343df12cc98938e5c3eb436064524c8d2b4e30a1d3a36eecdf81"
++dependencies = [
++ "memchr",
++]
++
++[[package]]
++name = "zmij"
++version = "1.0.23"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
+diff --git a/plugins/listener-stats-wasm/Cargo.toml b/plugins/listener-stats-wasm/Cargo.toml
+new file mode 100644
+--- /dev/null
++++ b/plugins/listener-stats-wasm/Cargo.toml
+@@ -0,0 +1,15 @@
++[package]
++name = "listener-stats-wasm"
++version = "0.1.0"
++edition = "2021"
++
++# Independent guest crate, like the other stationd WASM plugins.
++[workspace]
++
++[lib]
++crate-type = ["cdylib"]
++
++[dependencies]
++extism-pdk = "1"
++serde = { version = "1", features = ["derive"] }
++serde_json = "1"
+diff --git a/plugins/listener-stats-wasm/migrations/001_snapshots.sql b/plugins/listener-stats-wasm/migrations/001_snapshots.sql
+new file mode 100644
+--- /dev/null
++++ b/plugins/listener-stats-wasm/migrations/001_snapshots.sql
+@@ -0,0 +1,22 @@
++-- Immutable migration: add another file for future schema changes.
++-- NULL listeners means failed collection, not zero listeners.
++CREATE TABLE listener_snapshot (
++    mount TEXT NOT NULL,
++    at INTEGER NOT NULL,
++    listeners INTEGER CHECK (listeners >= 0),
++    PRIMARY KEY (mount, at)
++);
++CREATE INDEX listener_snapshot_at ON listener_snapshot(at);
++
++-- Only aggregates are stored. No IP, client ID or user agent survives.
++-- Empty country/city means unknown. Status explains why.
++CREATE TABLE listener_geo (
++    mount TEXT NOT NULL,
++    at INTEGER NOT NULL,
++    status TEXT NOT NULL CHECK (status IN ('found', 'not_found', 'unavailable')),
++    country TEXT NOT NULL,
++    city TEXT NOT NULL,
++    listeners INTEGER NOT NULL CHECK (listeners > 0),
++    PRIMARY KEY (mount, at, status, country, city)
++);
++CREATE INDEX listener_geo_at ON listener_geo(at);
+diff --git a/plugins/listener-stats-wasm/src/lib.rs b/plugins/listener-stats-wasm/src/lib.rs
+new file mode 100644
+--- /dev/null
++++ b/plugins/listener-stats-wasm/src/lib.rs
+@@ -0,0 +1,40 @@
++//! V1: sampled concurrent audience by mount and geography, not unique people
++//! or exact sessions. The host owns Icecast access and the SQLite handle.
++use extism_pdk::*;
++use serde_json::{json, Value};
++
++mod model;
++
++#[host_fn]
++extern "ExtismHost" {
++    fn db_batch(input: String) -> String;
++    fn geoip_lookup(input: String) -> String;
++}
++
++#[plugin_fn]
++pub fn db_migrations() -> FnResult<String> {
++    Ok(serde_json::to_string(&[include_str!("../migrations/001_snapshots.sql")])?)
++}
++
++#[plugin_fn]
++pub fn on_event(input: String) -> FnResult<()> {
++    let event: Value = serde_json::from_str(&input)?;
++    let Some(sample) = event.get("ListenerSnapshot") else { return Ok(()) };
++    let sample: model::Snapshot = serde_json::from_value(sample.clone())?;
++    let groups = model::aggregate(&sample, |ip| {
++        let reply = unsafe { geoip_lookup(json!({"ip": ip}).to_string()) }
++            .map_err(|_| "GeoIP host call failed".to_string())?;
++        let value: Value = serde_json::from_str(&reply).map_err(|_| "invalid GeoIP reply")?;
++        if value.get("ok") != Some(&Value::Bool(true)) {
++            return Err("GeoIP lookup refused".into());
++        }
++        serde_json::from_value(value).map_err(|_| "invalid GeoIP result".into())
++    }).map_err(|e| Error::msg(e))?;
++    let request = json!({"statements": model::statements(&sample, groups)});
++    let reply: Value = serde_json::from_str(&unsafe { db_batch(request.to_string())? })?;
++    if reply.get("ok") != Some(&Value::Bool(true)) {
++        // No raw reply/input: an error must not accidentally log client data.
++        return Err(Error::msg("listener-stats: database batch failed"));
++    }
++    Ok(())
++}
+diff --git a/plugins/listener-stats-wasm/src/model.rs b/plugins/listener-stats-wasm/src/model.rs
+new file mode 100644
+--- /dev/null
++++ b/plugins/listener-stats-wasm/src/model.rs
+@@ -0,0 +1,129 @@
++//! Pure snapshot aggregation and SQL planning, independently testable.
++use std::collections::BTreeMap;
++use serde::Deserialize;
++use serde_json::{json, Value};
++
++#[derive(Deserialize)]
++pub struct Listener {
++    pub ip: std::net::IpAddr,
++}
++
++#[derive(Deserialize)]
++pub struct Snapshot {
++    pub mount: String,
++    pub at: i64,
++    pub listeners: Option<Vec<Listener>>,
++}
++
++#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
++pub struct Geo {
++    pub status: String,
++    pub country: Option<String>,
++    pub city: Option<String>,
++}
++
++impl Geo {
++    pub fn validate(&self) -> Result<(), String> {
++        match self.status.as_str() {
++            "found" => {
++                if !self.country.as_ref().is_some_and(|c| c.len() == 2 && c.bytes().all(|b| b.is_ascii_uppercase())) {
++                    return Err("invalid GeoIP country".into());
++                }
++                if self.city.as_ref().is_some_and(|c| c.len() > 256 || c.is_empty()) {
++                    return Err("invalid GeoIP city".into());
++                }
++            }
++            "not_found" | "unavailable" if self.country.is_none() && self.city.is_none() => {}
++            _ => return Err("invalid GeoIP status".into()),
++        }
++        Ok(())
++    }
++}
++
++pub fn aggregate<F>(sample: &Snapshot, mut lookup: F) -> Result<BTreeMap<Geo, u32>, String>
++where F: FnMut(std::net::IpAddr) -> Result<Geo, String> {
++    let mut cache = BTreeMap::new();
++    let mut groups = BTreeMap::new();
++    if let Some(listeners) = &sample.listeners {
++        if listeners.len() > 10_000 {
++            return Err("snapshot exceeds listener limit".into());
++        }
++        for listener in listeners {
++            let geo = match cache.get(&listener.ip) {
++                Some(geo) => geo,
++                None => {
++                    let geo = lookup(listener.ip)?;
++                    geo.validate()?;
++                    cache.entry(listener.ip).or_insert(geo)
++                }
++            };
++            // Two clients behind the same IP still count as two listeners.
++            *groups.entry(geo.clone()).or_insert(0) += 1;
++        }
++    }
++    Ok(groups)
++}
++
++pub const SAVE_SAMPLE: &str = "INSERT INTO listener_snapshot (mount, at, listeners) VALUES (?1, ?2, ?3) ON CONFLICT(mount, at) DO UPDATE SET listeners = excluded.listeners";
++pub const CLEAR_GEO: &str = "DELETE FROM listener_geo WHERE mount = ?1 AND at = ?2";
++pub const SAVE_GEO: &str = "INSERT INTO listener_geo (mount, at, status, country, city, listeners) VALUES (?1, ?2, ?3, ?4, ?5, ?6)";
++pub const PRUNE_SAMPLES: &str = "DELETE FROM listener_snapshot WHERE at < ?1";
++pub const PRUNE_GEO: &str = "DELETE FROM listener_geo WHERE at < ?1";
++
++/// All writes go through one atomic host batch. Replaying an observation
++/// replaces it instead of double counting. Retain seven days of observations.
++pub fn statements(sample: &Snapshot, groups: BTreeMap<Geo, u32>) -> Vec<Value> {
++    let mut statements = vec![
++        json!({"sql": SAVE_SAMPLE, "params": [&sample.mount, sample.at, sample.listeners.as_ref().map(Vec::len)]}),
++        json!({"sql": CLEAR_GEO, "params": [&sample.mount, sample.at]}),
++    ];
++    for (geo, count) in groups {
++        statements.push(json!({"sql": SAVE_GEO, "params": [
++            &sample.mount, sample.at, geo.status,
++            geo.country.unwrap_or_default(), geo.city.unwrap_or_default(), count
++        ]}));
++    }
++    let before = sample.at.saturating_sub(7 * 86400);
++    statements.push(json!({"sql": PRUNE_GEO, "params": [before]}));
++    statements.push(json!({"sql": PRUNE_SAMPLES, "params": [before]}));
++    statements
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn shared_ip_is_cached_but_clients_are_not_deduplicated() {
++        let sample: Snapshot = serde_json::from_value(json!({
++            "mount": "/radio", "at": 100, "listeners": [{"ip": "192.0.2.1"}, {"ip": "192.0.2.1"}]
++        })).unwrap();
++        let mut calls = 0;
++        let groups = aggregate(&sample, |_| {
++            calls += 1;
++            Ok(Geo {status: "found".into(), country: Some("FR".into()), city: Some("Paris".into())})
++        }).unwrap();
++        assert_eq!(calls, 1);
++        assert_eq!(groups.values().copied().sum::<u32>(), 2);
++        let sql = statements(&sample, groups);
++        assert_eq!(sql[2]["params"], json!(["/radio", 100, "found", "FR", "Paris", 2]));
++        assert!(!serde_json::to_string(&sql).unwrap().contains("192.0.2.1"));
++    }
++
++    #[test]
++    fn failed_and_empty_snapshots_remain_distinct() {
++        for (listeners, count) in [(Value::Null, Value::Null), (json!([]), json!(0))] {
++            let sample: Snapshot = serde_json::from_value(json!({"mount": "/a", "at": 1, "listeners": listeners})).unwrap();
++            let groups = aggregate(&sample, |_| panic!("no lookup expected")).unwrap();
++            assert!(groups.is_empty());
++            assert_eq!(statements(&sample, groups)[0]["params"][2], count);
++        }
++    }
++
++    #[test]
++    fn missing_provider_is_not_a_fake_country() {
++        let unknown = Geo {status: "unavailable".into(), country: None, city: None};
++        assert!(unknown.validate().is_ok());
++        assert!(Geo {country: Some("FR".into()), ..unknown}.validate().is_err());
++    }
++}
+diff --git a/src/config.rs b/src/config.rs
+--- a/src/config.rs
++++ b/src/config.rs
+@@ -161,2 +161,5 @@
+     pub poll_interval_sleeping: u64,
++    /// Opt in to detailed client sampling. IPs only reach authorized plugins.
++    #[serde(default)]
++    pub listener_snapshots: bool,
+     /// `[icecast.server]` present = stationd generates Icecast's own config
+@@ -1010,2 +1013,3 @@
+             poll_interval_sleeping: 3,
++            listener_snapshots: false,
+             server: None,
+diff --git a/src/icecast.rs b/src/icecast.rs
+--- a/src/icecast.rs
++++ b/src/icecast.rs
+@@ -213,3 +213,8 @@
+     auth: String,
+-}
++    listener_snapshots: bool,
++}
++
++#[cfg(test)]
++#[path = "icecast_listener_tests.rs"]
++mod icecast_listener_tests;
+ 
+@@ -221,2 +226,3 @@
+             authority: cfg.authority()?,
++            listener_snapshots: cfg.listener_snapshots,
+             auth: format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(creds)),
+@@ -237,2 +243,10 @@
+         parse_stats(&body)
++    }
++
++    /// The same admin authentication, response-size cap and deadline as stats.
++    pub async fn list_clients(&self, mount: &str) -> Result<Vec<crate::listener_snapshot::Listener>, String> {
++        let path = format!("/admin/listclients?mount={}", crate::listener_snapshot::mount_query(mount));
++        let body = tokio::time::timeout(FETCH_TIMEOUT, self.get(&path))
++            .await.map_err(|_| "listclients: request timed out")??;
++        crate::listener_snapshot::parse_clients(&body, mount)
+     }
+@@ -420,22 +434,44 @@
+     tokio::spawn(async move {
+-        let mut last_problem: Option<String> = None;
+-        let mut first = true;
+-        loop {
+-            if !first {
++        // Independent futures: slow listclients must not delay the audience
++        // that controls sleep/wake. Aborting this task cancels both loops.
++        let details = async {
++            if !client.listener_snapshots {
++                return;
++            }
++            let unique: std::collections::BTreeSet<_> = mounts.iter().collect();
++            loop {
++                for mount in &unique {
++                    let listeners = client.list_clients(mount).await.ok();
++                    control.emit_event(crate::plugin::PluginEvent::ListenerSnapshot {
++                        mount: (*mount).clone(),
++                        at: control.now().0,
++                        listeners,
++                    });
++                }
+                 tokio::time::sleep(sample_period(&control, every, asleep)).await;
+             }
+-            first = false;
+-            let fetched = client.stats().await;
+-            let problem = apply_sample(fetched, &mounts, &control, &monitor);
+-            match (&last_problem, &problem) {
+-                (_, Some(p)) if last_problem.as_ref() != Some(p) => {
+-                    tracing::warn!(problem = %p, "Icecast: audience unknown (a draining station keeps playing)");
++        };
++        let totals = async {
++            let mut last_problem: Option<String> = None;
++            let mut first = true;
++            loop {
++                if !first {
++                    tokio::time::sleep(sample_period(&control, every, asleep)).await;
+                 }
+-                (Some(_), None) => {
+-                    tracing::info!(listeners = ?control.listeners(), "Icecast: audience sampled again");
++                first = false;
++                let fetched = client.stats().await;
++                let problem = apply_sample(fetched, &mounts, &control, &monitor);
++                match (&last_problem, &problem) {
++                    (_, Some(p)) if last_problem.as_ref() != Some(p) => {
++                        tracing::warn!(problem = %p, "Icecast: audience unknown (a draining station keeps playing)");
++                    }
++                    (Some(_), None) => {
++                        tracing::info!(listeners = ?control.listeners(), "Icecast: audience sampled again");
++                    }
++                    _ => {}
+                 }
+-                _ => {}
+-            }
+-            last_problem = problem;
+-        }
++                last_problem = problem;
++            }
++        };
++        tokio::join!(totals, details);
+     })
+@@ -703,2 +739,3 @@
+             poll_interval_sleeping: 3,
++            listener_snapshots: false,
+             server: None,
+diff --git a/src/icecast_listener_tests.rs b/src/icecast_listener_tests.rs
+new file mode 100644
+--- /dev/null
++++ b/src/icecast_listener_tests.rs
+@@ -0,0 +1,54 @@
++use super::*;
++use axum::{http::{HeaderMap, StatusCode, Uri}, routing::get, Router};
++
++fn config(address: std::net::SocketAddr, password: &str) -> IcecastConfig {
++    IcecastConfig {
++        admin_url: format!("http://{address}"), admin_user: "admin".into(),
++        admin_password: password.into(), poll_interval: 15,
++        poll_interval_sleeping: 3, listener_snapshots: true, server: None,
++    }
++}
++
++#[tokio::test]
++async fn listclients_authenticates_and_encodes_the_mount() {
++    let app = Router::new().route("/admin/listclients", get(|headers: HeaderMap, uri: Uri| async move {
++        if headers.get("authorization").unwrap() != "Basic YWRtaW46Z29vZA==" {
++            return (StatusCode::UNAUTHORIZED, "");
++        }
++        assert_eq!(uri.query(), Some("mount=%2Fradio%20%26%3F"));
++        (StatusCode::OK, r#"<icestats><source mount="/radio &amp;?"><Listeners>0</Listeners></source></icestats>"#)
++    }));
++    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
++    let address = listener.local_addr().unwrap();
++    let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
++    assert!(IcecastClient::new(&config(address, "good")).unwrap().list_clients("/radio &?").await.unwrap().is_empty());
++    assert!(IcecastClient::new(&config(address, "bad")).unwrap().list_clients("/radio &?").await.is_err());
++    task.abort();
++}
++
++#[tokio::test]
++async fn slow_details_do_not_delay_global_audience() {
++    let app = Router::new()
++        .route("/admin/listclients", get(|| async {
++            tokio::time::sleep(Duration::from_secs(10)).await;
++            ""
++        }))
++        .route("/admin/stats", get(|| async {
++            r#"<icestats><source mount="/radio"><listeners>7</listeners><stream_start>now</stream_start></source></icestats>"#
++        }));
++    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
++    let address = listener.local_addr().unwrap();
++    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
++    let control = StationControl::new_in_memory();
++    let sampler = spawn_sampler(IcecastClient::new(&config(address, "good")).unwrap(),
++        vec!["/radio".into()], Duration::from_secs(15), Duration::from_secs(3),
++        control.clone(), IcecastMonitor::default());
++    let result = tokio::time::timeout(Duration::from_secs(1), async {
++        while control.listeners() != Some(7) {
++            tokio::time::sleep(Duration::from_millis(10)).await;
++        }
++    }).await;
++    sampler.abort();
++    server.abort();
++    assert!(result.is_ok(), "global audience waited for listclients");
++}
+diff --git a/src/lib.rs b/src/lib.rs
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -28,2 +28,3 @@
+ pub mod icecast;
++pub mod listener_snapshot;
+ pub mod icecast_grpc;
+diff --git a/src/listener_snapshot.rs b/src/listener_snapshot.rs
+new file mode 100644
+--- /dev/null
++++ b/src/listener_snapshot.rs
+@@ -0,0 +1,132 @@
++//! Detailed Icecast snapshots. No persistence or geolocation policy here.
++
++use std::collections::HashSet;
++
++use serde::{Deserialize, Serialize};
++
++/// IDs are scoped to an Icecast process and mount, not stable people IDs.
++#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
++pub struct Listener {
++    pub id: String,
++    pub ip: std::net::IpAddr,
++    pub connected_seconds: u64,
++    pub user_agent: Option<String>,
++}
++
++/// Percent-encode one query value, including slash, ampersand and UTF-8.
++pub fn mount_query(mount: &str) -> String {
++    let mut out = String::new();
++    for b in mount.bytes() {
++        if b.is_ascii_alphanumeric() || b"-._~".contains(&b) {
++            out.push(b as char);
++        } else {
++            use std::fmt::Write;
++            write!(&mut out, "%{b:02X}").expect("writing to String");
++        }
++    }
++    out
++}
++
++/// Accept legacy listclients XML (including namespaced 2.5 XML).
++/// Reject partial/malformed snapshots rather than inventing departures.
++/// Errors deliberately exclude XML contents and client IPs.
++pub fn parse_clients(xml: &str, mount: &str) -> Result<Vec<Listener>, String> {
++    let doc = roxmltree::Document::parse(xml).map_err(|_| "listclients: invalid XML")?;
++    let mut root = doc.root_element();
++    if root.tag_name().name() == "report" {
++        if root.descendants().any(|n| n.is_element() && n.tag_name().name() == "incident") {
++            return Err("listclients: Icecast incident".into());
++        }
++        root = root.descendants().find(|n| n.is_element() && n.tag_name().name() == "icestats")
++            .ok_or("listclients: missing icestats")?;
++    }
++    if root.tag_name().name() != "icestats" {
++        return Err("listclients: unexpected root".into());
++    }
++    let mut sources = root.children().filter(|n| n.is_element() && n.tag_name().name() == "source");
++    let source = sources.next().ok_or("listclients: missing source")?;
++    if sources.next().is_some() || source.attribute("mount") != Some(mount) {
++        return Err("listclients: unexpected mount".into());
++    }
++    let text = |node: roxmltree::Node<'_, '_>, name: &str| -> Option<String> {
++        node.children().find(|n| n.is_element() && n.tag_name().name().eq_ignore_ascii_case(name))
++            .and_then(|n| n.text()).map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned)
++    };
++    let count: usize = text(source, "Listeners").ok_or("listclients: missing count")?
++        .parse().map_err(|_| "listclients: invalid count")?;
++    if count > 10_000 {
++        return Err("listclients: too many listeners".into());
++    }
++    let mut ids = HashSet::new();
++    let mut listeners = Vec::new();
++    for node in source.children().filter(|n| n.is_element() && n.tag_name().name() == "listener") {
++        let id: u64 = text(node, "ID").ok_or("listclients: missing ID")?
++            .parse().map_err(|_| "listclients: invalid ID")?;
++        if !ids.insert(id) || listeners.len() >= 10_000 {
++            return Err("listclients: duplicate ID or too many listeners".into());
++        }
++        listeners.push(Listener {
++            id: id.to_string(),
++            ip: text(node, "IP").ok_or("listclients: missing IP")?
++                .parse().map_err(|_| "listclients: invalid IP")?,
++            connected_seconds: text(node, "Connected").ok_or("listclients: missing Connected")?
++                .parse().map_err(|_| "listclients: invalid Connected")?,
++            user_agent: text(node, "UserAgent"),
++        });
++    }
++    if listeners.len() != count {
++        return Err("listclients: inconsistent count".into());
++    }
++    Ok(listeners)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    const XML: &str = r#"<icestats><source mount="/radio"><Listeners>1</Listeners>
++        <listener><ID>42</ID><IP>2001:db8::1</IP><Connected>12</Connected>
++        <UserAgent>A &amp; B</UserAgent></listener></source></icestats>"#;
++
++    #[test]
++    fn parses_details_and_namespaces() {
++        let listeners = parse_clients(XML, "/radio").unwrap();
++        assert_eq!(parse_clients(&XML.replace("Listeners", "listeners").replace("ID", "id").replace("IP", "ip").replace("Connected", "connected").replace("UserAgent", "useragent"), "/radio").unwrap(), listeners);
++        assert_eq!(listeners[0].id, "42");
++        assert_eq!(listeners[0].connected_seconds, 12);
++        assert_eq!(listeners[0].user_agent.as_deref(), Some("A & B"));
++        assert_eq!(parse_clients(&XML.replace("<icestats>", "<icestats xmlns=\"urn:icecast\">"), "/radio").unwrap(), listeners);
++        assert_eq!(parse_clients(&XML.replace("2001:db8::1", "192.0.2.1"), "/radio").unwrap().len(), 1);
++    }
++
++    #[test]
++    fn unknown_is_not_empty() {
++        for bad in [XML.replace("<Listeners>1", "<Listeners>0"),
++                    XML.replace("<ID>42</ID>", ""),
++                    XML.replace("2001:db8::1", "not-an-ip"),
++                    XML.replace("<Connected>12", "<Connected>-1"),
++                    "<icestats/>".into(), "<html/>".into(), "broken".into()] {
++            assert!(parse_clients(&bad, "/radio").is_err());
++        }
++        assert!(parse_clients(XML, "/other").is_err());
++        assert!(parse_clients(r#"<icestats><source mount="/radio"><Listeners>0</Listeners></source></icestats>"#, "/radio").unwrap().is_empty());
++    }
++
++    #[test]
++    fn encodes_query_delimiters() {
++        assert_eq!(mount_query("/a b&x=1%?#"), "%2Fa%20b%26x%3D1%25%3F%23");
++        assert_eq!(mount_query("/\u{e9}"), "%2F%C3%A9");
++    }
++
++    #[test]
++    fn rejects_duplicate_ids_and_report_incidents() {
++        let start = XML.find("<listener>").unwrap();
++        let end = XML.find("</listener>").unwrap() + "</listener>".len();
++        let duplicated = XML.replace("</source>", &format!("{}</source>", &XML[start..end]))
++            .replace("<Listeners>1", "<Listeners>2");
++        assert!(parse_clients(&duplicated, "/radio").is_err());
++        let wrapped = format!("<report><extension>{XML}</extension></report>");
++        assert_eq!(parse_clients(&wrapped, "/radio").unwrap().len(), 1);
++        assert!(parse_clients(&wrapped.replace("</report>", "<incident/></report>"), "/radio").is_err());
++    }
++}
+diff --git a/src/listener_stats_tests.rs b/src/listener_stats_tests.rs
+new file mode 100644
+--- /dev/null
++++ b/src/listener_stats_tests.rs
+@@ -0,0 +1,41 @@
++use super::*;
++
++#[test]
++fn geoip_contract_checks_capability_and_input() {
++    let denied = Host::new("test", &[], None);
++    let allowed = Host::new("test", &[Capability::Geoip], None);
++    let reply = |h: &Host, input| -> serde_json::Value {
++        serde_json::from_str(&wasm_geoip_lookup(h, input)).unwrap()
++    };
++    assert_eq!(reply(&denied, r#"{"ip":"192.0.2.1"}"#)["ok"], false);
++    assert_eq!(reply(&allowed, r#"{"ip":"2001:db8::1"}"#), serde_json::json!({
++        "ok": true, "status": "unavailable", "country": null, "city": null
++    }));
++    let bad = reply(&allowed, r#"{"ip":"secret-invalid-input"}"#);
++    assert_eq!(bad["ok"], false);
++    assert!(!bad.to_string().contains("secret-invalid-input"));
++}
++
++#[test]
++fn detailed_snapshots_only_reach_opted_in_plugins() {
++    struct Counter(Arc<std::sync::atomic::AtomicUsize>);
++    impl Plugin for Counter {
++        fn name(&self) -> &str { "counter" }
++        fn on_event(&mut self, _: &PluginEvent) { self.0.fetch_add(1, Ordering::SeqCst); }
++    }
++    let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
++    let declaration: PluginDecl = toml::from_str("name = \"counter\"\nenabled = true").unwrap();
++    let mut slot = Slot {
++        decl: declaration, state: PluginState::Loaded,
++        plugin: Some(Box::new(Counter(count.clone()))), failures: VecDeque::new(), host: None,
++    };
++    let event = PluginEvent::ListenerSnapshot { mount: "/a".into(), at: 1, listeners: Some(vec![]) };
++    dispatch_event(std::slice::from_mut(&mut slot), &event);
++    assert_eq!(count.load(Ordering::SeqCst), 0);
++    slot.decl.capabilities.push(Capability::ListenerDetails);
++    dispatch_event(std::slice::from_mut(&mut slot), &event);
++    assert_eq!(count.load(Ordering::SeqCst), 1);
++    slot.decl.capabilities.clear();
++    dispatch_event(std::slice::from_mut(&mut slot), &PluginEvent::ListenersSampled { count: 0, at: 1 });
++    assert_eq!(count.load(Ordering::SeqCst), 2);
++}
+diff --git a/src/plugin.rs b/src/plugin.rs
+--- a/src/plugin.rs
++++ b/src/plugin.rs
+@@ -174,2 +174,9 @@
+     ListenersSampled { count: u32, at: i64 },
++    /// Per-mount observation, gated by listener_details. None means unknown;
++    /// Some([]) means a successful empty snapshot. Never journal raw IPs.
++    ListenerSnapshot {
++        mount: String,
++        at: i64,
++        listeners: Option<Vec<crate::listener_snapshot::Listener>>,
++    },
+     /// The broadcast state changed (`running|paused|draining|sleeping`). `by`
+@@ -197,2 +204,3 @@
+     match event {
++        PluginEvent::ListenerSnapshot { .. } => {},
+         PluginEvent::TrackResolved { media_path, playlist_ref, rule_id, origin } => record(
+@@ -254,2 +262,6 @@
+     Db,
++    /// Receive snapshots containing transient client IPs and user agents.
++    ListenerDetails,
++    /// Ask the host for country/city (V1: unavailable provider).
++    Geoip,
+ }
+@@ -262,2 +274,4 @@
+             Capability::Db => "db",
++            Capability::ListenerDetails => "listener_details",
++            Capability::Geoip => "geoip",
+         }
+@@ -1184,2 +1198,7 @@
+         }
++        if matches!(event, PluginEvent::ListenerSnapshot { .. })
++            && !slot.decl.capabilities.contains(&Capability::ListenerDetails)
++        {
++            continue;
++        }
+         let outcome = slot.plugin.as_mut().map(|p| catch(|| p.on_event(event)));
+@@ -1190,2 +1209,6 @@
+ }
++
++#[cfg(test)]
++#[path = "listener_stats_tests.rs"]
++mod listener_stats_tests;
+ 
+@@ -1648,2 +1671,24 @@
+ 
++/// Stable V1 contract. No network lookup, no invented location, no IP log.
++/// A future local MMDB provider can return status=found with country/city.
++fn wasm_geoip_lookup(host: &Host, input: &str) -> String {
++    #[derive(Deserialize)]
++    #[serde(deny_unknown_fields)]
++    struct Req {
++        ip: std::net::IpAddr,
++    }
++    host_reply(host.check(Capability::Geoip).map_err(|e| e.to_string()).and_then(|_| {
++        let request = serde_json::from_str::<Req>(input)
++            .map_err(|_| "bad geoip_lookup input".to_string())?;
++        let _ = request.ip;
++        Ok(serde_json::json!({"status": "unavailable", "country": null, "city": null}))
++    }))
++}
++
++host_fn!(geoip_lookup(user_data: Host; input: String) -> String {
++    let host = user_data.get()?;
++    let host = host.lock().map_err(|_| anyhow::anyhow!("host surface poisoned"))?;
++    Ok(wasm_geoip_lookup(&host, &input))
++});
++
+ host_fn!(db_query(user_data: Host; input: String) -> String {
+@@ -1710,2 +1755,3 @@
+             ),
++            Function::new("geoip_lookup", [PTR], [PTR], UserData::new(host.clone()), geoip_lookup),
+             Function::new("db_query", [PTR], [PTR], UserData::new(host.clone()), db_query),
+diff --git a/tests/listener_stats.rs b/tests/listener_stats.rs
+new file mode 100644
+--- /dev/null
++++ b/tests/listener_stats.rs
+@@ -0,0 +1,42 @@
++//! Exercise the guest's actual SQL plan against the confined host database.
++#[path = "../plugins/listener-stats-wasm/src/model.rs"]
++mod model;
++
++use serde_json::json;
++use stationd::plugin_db::{DbLimits, Params, PluginDb, Statement};
++
++#[test]
++fn snapshots_are_atomic_idempotent_and_pruned() {
++    let dir = tempfile::tempdir().unwrap();
++    let db = PluginDb::open(dir.path(), "listener-stats", DbLimits::default()).unwrap();
++    let migrations = vec![include_str!("../plugins/listener-stats-wasm/migrations/001_snapshots.sql").to_string()];
++    assert_eq!(db.migrate(&migrations).unwrap().applied, 1);
++    assert_eq!(db.migrate(&migrations).unwrap().applied, 0);
++    let sample: model::Snapshot = serde_json::from_value(json!({
++        "mount": "/radio", "at": 1000, "listeners": [{"ip": "192.0.2.1"}]
++    })).unwrap();
++    let groups = model::aggregate(&sample, |_| Ok(model::Geo {
++        status: "unavailable".into(), country: None, city: None,
++    })).unwrap();
++    let plan = model::statements(&sample, groups);
++    let statements: Vec<Statement> = plan.into_iter().map(|v| serde_json::from_value(v).unwrap()).collect();
++    db.batch(&statements).unwrap();
++    db.batch(&statements).unwrap();
++    let query = |sql| serde_json::to_value(db.query(sql, &Params::default()).unwrap()).unwrap();
++    assert_eq!(query("SELECT count(*) FROM listener_snapshot")["rows"], json!([[1]]));
++    assert_eq!(query("SELECT status, country, city, listeners FROM listener_geo")["rows"], json!([["unavailable", "", "", 1]]));
++    let bad = vec![
++        serde_json::from_value(json!({"sql": "DELETE FROM listener_geo", "params": []})).unwrap(),
++        serde_json::from_value(json!({"sql": "INSERT INTO missing_table VALUES (1)", "params": []})).unwrap(),
++    ];
++    assert!(db.batch(&bad).is_err());
++    assert_eq!(query("SELECT count(*) FROM listener_geo")["rows"], json!([[1]]));
++    for (at, listeners) in [(700000, serde_json::Value::Null), (700001, json!([]))] {
++        let sample = serde_json::from_value(json!({"mount": "/radio", "at": at, "listeners": listeners})).unwrap();
++        let plan = model::statements(&sample, Default::default());
++        let statements: Vec<Statement> = plan.into_iter().map(|v| serde_json::from_value(v).unwrap()).collect();
++        db.batch(&statements).unwrap();
++    }
++    assert_eq!(query("SELECT listeners FROM listener_snapshot ORDER BY at")["rows"], json!([[null], [0]]));
++    assert_eq!(query("SELECT count(*) FROM listener_geo")["rows"], json!([[0]]));
++}
++

@@ -10,7 +10,9 @@
 //! Un média : les champs partent de ce qui est dans le fichier, seuls ceux
 //! qui changent sont envoyés, vide = retiré. Un lot : vide = inchangé, et
 //! dans une liste chaque genre est « ajouté », « retiré » ou laissé tel quel
-//! sur chaque fichier.
+//! sur chaque fichier. `Suppr` sur une liste la vide (dans chaque fichier
+//! pour un lot). Le choix des valeurs met en tête celles que portent les
+//! fichiers visés (`n/total` pour un lot) : on retire sans chercher.
 
 use std::collections::BTreeMap;
 
@@ -47,6 +49,8 @@ pub enum Values {
     Set(Vec<String>),
     /// Un lot : genre (graphie affichée) → ajouter / retirer.
     Marks(BTreeMap<String, (String, Mark)>),
+    /// Un lot : la liste vidée dans chaque fichier (`Suppr`).
+    Clear,
 }
 
 impl Values {
@@ -60,12 +64,15 @@ impl Values {
         match self {
             Values::Set(l) => l.iter().any(|x| Self::key(x) == Self::key(v)).then_some(true),
             Values::Marks(m) => m.get(&Self::key(v)).map(|(_, mark)| *mark == Mark::Add),
+            Values::Clear => None,
         }
     }
 
-    /// Espace : coché ↔ non coché (un média) ; rien → ajouter → retirer →
-    /// rien (lot).
-    fn toggle(&mut self, v: &str) {
+    /// Espace : coché ↔ non coché (un média). Lot : une valeur que portent
+    /// des fichiers du lot (`present`) va d'abord à « retirer », puis
+    /// « ajouter » (la mettre sur tous), puis rien ; une valeur absente va
+    /// seulement de rien à « ajouter ».
+    fn toggle(&mut self, v: &str, present: bool) {
         let k = Self::key(v);
         match self {
             Values::Set(l) => match l.iter().position(|x| Self::key(x) == k) {
@@ -74,17 +81,25 @@ impl Values {
                 }
                 None => l.push(v.trim().to_string()),
             },
-            Values::Marks(m) => match m.get(&k).map(|(_, mark)| *mark) {
-                None => {
-                    m.insert(k, (v.trim().to_string(), Mark::Add));
+            Values::Marks(m) => {
+                let next = match (m.get(&k).map(|(_, mark)| *mark), present) {
+                    (None, true) => Some(Mark::Remove),
+                    (None, false) => Some(Mark::Add),
+                    (Some(Mark::Remove), _) => Some(Mark::Add),
+                    (Some(Mark::Add), _) => None,
+                };
+                match next {
+                    Some(mark) => {
+                        m.insert(k, (v.trim().to_string(), mark));
+                    }
+                    None => {
+                        m.remove(&k);
+                    }
                 }
-                Some(Mark::Add) => {
-                    m.insert(k, (v.trim().to_string(), Mark::Remove));
-                }
-                Some(Mark::Remove) => {
-                    m.remove(&k);
-                }
-            },
+            }
+            // Le sélecteur ne s'ouvre jamais sur une liste vidée (repartie
+            // de « inchangé »).
+            Values::Clear => {}
         }
     }
 
@@ -99,6 +114,7 @@ impl Values {
                 .map(|(v, mark)| format!("{}{v}", if *mark == Mark::Add { "+" } else { "−" }))
                 .collect::<Vec<_>>()
                 .join(", "),
+            Values::Clear => tr!("tags-cleared"),
         }
     }
 
@@ -106,6 +122,7 @@ impl Values {
         match self {
             Values::Set(l) => l.clone(),
             Values::Marks(m) => m.values().map(|(v, _)| v.clone()).collect(),
+            Values::Clear => Vec::new(),
         }
     }
 
@@ -122,15 +139,43 @@ impl Values {
                 add: m.values().filter(|(_, k)| *k == Mark::Add).map(|(v, _)| v.clone()).collect(),
                 remove: m.values().filter(|(_, k)| *k == Mark::Remove).map(|(v, _)| v.clone()).collect(),
             }),
+            Values::Clear => Some(ListEdit::Replace(Vec::new())),
         }
     }
 }
 
-/// Choix d'une liste de genres : les genres connus, filtrés en tapant, et
-/// la saisie elle-même si elle n'existe pas encore.
+/// Les valeurs que portent les fichiers visés, avec le nombre de fichiers
+/// qui portent chacune (casse ignorée, première graphie gardée, une fois
+/// par fichier).
+fn tally<'a>(lists: impl Iterator<Item = &'a [String]>) -> Vec<(String, u32)> {
+    let mut out: Vec<(String, u32)> = Vec::new();
+    for list in lists {
+        let mut seen: Vec<String> = Vec::new();
+        for v in list.iter().filter(|v| !v.trim().is_empty()) {
+            let k = Values::key(v);
+            if seen.contains(&k) {
+                continue;
+            }
+            seen.push(k.clone());
+            match out.iter_mut().find(|(g, _)| Values::key(g) == k) {
+                Some((_, n)) => *n += 1,
+                None => out.push((v.trim().to_string(), 1)),
+            }
+        }
+    }
+    out
+}
+
+/// Choix d'une liste de genres : d'abord les valeurs que portent les
+/// fichiers visés, puis les autres genres connus, filtrés en tapant, et la
+/// saisie elle-même si elle n'existe pas encore.
 struct GenrePicker {
     title: String,
-    pool: Vec<(String, u32)>,
+    /// Genre, effectif dans la bibliothèque, nombre de fichiers visés qui le
+    /// portent (`None` : aucun).
+    pool: Vec<(String, u32, Option<u32>)>,
+    /// Nombre de fichiers visés (le compte `n/total` ne se montre qu'en lot).
+    total: usize,
     values: Values,
     filter: TextInputState,
     selected: usize,
@@ -143,33 +188,51 @@ enum PickerOutcome {
 }
 
 impl GenrePicker {
-    fn new(title: String, known: &[GenreCount], values: Values) -> Self {
-        let mut pool: Vec<(String, u32)> = known.iter().map(|g| (g.genre.clone(), g.count)).collect();
-        for v in values.values() {
-            if !pool.iter().any(|(g, _)| Values::key(g) == Values::key(&v)) {
-                pool.push((v, 0));
+    fn new(title: String, known: &[GenreCount], values: Values, present: &[(String, u32)], total: usize) -> Self {
+        let mut pool: Vec<(String, u32, Option<u32>)> = known.iter().map(|g| (g.genre.clone(), g.count, None)).collect();
+        for (v, n) in present {
+            match pool.iter_mut().find(|(g, _, _)| Values::key(g) == Values::key(v)) {
+                Some(row) => row.2 = Some(*n),
+                None => pool.push((v.clone(), 0, Some(*n))),
             }
         }
-        pool.sort_by_key(|(g, _)| g.to_lowercase());
+        for v in values.values() {
+            if !pool.iter().any(|(g, _, _)| Values::key(g) == Values::key(&v)) {
+                pool.push((v, 0, None));
+            }
+        }
+        Self::sort(&mut pool);
         let filter = TextInputState::new();
         filter.focus.set(true);
-        Self { title, pool, values, filter, selected: 0 }
+        Self { title, pool, total, values, filter, selected: 0 }
+    }
+
+    /// Les valeurs portées d'abord (les plus répandues dans le lot en tête),
+    /// puis les autres par ordre alphabétique.
+    fn sort(pool: &mut [(String, u32, Option<u32>)]) {
+        pool.sort_by(|a, b| {
+            b.2.is_some()
+                .cmp(&a.2.is_some())
+                .then_with(|| b.2.unwrap_or(0).cmp(&a.2.unwrap_or(0)))
+                .then_with(|| a.0.to_lowercase().cmp(&b.0.to_lowercase()))
+        });
     }
 
     /// Lignes visibles : les genres connus qui contiennent la saisie, puis
     /// la saisie elle-même en dernier si elle est nouvelle — le curseur
     /// tombe ainsi d'abord sur un genre existant (« amb » → ambient).
-    fn rows(&self) -> Vec<(String, u32, bool)> {
+    /// (genre, effectif, nouveau, porté par n fichiers visés).
+    fn rows(&self) -> Vec<(String, u32, bool, Option<u32>)> {
         let f = self.filter.text().trim().to_string();
         let needle = f.to_lowercase();
-        let mut out: Vec<(String, u32, bool)> = self
+        let mut out: Vec<(String, u32, bool, Option<u32>)> = self
             .pool
             .iter()
-            .filter(|(g, _)| needle.is_empty() || g.to_lowercase().contains(&needle))
-            .map(|(g, n)| (g.clone(), *n, false))
+            .filter(|(g, _, _)| needle.is_empty() || g.to_lowercase().contains(&needle))
+            .map(|(g, n, p)| (g.clone(), *n, false, *p))
             .collect();
-        if !f.is_empty() && !self.pool.iter().any(|(g, _)| g.to_lowercase() == needle) {
-            out.push((f, 0, true));
+        if !f.is_empty() && !self.pool.iter().any(|(g, _, _)| g.to_lowercase() == needle) {
+            out.push((f, 0, true, None));
         }
         out
     }
@@ -191,18 +254,18 @@ impl GenrePicker {
                     return PickerOutcome::Pending;
                 }
                 KeyCode::Char(' ') | KeyCode::Tab => {
-                    if let Some((g, _, new)) = self.rows().get(self.selected).cloned() {
-                        self.values.toggle(&g);
+                    if let Some((g, _, new, present)) = self.rows().get(self.selected).cloned() {
+                        self.values.toggle(&g, present.is_some());
                         if new {
                             // Le genre créé rejoint la liste.
-                            self.pool.push((g.clone(), 0));
-                            self.pool.sort_by_key(|(g, _)| g.to_lowercase());
+                            self.pool.push((g.clone(), 0, None));
+                            Self::sort(&mut self.pool);
                         }
                         if !self.filter.text().is_empty() {
                             // Filtre vidé pour saisir le genre suivant ; le
                             // curseur reste sur celui qu'on vient de cocher.
                             self.filter.set_text("");
-                            self.selected = self.rows().iter().position(|(r, _, _)| *r == g).unwrap_or(0);
+                            self.selected = self.rows().iter().position(|(r, _, _, _)| *r == g).unwrap_or(0);
                         }
                     }
                     return PickerOutcome::Pending;
@@ -243,7 +306,7 @@ impl GenrePicker {
             .enumerate()
             .skip(start)
             .take(hh)
-            .map(|(i, (g, n, new))| {
+            .map(|(i, (g, n, new, present))| {
                 let mark = match self.values.state(g) {
                     Some(true) if matches!(self.values, Values::Marks(_)) => "[+]",
                     Some(true) => "[x]",
@@ -253,8 +316,11 @@ impl GenrePicker {
                 let text = if *new { tr!("tags-picker-new", genre = g.clone()) } else { g.clone() };
                 let st = if i == self.selected { s.tab_active() } else { s.base() };
                 let mut spans = vec![Span::styled(format!("{mark} "), s.accent()), Span::styled(text, st)];
-                if *n > 0 {
-                    spans.push(Span::styled(format!("  ({n})"), s.muted()));
+                match present {
+                    // Lot : combien des fichiers visés la portent.
+                    Some(p) if self.total > 1 => spans.push(Span::styled(format!("  ({p}/{})", self.total), s.accent())),
+                    _ if *n > 0 => spans.push(Span::styled(format!("  ({n})"), s.muted())),
+                    _ => {}
                 }
                 Line::from(spans)
             })
@@ -302,6 +368,12 @@ pub struct TagForm {
     inputs: BTreeMap<u8, TextInputState>,
     genres: Values,
     sources: Vec<(String, Values)>,
+    /// Valeurs portées par les fichiers visés : genres, puis chaque source
+    /// (même ordre que `sources`).
+    present_genres: Vec<(String, u32)>,
+    present_sources: Vec<Vec<(String, u32)>>,
+    /// Nombre de fichiers visés.
+    total: usize,
     tempo_opts: Vec<(String, String)>,
     tempo: usize,
     picker: Option<(Option<usize>, GenrePicker)>,
@@ -359,9 +431,67 @@ impl TagForm {
             tempo_opts.push((t.tempo_manual.clone(), t.tempo_manual.clone()));
         }
         let tempo = if single { tempo_opts.iter().position(|o| o.1 == t.tempo_manual).unwrap_or(0) } else { 0 };
-        let mut f = Self { batch, orig: t, known, rows, focus: 0, inputs, genres, sources, tempo_opts, tempo, picker: None, error: None };
+        let total = batch.as_ref().map_or(1, |b| b.len());
+        let mut f = Self {
+            batch,
+            orig: t,
+            known,
+            rows,
+            focus: 0,
+            inputs,
+            genres,
+            sources,
+            present_genres: Vec::new(),
+            present_sources: Vec::new(),
+            total,
+            tempo_opts,
+            tempo,
+            picker: None,
+            error: None,
+        };
+        let orig = [f.orig.clone()];
+        f.tally(&orig);
         f.sync_focus();
         f
+    }
+
+    /// Les tags de tous les fichiers visés (lot) : leurs valeurs viennent en
+    /// tête des listes à choisir, avec le nombre de fichiers qui les portent.
+    pub fn with_present(mut self, all: &[MediaTags]) -> Self {
+        if !all.is_empty() {
+            self.tally(all);
+        }
+        self
+    }
+
+    fn tally(&mut self, all: &[MediaTags]) {
+        self.present_genres = tally(all.iter().map(|t| t.genres.as_slice()));
+        self.present_sources = self
+            .sources
+            .iter()
+            .map(|(name, _)| {
+                tally(all.iter().filter_map(|t| t.sources.iter().find(|s| s.name.eq_ignore_ascii_case(name)).map(|s| s.values.as_slice())))
+            })
+            .collect();
+    }
+
+    /// `Suppr` sur une liste : un média, vidée (ou rendue telle qu'au fichier
+    /// si elle l'était déjà) ; un lot, vidée dans chaque fichier ↔ inchangée.
+    fn clear_list(&mut self, which: Option<usize>) {
+        let orig = match which {
+            None => self.orig.genres.clone(),
+            Some(i) => self.orig.sources.iter().find(|s| s.name == self.sources[i].0).map(|s| s.values.clone()).unwrap_or_default(),
+        };
+        let v = match which {
+            None => &mut self.genres,
+            Some(i) => &mut self.sources[i].1,
+        };
+        *v = match v {
+            Values::Set(l) if l.is_empty() => Values::Set(orig),
+            Values::Set(_) => Values::Set(Vec::new()),
+            Values::Clear => Values::Marks(BTreeMap::new()),
+            Values::Marks(_) => Values::Clear,
+        };
     }
 
     fn sync_focus(&mut self) {
@@ -472,15 +602,18 @@ impl TagForm {
     }
 
     fn open_picker(&mut self, which: Option<usize>) {
-        let (title, values) = match which {
-            None => (tr!("tags-genres"), self.genres.clone()),
-            Some(i) => (self.sources[i].0.clone(), self.sources[i].1.clone()),
+        let (title, values, present) = match which {
+            None => (tr!("tags-genres"), self.genres.clone(), &self.present_genres),
+            Some(i) => (self.sources[i].0.clone(), self.sources[i].1.clone(), &self.present_sources[i]),
         };
+        // Une liste vidée repart de « inchangé » si on choisit à nouveau.
+        let values = if values == Values::Clear { Values::Marks(BTreeMap::new()) } else { values };
         let title = match &self.batch {
             None => tr!("tags-picker-title", field = title),
             Some(_) => tr!("tags-picker-title-batch", field = title),
         };
-        self.picker = Some((which, GenrePicker::new(title, &self.known, values)));
+        let picker = GenrePicker::new(title, &self.known, values, present, self.total);
+        self.picker = Some((which, picker));
     }
 
     pub fn handle(&mut self, e: &Event) -> TagOutcome {
@@ -514,6 +647,10 @@ impl TagForm {
             KeyCode::BackTab | KeyCode::Up => {
                 self.focus = self.focus.saturating_sub(1);
                 self.sync_focus();
+            }
+            KeyCode::Delete if matches!(row, Row::Genres | Row::Source(_)) => {
+                self.clear_list(if let Row::Source(i) = row { Some(i) } else { None });
+                self.error = None;
             }
             KeyCode::Enter => match row {
                 Row::Genres => self.open_picker(None),
@@ -724,23 +861,75 @@ mod tests {
 
     #[test]
     fn a_batch_adds_or_removes_genres_and_keeps_empty_fields() {
-        let known = vec![GenreCount { genre: "song".into(), count: 9, spellings: vec![] }];
+        let known = vec![GenreCount { genre: "song".into(), count: 9, spellings: vec![] }, GenreCount { genre: "talk".into(), count: 2, spellings: vec![] }];
         let mut f = TagForm::new(tags(), known, Some(vec!["a.mp3".into(), "b.mp3".into()]));
         assert!(f.changes().is_err(), "rien de saisi");
         let i = f.rows.iter().position(|r| *r == Row::Source(0)).unwrap();
         f.focus = i;
         f.handle(&key(KeyCode::Enter));
+        // « song » (porté par le lot) en tête, puis « talk ».
+        f.handle(&key(KeyCode::Char(' '))); // song : retirer d'emblée
+        f.handle(&key(KeyCode::Down));
+        f.handle(&key(KeyCode::Char(' '))); // talk (absent) : ajouter
         for c in "news".chars() {
             f.handle(&key(KeyCode::Char(c)));
         }
-        f.handle(&key(KeyCode::Char(' '))); // ajouter
-        f.handle(&key(KeyCode::Down));
-        f.handle(&key(KeyCode::Char(' '))); // song : ajouter
-        f.handle(&key(KeyCode::Char(' '))); // song : retirer
+        f.handle(&key(KeyCode::Char(' '))); // news : ajouter
         f.handle(&key(KeyCode::Enter));
         let c = f.changes().unwrap();
-        assert_eq!(c.sources, vec![("Type".into(), ListEdit::Merge { add: vec!["news".into()], remove: vec!["song".into()] })]);
+        assert_eq!(c.sources, vec![("Type".into(), ListEdit::Merge { add: vec!["news".into(), "talk".into()], remove: vec!["song".into()] })]);
         assert!(c.title.is_none() && c.genres.is_none() && c.tempo.is_none());
+    }
+
+    #[test]
+    fn a_batch_puts_the_values_its_files_carry_first() {
+        let known = vec![
+            GenreCount { genre: "ambient".into(), count: 40, spellings: vec![] },
+            GenreCount { genre: "House".into(), count: 3, spellings: vec![] },
+        ];
+        let mut b = tags();
+        b.rel_path = "b.mp3".into();
+        b.genres = vec!["house".into(), "Électro".into()];
+        let mut c = tags();
+        c.rel_path = "c.mp3".into();
+        c.genres = vec![];
+        let all = [tags(), b, c];
+        let f = TagForm::new(all[0].clone(), known, Some(vec!["a.mp3".into(), "b.mp3".into(), "c.mp3".into()])).with_present(&all);
+        let mut f = f;
+        f.focus = f.rows.iter().position(|r| *r == Row::Genres).unwrap();
+        f.handle(&key(KeyCode::Enter));
+        let rows = f.picker.as_ref().unwrap().1.rows();
+        let got: Vec<(&str, Option<u32>)> = rows.iter().map(|r| (r.0.as_str(), r.3)).collect();
+        // électro sur 2 fichiers, House sur 1 (graphie de la bibliothèque), puis le reste.
+        assert_eq!(got, vec![("électro", Some(2)), ("House", Some(1)), ("ambient", None)]);
+    }
+
+    #[test]
+    fn delete_empties_a_list_in_one_file_or_in_each_file_of_a_batch() {
+        // Un média : vidée, puis Suppr à nouveau rend la liste du fichier.
+        let mut f = TagForm::new(tags(), vec![], None);
+        f.focus = f.rows.iter().position(|r| *r == Row::Genres).unwrap();
+        f.handle(&key(KeyCode::Delete));
+        assert_eq!(f.changes().unwrap().genres, Some(ListEdit::Replace(vec![])));
+        f.handle(&key(KeyCode::Delete));
+        assert!(f.changes().is_err(), "rendue telle qu'au fichier");
+        // Un lot : vidée dans chaque fichier ↔ inchangée.
+        let mut f = TagForm::new(tags(), vec![], Some(vec!["a.mp3".into(), "b.mp3".into()]));
+        f.focus = f.rows.iter().position(|r| *r == Row::Source(0)).unwrap();
+        f.handle(&key(KeyCode::Delete));
+        let c = f.changes().unwrap();
+        assert_eq!(c.sources, vec![("Type".into(), ListEdit::Replace(vec![]))]);
+        let mut current = tags();
+        current.sources[0].values = vec!["song".into(), "talk".into()];
+        let req = c.request("b.mp3", "r".into(), Some(&current));
+        assert!(req.sources[0].values.is_empty(), "retiré du fichier");
+        f.handle(&key(KeyCode::Delete));
+        assert!(f.changes().is_err(), "de nouveau inchangée");
+        // Rouvrir le choix après avoir vidé repart de « inchangé ».
+        f.handle(&key(KeyCode::Delete));
+        f.handle(&key(KeyCode::Enter));
+        f.handle(&key(KeyCode::Enter));
+        assert!(f.changes().is_err());
     }
 
     #[test]

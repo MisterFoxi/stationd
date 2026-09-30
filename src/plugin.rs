@@ -172,6 +172,13 @@ pub enum PluginEvent {
     /// An audience sample (Icecast later; `stationctl debug listeners` today).
     /// `at` = epoch seconds.
     ListenersSampled { count: u32, at: i64 },
+    /// Per-mount observation, gated by listener_details. None means unknown;
+    /// Some([]) means a successful empty snapshot. Never journal raw IPs.
+    ListenerSnapshot {
+        mount: String,
+        at: i64,
+        listeners: Option<Vec<crate::listener_snapshot::Listener>>,
+    },
     /// The broadcast state changed (`running|paused|draining|sleeping`). `by`
     /// names the emitter: a plugin, `cli`, `stop-when-idle` for a drain
     /// completed by the core at a track boundary, `live` / `audience-unknown`
@@ -195,6 +202,7 @@ fn journal(event: &PluginEvent) {
     use crate::events::{record, Code, Component, Level};
     use std::sync::atomic::Ordering;
     match event {
+        PluginEvent::ListenerSnapshot { .. } => {},
         PluginEvent::TrackResolved { media_path, playlist_ref, rule_id, origin } => record(
             Level::Info,
             Component::Grid,
@@ -252,6 +260,10 @@ pub enum Capability {
     PushOverride,
     /// `host.db()` — the plugin's own SQLite database (`plugin_db`).
     Db,
+    /// Receive snapshots containing transient client IPs and user agents.
+    ListenerDetails,
+    /// Ask the host for country/city from its local DB-IP City Lite file.
+    Geoip,
 }
 
 impl Capability {
@@ -260,6 +272,8 @@ impl Capability {
             Capability::Control => "control",
             Capability::PushOverride => "push_override",
             Capability::Db => "db",
+            Capability::ListenerDetails => "listener_details",
+            Capability::Geoip => "geoip",
         }
     }
 }
@@ -292,6 +306,7 @@ pub struct Host {
     capabilities: Vec<Capability>,
     control: Option<StationControl>,
     db: Option<Arc<PluginDb>>,
+    geoip: Option<Arc<crate::geoip::Geoip>>,
     /// Set by the core around a hook it runs for a simulation: every clone
     /// of this host (the plugin keeps one, WASM host functions capture one)
     /// sees it. While set, `control`, `push_override` and database writes
@@ -306,6 +321,7 @@ impl Host {
             capabilities: capabilities.to_vec(),
             control,
             db: None,
+            geoip: None,
             simulating: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -518,6 +534,7 @@ pub fn validate_decls(decls: &[PluginDecl]) -> Result<(), String> {
 pub struct PluginEnv {
     pub control: Option<StationControl>,
     pub db_dir: Option<PathBuf>,
+    pub geoip: Option<Arc<crate::geoip::Geoip>>,
 }
 
 fn default_order() -> u32 {
@@ -640,7 +657,8 @@ impl Slot {
     /// opened here — before the instance is built, since a WASM plugin's host
     /// functions capture the host. `None` = failed (state set).
     fn open_host(&mut self, env: &PluginEnv) -> Option<Host> {
-        let host = Host::new(&self.decl.name, &self.decl.capabilities, env.control.clone());
+        let mut host = Host::new(&self.decl.name, &self.decl.capabilities, env.control.clone());
+        host.geoip = env.geoip.clone();
         if !self.decl.has_db() {
             return Some(host);
         }
@@ -1040,7 +1058,7 @@ pub fn spawn(decls: Vec<PluginDecl>) -> PluginHandle {
 
 /// Spawn with a station control and no plugin database directory.
 pub fn spawn_with(decls: Vec<PluginDecl>, control: Option<StationControl>) -> PluginHandle {
-    spawn_env(decls, PluginEnv { control, db_dir: None })
+    spawn_env(decls, PluginEnv { control, db_dir: None, geoip: None })
 }
 
 /// Spawn the owning task from the declared plugins and return a handle. Enabled
@@ -1182,12 +1200,21 @@ fn dispatch_event(slots: &mut [Slot], event: &PluginEvent) {
         if !matches!(slot.state, PluginState::Loaded) {
             continue;
         }
+        if matches!(event, PluginEvent::ListenerSnapshot { .. })
+            && !slot.decl.capabilities.contains(&Capability::ListenerDetails)
+        {
+            continue;
+        }
         let outcome = slot.plugin.as_mut().map(|p| catch(|| p.on_event(event)));
         if let Some(Err(reason)) = outcome {
             slot.note_failure(Phase::Event, reason);
         }
     }
 }
+
+#[cfg(test)]
+#[path = "listener_stats_tests.rs"]
+mod listener_stats_tests;
 
 /// Chain the candidate pool through every loaded plugin's `filter_pool`, in
 /// slot order (already sorted by `order`, then name). A plugin that panics
@@ -1646,6 +1673,30 @@ fn wasm_db_batch(host: &Host, input: &str) -> String {
     )
 }
 
+/// Local MMDB lookup. No network call, no IP log. Missing/invalid database
+/// at startup yields unavailable; absent/reserved addresses yield not_found.
+fn wasm_geoip_lookup(host: &Host, input: &str) -> String {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Req {
+        ip: std::net::IpAddr,
+    }
+    host_reply(host.check(Capability::Geoip).map_err(|e| e.to_string()).and_then(|_| {
+        let request = serde_json::from_str::<Req>(input)
+            .map_err(|_| "bad geoip_lookup input".to_string())?;
+        match &host.geoip {
+            Some(geoip) => geoip.lookup(request.ip),
+            None => Ok(crate::geoip::Location::unavailable()),
+        }
+    }))
+}
+
+host_fn!(geoip_lookup(user_data: Host; input: String) -> String {
+    let host = user_data.get()?;
+    let host = host.lock().map_err(|_| anyhow::anyhow!("host surface poisoned"))?;
+    Ok(wasm_geoip_lookup(&host, &input))
+});
+
 host_fn!(db_query(user_data: Host; input: String) -> String {
     let host = user_data.get()?;
     let host = host.lock().map_err(|_| anyhow::anyhow!("host surface poisoned"))?;
@@ -1708,6 +1759,7 @@ impl WasmPlugin {
                 UserData::new(host.clone()),
                 push_override,
             ),
+            Function::new("geoip_lookup", [PTR], [PTR], UserData::new(host.clone()), geoip_lookup),
             Function::new("db_query", [PTR], [PTR], UserData::new(host.clone()), db_query),
             Function::new("db_exec", [PTR], [PTR], UserData::new(host.clone()), db_exec),
             Function::new("db_batch", [PTR], [PTR], UserData::new(host.clone()), db_batch),
@@ -2347,7 +2399,7 @@ mod tests {
     }
 
     fn db_env(dir: &std::path::Path) -> PluginEnv {
-        PluginEnv { control: None, db_dir: Some(dir.to_path_buf()) }
+        PluginEnv { control: None, db_dir: Some(dir.to_path_buf()), geoip: None }
     }
 
     fn resolved(media: &str) -> PluginEvent {

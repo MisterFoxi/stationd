@@ -57,6 +57,9 @@ argon2 = "0.5"         # empreintes des mots de passe DJ (fichier des DJ, [live]
 # délai par requête ; limits = ATTACH interdit au niveau du moteur.
 rusqlite = { version = "0.30", features = ["hooks", "limits"] }
 
+# Local DB-IP City Lite MMDB lookups; no network or mmap feature.
+maxminddb = { version = "0.24", default-features = false }
+
 [build-dependencies]
 tonic-build = "0.12"
 
