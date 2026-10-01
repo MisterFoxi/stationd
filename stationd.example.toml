@@ -204,7 +204,8 @@ level = "info"
 # [[plugin]]
 # name = "custom-tags"
 # enabled = true
-# wasm = "plugins/custom-tags-wasm/target/wasm32-unknown-unknown/release/custom_tags_wasm.wasm"
+# No wasm path needed: custom_tags_wasm.wasm is found automatically.
+# wasm = "/custom/path/custom_tags_wasm.wasm"  # optional override
 # [plugin.config]
 # tags = ["Type"]                 # Existing Type values still become genres.
 # [plugin.config.creation]

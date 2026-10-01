@@ -588,7 +588,7 @@ A deliberately stopped station (`data/stationd.stopped`) remains stopped.
 First install: write `stationd.toml` from `stationd.example.toml` — relative
 paths resolve against the directory (`./playlist`…), `[media] library_path`
 = the `--media` path, WASM plugins at
-`wasm = "/usr/lib/stationd/plugins/<crate>.wasm"`,
+WASM plugins found automatically by their declared name (no `wasm` path needed),
 `control_socket = "/run/stationd/liquidsoap.sock"` — then
 `cd /opt/stationd && docker compose up -d`. The fallback and the background
 noise ship in the image (`/usr/share/stationd/error.mp3`, `bruit.mp3`, from
@@ -692,3 +692,18 @@ ETAT.md              development log / hand-over notes (French)
 ## License
 
 Not specified yet.
+
+### WASM plugin discovery
+
+Declare the plugin name and its existing configuration/capabilities; `wasm` is
+optional. Native plugins (`logger`, `blacklist`, `stop-when-idle`) retain priority.
+Other names resolve installed modules in `/usr/lib/stationd/plugins/`, then
+local `plugins/` and release WASM artifacts of the matching development crate.
+For example, `custom-tags` resolves `custom_tags_wasm.wasm`, and
+`stop-when-idle-wasm` resolves `stop_when_idle_wasm.wasm`.
+
+An explicitly configured file that exists retains priority. If an old development
+path no longer exists, stationd searches for that same filename in the installed
+and development locations. It logs the resolved path; a missing module reports
+the searched locations. Declaring a plugin is still required: finding modules
+does not automatically enable undeclared plugins.

@@ -30,6 +30,9 @@
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
+
+#[path = "plugin_path.rs"]
+mod plugin_path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -425,8 +428,8 @@ pub struct PluginDecl {
     /// broken by name for determinism.
     #[serde(default = "default_order")]
     pub order: u32,
-    /// Path to a `.wasm` module. When set, this is a WASM plugin loaded from
-    /// that file (via extism); when absent, `name` selects a built-in.
+    /// Optional WASM path override. Existing files win; missing paths resolve
+    /// by filename. Without a path, built-ins win, then WASM is found by name.
     #[serde(default)]
     pub wasm: Option<String>,
     /// Host calls this plugin may make (`control`, `push_override`, `db`).
@@ -783,16 +786,21 @@ fn catch<R>(f: impl FnOnce() -> R) -> Result<R, String> {
 /// set (its host functions bound to `host`), else a built-in by name. An
 /// unknown name is a loud (visible) failure, never silently ignored.
 fn build_plugin(decl: &PluginDecl, host: &Host) -> Result<Box<dyn Plugin>, String> {
-    if let Some(path) = &decl.wasm {
-        return WasmPlugin::new(decl.name.clone(), path, &decl.config, host)
-            .map(|p| Box::new(p) as Box<dyn Plugin>);
+    if decl.wasm.is_none() {
+        match decl.name.as_str() {
+            "logger" => return Ok(Box::new(LoggerPlugin::from_config(&decl.config))),
+            "blacklist" => return Ok(Box::new(BlacklistPlugin::from_config(&decl.config))),
+            "stop-when-idle" => return Ok(Box::new(StopWhenIdlePlugin::from_config(&decl.config)?)),
+            _ => {}
+        }
     }
-    match decl.name.as_str() {
-        "logger" => Ok(Box::new(LoggerPlugin::from_config(&decl.config))),
-        "blacklist" => Ok(Box::new(BlacklistPlugin::from_config(&decl.config))),
-        "stop-when-idle" => Ok(Box::new(StopWhenIdlePlugin::from_config(&decl.config)?)),
-        other => Err(format!("unknown plugin kind `{other}`")),
-    }
+    let path = plugin_path::resolve(&decl.name, decl.wasm.as_deref()).map_err(|e| {
+        if decl.wasm.is_none() { format!("unknown plugin kind `{}`: {e}", decl.name) } else { e }
+    })?;
+    tracing::info!(plugin = %decl.name, path = %path.display(), "resolved WASM plugin");
+    let path = path.to_str().ok_or_else(|| format!("plugin {}: chemin WASM non UTF-8", decl.name))?;
+    WasmPlugin::new(decl.name.clone(), path, &decl.config, host)
+        .map(|p| Box::new(p) as Box<dyn Plugin>)
 }
 
 // ---------------------------------------------------------------------------
