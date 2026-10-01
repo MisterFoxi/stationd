@@ -25,11 +25,12 @@ if [ -n "${STATIOND_UID:-}" ]; then
   fi
 fi
 if [ -n "${MEDIA_GID:-}" ]; then
-  # Liquidsoap lit lui-même les pistes : il rejoint le groupe propriétaire
-  # de la médiathèque (existant dans l'image, sinon créé sous le nom `media`).
+  # Liquidsoap lit les pistes ; stationd parcourt et indexe la médiathèque.
+  # Les deux rejoignent son groupe propriétaire.
   g="$(getent group "$MEDIA_GID" | cut -d: -f1)"
   [ -n "$g" ] || { groupadd -g "$MEDIA_GID" media; g=media; }
   usermod -aG "$g" liquidsoap
+  usermod -aG "$g" "${STATIOND_USER:-stationd}"
 fi
 
 # --- Dev : volumes nommés -----------------------------------------------------

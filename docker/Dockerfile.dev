@@ -86,6 +86,7 @@ RUN set -eu; \
     g="$(getent group "$MEDIA_GID" | cut -d: -f1)"; \
     [ -n "$g" ] || { groupadd -g "$MEDIA_GID" media; g=media; }; \
     usermod -aG "$g" liquidsoap; \
+    usermod -aG "$g" dev; \
     mkdir -p /src/target "$CARGO_HOME/registry"; \
     chown dev:dev /src/target; \
     chown -R dev:dev "$CARGO_HOME" "$RUSTUP_HOME"
