@@ -160,10 +160,19 @@ fn clock_line<'a>(store: &Store, now: Instant, s: &Styles, narrow: bool) -> Line
     let mut v = Vec::new();
     match (&store.tz, &store.tz_name) {
         (Some(tz), Some(name)) => {
-            let t = jiff::Timestamp::now().to_zoned(tz.clone());
+            let timestamp = jiff::Timestamp::now();
+            let t = timestamp.to_zoned(tz.clone());
             v.push(Span::styled(t.strftime("%H:%M:%S").to_string(), s.title()));
             // Le fuseau reste visible même en étroit : une heure sans fuseau est ambiguë.
             v.push(Span::styled(format!(" {name}"), s.label()));
+            if tz != &jiff::tz::TimeZone::UTC
+                && !matches!(name.as_str(), "UTC" | "Etc/UTC" | "GMT" | "Etc/GMT")
+            {
+                v.push(Span::raw(if narrow { " │ " } else { SEP }));
+                let utc = timestamp.to_zoned(jiff::tz::TimeZone::UTC);
+                v.push(Span::styled(utc.strftime("%H:%M:%S").to_string(), s.title()));
+                v.push(Span::styled(" UTC", s.label()));
+            }
         }
         (None, Some(name)) => {
             v.push(Span::styled(tr!("banner-tz-unknown", tz = name.clone()), s.error()));
