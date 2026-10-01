@@ -7,7 +7,7 @@ pub(crate) fn resolve(name: &str, explicit: Option<&str>) -> Result<PathBuf, Str
 
 fn resolve_in(name: &str, explicit: Option<&str>, installed: &Path, repo: &Path) -> Result<PathBuf, String> {
     if let Some(path) = explicit {
-        if Path::new(path).is_file() { return Ok(PathBuf::from(path)); }
+        if readable_metadata(Path::new(path))? { return Ok(PathBuf::from(path)); }
     }
     let safe = !name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
     let files: Vec<std::ffi::OsString> = if let Some(path) = explicit {
@@ -30,9 +30,27 @@ fn resolve_in(name: &str, explicit: Option<&str>, installed: &Path, repo: &Path)
     for krate in &crates {
         for file in &files { candidates.push(repo.join("plugins").join(krate).join("target/wasm32-unknown-unknown/release").join(file)); }
     }
-    if let Some(path) = candidates.iter().find(|p| p.is_file()) { return Ok(path.clone()); }
+    let mut access_errors = Vec::new();
+    for path in &candidates {
+        match readable_metadata(path) {
+            Ok(true) => return Ok(path.clone()),
+            Ok(false) => {},
+            Err(error) => access_errors.push(error),
+        }
+    }
+    if !access_errors.is_empty() {
+        return Err(format!("plugin {name}: recherche WASM impossible : {}", access_errors.join("; ")));
+    }
     let tried = candidates.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ");
     Err(format!("plugin {name}: module WASM introuvable ; recherchés: {tried}"))
+}
+
+fn readable_metadata(path: &Path) -> Result<bool, String> {
+    match std::fs::metadata(path) {
+        Ok(meta) => Ok(meta.is_file()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound || error.kind() == std::io::ErrorKind::NotADirectory => Ok(false),
+        Err(error) => Err(format!("{}: {error}", path.display())),
+    }
 }
 
 #[cfg(test)]
@@ -63,5 +81,27 @@ mod tests {
         assert!(error.contains("missing_wasm.wasm"));
         std::fs::remove_dir_all(root).unwrap();
     }
+    #[cfg(unix)]
+    #[test]
+    fn inaccessible_parent_is_reported_as_access_error() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("stationd-plugin-denied-{}", std::process::id()));
+        let installed = root.join("installed");
+        std::fs::create_dir_all(&installed).unwrap();
+        let module = installed.join("custom_tags_wasm.wasm");
+        std::fs::write(&module, b"wasm").unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let blocked = std::fs::metadata(&module).is_err();
+        let result = resolve_in("custom-tags", None, &installed, &root.join("repo"));
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::remove_dir_all(&root).unwrap();
+        // Root can bypass directory permissions.
+        if blocked {
+            let error = result.unwrap_err();
+            assert!(error.contains("recherche WASM impossible"));
+            assert!(!error.contains("introuvable"));
+        }
+    }
+
 }
 

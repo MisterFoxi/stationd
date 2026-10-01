@@ -108,6 +108,15 @@ docker run --rm --entrypoint /bin/sh "stationd:$tag" -euc '
   test -d /usr/share/zoneinfo/Europe
 '
 
+# Vérifier aussi sous l'identité qui charge les plugins, pas seulement root.
+docker run --rm --user stationd --entrypoint /bin/sh "stationd:$tag" -euc '
+  for w in /usr/lib/stationd/plugins/*.wasm; do
+    test -f "$w" && test -r "$w" || { echo "plugin inaccessible à stationd: $w" >&2; exit 1; }
+  done
+  test -r /usr/share/stationd/error.mp3
+  test -r /usr/share/stationd/bruit.mp3
+'
+
 # --- 4. Bundle --------------------------------------------------------------
 out="$root/dist/stationd-$tag"
 rm -rf "$out" "$out.tar"

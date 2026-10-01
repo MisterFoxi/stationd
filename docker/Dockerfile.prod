@@ -82,13 +82,16 @@ RUN set -eu; \
     else useradd --system -g stationd -d /var/lib/liquidsoap -m -s /usr/sbin/nologin liquidsoap; fi; \
     mkdir -p /var/lib/stationd
 
+RUN mkdir -p /usr/lib/stationd/plugins /usr/share/stationd
 COPY --chmod=0755 bin/ /usr/local/bin/
 COPY --chmod=0644 plugins/ /usr/lib/stationd/plugins/
 COPY --chmod=0644 share/ /usr/share/stationd/
 COPY rootfs/ /
 # Droits du partage W: (Samba) non fiables : COPY les reporte jusque sur /etc.
 # Même normalisation que l'image de dev.
-RUN chmod 0755 /etc /usr/lib/stationd/plugins /usr/share/stationd \
+RUN chmod 0755 /etc /usr/lib/stationd /usr/lib/stationd/plugins /usr/share/stationd \
+ && find /usr/lib/stationd/plugins -type d -exec chmod 0755 {} + \
+ && find /usr/lib/stationd/plugins -type f -exec chmod 0644 {} + \
  && find /usr/share/stationd -type d -exec chmod 0755 {} + \
  && find /etc/s6-overlay -type d -exec chmod 0755 {} + \
  && find /etc/s6-overlay -type f -exec chmod 0644 {} + \
