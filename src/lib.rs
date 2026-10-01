@@ -9,6 +9,7 @@
 //! `signal::unix` shutdown handling) stays in `main.rs`, deliberately kept
 //! out of here so the library itself stays portable.
 
+pub mod air_time;
 pub mod broadcast_grpc;
 pub mod broadcast_log;
 pub mod clock;

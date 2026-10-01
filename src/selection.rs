@@ -390,8 +390,9 @@ async fn resolve_leaf(
 /// applied in turn (cumulative: the strictest window wins). A HARD filter,
 /// never relaxed implicitly (doc): if it empties the pool the caller surfaces
 /// `PoolEmpty` and the grid falls through. An untagged candidate (no artist) is
-/// never excluded by the artist window. `now` is epoch seconds; each window's
-/// cutoff is `now - window`.
+/// never excluded by the artist window. `now` is epoch seconds; each window
+/// counts AIR time back from `now` (`air_time`: the station's halts —
+/// `sleeping`, `paused` — freeze it).
 async fn apply_constraints(
     pool: &SqlitePool,
     now: i64,
@@ -414,7 +415,7 @@ async fn apply_one_constraint_set(
         let secs = crate::playlist::parse_duration_secs(window).map_err(|e| {
             SelectionError::Unsupported(format!("no_same_track_within `{window}`: {e}"))
         })?;
-        let cutoff = now.saturating_sub(secs as i64);
+        let cutoff = crate::air_time::cutoff(pool, now, secs as i64).await?;
         let recent = broadcast_log::tracks_since(pool, cutoff).await?;
         candidates.retain(|cand| !recent.contains(&cand.rel_path));
     }
@@ -422,7 +423,7 @@ async fn apply_one_constraint_set(
         let secs = crate::playlist::parse_duration_secs(window).map_err(|e| {
             SelectionError::Unsupported(format!("no_same_title_within `{window}`: {e}"))
         })?;
-        let cutoff = now.saturating_sub(secs as i64);
+        let cutoff = crate::air_time::cutoff(pool, now, secs as i64).await?;
         let recent = broadcast_log::song_keys_since(pool, cutoff).await?;
         if !recent.is_empty() {
             candidates.retain(|cand| {
@@ -436,7 +437,7 @@ async fn apply_one_constraint_set(
         let secs = crate::playlist::parse_duration_secs(window).map_err(|e| {
             SelectionError::Unsupported(format!("no_same_artist_within `{window}`: {e}"))
         })?;
-        let cutoff = now.saturating_sub(secs as i64);
+        let cutoff = crate::air_time::cutoff(pool, now, secs as i64).await?;
         let recent = broadcast_log::artists_since(pool, cutoff).await?;
         candidates.retain(|cand| match &cand.artist {
             Some(a) => !recent.contains(a),
@@ -2750,6 +2751,50 @@ mod tests {
             .unwrap();
         assert!(matches!(
             resolve_ref_at(&pool, now, "rot").await,
+            Err(SelectionError::PoolEmpty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_halt_freezes_the_anti_repetition_window() {
+        let (_d, pool) = fresh_db().await;
+        media_index::replace_library(&pool, &[media("a.mp3", "X", 0, &[])], 1000)
+            .await
+            .unwrap();
+        let toml = r#"
+            name = "Rot"
+            [selection]
+            mode = "dynamic"
+            order = "shuffle"
+            [[selection.filter]]
+            field = "path"
+            op = "prefix"
+            value = ""
+            [broadcast.constraints]
+            no_same_track_within = "1h"
+        "#;
+        add_playlist(&pool, "rot", toml).await;
+        let now = 1_000_000;
+        // Played 3 h ago (wall), then the station slept 2 h 30: only 30 min
+        // of air since → still inside the 1 h window.
+        crate::broadcast_log::record(&pool, "a.mp3", Some("X"), crate::resolver::Epoch(now - 3 * 3600), Default::default())
+            .await
+            .unwrap();
+        crate::air_time::mark(&pool, true, now - 3 * 3600 + 600).await.unwrap();
+        crate::air_time::mark(&pool, false, now - 1800).await.unwrap();
+        assert!(matches!(
+            resolve_ref_at(&pool, now, "rot").await,
+            Err(SelectionError::PoolEmpty)
+        ));
+        // 31 min of air later, it is out of the window.
+        assert_eq!(resolve_ref_at(&pool, now + 1860, "rot").await.unwrap(), "a.mp3");
+        // Still asleep (open halt): the window does not run at all.
+        crate::air_time::mark(&pool, true, now + 1860).await.unwrap();
+        crate::broadcast_log::record(&pool, "a.mp3", Some("X"), crate::resolver::Epoch(now + 1800), Default::default())
+            .await
+            .unwrap();
+        assert!(matches!(
+            resolve_ref_at(&pool, now + 10 * 3600, "rot").await,
             Err(SelectionError::PoolEmpty)
         ));
     }

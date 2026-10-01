@@ -5,7 +5,7 @@ sans reconstruire le contexte. À distinguer des docs de `Doc/` (décisions
 d'architecture durables) : ce fichier-ci est volatil, à mettre à jour à
 chaque session.
 
-Dernière mise à jour : 2026-09-30 (A4 lots 5 et 6b : grilles en fichiers, édition dans l'Agenda).
+Dernière mise à jour : 2026-10-01 (fix : la veille gèle les fenêtres anti-répétition).
 
 
 ## Où on en est en une phrase
@@ -514,6 +514,27 @@ lot A (login) avant tout usage distant.
 ---
 
 ## Fait
+
+### — Fix : la veille et la pause gèlent les fenêtres anti-répétition (2026-10-01) —
+
+- **Bug** : `no_same_track_within` / `no_same_title_within` /
+  `no_same_artist_within` comptaient en temps réel, veille comprise. Une
+  station endormie de 23 h à 20 h se réveillait avec ses fenêtres de 24 h
+  presque écoulées et rejouait les morceaux de la veille.
+- **Fix** : les fenêtres comptent en **temps d'antenne**. Les arrêts
+  (`paused`, `sleeping`) sont gardés en intervalles (`broadcast_halt`,
+  migration 0029 ; une station arrêtée au moment de la migration ouvre son
+  intervalle à son dernier changement d'état), écrits par le writer de
+  `station_control` dans la même transaction que l'état. `air_time::cutoff`
+  remonte depuis `now` jusqu'à couvrir la fenêtre en temps non arrêté ; les
+  requêtes `broadcast_log::*_since` sont inchangées, `played_at` reste en
+  temps réel (historique, stats, agenda).
+- `draining` compte comme antenne. stationd arrêté (arrêt opérateur, crash)
+  n'est **pas** compté comme un arrêt : seuls les états de diffusion le sont.
+- Les `every` à temps écoulé ne changent pas (dus au réveil, spec veille).
+- Simulation (TUI « à venir ») : la copie ferme l'arrêt en cours à
+  l'instant de départ (elle simule une station qui diffuse).
+- 547 tests lib verts (+10). **À valider sur devstationd.**
 
 ### — Analyse des BPM : octaves, avancement, blocage FFmpeg (2026-09-30) —
 

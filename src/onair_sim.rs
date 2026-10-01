@@ -136,6 +136,13 @@ async fn run(start: &SimStart<'_>, plugins: Option<&PluginHandle>) -> SimOutcome
             return out;
         }
     };
+    // The copy airs from `start.at` on (its control is `running`): a halt the
+    // real station is in ends there, or it would freeze the anti-repetition
+    // windows of the whole simulation (`air_time`).
+    if let Err(e) = crate::air_time::mark(&pool, false, start.at.0).await {
+        out.notes.push(Note::SimulationFailed { reason: e.to_string() });
+        return out;
+    }
     let control = start.control.simulation_copy();
     let mut engine = GridEngine::new(pool.clone(), start.tz).with_control(control.clone());
     if let Some(p) = plugins {

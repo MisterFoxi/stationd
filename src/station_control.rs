@@ -14,7 +14,9 @@
 //!   an operator's pause. The operator's stop is not a broadcast state: it is
 //!   stationd itself stopped (`shutdown`, marker `data/stationd.stopped`).
 //!   Persisted (family B, migrations 0014 / 0021) through an ordered writer
-//!   task, so the synchronous API stays callable from a plugin hook.
+//!   task, so the synchronous API stays callable from a plugin hook. The same
+//!   writer keeps the halt intervals (`paused` / `sleeping`, migration 0029)
+//!   that freeze the anti-repetition windows (`air_time`).
 //! - **Core wake rules** (mechanism, not policy): a sleeping station wakes
 //!   when the audience becomes *unknown* (a failure is never read as « no
 //!   one listens ») and when a DJ takes the air.
@@ -76,6 +78,12 @@ impl BroadcastState {
             BroadcastState::Draining => "draining",
             BroadcastState::Sleeping => "sleeping",
         }
+    }
+
+    /// Nothing of the rotation airs: the anti-repetition windows are frozen
+    /// (`air_time`). `draining` still airs.
+    pub fn halts(self) -> bool {
+        matches!(self, BroadcastState::Paused | BroadcastState::Sleeping)
     }
 
     pub fn parse(s: &str) -> Option<Self> {
@@ -446,18 +454,13 @@ impl StationControl {
         if state != BroadcastState::Running {
             tracing::warn!(state = state.as_str(), "broadcast state restored from the last run");
         }
+        // The halt intervals follow the restored state (normally already the
+        // case: written together). A no-op unless a write was lost.
+        crate::air_time::mark(&pool, state.halts(), wall_now().0).await?;
         let (tx, mut rx) = mpsc::unbounded_channel::<(BroadcastState, Epoch)>();
         tokio::spawn(async move {
             while let Some((state, at)) = rx.recv().await {
-                let res = sqlx::query(
-                    "INSERT INTO broadcast_state (id, state, updated_at) VALUES (1, ?1, ?2) \
-                     ON CONFLICT(id) DO UPDATE SET state = excluded.state, updated_at = excluded.updated_at",
-                )
-                .bind(state.as_str())
-                .bind(at.0)
-                .execute(&pool)
-                .await;
-                if let Err(e) = res {
+                if let Err(e) = persist_state(&pool, state, at).await {
                     tracing::error!(%e, state = state.as_str(), "could not persist broadcast state");
                 }
             }
@@ -935,6 +938,23 @@ pub fn normalize_media_ref(raw: &str) -> Result<String, String> {
     Ok(segments.join("/"))
 }
 
+/// One state change: the state row and the halt intervals (`air_time`), in
+/// one transaction — the anti-repetition windows never see one without the
+/// other.
+async fn persist_state(pool: &SqlitePool, state: BroadcastState, at: Epoch) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO broadcast_state (id, state, updated_at) VALUES (1, ?1, ?2) \
+         ON CONFLICT(id) DO UPDATE SET state = excluded.state, updated_at = excluded.updated_at",
+    )
+    .bind(state.as_str())
+    .bind(at.0)
+    .execute(&mut *tx)
+    .await?;
+    crate::air_time::mark(&mut *tx, state.halts(), at.0).await?;
+    tx.commit().await
+}
+
 fn wall_now() -> Epoch {
     use std::time::{SystemTime, UNIX_EPOCH};
     Epoch(
@@ -1294,6 +1314,81 @@ mod tests {
         }
         let again = StationControl::load(pool).await.unwrap();
         assert_eq!(again.state(), Sleeping, "an idle stop survives a restart");
+    }
+
+    #[tokio::test]
+    async fn halts_are_recorded_with_the_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = crate::db::init(&dir.path().join("t.db")).await.unwrap();
+        let c = StationControl::load(pool.clone()).await.unwrap();
+        let halts = || async {
+            sqlx::query_as::<_, (i64, Option<i64>)>("SELECT start_at, end_at FROM broadcast_halt ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap()
+        };
+        let settle = |n: usize, closed: usize| {
+            let pool = pool.clone();
+            async move {
+                for _ in 0..100 {
+                    let rows: Vec<(i64, Option<i64>)> =
+                        sqlx::query_as("SELECT start_at, end_at FROM broadcast_halt")
+                            .fetch_all(&pool)
+                            .await
+                            .unwrap();
+                    if rows.len() == n && rows.iter().filter(|r| r.1.is_some()).count() == closed {
+                        return;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                panic!("halts never reached {n} rows / {closed} closed");
+            }
+        };
+        c.set_clock(Some(Epoch(1000)));
+        c.sleep_now();
+        settle(1, 0).await;
+        c.set_clock(Some(Epoch(5000)));
+        c.apply(ControlAction::Wake, "test").unwrap();
+        settle(1, 1).await;
+        // `draining` airs: no halt.
+        c.apply(ControlAction::StopWhenIdle, "cli").unwrap();
+        c.set_clock(Some(Epoch(6000)));
+        c.apply(ControlAction::Pause, "cli").unwrap();
+        settle(2, 1).await;
+        c.set_clock(Some(Epoch(6500)));
+        c.apply(ControlAction::Resume, "cli").unwrap();
+        settle(2, 2).await;
+        assert_eq!(halts().await, [(1000, Some(5000)), (6000, Some(6500))]);
+    }
+
+    #[tokio::test]
+    async fn migration_0029_opens_the_halt_of_a_halted_station() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        for m in [
+            include_str!("../migrations/0014_broadcast_state.sql"),
+            include_str!("../migrations/0021_broadcast_sleeping.sql"),
+        ] {
+            sqlx::raw_sql(m).execute(&pool).await.unwrap();
+        }
+        sqlx::query("INSERT INTO broadcast_state (id, state, updated_at) VALUES (1, 'sleeping', 42)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::raw_sql(include_str!("../migrations/0029_broadcast_halt.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        let rows: Vec<(i64, Option<i64>)> = sqlx::query_as("SELECT start_at, end_at FROM broadcast_halt")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(rows, [(42, None)]);
+        // At most one open halt.
+        assert!(sqlx::query("INSERT INTO broadcast_halt (start_at) VALUES (50)").execute(&pool).await.is_err());
     }
 
     #[tokio::test]
