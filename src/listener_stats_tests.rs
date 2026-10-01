@@ -9,7 +9,7 @@ fn geoip_contract_checks_capability_and_input() {
     };
     assert_eq!(reply(&denied, r#"{"ip":"192.0.2.1"}"#)["ok"], false);
     assert_eq!(reply(&allowed, r#"{"ip":"2001:db8::1"}"#), serde_json::json!({
-        "ok": true, "status": "unavailable", "country": null, "city": null
+        "ok": true, "status": "unavailable", "country": null, "city": null, "region": null
     }));
     let bad = reply(&allowed, r#"{"ip":"secret-invalid-input"}"#);
     assert_eq!(bad["ok"], false);

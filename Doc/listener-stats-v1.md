@@ -99,9 +99,10 @@ failure during lookup returns a host error and the guest rejects that batch.
 {"ip":"8.8.8.8"}
 ```
 
-The reply includes `ok`, `status`, `country` and `city`:
+The reply includes `ok`, `status`, `country`, `region` and `city`:
 
-- `found`: uppercase country code and a nullable city (English name).
+- `found`: uppercase country code and a nullable city (English name) and region. The region is the first
+  administrative subdivision, using its French name when available, else English.
 - `not_found`: no usable country or a private/reserved/documentation address;
   location fields are null. IPv4-mapped IPv6 is normalized before lookup.
 - `unavailable`: no usable database was loaded; location fields are null.
@@ -109,8 +110,9 @@ The reply includes `ok`, `status`, `country` and `city`:
 
 DB-IP's ZZ (unknown) is not recorded as a real country. The plugin caches
 lookups only within one observation; clients sharing an IP still count
-individually. The event and database schemas are unchanged: no new migration
-is needed. Historical unavailable buckets cannot be enriched retrospectively
+individually. The regions extension adds a nullable region to the host reply and migration 2
+to the plugin database. Migration 1 remains unchanged and existing rows are
+preserved with an unknown region. Historical unavailable buckets cannot be enriched retrospectively
 because raw IPs were intentionally not stored.
 
 DB-IP publishes monthly updates. Run the script again when wanted, then
@@ -129,12 +131,13 @@ See [DB-IP City Lite](https://db-ip.com/db/download/ip-to-city-lite).
 
 `listener_snapshot(mount, at, listeners)` stores concurrent audience, with
 NULL for failed collection. `listener_geo` stores counts grouped by status,
-country and city. Empty location strings mean unknown, not a real country.
+country, region and city. Empty location strings mean unknown, not a real country.
 Neither table contains IPs, user agents or client IDs. Each event replaces
 its `(mount, at)` observation atomically, so replay does not double count.
 Two observations for the same mount within one second replace one another.
-Rows older than seven days relative to the current event are deleted on each
-write. No background cleanup runs while the plugin/station is stopped, and
+Rows older than 30 days relative to the current event are deleted on each
+write by default. Set [plugin.config] retention_days to an integer from 1 to
+365 for another retention period (for example 90 for weekly reports). No background cleanup runs while the plugin/station is stopped, and
 SQLite may reuse freed pages without shrinking its file.
 
 ```sh
@@ -144,7 +147,55 @@ stationctl plugin db listener-stats query "SELECT mount, status, country, city, 
 
 Counts describe concurrent connections at sample time. Summing across samples
 does NOT give unique listeners. Exact sessions, connection durations, bot or
-relay classification, retention configuration and dashboards are outside V1.
+relay classification, and dashboards are outside V1.
+
+## Listener commands
+
+After rebuilding stationd/stationctl and the listener-stats WASM, restart the
+host and reload the plugin. Migration 2 runs automatically; do not reset the
+plugin database. Regions become available on new observations; past IPs were
+not stored and old rows cannot be enriched retrospectively.
+
+```sh
+stationctl listeners regions
+stationctl listeners regions --mount /radio.mp3
+stationctl listeners stats --by hour --since 24h
+stationctl listeners stats --by day --since 7d
+stationctl listeners stats --by week --since 4w
+stationctl listeners stats --by day --since 7d --mount /radio.mp3
+```
+
+Use `--plugin NAME` for a different plugin declaration name. Both commands
+reuse the existing read-only plugin DB RPC. No new service or core DB is added.
+
+`regions` shows the latest retained observation per mount, grouped by country
+and administrative region, with its epoch timestamp. Confirmed zero audiences
+are hidden; failed collection remains explicitly unknown rather than falling
+back to an earlier successful observation.
+
+`stats` shows period, mount, country, region, city, average observed concurrent
+listeners, peak, successful observation count, collection failure count and
+GeoIP status. Positive groups only are shown. A small positive average is
+shown as `<0.01` rather than rounded to zero. The time window accepts hours,
+days and weeks (1h to 365d); data availability is limited by retention and the
+actual collection start. Changing retention does not recover deleted history.
+
+Buckets use UTC; calendar weeks run Monday through Sunday. Boundary buckets
+may be partial. The average is the arithmetic mean over successful snapshots
+in the selected window: successful zero samples count in its denominator,
+failed collections do not. It is not a time-weighted estimate, a sum of
+visitors, or unique listeners. GeoIP-unknown listeners stay in explicit unknown
+buckets. Mounts remain separate; observing a connection on multiple mounts
+must not be interpreted as multiple unique people. Changing the polling
+interval affects sample weighting. No observations are invented for gaps.
+
+For example, to retain 90 days (subject to the existing plugin DB size cap):
+
+```toml
+# Under the listener-stats [[plugin]] declaration:
+[plugin.config]
+retention_days = 90
+```
 
 ## Checks
 
@@ -158,6 +209,7 @@ cargo test --lib listener_snapshot
 cargo test --lib listener_stats_tests
 cargo test --lib icecast_listener_tests
 cargo test --test listener_stats
+cargo test --bin stationctl listeners::tests
 cargo build --manifest-path plugins/listener-stats-wasm/Cargo.toml --release --target wasm32-unknown-unknown
 ```
 

@@ -65,7 +65,7 @@ level = "info"
 # query_timeout_ms = 200   # per host call (a db_batch as a whole)
 # max_rows = 10000         # db_query result cap (more = error, not truncation)
 
-# Listener snapshots in the plugin's own database (seven-day retention).
+# Listener snapshots in the plugin's own database (30-day default retention).
 # Also enable listener_snapshots in [icecast] below and restart stationd.
 # Build the WASM first; the path is relative to stationd's working directory.
 # Configure [geoip] below for local country/city lookups with DB-IP City Lite.
@@ -76,6 +76,11 @@ level = "info"
 # enabled = true
 # wasm = "plugins/listener-stats-wasm/target/wasm32-unknown-unknown/release/listener_stats_wasm.wasm"
 # capabilities = ["db", "listener_details", "geoip"]
+# [plugin.config]
+# retention_days = 90                     # optional: 1..365 days, default 30
+# Read: stationctl listeners stats --by day --since 7d
+#       stationctl listeners stats --by week --since 4w
+# Only positive audience rows are shown; periods are in UTC.
 
 # Local geolocation shared by plugins declaring capability "geoip".
 # Run: sh scripts/update-dbip.sh ./data/geoip/dbip-city-lite.mmdb

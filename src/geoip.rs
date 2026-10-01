@@ -24,15 +24,16 @@ pub struct Location {
     pub status: &'static str,
     pub country: Option<String>,
     pub city: Option<String>,
+    pub region: Option<String>,
 }
 
 impl Location {
     pub fn unavailable() -> Self {
-        Self { status: "unavailable", country: None, city: None }
+        Self { status: "unavailable", country: None, city: None, region: None }
     }
 
     fn not_found() -> Self {
-        Self { status: "not_found", country: None, city: None }
+        Self { status: "not_found", country: None, city: None, region: None }
     }
 }
 
@@ -53,6 +54,10 @@ struct Record {
     country: Country,
     #[serde(default)]
     city: City,
+    // DB-IP orders subdivisions from broadest to most specific. Index zero
+    // is the administrative region/state; do not confuse it with the city.
+    #[serde(default)]
+    subdivisions: Vec<City>,
 }
 
 impl Geoip {
@@ -102,7 +107,10 @@ fn location(record: Record) -> Location {
     }
     let city = record.city.names.get("en").map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty() && s.len() <= 256);
-    Location { status: "found", country: Some(country), city }
+    let region = record.subdivisions.first().and_then(|s| {
+        s.names.get("fr").or_else(|| s.names.get("en"))
+    }).map(|s| s.trim().to_string()).filter(|s| !s.is_empty() && s.len() <= 256);
+    Location { status: "found", country: Some(country), city, region }
 }
 
 /// Exclude local, documentation, benchmarking and multicast addresses even
@@ -133,12 +141,20 @@ mod tests {
     #[test]
     fn maps_city_country_and_missing_values() {
         let record = serde_json::from_str(r#"{"country":{"iso_code":"fr"},"city":{"names":{"en":"Paris"}}}"#).unwrap();
-        assert_eq!(location(record), Location {status: "found", country: Some("FR".into()), city: Some("Paris".into())});
+        assert_eq!(location(record), Location {status: "found", country: Some("FR".into()), city: Some("Paris".into()), region: None});
         let record = serde_json::from_str(r#"{"country":{"iso_code":"FR"}}"#).unwrap();
         assert_eq!(location(record).city, None);
         for data in ["{}", r#"{"country":{"iso_code":"ZZ"}}"#, r#"{"country":{"iso_code":"FRA"}}"#] {
             assert_eq!(location(serde_json::from_str(data).unwrap()), Location::not_found());
         }
+    }
+
+    #[test]
+    fn selects_first_administrative_subdivision_and_prefers_french() {
+        let record = serde_json::from_str(r#"{"country":{"iso_code":"FR"},"subdivisions":[{"names":{"en":"Brittany","fr":"Bretagne"}},{"names":{"en":"Finistere"}}]}"#).unwrap();
+        assert_eq!(location(record).region.as_deref(), Some("Bretagne"));
+        let record = serde_json::from_str(r#"{"country":{"iso_code":"US"},"subdivisions":[{"names":{"en":"California"}}]}"#).unwrap();
+        assert_eq!(location(record).region.as_deref(), Some("California"));
     }
 
     #[test]
@@ -166,11 +182,14 @@ mod tests {
     fn reads_real_dbip_ipv4_ipv6_and_mapped_addresses() {
         let path = std::env::var_os("STATIOND_TEST_DBIP").expect("STATIOND_TEST_DBIP");
         let reader = Geoip::open(Path::new(&path)).unwrap();
+        let mut saw_region = false;
         for ip in ["8.8.8.8", "1.1.1.1", "2606:4700:4700::1111"] {
             let result = reader.lookup(ip.parse().unwrap()).unwrap();
             assert_eq!(result.status, "found");
             assert_eq!(result.country.as_ref().unwrap().len(), 2);
+            saw_region |= result.region.is_some();
         }
+        assert!(saw_region, "expected at least one subdivision in DB-IP City Lite");
         assert_eq!(reader.lookup("::ffff:8.8.8.8".parse().unwrap()).unwrap(),
             reader.lookup("8.8.8.8".parse().unwrap()).unwrap());
         assert_eq!(reader.lookup("::ffff:192.168.1.1".parse().unwrap()).unwrap(), Location::not_found());

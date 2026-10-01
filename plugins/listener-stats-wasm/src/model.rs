@@ -20,6 +20,8 @@ pub struct Geo {
     pub status: String,
     pub country: Option<String>,
     pub city: Option<String>,
+    #[serde(default)]
+    pub region: Option<String>,
 }
 
 impl Geo {
@@ -29,11 +31,14 @@ impl Geo {
                 if !self.country.as_ref().is_some_and(|c| c.len() == 2 && c.bytes().all(|b| b.is_ascii_uppercase())) {
                     return Err("invalid GeoIP country".into());
                 }
+                if self.region.as_ref().is_some_and(|r| r.len() > 256 || r.is_empty()) {
+                    return Err("invalid GeoIP region".into());
+                }
                 if self.city.as_ref().is_some_and(|c| c.len() > 256 || c.is_empty()) {
                     return Err("invalid GeoIP city".into());
                 }
             }
-            "not_found" | "unavailable" if self.country.is_none() && self.city.is_none() => {}
+            "not_found" | "unavailable" if self.country.is_none() && self.city.is_none() && self.region.is_none() => {}
             _ => return Err("invalid GeoIP status".into()),
         }
         Ok(())
@@ -66,13 +71,13 @@ where F: FnMut(std::net::IpAddr) -> Result<Geo, String> {
 
 pub const SAVE_SAMPLE: &str = "INSERT INTO listener_snapshot (mount, at, listeners) VALUES (?1, ?2, ?3) ON CONFLICT(mount, at) DO UPDATE SET listeners = excluded.listeners";
 pub const CLEAR_GEO: &str = "DELETE FROM listener_geo WHERE mount = ?1 AND at = ?2";
-pub const SAVE_GEO: &str = "INSERT INTO listener_geo (mount, at, status, country, city, listeners) VALUES (?1, ?2, ?3, ?4, ?5, ?6)";
+pub const SAVE_GEO: &str = "INSERT INTO listener_geo (mount, at, status, country, region, city, listeners) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)";
 pub const PRUNE_SAMPLES: &str = "DELETE FROM listener_snapshot WHERE at < ?1";
 pub const PRUNE_GEO: &str = "DELETE FROM listener_geo WHERE at < ?1";
 
 /// All writes go through one atomic host batch. Replaying an observation
-/// replaces it instead of double counting. Retain seven days of observations.
-pub fn statements(sample: &Snapshot, groups: BTreeMap<Geo, u32>) -> Vec<Value> {
+/// replaces it instead of double counting. Retention is the plugin's policy.
+pub fn statements(sample: &Snapshot, groups: BTreeMap<Geo, u32>, retention_days: u32) -> Vec<Value> {
     let mut statements = vec![
         json!({"sql": SAVE_SAMPLE, "params": [&sample.mount, sample.at, sample.listeners.as_ref().map(Vec::len)]}),
         json!({"sql": CLEAR_GEO, "params": [&sample.mount, sample.at]}),
@@ -80,10 +85,10 @@ pub fn statements(sample: &Snapshot, groups: BTreeMap<Geo, u32>) -> Vec<Value> {
     for (geo, count) in groups {
         statements.push(json!({"sql": SAVE_GEO, "params": [
             &sample.mount, sample.at, geo.status,
-            geo.country.unwrap_or_default(), geo.city.unwrap_or_default(), count
+            geo.country.unwrap_or_default(), geo.region.unwrap_or_default(), geo.city.unwrap_or_default(), count
         ]}));
     }
-    let before = sample.at.saturating_sub(7 * 86400);
+    let before = sample.at.saturating_sub(i64::from(retention_days) * 86400);
     statements.push(json!({"sql": PRUNE_GEO, "params": [before]}));
     statements.push(json!({"sql": PRUNE_SAMPLES, "params": [before]}));
     statements
@@ -101,12 +106,12 @@ mod tests {
         let mut calls = 0;
         let groups = aggregate(&sample, |_| {
             calls += 1;
-            Ok(Geo {status: "found".into(), country: Some("FR".into()), city: Some("Paris".into())})
+            Ok(Geo {status: "found".into(), country: Some("FR".into()), city: Some("Paris".into()), region: Some("Ile-de-France".into())})
         }).unwrap();
         assert_eq!(calls, 1);
         assert_eq!(groups.values().copied().sum::<u32>(), 2);
-        let sql = statements(&sample, groups);
-        assert_eq!(sql[2]["params"], json!(["/radio", 100, "found", "FR", "Paris", 2]));
+        let sql = statements(&sample, groups, 30);
+        assert_eq!(sql[2]["params"], json!(["/radio", 100, "found", "FR", "Ile-de-France", "Paris", 2]));
         assert!(!serde_json::to_string(&sql).unwrap().contains("192.0.2.1"));
     }
 
@@ -116,13 +121,13 @@ mod tests {
             let sample: Snapshot = serde_json::from_value(json!({"mount": "/a", "at": 1, "listeners": listeners})).unwrap();
             let groups = aggregate(&sample, |_| panic!("no lookup expected")).unwrap();
             assert!(groups.is_empty());
-            assert_eq!(statements(&sample, groups)[0]["params"][2], count);
+            assert_eq!(statements(&sample, groups, 30)[0]["params"][2], count);
         }
     }
 
     #[test]
     fn missing_provider_is_not_a_fake_country() {
-        let unknown = Geo {status: "unavailable".into(), country: None, city: None};
+        let unknown = Geo {status: "unavailable".into(), country: None, city: None, region: None};
         assert!(unknown.validate().is_ok());
         assert!(Geo {country: Some("FR".into()), ..unknown}.validate().is_err());
     }

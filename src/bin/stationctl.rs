@@ -5,6 +5,9 @@
 
 use clap::{Parser, Subcommand};
 
+#[path = "stationctl/listeners.rs"]
+mod listeners;
+
 use stationd::proto::{broadcast, events, icecast, library, liquidsoap, live, onair, playlist, plugin, schedule, station, stats};
 use events::event_service_client::EventServiceClient;
 
@@ -72,6 +75,9 @@ enum Command {
     /// Plugin operations
     #[command(subcommand)]
     Plugin(PluginCommand),
+    /// Listener counts by geographic region (listener-stats plugin)
+    #[command(subcommand)]
+    Listeners(listeners::ListenersCommand),
     /// Manual clock (testing)
     #[command(subcommand)]
     Clock(ClockCommand),
@@ -1489,6 +1495,7 @@ async fn main() -> anyhow::Result<()> {
                 println!("{:>5}  (no genre)", reply.untagged);
             }
         }
+        Command::Listeners(command) => listeners::run(&args.addr, command).await?,
         Command::Plugin(PluginCommand::List) => {
             let mut cli = PluginServiceClient::connect(args.addr.clone()).await?;
             let reply = cli.list(PluginListRequest {}).await?.into_inner();

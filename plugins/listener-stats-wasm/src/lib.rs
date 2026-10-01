@@ -13,7 +13,10 @@ extern "ExtismHost" {
 
 #[plugin_fn]
 pub fn db_migrations() -> FnResult<String> {
-    Ok(serde_json::to_string(&[include_str!("../migrations/001_snapshots.sql")])?)
+    Ok(serde_json::to_string(&[
+        include_str!("../migrations/001_snapshots.sql"),
+        include_str!("../migrations/002_regions.sql"),
+    ])?)
 }
 
 #[plugin_fn]
@@ -30,7 +33,13 @@ pub fn on_event(input: String) -> FnResult<()> {
         }
         serde_json::from_value(value).map_err(|_| "invalid GeoIP result".into())
     }).map_err(|e| Error::msg(e))?;
-    let request = json!({"statements": model::statements(&sample, groups)});
+    let config: Value = serde_json::from_str(&config::get("config")?.unwrap_or_else(|| "{}".into()))?;
+    let retention = match config.get("retention_days") {
+        None => 30,
+        Some(value) => value.as_u64().filter(|days| (1..=365).contains(days))
+            .ok_or_else(|| Error::msg("listener-stats: retention_days must be an integer from 1 to 365"))?,
+    };
+    let request = json!({"statements": model::statements(&sample, groups, retention as u32)});
     let reply: Value = serde_json::from_str(&unsafe { db_batch(request.to_string())? })?;
     if reply.get("ok") != Some(&Value::Bool(true)) {
         // No raw reply/input: an error must not accidentally log client data.
