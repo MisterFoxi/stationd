@@ -69,6 +69,11 @@ if [ "$1" = compose ]; then
       cp) dest="${@: -1}"; printf binary > "$dest"; exit 0;;
     esac
   done
+  if [[ " $* " = *" up "* ]]; then
+    if [ "${TEST_UP_FAIL:-0}" = 1 ] && [ ! -f "$TEST_HOME/up-failed" ]; then
+      touch "$TEST_HOME/up-failed"; exit 1
+    fi
+  fi
   if [[ " $* " = *" status "* ]]; then exit "${TEST_STATUS_FAIL:-0}"; fi
 fi
 exit 0
@@ -122,10 +127,11 @@ bash "$tmp/bundle/install.sh" --dir "$tmp/node" --admin foxi > "$tmp/output"
 test "$(cat "$tmp/node/radio/error.mp3")" = custom
 cmp "$tmp/expected-config" "$tmp/node/stationd.toml"
 grep -qx STATIOND_VERSION=v1 "$tmp/node/.env"
-grep -q 'répond' "$tmp/output"
-# Échec de readiness : restaurer la version précédente et rendre un échec.
+grep -q 'conteneur démarré' "$tmp/output"
+! grep -q 'stationctl status' "$TEST_LOG"
+# Échec de Compose : restaurer la version précédente et rendre un échec.
 sed -i 's/STATIOND_VERSION=v1/STATIOND_VERSION=old/' "$tmp/node/.env"
-if TEST_STATUS_FAIL=1 bash "$tmp/bundle/install.sh" --dir "$tmp/node" --admin foxi > "$tmp/output" 2>&1; then exit 1; fi
+if TEST_UP_FAIL=1 bash "$tmp/bundle/install.sh" --dir "$tmp/node" --admin foxi > "$tmp/output" 2>&1; then exit 1; fi
 grep -qx STATIOND_VERSION=old "$tmp/node/.env"
 grep -q 'restauration' "$tmp/output"
 # Arrêt volontaire : ne pas réactiver le daemon, ni attendre un RPC impossible.

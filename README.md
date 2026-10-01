@@ -580,9 +580,9 @@ The installer validates the bundle checksums, Docker, the media mount, Compose
 configuration and client executables before activating the new version. It
 serializes concurrent installations, preserves existing configuration and
 radio files, copies all missing radio files (including nested/hidden files),
-and checks that stationd answers after startup. On an update whose startup
-fails, it restores the previous `.env` and attempts to restart the previous
-image; it reports an error. Database/data migrations are not rolled back.
+and finishes after `docker compose up -d`, without a final gRPC check or
+readiness wait. If Compose fails during an update, it restores the previous
+`.env` and attempts to restart the previous image; it reports an error. Database/data migrations are not rolled back.
 A deliberately stopped station (`data/stationd.stopped`) remains stopped.
 
 First install: write `stationd.toml` from `stationd.example.toml` — relative

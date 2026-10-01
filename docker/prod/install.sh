@@ -19,7 +19,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 [ "$(id -u)" = 0 ] || die "à lancer avec sudo (ou en root avec --admin USER)"
-for cmd in docker flock sha256sum getent usermod groupadd useradd install realpath timeout; do
+for cmd in docker flock sha256sum getent usermod groupadd useradd install realpath; do
   command -v "$cmd" >/dev/null || die "commande requise absente : $cmd"
 done
 case "$dir" in /*) ;; *) die "--dir doit être un chemin absolu" ;; esac
@@ -132,18 +132,11 @@ if [ ! -f "$dir/stationd.toml" ]; then
   exit 0
 fi
 dc() { docker compose --project-directory "$dir" -f "$dir/compose.yaml" "$@"; }
-ready() {
-  for ((attempt=0; attempt<30; attempt++)); do
-    timeout 5 docker compose --project-directory "$dir" -f "$dir/compose.yaml" exec -T -u stationd station /usr/local/bin/stationctl status >/dev/null 2>&1 && return 0
-    sleep 1
-  done
-  return 1
-}
-if dc up -d && { [ -f "$dir/data/stationd.stopped" ] || ready; }; then
+if dc up -d; then
   if [ -f "$dir/data/stationd.stopped" ]; then
     echo "Installation mise à jour ; stationd reste volontairement arrêté. Reprise : stationctl station start"
   else
-    echo "stationd $tag répond. Administration : stationctl status ; stationd-tui"
+    echo "stationd $tag installé ; conteneur démarré. Administration : stationctl ; stationd-tui"
   fi
 else
   dc logs --tail 80 >&2 || true
@@ -152,5 +145,5 @@ else
     echo "Échec du démarrage : restauration de la version précédente dans .env." >&2
     dc up -d >&2 || true
   fi
-  die "stationd ne répond pas ; consulter docker compose logs dans $dir"
+  die "docker compose up a échoué ; consulter docker compose logs dans $dir"
 fi
