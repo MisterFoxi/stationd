@@ -513,15 +513,19 @@ image (`docker/rootfs`).
 **Package** (on the development machine, development container running):
 
 ```sh
-docker/package.sh                 # clean git tree required; --allow-dirty otherwise
+make package                      # clean git tree required
+# make package ARGS=--allow-dirty   # allow uncommitted changes
 # → dist/stationd-<version>-<rev>.tar
 #   (image + compose.yaml + install.sh + client.sh + stationd.example.toml + examples/ + radio/ + SHA256SUMS)
 ```
 
-It builds `stationd` / `stationctl` / `stationd-tui` (`--release --locked`) and every
+It builds all workspace binaries, including `stationd` / `stationctl` /
+`stationd-tui` (`--workspace --bins --release --locked`), and every
 `plugins/*` crate (`wasm32-unknown-unknown`), builds the image
 `stationd:<version>-<rev>`, checks it (shared libraries, Liquidsoap, Icecast,
-plugins) and saves it.
+plugins) and saves it. Compilation always runs before image creation and export;
+any binary or plugin build failure stops packaging. Packages always use the
+release profile, regardless of the branch or Make's `PROFILE` / `P` settings.
 
 **Deploy** (node: Docker from `docker-ce` + compose plugin, media mounted).
 Everything lives in **one directory**, `/opt/stationd` by default:

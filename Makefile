@@ -134,5 +134,5 @@ mrproper: ## Grand ménage : cargo clean (dépôt + plugins), puis conteneur, im
 > $(DC) down --volumes --rmi all --remove-orphans
 
 # --- livraison ---------------------------------------------------------------
-package: ## docker/package.sh (arbre git propre ; ARGS=--allow-dirty sinon)
+package: ## Compile tous les binaires + plugins WASM + TUI en release, puis package (ARGS=--allow-dirty sinon)
 > docker/package.sh $(ARGS)

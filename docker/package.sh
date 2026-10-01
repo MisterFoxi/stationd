@@ -47,8 +47,9 @@ dc ps --status running --services | grep -qx station \
 
 # --- 1. Compilation (conteneur de dev) --------------------------------------
 step "compilation stationd / stationctl / stationd-tui ($tag)"
-dc exec -T -u dev station cargo build --release --locked --bin stationd --bin stationctl
-dc exec -T -u dev station cargo build --release --locked -p stationd-tui
+# Tous les binaires du workspace, dont stationd, stationctl et stationd-tui.
+# Toujours release, indépendamment de la branche ou du PROFILE de Make.
+dc exec -T -u dev station cargo build --release --locked --workspace --bins
 
 plugins=()
 for manifest in plugins/*/Cargo.toml; do

@@ -58,6 +58,10 @@ printf '\n' >> "$TEST_LOG"
 if [ "$1" = info ]; then exit "${TEST_INFO_FAIL:-0}"; fi
 if [ "$1" = save ]; then printf image; exit 0; fi
 if [ "$1" = compose ]; then
+  if [[ " $* " = *" cargo build "* ]]; then
+    if [[ " $* " = *" --workspace "* ]] && [ "${TEST_FAIL_BUILD:-0}" = 1 ]; then exit 1; fi
+    if [[ " $* " = *" --target wasm32-unknown-unknown "* ]] && [ "${TEST_FAIL_PLUGIN:-0}" = 1 ]; then exit 1; fi
+  fi
   for arg in "$@"; do
     case "$arg" in
       --environment) printf 'MEDIA_PATH=%s\n' "$TEST_MEDIA"; exit 0;;
@@ -159,7 +163,15 @@ bundle="$tmp/unpack/stationd-0.1.0-deadbeef"
 (cd "$bundle"; sha256sum --quiet -c SHA256SUMS)
 diff -r "$tmp/repo/radio" "$bundle/radio"
 test -x "$bundle/client.sh"
-grep -q -- '-p stationd-tui' "$TEST_LOG"
+grep -q -- 'cargo build --release --locked --workspace --bins' "$TEST_LOG"
 grep -q 'station:/src/target/release/stationd-tui' "$TEST_LOG"
+: > "$TEST_LOG"
+if TEST_FAIL_BUILD=1 bash "$tmp/repo/docker/package.sh" > "$tmp/output" 2>&1; then exit 1; fi
+! grep -q 'docker build' "$TEST_LOG"
+! grep -q 'docker save' "$TEST_LOG"
+: > "$TEST_LOG"
+if TEST_FAIL_PLUGIN=1 bash "$tmp/repo/docker/package.sh" > "$tmp/output" 2>&1; then exit 1; fi
+! grep -q 'docker build' "$TEST_LOG"
+! grep -q 'docker save' "$TEST_LOG"
 echo 'OK: preflight, fresh install, update, radio, groups, launchers, rollback, intentional stop, checksum, CLI, packaging + TUI'
 
