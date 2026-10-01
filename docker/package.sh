@@ -4,7 +4,7 @@
 #
 #   docker/package.sh [--allow-dirty]
 #
-# 1. compile stationd, stationctl (--release --locked) et les plugins WASM
+# 1. compile stationd, stationctl et stationd-tui (--release --locked) et les plugins WASM
 #    dans le conteneur de dev (qui doit tourner : docker compose up -d) ;
 # 2. construit l'image d'exploitation (docker/Dockerfile.prod, sans toolchain) ;
 # 3. vérifie l'image (bibliothèques, Liquidsoap, Icecast, plugins) ;
@@ -46,8 +46,9 @@ dc ps --status running --services | grep -qx station \
   || die "conteneur de dev arrêté : docker compose up -d"
 
 # --- 1. Compilation (conteneur de dev) --------------------------------------
-step "compilation stationd / stationctl ($tag)"
+step "compilation stationd / stationctl / stationd-tui ($tag)"
 dc exec -T -u dev station cargo build --release --locked --bin stationd --bin stationctl
+dc exec -T -u dev station cargo build --release --locked -p stationd-tui
 
 plugins=()
 for manifest in plugins/*/Cargo.toml; do
@@ -64,7 +65,7 @@ rm -rf "$stage"
 mkdir -p "$stage/bin" "$stage/plugins" "$stage/share"
 
 # target/ du crate principal = volume nommé du conteneur, invisible de l'hôte.
-for b in stationd stationctl; do
+for b in stationd stationctl stationd-tui; do
   dc cp "station:/src/target/release/$b" "$stage/bin/$b"
 done
 # target/ des plugins = sur le dépôt monté. Un seul .wasm par crate.
@@ -94,9 +95,11 @@ docker build -f docker/Dockerfile.prod \
 
 step "vérification de l'image"
 docker run --rm --entrypoint /bin/sh "stationd:$tag" -euc '
-  if ldd /usr/local/bin/stationd /usr/local/bin/stationctl | grep "not found"; then
+  if ldd /usr/local/bin/stationd /usr/local/bin/stationctl /usr/local/bin/stationd-tui | grep "not found"; then
     echo "bibliothèque manquante" >&2; exit 1
   fi
+  /usr/local/bin/stationctl --help >/dev/null
+  /usr/local/bin/stationd-tui --help >/dev/null
   liquidsoap --version | head -n1
   icecast2 -v
   ls /usr/lib/stationd/plugins
@@ -114,6 +117,7 @@ cp docker/prod/compose.yaml stationd.example.toml "$out/"
 cp -r examples "$out/examples"
 cp -r radio "$out/radio"
 install -m 0755 docker/prod/install.sh "$out/install.sh"
+install -m 0755 docker/prod/client.sh "$out/client.sh"
 echo "$tag" > "$out/VERSION"
 (cd "$out" && find . -type f -printf '%P\0' | sort -z | xargs -0 sha256sum -- > "$root/dist/SHA256SUMS.tmp")
 mv "$root/dist/SHA256SUMS.tmp" "$out/SHA256SUMS"

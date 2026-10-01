@@ -1,114 +1,156 @@
 #!/usr/bin/env bash
-# Installe ou met à jour stationd. Tout va dans UN répertoire.
-#
-#   sudo ./install.sh [--dir /opt/stationd] [--media /mnt/nfs/radio]
-#
-#   --dir    répertoire d'installation (défaut /opt/stationd)
-#   --media  médiathèque montée sur l'hôte (défaut /mnt/nfs/radio) ;
-#            lu seulement à la création du .env
-#
-# Le script installe compose.yaml, stationd.example.toml, examples/ et les
-# fichiers manquants de radio/ (sans écraser les fichiers personnalisés).
-# (playlists et grille d'exemple, remplacés à chaque passage) et, la
-# première fois, .env. Il ne modifie jamais le contenu de stationd.toml,
-# grid/, playlist/ ni data/ ; il (ré)applique seulement les droits.
-# Grilles : grid/ (une active, grid.toml par défaut). Un ancien grid.toml à
-# la racine est déplacé dans grid/ s'il n'y en a pas déjà un.
-# Le compte qui lance sudo rejoint le groupe stationd : config, grille,
-# playlists et radio/ s'éditent sans sudo ; data/ reste le répertoire de
-# stationd (le groupe n'y crée ni n'y supprime rien).
-# Mise à jour : seule la ligne STATIOND_VERSION du .env change ; l'ancienne
-# image reste chargée (retour arrière = remettre l'ancienne version dans
-# .env, puis docker compose up -d).
+# Installe / met à jour le nœud et ses commandes stationctl / stationd-tui.
+# sudo ./install.sh [--dir /opt/stationd] [--media /mnt/nfs/radio] [--admin USER]
+# --media est utilisé à la première installation seulement.
+# Les fichiers de configuration et les médias existants sont préservés.
 set -euo pipefail
-
 dir=/opt/stationd
 media=/mnt/nfs/radio
+admin="${SUDO_USER:-}"
 here="$(cd "$(dirname "$0")" && pwd)"
-
 die() { echo "install.sh : $*" >&2; exit 1; }
-
 while [ $# -gt 0 ]; do
   case "$1" in
-    --dir)   [ $# -ge 2 ] || die "--dir attend un chemin";   dir="$2";   shift 2 ;;
-    --media) [ $# -ge 2 ] || die "--media attend un chemin"; media="$2"; shift 2 ;;
+    --dir|--media|--admin)
+      [ $# -ge 2 ] && [ -n "$2" ] || die "$1 attend une valeur"
+      case "$1" in --dir) dir="$2";; --media) media="$2";; --admin) admin="$2";; esac
+      shift 2 ;;
     *) die "option inconnue : $1" ;;
   esac
 done
-
-[ "$(id -u)" = 0 ] || die "à lancer en root"
-command -v docker >/dev/null || die "docker absent (docker-ce + containerd.io, jamais docker.io)"
+[ "$(id -u)" = 0 ] || die "à lancer avec sudo (ou en root avec --admin USER)"
+for cmd in docker flock sha256sum getent usermod groupadd useradd install realpath timeout; do
+  command -v "$cmd" >/dev/null || die "commande requise absente : $cmd"
+done
+case "$dir" in /*) ;; *) die "--dir doit être un chemin absolu" ;; esac
+dir="$(realpath -m "$dir")"
+[ "$dir" != / ] && [ "$dir" != "$here" ] || die "répertoire d'installation invalide : $dir"
+[ -z "$admin" ] || [ "$admin" = root ] || id "$admin" >/dev/null 2>&1 || die "compte administrateur inconnu : $admin"
+# Un seul installateur à la fois, même pour des répertoires différents :
+# les lanceurs /usr/local/bin sont partagés.
+exec 9>/run/lock/stationd-install.lock
+flock -n 9 || die "une installation stationd est déjà en cours"
 docker compose version >/dev/null 2>&1 || die "plugin docker compose absent"
-
+docker info >/dev/null 2>&1 || die "daemon Docker indisponible"
+for f in VERSION SHA256SUMS compose.yaml stationd.example.toml client.sh radio/error.mp3 radio/bruit.mp3; do
+  [ -s "$here/$f" ] || die "bundle incomplet : $f absent ou vide"
+done
+[ -d "$here/examples" ] || die "bundle incomplet : examples/"
 tag="$(cat "$here/VERSION")"
+[[ "$tag" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]] || die "VERSION invalide"
+[ -s "$here/stationd-$tag.image.tar.gz" ] || die "image du bundle absente"
 (cd "$here" && sha256sum --quiet -c SHA256SUMS) || die "bundle corrompu (SHA256SUMS)"
+# Refuser un mauvais montage avant de changer l'installation.
+if [ ! -f "$dir/.env" ]; then
+  case "$media" in /*) ;; *) die "--media doit être un chemin absolu" ;; esac
+  [ -d "$media" ] || die "médiathèque $media absente (montage NFS ?) : préciser --media"
+fi
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
 docker load -i "$here/stationd-$tag.image.tar.gz"
-
-# Utilisateur système stationd : propriétaire du répertoire ; mêmes UID/GID
-# dans le conteneur (init-perms).
+# Vérifier les clients et leurs bibliothèques AVANT de changer la version active.
+docker run --rm --entrypoint /bin/sh "stationd:$tag" -euc '
+  /usr/local/bin/stationctl --help >/dev/null
+  /usr/local/bin/stationd-tui --help >/dev/null
+  test -s /usr/share/stationd/error.mp3
+  test -s /usr/share/stationd/bruit.mp3
+'
 getent group stationd >/dev/null || groupadd --system stationd
-id stationd >/dev/null 2>&1 \
-  || useradd --system -g stationd -d "$dir" -M -s /usr/sbin/nologin stationd
-
-# Droits (réappliqués à chaque passage) : répertoires partagés en 2770 — le
-# setgid donne au groupe stationd ce que l'administrateur y crée ; data/ :
-# répertoire en 0750 (le groupe n'y crée ni n'y supprime rien).
+id stationd >/dev/null 2>&1 || useradd --system -g stationd -d "$dir" -M -s /usr/sbin/nologin stationd
+# Préparer et valider .env avant de remplacer les fichiers actifs.
+previous=0
+if [ -f "$dir/.env" ]; then
+  previous=1
+  cp "$dir/.env" "$tmp/previous.env"
+  awk -v tag="$tag" '
+    /^STATIOND_VERSION=/ { if (!seen++) print "STATIOND_VERSION=" tag; next }
+    { print }
+    END { if (!seen) print "STATIOND_VERSION=" tag }
+  ' "$dir/.env" > "$tmp/.env"
+else
+  # Les chemins contenant $, # ou des espaces restent littéraux dans Compose.
+  [[ "$media" != *"'"* && "$media" != *$'\n'* ]] || die "--media contient un caractère non pris en charge"
+  cat > "$tmp/.env" <<EOF
+STATIOND_VERSION=$tag
+STATIOND_UID=$(id -u stationd)
+STATIOND_GID=$(getent group stationd | cut -d: -f3)
+MEDIA_PATH='$media'
+MEDIA_GID=$(stat -c %g "$media")
+TZ='${TZ:-UTC}'
+EOF
+fi
+docker compose --project-directory "$dir" --env-file "$tmp/.env" -f "$here/compose.yaml" config --quiet
+# Valider aussi le montage d'une installation existante sans exécuter .env.
+media_line="$(docker compose --project-directory "$dir" --env-file "$tmp/.env" -f "$here/compose.yaml" config --environment | sed -n 's/^MEDIA_PATH=//p')"
+[ -n "$media_line" ] && [ -d "$media_line" ] || die "médiathèque configurée absente : $media_line"
 install -d -m 2770 -o stationd -g stationd "$dir" "$dir/playlist" "$dir/radio" "$dir/grid"
 install -d -m 0750 -o stationd -g stationd "$dir/data"
-# Initialisation et réparation des installations existantes : conserver tout
-# fichier déjà présent, même personnalisé, et ajouter les fichiers manquants.
 cp -r --no-clobber "$here/radio/." "$dir/radio/"
 if [ -f "$dir/grid.toml" ] && [ ! -e "$dir/grid/grid.toml" ]; then
   mv "$dir/grid.toml" "$dir/grid/grid.toml"
-  echo "grid.toml déplacé dans $dir/grid/ (répertoire des grilles)."
 fi
 find "$dir/playlist" "$dir/radio" "$dir/grid" -mindepth 1 -type d -exec chmod 2770 {} +
 chgrp -R stationd "$dir/playlist" "$dir/radio" "$dir/grid"
 chmod -R g+rwX "$dir/playlist" "$dir/radio" "$dir/grid"
 find "$dir" -maxdepth 1 -name '*.toml' -exec chgrp stationd {} + -exec chmod g+rw {} +
-
-admin="${SUDO_USER:-}"
-relog=""
-if [ -n "$admin" ] && [ "$admin" != root ] \
-   && ! id -nG "$admin" | tr ' ' '\n' | grep -qx stationd; then
-  usermod -aG stationd "$admin"
-  relog="$admin ajouté au groupe stationd : se reconnecter pour éditer $dir sans sudo."
-fi
 install -m 0644 "$here/compose.yaml" "$dir/compose.yaml"
 install -m 0660 -o stationd -g stationd "$here/stationd.example.toml" "$dir/stationd.example.toml"
-# Exemples : hors de playlist/ (stationd ne les charge pas), rafraîchis à
-# chaque installation — ne rien y modifier, copier ce qu'on garde.
+# Rafraîchir les exemples sans effacer ceux en place avant la copie.
+cp -r "$here/examples" "$tmp/examples"
+chown -R stationd:stationd "$tmp/examples"
+find "$tmp/examples" -type d -exec chmod 2770 {} +
+find "$tmp/examples" -type f -exec chmod 0660 {} +
 rm -rf "$dir/examples"
-cp -r "$here/examples" "$dir/examples"
-chown -R stationd:stationd "$dir/examples"
-find "$dir/examples" -type d -exec chmod 2770 {} +
-find "$dir/examples" -type f -exec chmod 0660 {} +
-
-if [ -f "$dir/.env" ]; then
-  sed -i "s/^STATIOND_VERSION=.*/STATIOND_VERSION=$tag/" "$dir/.env"
-else
-  [ -d "$media" ] || die "médiathèque $media absente (montage NFS ?) : préciser --media"
-  cat > "$dir/.env" <<EOF
-STATIOND_VERSION=$tag
-STATIOND_UID=$(id -u stationd)
-STATIOND_GID=$(getent group stationd | cut -d: -f3)
-MEDIA_PATH=$media
-MEDIA_GID=$(stat -c %g "$media")
-TZ=$(cat /etc/timezone 2>/dev/null || echo UTC)
-EOF
+cp -a "$tmp/examples" "$dir/examples"
+install -m 0640 -o root -g stationd "$tmp/.env" "$dir/.env.new"
+mv -f "$dir/.env.new" "$dir/.env"
+# Lanceurs root-owned : aucun binaire natif / alias à configurer sur le nœud.
+install -d -m 0755 /usr/local/libexec /usr/local/bin
+install -m 0755 "$here/client.sh" /usr/local/libexec/stationd-client
+for client in stationctl stationd-tui; do
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'exec /usr/local/libexec/stationd-client %q %q "$@"\n' "$dir" "$client"
+  } > "$tmp/$client"
+  install -m 0755 "$tmp/$client" "/usr/local/bin/$client"
+done
+relog=""
+if [ -n "$admin" ] && [ "$admin" != root ]; then
+  getent group docker >/dev/null || groupadd --system docker
+  for group in stationd docker; do
+    if ! id -nG "$admin" | tr ' ' '\n' | grep -qx "$group"; then
+      usermod -aG "$group" "$admin"
+      relog="Reconnecter la session SSH de $admin pour activer les groupes stationd/docker. Les lanceurs utilisent sudo en attendant."
+    fi
+  done
 fi
-
-[ -z "$relog" ] || { echo; echo "$relog"; }
-
+echo "Commandes installées : /usr/local/bin/stationctl et /usr/local/bin/stationd-tui"
+[ -z "$relog" ] || echo "$relog"
 if [ ! -f "$dir/stationd.toml" ]; then
-  echo
-  echo "stationd $tag installé dans $dir, pas démarré : $dir/stationd.toml manque."
-  echo "Le créer d'après $dir/stationd.example.toml (README « Package & deploy »), puis :"
-  echo "  cd $dir && docker compose up -d"
+  echo "Installation prête, configuration requise : créer $dir/stationd.toml depuis stationd.example.toml."
+  echo "Puis : cd $dir && docker compose up -d"
   exit 0
 fi
-
-cd "$dir"
-docker compose up -d
-echo
-echo "stationd $tag démarré ($dir). Journal : cd $dir && docker compose logs -f"
+dc() { docker compose --project-directory "$dir" -f "$dir/compose.yaml" "$@"; }
+ready() {
+  for ((attempt=0; attempt<30; attempt++)); do
+    timeout 5 docker compose --project-directory "$dir" -f "$dir/compose.yaml" exec -T -u stationd station /usr/local/bin/stationctl status >/dev/null 2>&1 && return 0
+    sleep 1
+  done
+  return 1
+}
+if dc up -d && { [ -f "$dir/data/stationd.stopped" ] || ready; }; then
+  if [ -f "$dir/data/stationd.stopped" ]; then
+    echo "Installation mise à jour ; stationd reste volontairement arrêté. Reprise : stationctl station start"
+  else
+    echo "stationd $tag répond. Administration : stationctl status ; stationd-tui"
+  fi
+else
+  dc logs --tail 80 >&2 || true
+  if [ "$previous" = 1 ]; then
+    install -m 0640 -o root -g stationd "$tmp/previous.env" "$dir/.env"
+    echo "Échec du démarrage : restauration de la version précédente dans .env." >&2
+    dc up -d >&2 || true
+  fi
+  die "stationd ne répond pas ; consulter docker compose logs dans $dir"
+fi

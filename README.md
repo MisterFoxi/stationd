@@ -506,7 +506,7 @@ stationctl icecast status
 Production binaries are **compiled on the development machine** (inside the
 development container: same Ubuntu, same glibc) and shipped in a runtime-only
 image — no toolchain on the nodes. `docker/Dockerfile.prod`: Ubuntu 26.04 +
-Icecast 2.5 + Liquidsoap + s6-overlay + `stationd` / `stationctl` + the WASM
+Icecast 2.5 + Liquidsoap + s6-overlay + `stationd` / `stationctl` / `stationd-tui` + the WASM
 plugins (`/usr/lib/stationd/plugins/`). Same s6 services as the development
 image (`docker/rootfs`).
 
@@ -515,10 +515,10 @@ image (`docker/rootfs`).
 ```sh
 docker/package.sh                 # clean git tree required; --allow-dirty otherwise
 # → dist/stationd-<version>-<rev>.tar
-#   (image + compose.yaml + install.sh + stationd.example.toml + examples/ + SHA256SUMS)
+#   (image + compose.yaml + install.sh + client.sh + stationd.example.toml + examples/ + radio/ + SHA256SUMS)
 ```
 
-It builds `stationd` / `stationctl` (`--release --locked`) and every
+It builds `stationd` / `stationctl` / `stationd-tui` (`--release --locked`) and every
 `plugins/*` crate (`wasm32-unknown-unknown`), builds the image
 `stationd:<version>-<rev>`, checks it (shared libraries, Liquidsoap, Icecast,
 plugins) and saves it.
@@ -549,13 +549,37 @@ the directory) and, the first time, `.env` (image tag, `stationd` UID/GID,
 media path and its group — applied in the container at start-up). It starts
 the station when `stationd.toml` exists; otherwise it stops there.
 
-Permissions: the account running `sudo` joins the group `stationd` (log in
-again once): `stationd.toml`, `grid/`, `playlist/` and `radio/` are edited
+Permissions: the account running `sudo` (or `--admin USER` for a root
+installation) joins the groups `stationd` and `docker` (log in again once).
+The Docker group grants root-equivalent control of the host. This allows
+Docker administration without sudo, and `stationd.toml`, `grid/`, `playlist/` and `radio/` are edited
 without `sudo`. The shared directories are `2770 stationd:stationd` (setgid:
 what you create belongs to the group) and stationd writes with `umask 007`,
 so the files it writes stay editable by the group; `data/` is `0750` (the
 group creates and deletes nothing there). `install.sh` re-applies these
-permissions on every run.
+permissions on every run. `.env` is root-owned and group-readable (`0640`).
+
+The installer installs `stationctl` and `stationd-tui` in `/usr/local/bin`.
+These launchers use the clients in the running container as `stationd`, from
+any working directory, with no native host libraries or shell aliases needed.
+The CLI supports pipes; the TUI requires an interactive terminal and forwards
+its terminal type and locale. Until the new groups take effect after SSH
+reconnection, launchers fall back to `sudo docker`.
+
+```sh
+stationctl status
+stationctl station start
+stationd-tui --lang fr
+```
+
+The installer validates the bundle checksums, Docker, the media mount, Compose
+configuration and client executables before activating the new version. It
+serializes concurrent installations, preserves existing configuration and
+radio files, copies all missing radio files (including nested/hidden files),
+and checks that stationd answers after startup. On an update whose startup
+fails, it restores the previous `.env` and attempts to restart the previous
+image; it reports an error. Database/data migrations are not rolled back.
+A deliberately stopped station (`data/stationd.stopped`) remains stopped.
 
 First install: write `stationd.toml` from `stationd.example.toml` — relative
 paths resolve against the directory (`./playlist`…), `[media] library_path`
@@ -576,7 +600,8 @@ changes in `.env`). Roll back: put the previous version back in `.env`, then
 ```sh
 cd /opt/stationd
 docker compose logs -f
-docker compose exec -u stationd station stationctl status
+stationctl status
+stationd-tui
 ```
 
 ---
