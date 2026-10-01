@@ -63,6 +63,9 @@ pub enum Code {
     TrackChosen,
     /// An override was queued: `media` or `playlist`, `mode`, `by`.
     OverridePushed,
+    /// A queued override could not air and was dropped (missing file, empty
+    /// pool, playlist error): `media` or `playlist`, `by`, `reason`.
+    OverrideDropped,
     /// A grid was applied: `grid`, `rules`.
     GridApplied,
     /// The active grid file was refused (start-up, reload): `grid`, then

@@ -240,7 +240,8 @@ impl Controle {
                     Cell::from(o.id.to_string()),
                     Cell::from(what),
                     Cell::from(Span::styled(o.mode.clone(), if o.mode == "hard" { s.warn() } else { Style::default() })),
-                    Cell::from(o.remaining.to_string()),
+                    // 0 = auto : fin du cycle d'un groupe, sinon 1.
+                    Cell::from(if o.remaining == 0 { tr!("override-left-auto") } else { o.remaining.to_string() }),
                     Cell::from(expires),
                     Cell::from(Span::styled(o.source.clone(), s.muted())),
                 ]);

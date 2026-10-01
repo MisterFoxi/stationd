@@ -77,6 +77,7 @@ async fn fixture() -> (tempfile::TempDir, SqlitePool) {
         r#"
 mode = "dynamic"
 order = "newest"
+order_by = "filename"
 [[selection.filter]]
 field = "genre"
 op = "has"

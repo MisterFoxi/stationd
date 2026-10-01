@@ -265,12 +265,12 @@ form-override-title = Pousser un override
 form-override-kind = Contenu
 form-override-kind-media = Média
 form-override-kind-playlist = Playlist
-form-override-target = Chemin sous media/ ou référence de playlist
+form-override-target = Cible (Entrée : choisir dans la liste, ou saisir un chemin / une référence)
 form-override-mode = Mode
 form-override-soft = SOFT : au prochain morceau
 form-override-hard = HARD : coupe maintenant
 form-override-expiry = Péremption (30s, 5m, 2h ; vide = jamais)
-form-override-tracks = Pistes tenues (playlist)
+form-override-tracks = Pistes tenues (playlist ; vide = tout le cycle d'un groupe, sinon 1)
 override-media = Média : { $path }
 override-playlist = Playlist : { $playlist }
 confirm-override-title = Pousser cet override ?
@@ -280,6 +280,10 @@ confirm-override-tracks = { $n ->
     [one] Tient 1 piste.
    *[other] Tient { $n } pistes.
 }
+confirm-override-tracks-auto = Tient tout le cycle si c'est un groupe (repris du début), sinon 1 piste.
+override-left-auto = auto
+form-pick-media = Choisir un média — / chercher · Entrée choisir · Échap annuler
+form-pick-playlist = Choisir une playlist
 confirm-override-no-expiry = Sans péremption.
 confirm-override-expiry = Périmé s'il n'est pas passé dans { $expiry }.
 confirm-override-yes = Pousser
@@ -1129,6 +1133,7 @@ ev-audience-unknown = audience inconnue (lecture Icecast impossible)
 ev-track-chosen = choisi : { $media } ({ $playlist }, { $origin })
 ev-track-fallback = rien à diffuser : filet de sécurité ({ $origin })
 ev-override-pushed = override { $mode } : { $what } (par { $by })
+ev-override-dropped = override abandonné, n'a pas pu passer : { $what } (par { $by }) — { $reason }
 ev-grid-applied = grille { $grid } appliquée ({ $rules } règles)
 ev-grid-refused = grille { $grid } refusée ({ $problems } problèmes) : la grille d'avant reste à l'antenne
 ev-grid-unreadable = grille { $grid } illisible : { $error }

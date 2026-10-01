@@ -286,7 +286,9 @@ enum OverrideCommand {
         /// Staleness window from now, e.g. 30s, 5m, 2h (default: never stale)
         #[arg(long)]
         expiry: Option<String>,
-        /// Playlist only: number of tracks it holds the air (default 1)
+        /// Playlist only: number of tracks it holds the air. Default: a
+        /// sequence/shuffle group plays its whole cycle (from the top), any
+        /// other playlist 1 track; on such a group it is a cap
         #[arg(long)]
         tracks: Option<u32>,
     },
@@ -1719,9 +1721,11 @@ async fn main() -> anyhow::Result<()> {
                 } else {
                     format!("expires at {}", o.expires_at)
                 };
+                // 0 = auto: to the end of a group's cycle, else 1 track.
+                let left = if o.remaining == 0 { "auto".to_string() } else { o.remaining.to_string() };
                 println!(
-                    "#{:<4} {what}  mode={}  left={}  by={}  ({exp})",
-                    o.id, o.mode, o.remaining, o.source
+                    "#{:<4} {what}  mode={}  left={left}  by={}  ({exp})",
+                    o.id, o.mode, o.source
                 );
             }
         }

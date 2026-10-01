@@ -5,7 +5,7 @@
 use stationd_proto::broadcast::State;
 
 use crate::action::{Action, OverrideContent, PluginVerb};
-use crate::dialog::{Confirm, Field, Form, Modal};
+use crate::dialog::{Browse, Confirm, Field, Form, Modal};
 use crate::store::Store;
 use crate::tr;
 
@@ -105,29 +105,38 @@ pub fn push_override_with(media: Option<&str>) -> Modal {
             vec![(tr!("form-override-soft"), "soft".into()), (tr!("form-override-hard"), "hard".into())],
         ),
         Field::text(tr!("form-override-expiry"), ""),
-        Field::text(tr!("form-override-tracks"), "1"),
+        Field::text(tr!("form-override-tracks"), ""),
     ];
     let form = Form::new(tr!("form-override-title"), fields, |f| {
         let target = f[1].value();
         if target.is_empty() {
             return Err(tr!("form-required", field = f[1].label.clone()));
         }
-        let tracks: u32 = f[4]
-            .value()
-            .parse()
-            .ok()
-            .filter(|n| *n >= 1)
-            .ok_or_else(|| tr!("form-positive-integer", field = f[4].label.clone()))?;
+        // Vide = 0 : stationd choisit (tout le cycle d'un groupe, sinon 1).
+        let tracks: u32 = match f[4].value() {
+            v if v.is_empty() => 0,
+            v => v
+                .parse()
+                .ok()
+                .filter(|n| *n >= 1)
+                .ok_or_else(|| tr!("form-positive-integer", field = f[4].label.clone()))?,
+        };
         let content =
             if f[0].value() == "playlist" { OverrideContent::Playlist(target) } else { OverrideContent::Media(target) };
         Ok(Action::PushOverride { content, hard: f[2].value() == "hard", expiry: f[3].value(), tracks })
+    })
+    // Entrée sur la cible : la bibliothèque ou les playlists, selon le contenu.
+    .browse_with(|f, i| match i {
+        1 if f[0].value() == "playlist" => Some(Browse::Playlist),
+        1 => Some(Browse::Media),
+        _ => None,
     })
     .confirm_with(|a| {
         let Action::PushOverride { content, hard, expiry, tracks } = a else { return None };
         let mut lines = vec![content_text(content)];
         lines.push(if *hard { tr!("confirm-override-hard") } else { tr!("confirm-override-soft") });
         if matches!(content, OverrideContent::Playlist(_)) {
-            lines.push(tr!("confirm-override-tracks", n = *tracks));
+            lines.push(if *tracks == 0 { tr!("confirm-override-tracks-auto") } else { tr!("confirm-override-tracks", n = *tracks) });
         }
         lines.push(if expiry.is_empty() {
             tr!("confirm-override-no-expiry")

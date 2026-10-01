@@ -265,12 +265,12 @@ form-override-title = Override einreihen
 form-override-kind = Inhalt
 form-override-kind-media = Medium
 form-override-kind-playlist = Playlist
-form-override-target = Pfad unter media/ oder Playlist-Referenz
+form-override-target = Ziel (Enter: aus der Liste wählen, oder Pfad / Referenz eingeben)
 form-override-mode = Modus
 form-override-soft = SOFT: beim nächsten Titel
 form-override-hard = HARD: schneidet sofort
 form-override-expiry = Verfall (30s, 5m, 2h; leer = nie)
-form-override-tracks = Gehaltene Titel (Playlist)
+form-override-tracks = Gehaltene Titel (Playlist; leer = ganzer Zyklus einer Gruppe, sonst 1)
 override-media = Medium: { $path }
 override-playlist = Playlist: { $playlist }
 confirm-override-title = Diesen Override einreihen?
@@ -280,6 +280,10 @@ confirm-override-tracks = { $n ->
     [one] Hält 1 Titel.
    *[other] Hält { $n } Titel.
 }
+confirm-override-tracks-auto = Hält den ganzen Zyklus, wenn es eine Gruppe ist (von vorn), sonst 1 Titel.
+override-left-auto = auto
+form-pick-media = Medium wählen — / suchen · Enter wählen · Esc abbrechen
+form-pick-playlist = Playlist wählen
 confirm-override-no-expiry = Ohne Verfall.
 confirm-override-expiry = Verfällt, wenn nicht innerhalb von { $expiry } gesendet.
 confirm-override-yes = Einreihen
@@ -1126,6 +1130,7 @@ ev-audience-unknown = Hörerzahl unbekannt (Icecast nicht lesbar)
 ev-track-chosen = gewählt: { $media } ({ $playlist }, { $origin })
 ev-track-fallback = nichts zu senden: Notfallprogramm ({ $origin })
 ev-override-pushed = Override { $mode }: { $what } (durch { $by })
+ev-override-dropped = Override verworfen, konnte nicht gesendet werden: { $what } (durch { $by }) — { $reason }
 ev-grid-applied = Raster { $grid } angewendet ({ $rules } Regeln)
 ev-grid-refused = Raster { $grid } abgelehnt ({ $problems } Probleme): das vorige Raster bleibt auf Sendung
 ev-grid-unreadable = Raster { $grid } unlesbar: { $error }

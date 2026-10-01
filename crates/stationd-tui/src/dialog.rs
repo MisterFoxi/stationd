@@ -20,9 +20,12 @@ use ratatui_widgets::clear::Clear;
 use ratatui_widgets::paragraph::{Paragraph, Wrap};
 
 use crate::action::Action;
-use crate::app::Global;
+use crate::app::{AppEvent, Global};
+use crate::screens::medias::{Medias, Picked as PickedMedia};
+use crate::screens::picker::{Picked as PickedPlaylist, PlaylistPicker};
 use crate::style::Styles;
 use crate::{fit, tr};
+use rat_salsa::Control;
 
 /// Ce qu'une entrée a fait de la modale.
 pub enum Outcome {
@@ -47,11 +50,20 @@ pub enum Modal {
 }
 
 impl Modal {
-    pub fn handle(&mut self, event: &Event) -> Outcome {
+    pub fn handle(&mut self, event: &Event, ctx: &mut Global) -> Outcome {
         match self {
             Modal::Confirm(c) => c.handle(event),
-            Modal::Form(f) => f.handle(event),
+            Modal::Form(f) => f.handle(event, ctx),
             Modal::Info(i) => i.handle(event),
+        }
+    }
+
+    /// Une réponse destinée à la modale (liste ouverte d'un formulaire) :
+    /// `true` si elle l'a prise.
+    pub fn on_event(&mut self, event: &AppEvent, ctx: &mut Global) -> bool {
+        match self {
+            Modal::Form(f) => f.on_event(event, ctx),
+            _ => false,
         }
     }
 
@@ -334,6 +346,22 @@ impl Field {
 
 type Build = Box<dyn Fn(&[Field]) -> Result<Action, String>>;
 type ConfirmWith = Box<dyn Fn(&Action) -> Option<Confirm>>;
+type BrowseWith = Box<dyn Fn(&[Field], usize) -> Option<Browse>>;
+
+/// La liste où choisir la valeur d'un champ texte (Entrée sur ce champ).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Browse {
+    /// La bibliothèque (recherche de l'écran Médias) : le chemin choisi.
+    Media,
+    /// Les playlists (`PlaylistService.List`) : le ref choisi.
+    Playlist,
+}
+
+/// Liste ouverte au-dessus du formulaire.
+enum Lookup {
+    Playlist { picker: Box<PlaylistPicker>, request: u64 },
+    Media(Box<Medias>),
+}
 
 pub struct Form {
     pub title: String,
@@ -343,15 +371,86 @@ pub struct Form {
     build: Build,
     /// Confirmation demandée après validation (l'action touche l'antenne).
     confirm: Option<ConfirmWith>,
+    /// Champs qu'on remplit en choisissant dans une liste.
+    browse: Option<BrowseWith>,
+    /// La liste ouverte, et le champ qu'elle remplit.
+    lookup: Option<(usize, Lookup)>,
+    /// Destinataire des réponses aux lectures de la liste.
+    owner: u64,
+    request: u64,
 }
 
 impl Form {
     /// `build` transforme les champs en action, ou dit ce qui manque (le
     /// formulaire reste ouvert, la saisie conservée).
     pub fn new(title: String, fields: Vec<Field>, build: impl Fn(&[Field]) -> Result<Action, String> + 'static) -> Self {
-        let mut f = Self { title, fields, focus: 0, error: None, build: Box::new(build), confirm: None };
+        let mut f = Self {
+            title,
+            fields,
+            focus: 0,
+            error: None,
+            build: Box::new(build),
+            confirm: None,
+            browse: None,
+            lookup: None,
+            owner: crate::screens::next_owner(),
+            request: 0,
+        };
         f.sync_focus();
         f
+    }
+
+    /// Entrée sur un champ texte pour lequel `f` rend une liste l'ouvre (au
+    /// lieu de valider) ; le choix remplit le champ, qui reste modifiable à la
+    /// main. `f` voit les autres champs (le type de contenu choisi…).
+    pub fn browse_with(mut self, f: impl Fn(&[Field], usize) -> Option<Browse> + 'static) -> Self {
+        self.browse = Some(Box::new(f));
+        self
+    }
+
+    fn open_lookup(&mut self, kind: Browse, ctx: &mut Global) {
+        let lookup = match kind {
+            Browse::Media => {
+                let mut m = Medias::new(true);
+                m.ensure_loaded(ctx);
+                Lookup::Media(Box::new(m))
+            }
+            Browse::Playlist => {
+                self.request += 1;
+                let (owner, id, channel) = (self.owner, self.request, ctx.channel.clone());
+                ctx.spawn_async(async move {
+                    let r = crate::rpc::list_playlists(channel).await;
+                    Ok(Control::Event(AppEvent::PlaylistChoices(owner, id, r)))
+                });
+                Lookup::Playlist { picker: Box::new(PlaylistPicker::new(tr!("form-pick-playlist"), Vec::new(), false)), request: id }
+            }
+        };
+        self.lookup = Some((self.focus, lookup));
+    }
+
+    /// Le choix fait dans la liste : écrit dans le champ, focus au suivant.
+    fn chosen(&mut self, field: usize, value: &str) {
+        self.lookup = None;
+        if let Some(Field { input: Input::Text(st), .. }) = self.fields.get_mut(field) {
+            st.set_text(value);
+        }
+        self.error = None;
+        self.focus = field;
+        self.move_focus(true);
+    }
+
+    /// Réponses aux lectures de la liste ouverte.
+    pub fn on_event(&mut self, event: &AppEvent, ctx: &mut Global) -> bool {
+        match (&mut self.lookup, event) {
+            (Some((_, Lookup::Playlist { picker, request })), AppEvent::PlaylistChoices(owner, id, r))
+                if *owner == self.owner && id == request =>
+            {
+                picker.set_items(r.clone());
+                true
+            }
+            (Some((_, Lookup::Media(m))), _) => m.handle(event, ctx) != Control::Continue,
+            _ => false,
+        }
     }
 
     /// Une fois le formulaire valide, `f` peut exiger une confirmation qui
@@ -378,10 +477,43 @@ impl Form {
         self.sync_focus();
     }
 
-    fn handle(&mut self, event: &Event) -> Outcome {
+    fn handle(&mut self, event: &Event, ctx: &mut Global) -> Outcome {
+        // Liste ouverte : elle capture tout.
+        if let Some((field, lookup)) = self.lookup.as_mut() {
+            let field = *field;
+            match lookup {
+                Lookup::Media(m) => {
+                    let _ = m.handle(&AppEvent::Event(event.clone()), ctx);
+                    match m.take_picked() {
+                        Some(PickedMedia::Chosen(files)) => match files.first() {
+                            Some(f) => {
+                                let f = f.clone();
+                                self.chosen(field, &f);
+                            }
+                            None => self.lookup = None,
+                        },
+                        Some(PickedMedia::Cancel) => self.lookup = None,
+                        None => {}
+                    }
+                }
+                Lookup::Playlist { picker, .. } => match picker.handle(event) {
+                    PickedPlaylist::Chosen(r) => self.chosen(field, &r),
+                    PickedPlaylist::Cancel => self.lookup = None,
+                    _ => {}
+                },
+            }
+            return Outcome::Changed;
+        }
         if let Some(k) = press(event) {
             match k.code {
                 KeyCode::Esc => return Outcome::Cancel,
+                KeyCode::Enter
+                    if matches!(self.fields.get(self.focus), Some(Field { input: Input::Text(_), .. }))
+                        && let Some(kind) = self.browse.as_ref().and_then(|b| b(&self.fields, self.focus)) =>
+                {
+                    self.open_lookup(kind, ctx);
+                    return Outcome::Changed;
+                }
                 KeyCode::Enter => {
                     return match (self.build)(&self.fields) {
                         Ok(a) => match self.confirm.as_ref().and_then(|f| f(&a)) {
@@ -483,6 +615,22 @@ impl Form {
             Paragraph::new(Span::styled(fit::ellipsize(e, inner.width as usize), s.error())).render(areas[n * 2], buf);
         }
         ctx.set_screen_cursor(cursor);
+        match self.lookup.as_mut() {
+            Some((_, Lookup::Playlist { picker, .. })) => {
+                let c = picker.render(area, buf, &ctx.theme);
+                ctx.set_screen_cursor(c);
+            }
+            Some((_, Lookup::Media(m))) => {
+                let box_a = centered(area, area.width.saturating_sub(4), area.height.saturating_sub(2));
+                Clear.render(box_a, buf);
+                let block = frame(&tr!("form-pick-media"), &s, false);
+                let inner = block.inner(box_a);
+                block.style(s.base()).render(box_a, buf);
+                ctx.set_screen_cursor(None);
+                m.draw(inner, buf, ctx);
+            }
+            None => {}
+        }
     }
 }
 

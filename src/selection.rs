@@ -141,6 +141,9 @@ pub async fn resolve_ref_with_plugins(
 pub struct Turn {
     pub resolved: Resolved,
     pub holds: bool,
+    /// `playlist_ref` is a `sequence` / `shuffle` group — it has a cycle; with
+    /// `holds` false, this track was the last of that cycle.
+    pub cycles: bool,
 }
 
 /// How a `sequence` / `shuffle` group takes this turn (other sources ignore
@@ -185,7 +188,7 @@ pub async fn resolve_turn(
                 return Err(SelectionError::CycleComplete);
             }
             let resolved = resolve_media(pool, plugins, now, &key, &playlist, 0, &[]).await?;
-            return Ok(Turn { resolved, holds: false });
+            return Ok(Turn { resolved, holds: false, cycles: false });
         }
     };
     let scope: Vec<&Constraints> =
@@ -197,7 +200,7 @@ pub async fn resolve_turn(
         resolve_group_rotation(pool, plugins, now, &key, sel, shuffle, 0, &scope, continuing).await?;
     let st = crate::group_state::get(pool, &key).await?;
     let holds = st.member_idx != 0 || st.take_count != 0 || st.member_started_at.is_some();
-    Ok(Turn { resolved, holds })
+    Ok(Turn { resolved, holds, cycles: true })
 }
 
 async fn resolve_inner(

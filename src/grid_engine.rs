@@ -1691,7 +1691,9 @@ impl GridEngine {
     /// The override layer: air the head of the override queue, if any. A media
     /// is checked on disk (it may be outside the index — arbitrary path
     /// allowed); a playlist is resolved like a grid source (plugins, constraints
-    /// included) and holds the air for its `tracks`. An override that can't
+    /// included) and holds the air for its `tracks` — a `sequence` / `shuffle`
+    /// group starts its cycle from the top and, without `tracks`, holds the
+    /// air until that cycle ends (as when a rule triggers it). An override that can't
     /// air (missing file, empty pool, unknown ref) is DROPPED loudly and the
     /// next one / the grid takes over — never a silent gap, never a retry loop
     /// (each iteration consumes or drops one entry). Grid side effects (AtClock
@@ -1720,18 +1722,19 @@ impl GridEngine {
     }
 
     /// Resolve one override entry: `Some` = it produced (one track consumed),
-    /// `None` = it could not air and was dropped (logged).
+    /// `None` = it could not air and was dropped (logged), or its group cycle
+    /// had nothing left (ended quietly).
     async fn air_override_entry(
         &self,
         entry: crate::station_control::OverrideEntry,
         now: Epoch,
     ) -> Result<Option<ResolvedDecision>, EngineError> {
-        use crate::selection::{Resolved, SelectionError};
-        let produced: Result<Resolved, String> = match &entry.content {
+        use crate::selection::{Resolved, SelectionError, Turn, TurnStart};
+        let produced: Result<Turn, String> = match &entry.content {
             OverrideContent::Media(path) => {
                 if self.media_exists(path) {
                     // No playlist produced it: no leaf, never an unplayed_only mark.
-                    Ok(Resolved::File { path: path.clone(), leaf: None })
+                    Ok(Turn { resolved: Resolved::File { path: path.clone(), leaf: None }, holds: false, cycles: false })
                 } else {
                     // Keep the index honest: it is no longer offered as available.
                     crate::media_index::mark_unavailable(&self.pool, path).await?;
@@ -1739,19 +1742,21 @@ impl GridEngine {
                 }
             }
             OverrideContent::Playlist(reference) => {
-                match crate::selection::resolve_ref_with_plugins(
-                    &self.pool,
-                    self.plugins.as_ref(),
-                    now.0,
-                    reference,
-                )
-                .await
+                // First track: a group cycle starts from the top; then it
+                // carries on in that same cycle (other playlists ignore it).
+                let start = if entry.holding { TurnStart::Continue } else { TurnStart::Fresh };
+                match crate::selection::resolve_turn(&self.pool, self.plugins.as_ref(), now.0, reference, start)
+                    .await
                 {
-                    Ok(Resolved::File { path: media, .. }) if !self.media_exists(&media) => {
+                    Ok(Turn { resolved: Resolved::File { path: media, .. }, .. }) if !self.media_exists(&media) => {
                         crate::media_index::mark_unavailable(&self.pool, &media).await?;
                         Err(format!("resolved media `{media}` missing on disk"))
                     }
-                    Ok(resolved) => Ok(resolved),
+                    Ok(turn) => Ok(turn),
+                    Err(SelectionError::CycleComplete) => {
+                        self.control.end_override(entry.id);
+                        return Ok(None);
+                    }
                     Err(SelectionError::Sqlx(e)) => return Err(EngineError::Sqlx(e)),
                     Err(e) => Err(e.to_string()),
                 }
@@ -1762,8 +1767,8 @@ impl GridEngine {
                 self.control.drop_override(entry.id, &reason);
                 Ok(None)
             }
-            Ok(resolved) => {
-                self.control.consume_override(entry.id);
+            Ok(Turn { resolved, holds, cycles }) => {
+                self.control.consume_override(entry.id, holds, cycles);
                 let playlist_ref = match &entry.content {
                     OverrideContent::Playlist(r) => Some(r.clone()),
                     OverrideContent::Media(_) => None,
@@ -2987,6 +2992,76 @@ mode = "dynamic""#;
             eng.next_media(at(9, 2)).await.unwrap().media_path.as_deref(),
             Some("music/a.mp3")
         );
+    }
+
+    /// `block` = sequence group: `news` (2 tracks) then `music` (1).
+    async fn with_block_group(eng: &GridEngine) {
+        let group = "name = \"block\"\n[selection]\nmode = \"group\"\nstrategy = \"sequence\"\n\
+                     members = [ { ref = \"news\", take = 2 }, { ref = \"music\", take = 1 } ]\n";
+        let pl = crate::playlist::Playlist::parse(group).unwrap();
+        crate::store::upsert(&eng.pool, "block", &pl, group, Some("block")).await.unwrap();
+    }
+
+    fn playlist_override(r: &str, tracks: Option<u32>) -> crate::station_control::OverrideRequest {
+        crate::station_control::OverrideRequest {
+            content: OverrideContent::Playlist(r.into()),
+            mode: Default::default(),
+            expiry: None,
+            tracks,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_group_override_airs_its_whole_cycle_from_the_top() {
+        let (_dir, eng) = engine_with_floor().await;
+        with_block_group(&eng).await;
+        // The group's cycle was left mid-way (a grid turn): the override
+        // restarts it from the top anyway.
+        crate::group_state::set(
+            &eng.pool,
+            "block",
+            &crate::group_state::GroupState { member_idx: 1, ..Default::default() },
+        )
+        .await
+        .unwrap();
+        eng.control().push_override(playlist_override("block", None), "cli").unwrap();
+        let mut aired = Vec::new();
+        for m in 0..3 {
+            let r = eng.next_media(at(9, m)).await.unwrap();
+            assert_eq!(r.override_source.as_deref(), Some("cli"), "track {m}");
+            aired.push(r.media_path.unwrap());
+        }
+        assert_eq!(aired, ["news/flash.mp3", "news/flash2.mp3", "music/a.mp3"]);
+        assert!(eng.control().list_overrides().is_empty(), "cycle over: override gone");
+        let r = eng.next_media(at(9, 3)).await.unwrap();
+        assert!(r.override_source.is_none());
+        assert_eq!(r.decision.origin, Origin::BaseRotation);
+    }
+
+    #[tokio::test]
+    async fn tracks_caps_a_group_override() {
+        let (_dir, eng) = engine_with_floor().await;
+        with_block_group(&eng).await;
+        eng.control().push_override(playlist_override("block", Some(2)), "cli").unwrap();
+        assert_eq!(eng.next_media(at(9, 0)).await.unwrap().media_path.as_deref(), Some("news/flash.mp3"));
+        assert_eq!(eng.next_media(at(9, 1)).await.unwrap().media_path.as_deref(), Some("news/flash2.mp3"));
+        let r = eng.next_media(at(9, 2)).await.unwrap();
+        assert!(r.override_source.is_none(), "capped at 2");
+        assert_eq!(r.decision.origin, Origin::BaseRotation);
+    }
+
+    #[tokio::test]
+    async fn a_hard_group_override_carries_on_after_the_cut() {
+        let (_dir, eng) = engine_with_floor().await;
+        with_block_group(&eng).await;
+        let id = eng.control().push_override(playlist_override("block", None), "cli").unwrap().id;
+        // The cut airs the first track out of queue order…
+        let r = eng.air_override_now(id, at(9, 0)).await.unwrap().unwrap();
+        assert_eq!(r.media_path.as_deref(), Some("news/flash.mp3"));
+        // …the rest of the cycle follows at the next boundaries.
+        assert_eq!(eng.next_media(at(9, 1)).await.unwrap().media_path.as_deref(), Some("news/flash2.mp3"));
+        assert_eq!(eng.next_media(at(9, 2)).await.unwrap().media_path.as_deref(), Some("music/a.mp3"));
+        assert!(eng.next_media(at(9, 3)).await.unwrap().override_source.is_none());
     }
 
     #[tokio::test]

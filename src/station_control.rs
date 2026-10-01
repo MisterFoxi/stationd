@@ -177,7 +177,10 @@ pub struct OverrideRequest {
     /// Staleness window from the push instant ("5m"). Absent = never stale.
     #[serde(default)]
     pub expiry: Option<String>,
-    /// Playlist overrides only: how many tracks it holds the air (default 1).
+    /// Playlist overrides only: how many tracks it holds the air. Absent: a
+    /// `sequence` / `shuffle` group holds it until the end of its cycle, any
+    /// other playlist for 1 track. Given on such a group: a cap (the override
+    /// also ends with the cycle).
     #[serde(default)]
     pub tracks: Option<u32>,
 }
@@ -193,8 +196,13 @@ pub struct OverrideEntry {
     pub source: String,
     pub pushed_at: Epoch,
     pub expires_at: Option<Epoch>,
-    /// Tracks left (media = 1).
-    pub remaining: u32,
+    /// Tracks left (media = 1). `None`: a `sequence` / `shuffle` group until
+    /// the end of its cycle, 1 track for any other playlist.
+    pub remaining: Option<u32>,
+    /// A group cycle is under way: its next track continues it (never a
+    /// restart). False before the first track — which starts the cycle from
+    /// the top, like a rule triggering the group.
+    pub holding: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -704,15 +712,14 @@ impl StationControl {
                 if matches!(req.tracks, Some(n) if n != 1) {
                     return Err(bad("`tracks` applies to a playlist override, not a media".into()));
                 }
-                (OverrideContent::Media(normalize_media_ref(&p).map_err(bad)?), 1)
+                (OverrideContent::Media(normalize_media_ref(&p).map_err(bad)?), Some(1))
             }
             OverrideContent::Playlist(r) => {
                 let key = crate::playlist::normalize_ref(&r).map_err(bad)?;
-                let n = req.tracks.unwrap_or(1);
-                if n == 0 {
+                if req.tracks == Some(0) {
                     return Err(bad("`tracks` must be ≥ 1".into()));
                 }
-                (OverrideContent::Playlist(key), n)
+                (OverrideContent::Playlist(key), req.tracks)
             }
         };
         let now = self.now();
@@ -753,6 +760,7 @@ impl StationControl {
                 pushed_at: now,
                 expires_at,
                 remaining,
+                holding: false,
             });
             PushOutcome { id, degraded, pending: g.overrides.len() }
         };
@@ -835,18 +843,41 @@ impl StationControl {
     }
 
     /// One track of override `id` aired: decrement, drop when exhausted.
-    pub fn consume_override(&self, id: u64) {
+    /// `holds` / `cycles`: what the turn said (see `selection::Turn`) — a
+    /// group whose cycle just ended ends the override too, whatever
+    /// `tracks` was left; without `tracks`, a group runs to the end of its
+    /// cycle and anything else airs once.
+    pub fn consume_override(&self, id: u64, holds: bool, cycles: bool) {
         {
             let mut g = self.lock();
             if let Some(pos) = g.overrides.iter().position(|e| e.id == id) {
-                let left = {
+                let done = {
                     let e = &mut g.overrides[pos];
-                    e.remaining = e.remaining.saturating_sub(1);
-                    e.remaining
+                    e.holding = holds;
+                    match &mut e.remaining {
+                        Some(n) => {
+                            *n = n.saturating_sub(1);
+                            *n == 0 || (cycles && !holds)
+                        }
+                        None => !holds,
+                    }
                 };
-                if left == 0 {
+                if done {
                     g.overrides.remove(pos);
                 }
+            }
+        }
+        self.bump_air();
+    }
+
+    /// Override `id` is over without airing again: its group cycle has
+    /// nothing left (members all unavailable under `skip`). Not an error.
+    pub fn end_override(&self, id: u64) {
+        {
+            let mut g = self.lock();
+            if let Some(pos) = g.overrides.iter().position(|e| e.id == id) {
+                let e = g.overrides.remove(pos).expect("position is valid");
+                tracing::info!(id, source = %e.source, "override: group cycle complete");
             }
         }
         self.bump_air();
@@ -855,11 +886,24 @@ impl StationControl {
     /// Override `id` could not air (missing file, empty pool, bad ref): drop
     /// it, loudly. The grid takes over — never a silent gap.
     pub fn drop_override(&self, id: u64, reason: &str) {
-        {
+        let dropped = {
             let mut g = self.lock();
-            if let Some(pos) = g.overrides.iter().position(|e| e.id == id) {
-                let e = g.overrides.remove(pos).expect("position is valid");
-                tracing::warn!(id, source = %e.source, reason, "override could not air; dropped");
+            g.overrides.iter().position(|e| e.id == id).map(|pos| g.overrides.remove(pos).expect("position is valid"))
+        };
+        if let Some(e) = dropped {
+            // Typed in the journal below (`event`): not a second, raw line.
+            tracing::warn!(event = "override_dropped", id, source = %e.source, reason, "override could not air; dropped");
+            if self.is_real() {
+                let what = match &e.content {
+                    OverrideContent::Media(p) => ("media", p.clone()),
+                    OverrideContent::Playlist(r) => ("playlist", r.clone()),
+                };
+                crate::events::record(
+                    crate::events::Level::Warn,
+                    crate::events::Component::Broadcast,
+                    crate::events::Code::OverrideDropped,
+                    [(what.0, what.1), ("by", e.source.clone()), ("reason", reason.to_string())],
+                );
             }
         }
         self.bump_air();
@@ -1088,7 +1132,7 @@ mod tests {
         let list = c.list_overrides();
         assert_eq!(list[0].content, OverrideContent::Media("a.mp3".into()));
         assert_eq!(list[1].content, OverrideContent::Playlist("shows/urgence".into()));
-        assert_eq!(list[1].remaining, 2);
+        assert_eq!(list[1].remaining, Some(2));
         assert_eq!(list[1].source, "plugin-x");
         // Invalid shapes.
         let mut r = media("a.mp3");
@@ -1183,10 +1227,34 @@ mod tests {
             )
             .unwrap()
             .id;
-        c.consume_override(id);
-        assert_eq!(c.list_overrides()[0].remaining, 1);
-        c.consume_override(id);
+        c.consume_override(id, false, false);
+        assert_eq!(c.list_overrides()[0].remaining, Some(1));
+        c.consume_override(id, false, false);
         assert!(c.list_overrides().is_empty());
+        // No `tracks`: a group runs to the end of its cycle, anything else once.
+        let group = |tracks| OverrideRequest {
+            content: OverrideContent::Playlist("block".into()),
+            mode: OverrideMode::Soft,
+            expiry: None,
+            tracks,
+        };
+        let id = c.push_override(group(None), "cli").unwrap().id;
+        c.consume_override(id, true, true);
+        assert!(c.list_overrides()[0].holding, "cycle under way");
+        c.consume_override(id, true, true);
+        c.consume_override(id, false, true);
+        assert!(c.list_overrides().is_empty(), "cycle over");
+        let id = c.push_override(group(None), "cli").unwrap().id;
+        c.consume_override(id, false, false);
+        assert!(c.list_overrides().is_empty(), "not a group: one track");
+        // `tracks` on a group: a cap, and the cycle's end ends it too.
+        let id = c.push_override(group(Some(5)), "cli").unwrap().id;
+        c.consume_override(id, true, true);
+        c.consume_override(id, false, true);
+        assert!(c.list_overrides().is_empty(), "cycle over before the cap");
+        let id = c.push_override(group(Some(1)), "cli").unwrap().id;
+        c.consume_override(id, true, true);
+        assert!(c.list_overrides().is_empty(), "capped mid-cycle");
         let id = c.push_override(media("a.mp3"), "cli").unwrap().id;
         c.drop_override(id, "missing");
         assert!(c.list_overrides().is_empty());

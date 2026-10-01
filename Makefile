@@ -42,7 +42,7 @@ CTL       = $(EXEC) sh -c '"$$STATIOND_BIN/stationctl" "$$@"' stationctl
 .DEFAULT_GOAL := help
 .PHONY: help up down image logs shell build release test clippy fmt plugins \
         all restart restart-ls restart-icecast restart-air check-liq tui ctl \
-        state stop start package
+        state stop start package mrproper
 
 help: ## Liste des cibles
 > @grep -hE '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | \
@@ -125,6 +125,13 @@ stop: ## Arrêt opérateur (stationctl station stop ; FORCE=1 pour --force)
 
 start: ## Relance après un arrêt opérateur (stationctl station start)
 > $(CTL) station start
+
+# --- nettoyage --------------------------------------------------------------
+mrproper: ## Grand ménage : cargo clean (dépôt + plugins), puis conteneur, image et volumes Docker du projet supprimés (make image pour repartir)
+> @echo "== cargo clean (dépôt et plugins, dans le conteneur s'il tourne)"
+> -$(EXEC) sh -c 'cargo clean; for m in /src/plugins/*/Cargo.toml; do [ -f "$$m" ] && cargo clean --manifest-path "$$m"; done; true'
+> @echo "== docker : conteneur, image et volumes du projet (target, cargo-registry)"
+> $(DC) down --volumes --rmi all --remove-orphans
 
 # --- livraison ---------------------------------------------------------------
 package: ## docker/package.sh (arbre git propre ; ARGS=--allow-dirty sinon)

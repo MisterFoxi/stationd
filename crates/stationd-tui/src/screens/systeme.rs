@@ -212,6 +212,10 @@ pub fn event_text(e: &JEvent) -> String {
             let what = if p("media").is_empty() { p("playlist") } else { p("media") };
             tr!("ev-override-pushed", what = what, mode = p("mode"), by = p("by"))
         }
+        Code::OverrideDropped => {
+            let what = if p("media").is_empty() { p("playlist") } else { p("media") };
+            tr!("ev-override-dropped", what = what, by = p("by"), reason = p("reason"))
+        }
         Code::GridApplied => tr!("ev-grid-applied", grid = p("grid"), rules = p("rules")),
         Code::GridRefused => {
             if p("problems").is_empty() {

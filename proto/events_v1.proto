@@ -79,6 +79,7 @@ message Event {
     PLUGIN_QUARANTINED = 20;  // (plugin, failures, reason)
     PLUGIN_STATE = 21;        // (plugin, state)
     BPM_ANALYZED = 22;        // (estimated, failed, failed_<decode|too_short|no_rhythm|weak|competing|disagree>)
+    OVERRIDE_DROPPED = 23;    // (media ou playlist, by, reason) — n'a pas pu passer, abandonné
   }
 }
 

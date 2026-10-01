@@ -98,7 +98,10 @@ message PushOverrideRequest {
   Mode mode = 3;
   // Fenêtre de péremption depuis le push ("30s", "5m", "2h"). Vide = jamais périmé.
   string expiry = 4;
-  // Playlist seulement : pistes tenues à l'antenne. 0 = 1.
+  // Playlist seulement : pistes tenues à l'antenne. 0 = absent : un groupe
+  // sequence / shuffle tient jusqu'à la fin de son cycle (repris du début),
+  // toute autre playlist 1 piste. Donné sur un tel groupe : un plafond (le
+  // cycle fini termine aussi l'override).
   uint32 tracks = 5;
 
   enum Mode {
@@ -128,7 +131,7 @@ message Override {
   string source       = 5;   // nom du plugin, ou "cli"
   int64  pushed_at    = 6;   // epoch s
   int64  expires_at   = 7;   // epoch s ; 0 = jamais
-  uint32 remaining    = 8;   // pistes restantes
+  uint32 remaining    = 8;   // pistes restantes ; 0 = auto (fin du cycle d'un groupe, sinon 1)
 }
 
 message ClearOverridesRequest {

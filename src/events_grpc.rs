@@ -48,6 +48,7 @@ pub fn to_proto(e: &Event) -> proto::Event {
         Code::AudienceUnknown => C::AudienceUnknown,
         Code::TrackChosen => C::TrackChosen,
         Code::OverridePushed => C::OverridePushed,
+        Code::OverrideDropped => C::OverrideDropped,
         Code::GridApplied => C::GridApplied,
         Code::GridRefused => C::GridRefused,
         Code::GridIncident => C::GridIncident,

@@ -264,12 +264,12 @@ form-override-title = Push an override
 form-override-kind = Content
 form-override-kind-media = Media
 form-override-kind-playlist = Playlist
-form-override-target = Path under media/ or playlist reference
+form-override-target = Target (Enter: pick from the list, or type a path / reference)
 form-override-mode = Mode
 form-override-soft = SOFT: at the next track
 form-override-hard = HARD: cuts now
 form-override-expiry = Expiry (30s, 5m, 2h; empty = never)
-form-override-tracks = Tracks held (playlist)
+form-override-tracks = Tracks held (playlist; empty = a group's whole cycle, else 1)
 override-media = Media: { $path }
 override-playlist = Playlist: { $playlist }
 confirm-override-title = Push this override?
@@ -279,6 +279,10 @@ confirm-override-tracks = { $n ->
     [one] Holds 1 track.
    *[other] Holds { $n } tracks.
 }
+confirm-override-tracks-auto = Holds the whole cycle if it is a group (from the top), else 1 track.
+override-left-auto = auto
+form-pick-media = Pick a media — / search · Enter pick · Esc cancel
+form-pick-playlist = Pick a playlist
 confirm-override-no-expiry = No expiry.
 confirm-override-expiry = Dropped if not aired within { $expiry }.
 confirm-override-yes = Push
@@ -1125,6 +1129,7 @@ ev-audience-unknown = audience unknown (Icecast unreadable)
 ev-track-chosen = chosen: { $media } ({ $playlist }, { $origin })
 ev-track-fallback = nothing to air: safety fallback ({ $origin })
 ev-override-pushed = { $mode } override: { $what } (by { $by })
+ev-override-dropped = override dropped, could not air: { $what } (by { $by }) — { $reason }
 ev-grid-applied = grid { $grid } applied ({ $rules } rules)
 ev-grid-refused = grid { $grid } refused ({ $problems } problems): the previous grid stays on air
 ev-grid-unreadable = grid { $grid } unreadable: { $error }

@@ -561,7 +561,13 @@ pub fn event(event: &AppEvent, state: &mut Scenery, ctx: &mut Global) -> Result<
             ctx.set_focus(b.build());
             return Ok(Control::Continue);
         }
-        // Réponse destinée à l'écran qui l'a demandée (plus bas).
+        // Réponse à la liste ouverte d'un formulaire (modale) ; sinon destinée
+        // à l'écran qui l'a demandée (plus bas).
+        AppEvent::Media(..) | AppEvent::MediaTyped(..) | AppEvent::PlaylistChoices(..)
+            if state.modal.as_mut().is_some_and(|m| m.on_event(event, ctx)) =>
+        {
+            return Ok(Control::Changed);
+        }
         AppEvent::Media(..)
         | AppEvent::MediaTyped(..)
         | AppEvent::MediaCard(..)
@@ -582,7 +588,7 @@ pub fn event(event: &AppEvent, state: &mut Scenery, ctx: &mut Global) -> Result<
                 }
                 // Une modale capture tout.
                 if let Some(m) = state.modal.as_mut() {
-                    match m.handle(e) {
+                    match m.handle(e, ctx) {
                         Outcome::Unchanged => return Ok(Control::Unchanged),
                         Outcome::Changed => return Ok(Control::Changed),
                         Outcome::Cancel => {

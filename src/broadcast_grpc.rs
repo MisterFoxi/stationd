@@ -198,7 +198,8 @@ impl BroadcastService for BroadcastGrpc {
                     source: e.source,
                     pushed_at: e.pushed_at.0,
                     expires_at: e.expires_at.map(|x| x.0).unwrap_or(0),
-                    remaining: e.remaining,
+                    // 0 = until the end of the group's cycle.
+                    remaining: e.remaining.unwrap_or(0),
                 }
             })
             .collect();

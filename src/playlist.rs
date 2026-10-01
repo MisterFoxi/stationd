@@ -315,6 +315,29 @@ impl Playlist {
             );
         }
 
+        // `newest` / `oldest` sort on a key that must be named: without it the
+        // pool could only fail when it airs. `published` is not read yet.
+        // Both are loud here, at add / sync, never at air time.
+        if matches!(sel.order, Some(Order::Newest) | Some(Order::Oldest)) {
+            let o = order_name(sel.order.expect("matched above"));
+            match sel.order_by {
+                None => out.push(
+                    Diag::error(
+                        DiagCode::RequiredForMode,
+                        "selection.order_by",
+                        &format!("`order = {o}` requires `order_by` (the date or name it sorts on)"),
+                    )
+                    .expected("mtime, filename"),
+                ),
+                Some(OrderBy::Published) => out.push(
+                    Diag::error(DiagCode::BadValue, "selection.order_by", "`order_by = published` is not supported yet")
+                        .rejected("published")
+                        .expected("mtime, filename"),
+                ),
+                Some(OrderBy::Mtime | OrderBy::Filename) => {}
+            }
+        }
+
         // `unplayed_only` (play-once) only makes sense on a dated order: it
         // dequeues a growing series oldest/newest-first. On any other order it
         // is a loud error, never silently ignored.
@@ -1429,6 +1452,28 @@ mod tests {
             validate_str(toml_str).is_err(),
             "unplayed_only needs order newest or oldest"
         );
+    }
+
+    #[test]
+    fn newest_or_oldest_requires_a_supported_order_by() {
+        let base = |order: &str, by: &str| {
+            format!("name = \"P\"\n[selection]\nmode = \"dynamic\"\norder = \"{order}\"\n{by}")
+        };
+        for order in ["newest", "oldest"] {
+            let fields = |t: &str| -> Vec<String> {
+                Playlist::parse(t).unwrap().diagnostics().into_iter().map(|d| d.field).collect()
+            };
+            assert_eq!(fields(&base(order, "")), ["selection.order_by"], "{order}: missing order_by");
+            assert_eq!(
+                fields(&base(order, "order_by = \"published\"\n")),
+                ["selection.order_by"],
+                "{order}: published not yet"
+            );
+            for by in ["mtime", "filename"] {
+                validate_str(&base(order, &format!("order_by = \"{by}\"\n"))).expect("supported order_by");
+            }
+        }
+        validate_str(&base("shuffle", "")).expect("order_by only for dated orders");
     }
 
     #[test]
