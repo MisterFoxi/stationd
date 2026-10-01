@@ -58,28 +58,29 @@ mod tests {
     use super::*;
     #[test]
     fn resolution_supports_deployment_development_and_overrides() {
-        let root = std::env::temp_dir().join(format!("stationd-plugin-path-{}", std::process::id()));
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
         let installed = root.join("installed"); let repo = root.join("repo");
         std::fs::create_dir_all(&installed).unwrap();
         for (name, stem) in [("custom-tags", "custom_tags_wasm"), ("listener-stats", "listener_stats_wasm"), ("play-stats", "play_stats_wasm"), ("stop-when-idle-wasm", "stop_when_idle_wasm")] {
             let path = installed.join(format!("{stem}.wasm")); std::fs::write(&path, b"wasm").unwrap();
             assert_eq!(resolve_in(name, None, &installed, &repo).unwrap(), path);
-            let old = format!("plugins/{name}/target/wasm32-unknown-unknown/release/{stem}.wasm");
-            assert_eq!(resolve_in("alias", Some(&old), &installed, &repo).unwrap(), path);
+            let old = repo.join(format!("plugins/{name}/target/wasm32-unknown-unknown/release/{stem}.wasm"));
+            assert_eq!(resolve_in("alias", Some(old.to_str().unwrap()), &installed, &repo).unwrap(), path);
         }
         let custom = root.join("custom.wasm"); std::fs::write(&custom, b"override").unwrap();
         assert_eq!(resolve_in("custom-tags", Some(custom.to_str().unwrap()), &installed, &repo).unwrap(), custom);
-        assert!(resolve_in("custom-tags", Some("missing/other.wasm"), &installed, &repo).is_err());
+        assert!(resolve_in("custom-tags", Some(repo.join("missing/other.wasm").to_str().unwrap()), &installed, &repo).is_err());
         assert!(resolve_in("../outside", None, &installed, &repo).is_err());
         let artifact = repo.join("plugins/custom-tags-wasm/target/wasm32-unknown-unknown/release/custom_tags_wasm.wasm");
         std::fs::create_dir_all(artifact.parent().unwrap()).unwrap(); std::fs::write(&artifact, b"dev").unwrap();
         let shipped = installed.join("custom_tags_wasm.wasm");
         assert_eq!(resolve_in("custom-tags", None, &installed, &repo).unwrap(), shipped);
+        assert_eq!(resolve_in("alias", Some(artifact.to_str().unwrap()), &installed, &repo).unwrap(), artifact);
         std::fs::remove_file(shipped).unwrap();
         assert_eq!(resolve_in("custom-tags", None, &installed, &repo).unwrap(), artifact);
         let error = resolve_in("missing", None, &installed, &repo).unwrap_err();
         assert!(error.contains("missing_wasm.wasm"));
-        std::fs::remove_dir_all(root).unwrap();
     }
     #[cfg(unix)]
     #[test]

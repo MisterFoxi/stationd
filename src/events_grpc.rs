@@ -46,6 +46,8 @@ pub fn to_proto(e: &Event) -> proto::Event {
         Code::BroadcastState => C::BroadcastState,
         Code::Listeners => C::Listeners,
         Code::AudienceUnknown => C::AudienceUnknown,
+        Code::ConnectionStarted => C::ConnectionStarted,
+        Code::ConnectionEnded => C::ConnectionEnded,
         Code::TrackChosen => C::TrackChosen,
         Code::OverridePushed => C::OverridePushed,
         Code::OverrideDropped => C::OverrideDropped,

@@ -39,6 +39,9 @@
 //! attached). The API is synchronous and lock-short: no lock is ever held
 //! across an await or an event emission.
 
+#[path = "connection_events.rs"]
+mod connection_events;
+
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -262,6 +265,11 @@ struct Inner {
     /// Last listener sample (count, instant). `None` = never sampled: a
     /// draining station then never stops on its own (no audience signal).
     listeners: Option<(u32, Epoch)>,
+    connections: Option<(Vec<crate::listener_snapshot::Connection>, std::time::Instant, std::time::Duration)>,
+    connection_age: Option<u64>,
+    connection_sampling_enabled: bool,
+    connection_tracker: connection_events::Tracker,
+    sleeping_connections: Option<std::collections::HashMap<(String, String), u64>>,
     overrides: VecDeque<OverrideEntry>,
     next_id: u64,
     /// Manual clock override (testing). Shared with `GridEngine`.
@@ -323,6 +331,11 @@ impl StationControl {
             inner: Arc::new(Mutex::new(Inner {
                 state,
                 listeners: None,
+                connections: None,
+                connection_age: None,
+                connection_sampling_enabled: false,
+                connection_tracker: connection_events::Tracker::default(),
+                sleeping_connections: None,
                 overrides: VecDeque::new(),
                 next_id: 1,
                 clock: None,
@@ -552,6 +565,18 @@ impl StationControl {
     /// Apply a control action. `by` names the emitter (plugin name / `cli`).
     /// Returns the transition, or `None` when already in the target state.
     pub fn apply(&self, action: ControlAction, by: &str) -> Result<Option<Transition>, ControlError> {
+        self.apply_with_age(action, by, None)
+    }
+
+    /// Arm a drain guarded by a fresh, complete connection snapshot.
+    pub fn stop_when_connections_old(&self, max_age: u64, by: &str) -> Result<Option<Transition>, ControlError> {
+        if max_age == 0 {
+            return Err(ControlError::Refused("max_connection_age must be positive".into()));
+        }
+        self.apply_with_age(ControlAction::StopWhenIdle, by, Some(max_age))
+    }
+
+    fn apply_with_age(&self, action: ControlAction, by: &str, age: Option<u64>) -> Result<Option<Transition>, ControlError> {
         use BroadcastState::*;
         let transition = {
             let mut g = self.lock();
@@ -574,6 +599,12 @@ impl StationControl {
                 (ControlAction::Wake, Sleeping) => Running,
                 (ControlAction::Wake, s) => s,
             };
+            if action == ControlAction::StopWhenIdle && from != Sleeping {
+                g.connection_age = age;
+            } else if matches!(action, ControlAction::Resume | ControlAction::Pause) || (from == Sleeping && to == Running) {
+                g.connection_age = None;
+                g.sleeping_connections = None;
+            }
             if to == from {
                 return Ok(None);
             }
@@ -596,6 +627,8 @@ impl StationControl {
             }
             g.state = BroadcastState::Running;
             g.woken = true;
+            g.connection_age = None;
+            g.sleeping_connections = None;
             Transition { from: BroadcastState::Sleeping, to: BroadcastState::Running }
         };
         self.changed(t, by);
@@ -673,8 +706,49 @@ impl StationControl {
         self.lock().listeners.map(|(c, _)| c)
     }
 
-    /// Called at a track boundary, before anything is resolved. `draining`
-    /// with a last sample of 0 goes to sleep here.
+    /// Generic availability of the detailed Icecast sampler, independent of plugins.
+    pub fn configure_connection_sampling(&self, enabled: bool) {
+        self.lock().connection_sampling_enabled = enabled;
+    }
+
+    pub fn connection_sampling_enabled(&self) -> bool {
+        self.lock().connection_sampling_enabled
+    }
+
+    /// No IP or user-agent is retained in the station control surface.
+    pub fn listener_connections(&self) -> Option<Vec<crate::listener_snapshot::Connection>> {
+        self.lock().connections.as_ref()
+            .filter(|(_, at, ttl)| at.elapsed() <= *ttl)
+            .map(|(clients, _, _)| clients.clone())
+    }
+
+    /// One complete poll over all mounts; None is unknown, never empty.
+    pub fn sample_connections(&self, clients: Option<Vec<crate::listener_snapshot::Connection>>, valid_for: std::time::Duration) {
+        let at = self.now().0;
+        let (wake, changes) = {
+            let mut g = self.lock();
+            let changes = g.connection_tracker.observe(at, clients.as_deref());
+            let wake = g.state == BroadcastState::Sleeping && g.connection_age.is_some() &&
+                match (&clients, &g.sleeping_connections) {
+                    (Some(now), Some(before)) => now.iter().any(|c|
+                        before.get(&(c.mount.clone(), c.id.clone()))
+                            .is_none_or(|age| c.connected_seconds < *age)),
+                    _ => true,
+                };
+            g.connections = clients.clone().map(|c| (c, std::time::Instant::now(), valid_for));
+            (wake, changes)
+        };
+        for change in changes {
+            change.record();
+        }
+        if wake {
+            self.wake_if_sleeping("connections-changed");
+        }
+        self.emit(PluginEvent::ConnectionsSampled { at: self.now().0, connections: clients });
+    }
+
+    /// At a track boundary, recheck the armed drain: zero listeners, or
+    /// a complete fresh snapshot with all connections at least the requested age.
     pub fn gate(&self) -> Gate {
         let completed = {
             let mut g = self.lock();
@@ -686,7 +760,14 @@ impl StationControl {
                 BroadcastState::Running => return Gate::Play,
                 s @ (BroadcastState::Paused | BroadcastState::Sleeping) => return Gate::Halt(s),
                 BroadcastState::Draining => {
-                    if g.listeners.map(|(c, _)| c) == Some(0) {
+                    let idle = match g.connection_age {
+                        Some(age) => g.listeners.is_some() && g.connections.as_ref().is_some_and(|(clients, at, ttl)|
+                            at.elapsed() <= *ttl && clients.iter().all(|c| c.connected_seconds >= age)),
+                        None => g.listeners.map(|(c, _)| c) == Some(0),
+                    };
+                    if idle {
+                        g.sleeping_connections = g.connections.as_ref().map(|(clients, _, _)|
+                            clients.iter().map(|c| ((c.mount.clone(), c.id.clone()), c.connected_seconds)).collect());
                         g.state = BroadcastState::Sleeping;
                         Transition { from: BroadcastState::Draining, to: BroadcastState::Sleeping }
                     } else {
@@ -1438,3 +1519,7 @@ mod tests {
         assert!(c.simulation_copy().incidents_since(Epoch(0)).is_empty(), "a simulation starts clean");
     }
 }
+
+#[cfg(test)]
+#[path = "connection_age_tests.rs"]
+mod connection_age_tests;

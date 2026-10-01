@@ -1,6 +1,8 @@
 //! Exercise the guest's actual SQL plan against the confined host database.
 #[path = "../plugins/listener-stats-wasm/src/model.rs"]
 mod model;
+// Tests exercise queries and rendering, not the CLI RPC dispatcher.
+#[allow(dead_code)]
 #[path = "../src/bin/stationctl/listeners.rs"]
 mod listeners;
 

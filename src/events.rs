@@ -58,6 +58,12 @@ pub enum Code {
     Listeners,
     /// The audience could not be read (a failure, never « nobody »).
     AudienceUnknown,
+    /// A connection was first observed: mount, id, started_at (estimated),
+    /// connected_seconds, last_seen_at, observed_at (epoch seconds).
+    ConnectionStarted,
+    /// A connection disappeared from a successful poll. Same fields;
+    /// last_seen_at..observed_at bounds its end; connected_seconds is a lower bound.
+    ConnectionEnded,
     /// A track was chosen: `media` (empty on a fallback), `playlist`, `rule`,
     /// `origin`.
     TrackChosen,

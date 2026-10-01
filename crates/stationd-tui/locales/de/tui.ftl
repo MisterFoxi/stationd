@@ -1231,3 +1231,5 @@ bpm-fail-no-rhythm = kein Rhythmus
 bpm-fail-weak = schwacher Puls
 bpm-fail-competing = konkurrierende Rhythmen
 bpm-fail-disagree = Abschnitte uneinig
+ev-connection-started = Verbindung { $id } auf { $mount } beobachtet; geschätzter Beginn { $start }; Alter { $age } s
+ev-connection-ended = Verbindung { $id } auf { $mount } beendet; geschätzter Beginn { $start }; zuletzt gesehen { $last }; Ende beobachtet { $end }; Dauer ≥ { $age } s

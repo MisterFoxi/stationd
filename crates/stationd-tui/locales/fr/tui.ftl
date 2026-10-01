@@ -1237,3 +1237,5 @@ bpm-fail-no-rhythm = pas de rythme
 bpm-fail-weak = pulsation faible
 bpm-fail-competing = rythmes concurrents
 bpm-fail-disagree = sections en désaccord
+ev-connection-started = connexion { $id } sur { $mount } observée ; début estimé { $start } ; âge { $age } s
+ev-connection-ended = connexion { $id } sur { $mount } terminée ; début estimé { $start } ; dernière présence { $last } ; fin observée { $end } ; durée ≥ { $age } s

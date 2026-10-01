@@ -201,6 +201,19 @@ attendre sqlx). Démo : `plugins/play-stats-wasm`.
 - **`StopWhenIdle`** : `draining` devient `sleeping` au prochain bord de piste
   si le **dernier** échantillon d'auditeurs vaut 0. Jamais échantillonné →
   aucune veille (pas de signal d'audience). `resume` annule un drain.
+- **Connexions anciennes** (plugins `stop-when-idle` et `stop-when-idle-wasm`) :
+  `max_connection_age = "12h"` active une alternative au compteur, avec
+  `[icecast] listener_snapshots = true`. Le core revérifie au bord de piste
+  que toutes les connexions ont atteint le seuil et que le relevé est complet
+  et frais. La veille conserve les clients sur le bruit et se termine à
+  l'arrivée d'un nouveau couple (mount, id), ou si la collecte devient inconnue.
+  La baseline reste en mémoire : le chargement du plugin avec cette option
+  réveille une station sleeping par prudence.
+  `Host::listener_connections()` / WASM `listener_connections("{}")` expose
+  uniquement mount, id et connected_seconds, sans capacité `listener_details`.
+  `Host::stop_when_connections_old(seconds)` nécessite `control` ;
+  en WASM, utiliser `station_control({"action":"stop_when_idle","max_connection_age":43200})`.
+  Voir [la spécification](spec-veille-age-connexions.md).
 - **Réveil** (`Wake`, ou `resume`) : la piste du créneau à l'heure du réveil
   (un groupe tenu au moment de la veille est libéré et remis en tête de
   cycle). Pendant la veille, Icecast est lu toutes les

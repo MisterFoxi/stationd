@@ -177,6 +177,10 @@ fn window_label(w: &str) -> String {
 /// Un fait du journal, traduit (D12). Les paramètres manquants sont vides.
 pub fn event_text(e: &JEvent) -> String {
     let p = |n: &str| e.params.iter().find(|x| x.name == n).map(|x| x.value.clone()).unwrap_or_default();
+    let time = |key: &str| p(key).parse::<i64>().ok()
+        .and_then(|at| jiff::Timestamp::from_second(at).ok())
+        .map(|at| at.strftime("%Y-%m-%d %H:%M:%S UTC").to_string())
+        .unwrap_or_default();
     match Code::try_from(e.code).unwrap_or(Code::Unspecified) {
         Code::Log => {
             let fields: Vec<String> = e
@@ -200,6 +204,11 @@ pub fn event_text(e: &JEvent) -> String {
         ),
         Code::Listeners => tr!("ev-listeners", count = p("count")),
         Code::AudienceUnknown => tr!("ev-audience-unknown"),
+        Code::ConnectionStarted => tr!("ev-connection-started",
+            mount = p("mount"), id = p("id"), start = time("started_at"), age = p("connected_seconds")),
+        Code::ConnectionEnded => tr!("ev-connection-ended",
+            mount = p("mount"), id = p("id"), start = time("started_at"), age = p("connected_seconds"),
+            last = time("last_seen_at"), end = time("observed_at")),
         Code::TrackChosen => {
             let media = p("media");
             if media.is_empty() {

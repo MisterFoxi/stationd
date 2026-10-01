@@ -431,6 +431,7 @@ pub fn spawn_sampler(
     control: StationControl,
     monitor: IcecastMonitor,
 ) -> tokio::task::JoinHandle<()> {
+    control.configure_connection_sampling(client.listener_snapshots);
     tokio::spawn(async move {
         // Independent futures: slow listclients must not delay the audience
         // that controls sleep/wake. Aborting this task cancels both loops.
@@ -440,14 +441,28 @@ pub fn spawn_sampler(
             }
             let unique: std::collections::BTreeSet<_> = mounts.iter().collect();
             loop {
+                let mut connections = Some(Vec::new());
+                let started = std::time::Instant::now();
                 for mount in &unique {
                     let listeners = client.list_clients(mount).await.ok();
+                    match (&mut connections, &listeners) {
+                        (Some(all), Some(clients)) => all.extend(clients.iter().map(|c| crate::listener_snapshot::Connection {
+                            mount: (*mount).clone(), id: c.id.clone(), connected_seconds: c.connected_seconds,
+                        })),
+                        _ => connections = None,
+                    }
                     control.emit_event(crate::plugin::PluginEvent::ListenerSnapshot {
                         mount: (*mount).clone(),
                         at: control.now().0,
                         listeners,
                     });
                 }
+                // Slow/missing mounts invalidate the whole station-wide view.
+                let ttl = every.saturating_mul(2);
+                if unique.is_empty() || started.elapsed() > ttl {
+                    connections = None;
+                }
+                control.sample_connections(connections, ttl.saturating_sub(started.elapsed()));
                 tokio::time::sleep(sample_period(&control, every, asleep)).await;
             }
         };

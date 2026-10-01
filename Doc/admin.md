@@ -174,6 +174,24 @@ Un DJ qui prend l'antenne réveille une station en veille ; `station stop` est r
 
 **Veille automatique à 0 auditeur, réveil au retour.** Déclarer le plugin `stop-when-idle` (section Plugins, `enabled = true`, `capabilities = ["control"]`), puis `make restart` et vérifier avec `stationctl plugin list`. Suivi : `watch -n1 'make -s state'`. Un auditeur de test : `curl -s -o /dev/null http://127.0.0.1:8000/<mount> &`, puis `kill %1`.
 
+**Veille avec connexions oubliées.** Les plugins `stop-when-idle` et `stop-when-idle-wasm` acceptent
+`[plugin.config] max_connection_age = "12h"` (durées s/m/h/d), avec
+`[icecast] listener_snapshots = true`. Sans cette clé, la règle à 0 auditeur
+reste inchangée. Toutes les connexions de tous les mounts doivent avoir atteint
+le seuil ; `min_zero_samples` compte alors les relevés complets consécutifs
+éligibles. La station dort au prochain bord de piste, après une nouvelle vérification.
+Les clients anciens restent sur le bruit ; une nouvelle connexion la réveille.
+Une collecte inconnue empêche la veille et réveille une station endormie par cette
+règle. Choisir un seuil compatible avec une journée entière d'écoute. Voir
+[la spécification](spec-veille-age-connexions.md).
+
+**Suivi des connexions.** Avec `[icecast] listener_snapshots = true`,
+`make ctl A="events --last 20 --follow"` affiche `connection_started` et
+`connection_ended` (également dans le journal de la TUI). Début estimé d'après
+la durée Icecast, fin observée au relevé, durée minimale et dernière présence ;
+uniquement mount/id/horodatages, sans IP ni user-agent. Un relevé en échec
+ne produit pas de fausses déconnexions.
+
 **Veille ponctuelle, sans plugin.** `stationctl station stop-when-idle` ; réveil manuel par `station wake` ou `station resume`.
 
 **Arrêter la station pour de bon.** `make stop` (ou `station stop`, `--force` pendant un live) ; contrôle : `make state` rend `STOPPED by the operator` (code 3), y compris après `docker compose restart`. Relance : `make start`. Prérequis : image construite avec le script s6 actuel (`make image` après une modification de `docker/`).

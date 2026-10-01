@@ -175,6 +175,11 @@ pub enum PluginEvent {
     /// An audience sample (Icecast later; `stationctl debug listeners` today).
     /// `at` = epoch seconds.
     ListenersSampled { count: u32, at: i64 },
+    /// Complete station-wide privacy-reduced snapshot. None means unknown.
+    ConnectionsSampled {
+        at: i64,
+        connections: Option<Vec<crate::listener_snapshot::Connection>>,
+    },
     /// Per-mount observation, gated by listener_details. None means unknown;
     /// Some([]) means a successful empty snapshot. Never journal raw IPs.
     ListenerSnapshot {
@@ -205,7 +210,7 @@ fn journal(event: &PluginEvent) {
     use crate::events::{record, Code, Component, Level};
     use std::sync::atomic::Ordering;
     match event {
-        PluginEvent::ListenerSnapshot { .. } => {},
+        PluginEvent::ListenerSnapshot { .. } | PluginEvent::ConnectionsSampled { .. } => {},
         PluginEvent::TrackResolved { media_path, playlist_ref, rule_id, origin } => record(
             Level::Info,
             Component::Grid,
@@ -387,6 +392,20 @@ impl Host {
     pub fn control(&self, action: ControlAction) -> Result<Option<Transition>, HostError> {
         self.refuse_in_simulation("control")?;
         Ok(self.require(Capability::Control)?.apply(action, &self.plugin)?)
+    }
+
+    pub fn connection_sampling_enabled(&self) -> Result<bool, HostError> {
+        Ok(self.control.as_ref().ok_or(HostError::Unavailable)?.connection_sampling_enabled())
+    }
+
+    /// Privacy-reduced connections, available without listener_details.
+    pub fn listener_connections(&self) -> Result<Option<Vec<crate::listener_snapshot::Connection>>, HostError> {
+        Ok(self.control.as_ref().ok_or(HostError::Unavailable)?.listener_connections())
+    }
+
+    pub fn stop_when_connections_old(&self, max_age: u64) -> Result<Option<Transition>, HostError> {
+        self.refuse_in_simulation("control")?;
+        Ok(self.require(Capability::Control)?.stop_when_connections_old(max_age, &self.plugin)?)
     }
 
     /// Push content ahead of the grid. Needs capability `push_override`.
@@ -1497,6 +1516,9 @@ impl Plugin for BlacklistPlugin {
     }
 }
 
+/// Optional `max_connection_age = "12h"` instead observes ConnectionsSampled:
+/// all connections must be at least that old. The core rechecks at the boundary
+/// and wakes only on a new connection, or unknown audience/details.
 /// Demo of the A2 composition « observe + act »: on `ListenersSampled` with a
 /// count of 0 (for `min_zero_samples` consecutive samples, default 1) it arms
 /// `host.control(StopWhenIdle)`; with a count > 0 it calls `Wake`. The core
@@ -1513,6 +1535,7 @@ struct StopWhenIdlePlugin {
     host: Option<Host>,
     min_zero_samples: u32,
     zero_streak: u32,
+    max_connection_age: Option<u64>,
 }
 
 impl StopWhenIdlePlugin {
@@ -1524,7 +1547,21 @@ impl StopWhenIdlePlugin {
                 _ => return Err("`min_zero_samples` must be an integer ≥ 1".into()),
             },
         };
-        Ok(Self { host: None, min_zero_samples: min, zero_streak: 0 })
+        let max_connection_age = match config.get("max_connection_age") {
+            None => None,
+            Some(v) => {
+                let age = v.as_str().ok_or("`max_connection_age` must be a duration such as 12h")?;
+                if !age.is_ascii() {
+                    return Err("`max_connection_age` must be a duration such as 12h".into());
+                }
+                let seconds = crate::playlist::parse_duration_secs(age)?;
+                if seconds == 0 {
+                    return Err("`max_connection_age` must be positive".into());
+                }
+                Some(seconds)
+            }
+        };
+        Ok(Self { host: None, min_zero_samples: min, zero_streak: 0, max_connection_age })
     }
 }
 
@@ -1537,12 +1574,44 @@ impl Plugin for StopWhenIdlePlugin {
         if !host.has(Capability::Control) {
             return Err("stop-when-idle requires `capabilities = [\"control\"]`".into());
         }
+        // A persisted sleeping state has no connection baseline after restart.
+        // Recover conservatively instead of guessing which clients are new.
+        if self.max_connection_age.is_some() {
+            if !host.connection_sampling_enabled().map_err(|e| e.to_string())? {
+                return Err("max_connection_age requires [icecast] listener_snapshots = true".into());
+            }
+            host.control(ControlAction::Wake).map_err(|e| e.to_string())?;
+        }
         self.host = Some(host);
         self.zero_streak = 0;
         Ok(())
     }
 
     fn on_event(&mut self, event: &PluginEvent) {
+        if let Some(age) = self.max_connection_age {
+            let PluginEvent::ConnectionsSampled { connections, .. } = event else { return };
+            if connections.as_ref().is_none_or(|clients| clients.iter().any(|c| c.connected_seconds < age)) {
+                self.zero_streak = 0;
+                return;
+            }
+            let Some(host) = &self.host else { return };
+            // Read the current host view: queued events must not arm from old data.
+            let Ok(Some(clients)) = host.listener_connections() else {
+                self.zero_streak = 0;
+                return;
+            };
+            if clients.iter().any(|c| c.connected_seconds < age) {
+                self.zero_streak = 0;
+                return;
+            }
+            self.zero_streak = self.zero_streak.saturating_add(1);
+            if self.zero_streak == self.min_zero_samples {
+                if let Err(e) = host.stop_when_connections_old(age) {
+                    tracing::warn!(%e, "[stop-when-idle] could not arm connection-age sleep");
+                }
+            }
+            return;
+        }
         let PluginEvent::ListenersSampled { count, .. } = event else {
             return;
         };
@@ -1599,11 +1668,17 @@ fn wasm_station_control(host: &Host, input: &str) -> String {
     #[serde(deny_unknown_fields)]
     struct Req {
         action: ControlAction,
+        #[serde(default)]
+        max_connection_age: Option<u64>,
     }
     host_reply(
         serde_json::from_str::<Req>(input)
             .map_err(|e| format!("bad station_control input: {e}"))
-            .and_then(|r| host.control(r.action).map_err(|e| e.to_string()))
+            .and_then(|r| match (r.action, r.max_connection_age) {
+                (ControlAction::StopWhenIdle, Some(age)) => host.stop_when_connections_old(age).map_err(|e| e.to_string()),
+                (_, Some(_)) => Err("max_connection_age requires stop_when_idle".into()),
+                (action, None) => host.control(action).map_err(|e| e.to_string()),
+            })
             .map(|t| match t {
                 Some(t) => serde_json::json!({ "changed": true, "from": t.from, "to": t.to }),
                 None => serde_json::json!({ "changed": false }),
@@ -1620,6 +1695,20 @@ fn wasm_push_override(host: &Host, input: &str) -> String {
             .and_then(|r| host.push_override(r).map_err(|e| e.to_string())),
     )
 }
+
+fn wasm_listener_connections(host: &Host) -> String {
+    host_reply((|| {
+        let enabled = host.connection_sampling_enabled()?;
+        let connections = host.listener_connections()?;
+        Ok::<_, HostError>(serde_json::json!({ "enabled": enabled, "connections": connections }))
+    })().map_err(|e| e.to_string()))
+}
+
+host_fn!(listener_connections(user_data: Host; _input: String) -> String {
+    let host = user_data.get()?;
+    let host = host.lock().map_err(|_| anyhow::anyhow!("host surface poisoned"))?;
+    Ok(wasm_listener_connections(&host))
+});
 
 host_fn!(station_control(user_data: Host; input: String) -> String {
     let host = user_data.get()?;
@@ -1753,6 +1842,7 @@ impl WasmPlugin {
         let manifest = Manifest::new([Wasm::file(path)])
             .with_config([("config".to_string(), config_json)].into_iter());
         let functions = [
+            Function::new("listener_connections", [PTR], [PTR], UserData::new(host.clone()), listener_connections),
             Function::new(
                 "station_control",
                 [PTR],
@@ -1801,6 +1891,14 @@ impl WasmPlugin {
 impl Plugin for WasmPlugin {
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn on_load(&mut self, _host: Host) -> Result<(), String> {
+        if self.plugin.function_exists("on_load") {
+            self.plugin.call::<&str, &str>("on_load", "")
+                .map_err(|e| format!("wasm on_load failed: {e}"))?;
+        }
+        Ok(())
     }
 
     fn on_event(&mut self, event: &PluginEvent) {
@@ -2038,6 +2136,204 @@ mod tests {
         // A listener comes back: woken.
         control.sample_listeners(1);
         h.list().await;
+        assert_eq!(control.state(), crate::station_control::BroadcastState::Running);
+    }
+
+    /// Exercise the real guest against the same host/state machine as the native policy.
+    /// Run after compiling plugins/stop-when-idle-wasm for wasm32-unknown-unknown.
+    #[test]
+    #[ignore = "requires compiled stop-when-idle WASM"]
+    fn wasm_connection_age_matches_native_policy() {
+        use crate::listener_snapshot::Connection;
+        use crate::station_control::{BroadcastState, Gate};
+        let wasm = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("plugins/stop-when-idle-wasm/target/wasm32-unknown-unknown/release/stop_when_idle_wasm.wasm");
+        assert!(wasm.is_file(), "build stop-when-idle-wasm first");
+        for use_wasm in [false, true] {
+            let control = StationControl::new_in_memory();
+            control.configure_connection_sampling(true);
+            let mut cfg = toml::Table::new();
+            cfg.insert("max_connection_age".into(), toml::Value::String("1h".into()));
+            cfg.insert("min_zero_samples".into(), toml::Value::Integer(2));
+            let host = Host::new("p", &[Capability::Control], Some(control.clone()));
+            let mut p: Box<dyn Plugin> = if use_wasm {
+                Box::new(WasmPlugin::new("p".into(), wasm.to_str().unwrap(), &cfg, &host).unwrap())
+            } else {
+                Box::new(StopWhenIdlePlugin::from_config(&cfg).unwrap())
+            };
+            control.sleep_now();
+            p.on_load(host.clone()).unwrap();
+            assert_eq!(control.state(), BroadcastState::Running, "reload recovers without a baseline");
+            control.sample_listeners(2);
+            let old = vec![
+                Connection { mount: "/a".into(), id: "1".into(), connected_seconds: 3600 },
+                Connection { mount: "/b".into(), id: "1".into(), connected_seconds: 4000 },
+            ];
+            let sample = |p: &mut dyn Plugin, clients: Option<Vec<Connection>>| {
+                control.sample_connections(clients.clone(), Duration::from_secs(30));
+                p.on_event(&PluginEvent::ConnectionsSampled { at: 0, connections: clients });
+            };
+            sample(p.as_mut(), Some(old.clone()));
+            assert_eq!(control.state(), BroadcastState::Running);
+            // Unknown queued data must reset the streak even if the host is already fresh.
+            p.on_event(&PluginEvent::ConnectionsSampled { at: 0, connections: None });
+            sample(p.as_mut(), Some(old.clone()));
+            assert_eq!(control.state(), BroadcastState::Running);
+            sample(p.as_mut(), Some(old.clone()));
+            assert_eq!(control.gate(), Gate::Halt(BroadcastState::Sleeping));
+            p.on_event(&PluginEvent::ListenersSampled { count: 2, at: 0 });
+            sample(p.as_mut(), Some(old.clone()));
+            assert_eq!(control.state(), BroadcastState::Sleeping, "old clients do not wake");
+            control.apply(ControlAction::Resume, "cli").unwrap();
+            sample(p.as_mut(), Some(old.clone()));
+            assert_eq!(control.state(), BroadcastState::Running, "operator resume is respected");
+            let young = vec![Connection { mount: "/a".into(), id: "2".into(), connected_seconds: 0 }];
+            sample(p.as_mut(), Some(young.clone()));
+            sample(p.as_mut(), Some(old.clone()));
+            sample(p.as_mut(), Some(old.clone()));
+            assert_eq!(control.gate(), Gate::Halt(BroadcastState::Sleeping));
+            sample(p.as_mut(), Some(young));
+            assert_eq!(control.state(), BroadcastState::Running, "reopening the stream wakes");
+            sample(p.as_mut(), Some(old.clone()));
+            sample(p.as_mut(), Some(old.clone()));
+            assert_eq!(control.gate(), Gate::Halt(BroadcastState::Sleeping));
+            sample(p.as_mut(), None);
+            assert_eq!(control.state(), BroadcastState::Running, "missing mount wakes");
+            control.apply(ControlAction::Pause, "cli").unwrap();
+            sample(p.as_mut(), Some(vec![Connection { mount: "/a".into(), id: "3".into(), connected_seconds: 0 }]));
+            assert_eq!(control.state(), BroadcastState::Paused);
+        }
+        // Guest configuration failures are propagated through the optional on_load hook.
+        let host = Host::new("p", &[Capability::Control], Some(StationControl::new_in_memory()));
+        for age in [toml::Value::Integer(3600), toml::Value::String("0h".into()),
+            toml::Value::String("é".into()), toml::Value::String("18446744073709551615d".into())] {
+            let mut cfg = toml::Table::new();
+            cfg.insert("max_connection_age".into(), age);
+            let mut p = WasmPlugin::new("p".into(), wasm.to_str().unwrap(), &cfg, &host).unwrap();
+            assert!(p.on_load(host.clone()).is_err());
+        }
+        // A renamed guest makes its own prerequisite check, independently of config.rs.
+        let c = StationControl::new_in_memory();
+        c.sleep_now();
+        let host = Host::new("custom-alias", &[Capability::Control], Some(c.clone()));
+        let mut cfg = toml::Table::new();
+        cfg.insert("max_connection_age".into(), toml::Value::String("1h".into()));
+        let mut p = WasmPlugin::new("custom-alias".into(), wasm.to_str().unwrap(), &cfg, &host).unwrap();
+        assert!(p.on_load(host.clone()).unwrap_err().contains("listener_snapshots"));
+        assert_eq!(c.state(), BroadcastState::Sleeping);
+        c.configure_connection_sampling(true);
+        p.on_load(host).unwrap();
+        assert_eq!(c.state(), BroadcastState::Running);
+        // With no age option, the guest retains the zero-count policy.
+        let c = StationControl::new_in_memory();
+        let host = Host::new("p", &[Capability::Control], Some(c.clone()));
+        let mut p = WasmPlugin::new("p".into(), wasm.to_str().unwrap(), &toml::Table::new(), &host).unwrap();
+        p.on_load(host).unwrap();
+        c.sample_listeners(0);
+        p.on_event(&PluginEvent::ListenersSampled { count: 0, at: 0 });
+        assert_eq!(c.gate(), Gate::Halt(BroadcastState::Sleeping));
+        c.sample_listeners(1);
+        p.on_event(&PluginEvent::ListenersSampled { count: 1, at: 0 });
+        assert_eq!(c.state(), BroadcastState::Running);
+    }
+
+    #[test]
+    fn connection_age_policy_ignores_counts_and_preserves_operator_resume() {
+        use crate::listener_snapshot::Connection;
+        use crate::station_control::{BroadcastState, Gate};
+        let control = StationControl::new_in_memory();
+        control.configure_connection_sampling(true);
+        let mut cfg = toml::Table::new();
+        cfg.insert("max_connection_age".into(), toml::Value::String("1h".into()));
+        cfg.insert("min_zero_samples".into(), toml::Value::Integer(2));
+        let mut p = StopWhenIdlePlugin::from_config(&cfg).unwrap();
+        let host = Host::new("stop-when-idle", &[Capability::Control], Some(control.clone()));
+        p.on_load(host.clone()).unwrap();
+        control.sample_listeners(1);
+        let event = PluginEvent::ConnectionsSampled { at: 0, connections: Some(vec![Connection {
+            mount: "/radio".into(), id: "1".into(), connected_seconds: 3600,
+        }]) };
+        let sample = |age| control.sample_connections(Some(vec![Connection {
+            mount: "/radio".into(), id: "1".into(), connected_seconds: age,
+        }]), Duration::from_secs(30));
+        sample(3600);
+        p.on_event(&event);
+        assert_eq!(control.state(), BroadcastState::Running);
+        control.sample_connections(None, Duration::from_secs(30));
+        p.on_event(&PluginEvent::ConnectionsSampled { at: 0, connections: None });
+        sample(3600);
+        p.on_event(&event);
+        assert_eq!(control.state(), BroadcastState::Running, "unknown reset the streak");
+        p.on_event(&event);
+        assert_eq!(control.gate(), Gate::Halt(BroadcastState::Sleeping));
+        p.on_event(&PluginEvent::ListenersSampled { count: 1, at: 0 });
+        assert_eq!(control.state(), BroadcastState::Sleeping, "old client count must not wake");
+        let json: serde_json::Value = serde_json::from_str(&wasm_listener_connections(&host)).unwrap();
+        assert!(json["ok"].as_bool().unwrap());
+        let client = json["connections"][0].as_object().unwrap();
+        assert_eq!(client.len(), 3);
+        assert!(!client.contains_key("ip"));
+        assert!(!client.contains_key("user_agent"));
+        control.apply(ControlAction::Resume, "cli").unwrap();
+        p.on_event(&event);
+        assert_eq!(control.state(), BroadcastState::Running, "operator resume is not overridden");
+        sample(0);
+        p.on_event(&event);
+        sample(3600);
+        p.on_event(&event);
+        p.on_event(&event);
+        assert_eq!(control.state(), BroadcastState::Draining);
+    }
+
+    #[test]
+    fn connection_age_config_and_wasm_control_are_validated() {
+        for value in [toml::Value::Integer(3600), toml::Value::String("0h".into()),
+            toml::Value::String("bad".into()), toml::Value::String("18446744073709551615d".into())] {
+            let mut cfg = toml::Table::new();
+            cfg.insert("max_connection_age".into(), value);
+            assert!(StopWhenIdlePlugin::from_config(&cfg).is_err());
+        }
+        let control = StationControl::new_in_memory();
+        let host = Host::new("p", &[Capability::Control], Some(control.clone()));
+        for input in [r#"{"action":"wake","max_connection_age":100}"#,
+            r#"{"action":"stop_when_idle","max_connection_age":0}"#] {
+            let reply: serde_json::Value = serde_json::from_str(&wasm_station_control(&host, input)).unwrap();
+            assert_eq!(reply["ok"], false);
+        }
+        let reply: serde_json::Value = serde_json::from_str(&wasm_station_control(&host,
+            r#"{"action":"stop_when_idle","max_connection_age":3600}"#)).unwrap();
+        assert_eq!(reply["ok"], true);
+        assert_eq!(control.state(), crate::station_control::BroadcastState::Draining);
+        assert_eq!(control.gate(), crate::station_control::Gate::Play, "missing details");
+        let denied = Host::new("p", &[], Some(control));
+        assert!(denied.stop_when_connections_old(3600).is_err());
+    }
+
+    #[test]
+    fn connection_age_requires_sampler_in_plugin_on_load() {
+        let control = StationControl::new_in_memory();
+        control.sleep_now();
+        let host = Host::new("custom-alias", &[Capability::Control], Some(control.clone()));
+        let mut cfg = toml::Table::new();
+        cfg.insert("max_connection_age".into(), toml::Value::String("12h".into()));
+        let mut p = StopWhenIdlePlugin::from_config(&cfg).unwrap();
+        assert!(p.on_load(host.clone()).unwrap_err().contains("listener_snapshots"));
+        assert_eq!(control.state(), crate::station_control::BroadcastState::Sleeping);
+        control.configure_connection_sampling(true);
+        // Enabled sampling with no sample yet is distinct from disabled sampling.
+        assert_eq!(host.listener_connections().unwrap(), None);
+        assert!(p.on_load(host).is_ok());
+    }
+
+    #[test]
+    fn loading_connection_age_policy_wakes_without_a_persisted_baseline() {
+        let control = StationControl::new_in_memory();
+        control.configure_connection_sampling(true);
+        control.sleep_now();
+        let mut cfg = toml::Table::new();
+        cfg.insert("max_connection_age".into(), toml::Value::String("12h".into()));
+        let mut p = StopWhenIdlePlugin::from_config(&cfg).unwrap();
+        p.on_load(Host::new("p", &[Capability::Control], Some(control.clone()))).unwrap();
         assert_eq!(control.state(), crate::station_control::BroadcastState::Running);
     }
 

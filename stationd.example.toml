@@ -47,12 +47,18 @@ level = "info"
 # capabilities = ["control"]
 # [plugin.config]
 # min_zero_samples = 2
+# Optional: also sleep with forgotten connections (native or WASM plugin).
+# Requires [icecast] listener_snapshots = true. Disabled when omitted.
+# max_connection_age = "12h"
 #
 # Same policy as a WASM guest (plugins/stop-when-idle-wasm):
 # [[plugin]]
 # name = "stop-when-idle-wasm"
 # wasm = "plugins/stop-when-idle-wasm/target/wasm32-unknown-unknown/release/stop_when_idle_wasm.wasm"
 # capabilities = ["control"]
+# [plugin.config]
+# max_connection_age = "12h" # optional, requires icecast.listener_snapshots
+# min_zero_samples = 2
 #
 # Play counts in the plugin's own database (plugins/play-stats-wasm), read with
 # `stationctl plugin db play-stats query "SELECT * FROM play_count LIMIT 20"`:

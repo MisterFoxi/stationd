@@ -112,6 +112,7 @@ async fn main() -> anyhow::Result<()> {
     // by the grid engine, the plugin host surface and `stationctl station|
     // override|debug`.
     let control = StationControl::load(db_pool.clone()).await?;
+    control.configure_connection_sampling(cfg.icecast.as_ref().is_some_and(|ic| ic.listener_snapshots));
     info!(state = control.state().as_str(), "broadcast control ready");
 
     // Plugin system: single owning actor over the declared plugins. Loads the

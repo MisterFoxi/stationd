@@ -1227,3 +1227,5 @@ bpm-fail-no-rhythm = no rhythm
 bpm-fail-weak = weak pulse
 bpm-fail-competing = competing rhythms
 bpm-fail-disagree = sections disagree
+ev-connection-started = connection { $id } on { $mount } observed; estimated start { $start }; age { $age } s
+ev-connection-ended = connection { $id } on { $mount } ended; estimated start { $start }; last seen { $last }; end observed { $end }; duration ≥ { $age } s

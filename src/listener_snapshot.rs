@@ -4,6 +4,14 @@ use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 
+/// Privacy-reduced identity scoped to one mount and Icecast process.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Connection {
+    pub mount: String,
+    pub id: String,
+    pub connected_seconds: u64,
+}
+
 /// IDs are scoped to an Icecast process and mount, not stable people IDs.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Listener {

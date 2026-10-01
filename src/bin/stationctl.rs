@@ -2183,7 +2183,16 @@ fn event_line(e: &events::Event, tz: &jiff::tz::TimeZone) -> String {
             .collect::<Vec<_>>()
             .join(" ")
     };
+    let epoch_param = |name: &str| param(name).parse::<i64>().ok()
+        .and_then(|at| jiff::Timestamp::from_second(at).ok())
+        .map(|at| at.to_zoned(tz.clone()).strftime("%Y-%m-%d %H:%M:%S").to_string())
+        .unwrap_or_default();
     let what = match Code::try_from(e.code).unwrap_or(Code::Unspecified) {
+        Code::ConnectionStarted => format!("connection_started mount={} id={} start≈{} age={}s",
+            param("mount"), param("id"), epoch_param("started_at"), param("connected_seconds")),
+        Code::ConnectionEnded => format!("connection_ended mount={} id={} start≈{} last_seen={} duration≥{}s end_observed={}",
+            param("mount"), param("id"), epoch_param("started_at"), epoch_param("last_seen_at"),
+            param("connected_seconds"), epoch_param("observed_at")),
         Code::Log => format!("{}  {}", param("message"), rest(&["message", "target"])),
         c => format!("{}  {}", c.as_str_name().to_lowercase(), rest(&[])),
     };
