@@ -7,10 +7,11 @@
 #   --media  médiathèque montée sur l'hôte (défaut /mnt/nfs/radio) ;
 #            lu seulement à la création du .env
 #
-# Le script installe compose.yaml, stationd.example.toml, examples/
+# Le script installe compose.yaml, stationd.example.toml, examples/ et les
+# fichiers manquants de radio/ (sans écraser les fichiers personnalisés).
 # (playlists et grille d'exemple, remplacés à chaque passage) et, la
 # première fois, .env. Il ne modifie jamais le contenu de stationd.toml,
-# grid/, playlist/, radio/ ni data/ ; il (ré)applique seulement les droits.
+# grid/, playlist/ ni data/ ; il (ré)applique seulement les droits.
 # Grilles : grid/ (une active, grid.toml par défaut). Un ancien grid.toml à
 # la racine est déplacé dans grid/ s'il n'y en a pas déjà un.
 # Le compte qui lance sudo rejoint le groupe stationd : config, grille,
@@ -54,6 +55,9 @@ id stationd >/dev/null 2>&1 \
 # répertoire en 0750 (le groupe n'y crée ni n'y supprime rien).
 install -d -m 2770 -o stationd -g stationd "$dir" "$dir/playlist" "$dir/radio" "$dir/grid"
 install -d -m 0750 -o stationd -g stationd "$dir/data"
+# Initialisation et réparation des installations existantes : conserver tout
+# fichier déjà présent, même personnalisé, et ajouter les fichiers manquants.
+cp -r --no-clobber "$here/radio/." "$dir/radio/"
 if [ -f "$dir/grid.toml" ] && [ ! -e "$dir/grid/grid.toml" ]; then
   mv "$dir/grid.toml" "$dir/grid/grid.toml"
   echo "grid.toml déplacé dans $dir/grid/ (répertoire des grilles)."

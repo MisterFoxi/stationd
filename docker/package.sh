@@ -9,7 +9,7 @@
 # 2. construit l'image d'exploitation (docker/Dockerfile.prod, sans toolchain) ;
 # 3. vérifie l'image (bibliothèques, Liquidsoap, Icecast, plugins) ;
 # 4. produit dist/stationd-<version>-<rev>.tar : image + compose.yaml +
-#    install.sh + stationd.example.toml + examples/ + SHA256SUMS.
+#    install.sh + stationd.example.toml + examples/ + radio/ + SHA256SUMS.
 #
 # Sur le nœud :
 #   scp dist/stationd-<tag>.tar <vm>:/tmp/
@@ -81,8 +81,9 @@ done
 # halted_path (config.rs, DEFAULT_FALLBACK_PATH / DEFAULT_HALTED_PATH).
 for f in error.mp3 bruit.mp3; do
   [ -s "radio/$f" ] || die "radio/$f absent ou vide"
-  cp "radio/$f" "$stage/share/$f"
 done
+# Tout radio/, y compris les sous-répertoires et fichiers cachés.
+cp -r radio/. "$stage/share/"
 cp -r docker/rootfs "$stage/rootfs"
 
 # --- 3. Image ---------------------------------------------------------------
@@ -111,6 +112,7 @@ step "export de l'image"
 docker save "stationd:$tag" | gzip > "$out/stationd-$tag.image.tar.gz"
 cp docker/prod/compose.yaml stationd.example.toml "$out/"
 cp -r examples "$out/examples"
+cp -r radio "$out/radio"
 install -m 0755 docker/prod/install.sh "$out/install.sh"
 echo "$tag" > "$out/VERSION"
 (cd "$out" && find . -type f -printf '%P\0' | sort -z | xargs -0 sha256sum -- > "$root/dist/SHA256SUMS.tmp")
