@@ -115,6 +115,6 @@ async fn shared_details_cover_all_mounts_and_failure_wakes_age_sleep() {
     }).await;
     sampler.abort();
     server.abort();
-    assert!(recovered.is_ok(), "one missing mount must wake age-based sleep");
+    assert!(recovered.is_ok(), "a persistently missing mount must wake age-based sleep");
     assert_eq!(control.listener_connections(), None, "partial snapshot is unknown");
 }

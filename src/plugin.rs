@@ -2248,8 +2248,12 @@ mod tests {
             sample(p.as_mut(), Some(old.clone()));
             sample(p.as_mut(), Some(old.clone()));
             assert_eq!(control.gate(), Gate::Halt(BroadcastState::Sleeping));
+            for _ in 0..2 {
+                sample(p.as_mut(), None);
+                assert_eq!(control.state(), BroadcastState::Sleeping, "transient missing mount does not wake");
+            }
             sample(p.as_mut(), None);
-            assert_eq!(control.state(), BroadcastState::Running, "missing mount wakes");
+            assert_eq!(control.state(), BroadcastState::Running, "persistently missing mount wakes");
             control.apply(ControlAction::Pause, "cli").unwrap();
             sample(p.as_mut(), Some(vec![Connection { mount: "/a".into(), id: "3".into(), connected_seconds: 0 }]));
             assert_eq!(control.state(), BroadcastState::Paused);

@@ -260,6 +260,9 @@ pub struct Incident {
 // The control handle
 // ---------------------------------------------------------------------------
 
+// Tolerate transient Icecast failures (notably during a restart).
+const UNKNOWN_SAMPLES_BEFORE_WAKE: u8 = 3;
+
 struct Inner {
     state: BroadcastState,
     /// Last listener sample (count, instant). `None` = never sampled: a
@@ -268,6 +271,8 @@ struct Inner {
     connections: Option<(Vec<crate::listener_snapshot::Connection>, std::time::Instant, std::time::Duration)>,
     connection_age: Option<u64>,
     connection_sampling_enabled: bool,
+    audience_failures: u8,
+    connection_failures: u8,
     connection_tracker: connection_events::Tracker,
     sleeping_connections: Option<std::collections::HashMap<(String, String), u64>>,
     overrides: VecDeque<OverrideEntry>,
@@ -334,6 +339,8 @@ impl StationControl {
                 connections: None,
                 connection_age: None,
                 connection_sampling_enabled: false,
+                audience_failures: 0,
+                connection_failures: 0,
                 connection_tracker: connection_events::Tracker::default(),
                 sleeping_connections: None,
                 overrides: VecDeque::new(),
@@ -654,6 +661,8 @@ impl StationControl {
         let t = {
             let mut g = self.lock();
             let from = g.state;
+            g.audience_failures = 0;
+            g.connection_failures = 0;
             g.state = BroadcastState::Sleeping;
             Transition { from, to: BroadcastState::Sleeping }
         };
@@ -680,20 +689,34 @@ impl StationControl {
     /// completes only at a track boundary (`gate`).
     pub fn sample_listeners(&self, count: u32) {
         let at = self.now();
-        self.lock().listeners = Some((count, at));
+        {
+            let mut g = self.lock();
+            g.listeners = Some((count, at));
+            g.audience_failures = 0;
+        }
         self.bump_meta();
         self.emit(PluginEvent::ListenersSampled { count, at: at.0 });
     }
 
     /// The audience became unknown (Icecast unreachable, one of our mounts has
     /// no source, unreadable stats): forget the last sample. A draining
-    /// station then keeps playing and a sleeping one wakes — a failure is
+    /// station then keeps playing; a sleeping one wakes after three consecutive
+    /// failed audience polls. A successful poll resets the count. A failure is
     /// never read as « 0 listeners ». No event: `ListenersSampled` carries
     /// facts, not their absence (the error is visible in `stationctl icecast
     /// status`). Returns `true` when a sample was actually forgotten.
     pub fn clear_listeners(&self) -> bool {
-        let forgot = self.lock().listeners.take().is_some();
-        self.wake_if_sleeping("audience-unknown");
+        let (forgot, wake) = {
+            let mut g = self.lock();
+            let forgot = g.listeners.take().is_some();
+            g.audience_failures = if g.state == BroadcastState::Sleeping {
+                g.audience_failures.saturating_add(1)
+            } else { 0 };
+            (forgot, g.audience_failures >= UNKNOWN_SAMPLES_BEFORE_WAKE)
+        };
+        if wake {
+            self.wake_if_sleeping("audience-unknown");
+        }
         if forgot {
             self.bump_meta();
             crate::plugin::journal_audience_unknown();
@@ -723,26 +746,34 @@ impl StationControl {
     }
 
     /// One complete poll over all mounts; None is unknown, never empty.
+    /// Three consecutive unknown polls wake an age-based sleep; a known new
+    /// connection wakes immediately, including after a transient failure.
     pub fn sample_connections(&self, clients: Option<Vec<crate::listener_snapshot::Connection>>, valid_for: std::time::Duration) {
         let at = self.now().0;
         let (wake, changes) = {
             let mut g = self.lock();
             let changes = g.connection_tracker.observe(at, clients.as_deref());
-            let wake = g.state == BroadcastState::Sleeping && g.connection_age.is_some() &&
+            g.connection_failures = if clients.is_none() && g.state == BroadcastState::Sleeping {
+                g.connection_failures.saturating_add(1)
+            } else { 0 };
+            let wake = if g.state == BroadcastState::Sleeping && g.connection_age.is_some() {
                 match (&clients, &g.sleeping_connections) {
-                    (Some(now), Some(before)) => now.iter().any(|c|
+                    (Some(now), Some(before)) if now.iter().any(|c|
                         before.get(&(c.mount.clone(), c.id.clone()))
-                            .is_none_or(|age| c.connected_seconds < *age)),
-                    _ => true,
-                };
+                            .is_none_or(|age| c.connected_seconds < *age)) => Some("connections-changed"),
+                    (None, _) if g.connection_failures >= UNKNOWN_SAMPLES_BEFORE_WAKE => Some("connections-unknown"),
+                    (Some(_), None) => Some("connections-unknown"),
+                    _ => None,
+                }
+            } else { None };
             g.connections = clients.clone().map(|c| (c, std::time::Instant::now(), valid_for));
             (wake, changes)
         };
         for change in changes {
             change.record();
         }
-        if wake {
-            self.wake_if_sleeping("connections-changed");
+        if let Some(reason) = wake {
+            self.wake_if_sleeping(reason);
         }
         self.emit(PluginEvent::ConnectionsSampled { at: self.now().0, connections: clients });
     }
@@ -768,6 +799,8 @@ impl StationControl {
                     if idle {
                         g.sleeping_connections = g.connections.as_ref().map(|(clients, _, _)|
                             clients.iter().map(|c| ((c.mount.clone(), c.id.clone()), c.connected_seconds)).collect());
+                        g.audience_failures = 0;
+                        g.connection_failures = 0;
                         g.state = BroadcastState::Sleeping;
                         Transition { from: BroadcastState::Draining, to: BroadcastState::Sleeping }
                     } else {
@@ -1114,7 +1147,16 @@ mod tests {
         assert_eq!(c.gate(), Gate::Halt(Sleeping));
         c.sample_listeners(0);
         assert_eq!(c.state(), Sleeping);
-        // Icecast becomes unreadable: wake (never read as « no one »).
+        // Transient failure is unknown, but does not wake. Recovery resets the streak.
+        c.clear_listeners();
+        c.clear_listeners();
+        assert_eq!(c.listeners(), None);
+        assert_eq!(c.state(), Sleeping);
+        c.sample_listeners(0);
+        for _ in 0..2 {
+            c.clear_listeners();
+            assert_eq!(c.state(), Sleeping);
+        }
         c.clear_listeners();
         assert_eq!(c.state(), Running);
         assert!(c.take_woken());
@@ -1127,6 +1169,9 @@ mod tests {
     fn a_dj_taking_the_air_wakes_a_sleeping_station() {
         let c = StationControl::new_in_memory();
         c.sleep_now();
+        c.clear_listeners();
+        c.clear_listeners();
+        assert_eq!(c.state(), Sleeping);
         c.set_live(Some("dj".into()));
         assert_eq!(c.state(), Running);
         c.set_live(None);

@@ -58,8 +58,8 @@ pas) — hors de portée de tout plugin ; `{"action":"stop"}` est refusé.
 « stop maintenant » mais « en veille dès que c'est propre ». Il produit un état
 de diffusion `draining` observable (cf. `BroadcastStateChanged`). Le réveil est
 `Wake` (le plugin `stop-when-idle` l'appelle dès qu'un auditeur revient) ; le
-core réveille aussi seul une station en veille quand l'audience devient
-inconnue ou qu'un DJ prend l'antenne.
+core réveille aussi seul une station en veille après trois relevés d'audience
+en échec consécutifs, ou immédiatement lorsqu'un DJ prend l'antenne.
 
 Note : l'**état** de diffusion (`running`/`paused`/`draining`/`sleeping`) et la
 **commande** existent au niveau contrat et sont testables tout de suite ; l'effet
@@ -206,7 +206,8 @@ attendre sqlx). Démo : `plugins/play-stats-wasm`.
   `[icecast] listener_snapshots = true`. Le core revérifie au bord de piste
   que toutes les connexions ont atteint le seuil et que le relevé est complet
   et frais. La veille conserve les clients sur le bruit et se termine à
-  l'arrivée d'un nouveau couple (mount, id), ou si la collecte devient inconnue.
+  l'arrivée d'un nouveau couple (mount, id), ou après trois collectes détaillées
+  en échec consécutives. Un relevé réussi remet à zéro le compteur de sa collecte.
   La baseline reste en mémoire : le chargement du plugin avec cette option
   réveille une station sleeping par prudence.
   `Host::listener_connections()` / WASM `listener_connections("{}")` expose

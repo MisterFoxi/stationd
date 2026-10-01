@@ -59,9 +59,22 @@ fn stale_snapshots_cannot_stop_the_air() {
 #[test]
 fn detail_failure_or_reused_id_with_younger_age_wakes() {
     let c = sleeping();
+    for _ in 0..2 {
+        c.sample_connections(None, Duration::from_secs(30));
+        assert_eq!(c.state(), BroadcastState::Sleeping);
+        assert_eq!(c.listener_connections(), None);
+    }
+    // A successful empty snapshot also resets the failure streak.
+    sample(&c, vec![]);
+    for _ in 0..2 {
+        c.sample_connections(None, Duration::from_secs(30));
+        assert_eq!(c.state(), BroadcastState::Sleeping);
+    }
     c.sample_connections(None, Duration::from_secs(30));
     assert_eq!(c.state(), BroadcastState::Running);
     let c = sleeping();
+    c.sample_connections(None, Duration::from_secs(30));
+    c.sample_connections(None, Duration::from_secs(30));
     sample(&c, vec![client("/a", "1", 1)]);
     assert_eq!(c.state(), BroadcastState::Running);
 }

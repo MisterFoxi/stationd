@@ -80,8 +80,11 @@ Un couple absent de la baseline, ou une durée redevenue inférieure à sa duré
 initiale (réutilisation d'id), provoque `Wake`. Une disparition seule ne
 réveille pas. Les IP et user-agents ne participent à aucune comparaison.
 
-Une collecte détaillée devenue inconnue réveille également cette veille.
-Les réveils existants sur audience inconnue ou prise d'antenne DJ restent actifs.
+Une collecte détaillée devenue inconnue réveille cette veille après trois
+échecs consécutifs. La même tolérance vaut pour les statistiques d'audience :
+un relevé réussi remet à zéro le compteur de sa collecte. Dès le premier
+échec, les données sont inconnues et ne peuvent plus justifier une mise en
+veille. Un nouvel auditeur ou une prise d'antenne DJ réveille immédiatement.
 `poll_interval_sleeping` contrôle la fréquence des relevés pendant la veille.
 
 `Resume` et `Pause` annulent le garde d'âge. La veille manuelle

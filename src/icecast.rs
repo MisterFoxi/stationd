@@ -670,7 +670,12 @@ mod tests {
         assert!(monitor.snapshot().problem.is_none());
         assert_eq!(control.gate(), Gate::Halt(crate::station_control::BroadcastState::Sleeping));
 
-        // Asleep, then Icecast becomes unreadable: the station wakes.
+        // A transient failure after restart must not wake; persistent failure does.
+        for _ in 0..2 {
+            apply_sample(Err("127.0.0.1:8000: unreachable".into()), &ours, &control, &monitor);
+            assert_eq!(control.listeners(), None);
+            assert_eq!(control.state(), crate::station_control::BroadcastState::Sleeping);
+        }
         apply_sample(Err("127.0.0.1:8000: unreachable".into()), &ours, &control, &monitor);
         assert_eq!(control.state(), crate::station_control::BroadcastState::Running);
     }

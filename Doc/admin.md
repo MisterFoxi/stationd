@@ -60,7 +60,7 @@ Variables générales : `DC` (défaut `docker compose`), `SVC` (service, défaut
 | `station stop-when-idle` | Arme la veille : `DRAINING`, puis `SLEEPING` au prochain bord de piste si le dernier échantillon vaut 0. Audience inconnue = jamais de veille | — |
 | `station wake` | Quitte la veille (piste du créneau courant). Sans effet dans tout autre état : ne dépause jamais, n'annule pas un drain | — |
 
-Réveils automatiques (core) : audience devenue inconnue, DJ qui prend l'antenne. Le plugin `stop-when-idle` ajoute la veille à 0 auditeur et le réveil au retour d'un auditeur (voir Recettes).
+Réveils automatiques (core) : trois relevés d'audience en échec consécutifs, ou immédiatement lorsqu'un DJ prend l'antenne. Un relevé réussi remet le compteur d'échecs à zéro. Le plugin `stop-when-idle` ajoute la veille à 0 auditeur et le réveil au retour d'un auditeur (voir Recettes).
 
 ## Programmation
 
@@ -181,8 +181,9 @@ reste inchangée. Toutes les connexions de tous les mounts doivent avoir atteint
 le seuil ; `min_zero_samples` compte alors les relevés complets consécutifs
 éligibles. La station dort au prochain bord de piste, après une nouvelle vérification.
 Les clients anciens restent sur le bruit ; une nouvelle connexion la réveille.
-Une collecte inconnue empêche la veille et réveille une station endormie par cette
-règle. Choisir un seuil compatible avec une journée entière d'écoute. Voir
+Une collecte inconnue empêche la veille dès le premier échec ; trois échecs
+consécutifs réveillent une station endormie par cette règle. Un relevé complet
+réussi remet le compteur d'échecs à zéro. Choisir un seuil compatible avec une journée entière d'écoute. Voir
 [la spécification](spec-veille-age-connexions.md).
 
 **Mode de veille visible.** Dès le chargement réussi du plugin, le bandeau
