@@ -310,6 +310,7 @@ pub enum HostError {
 /// Capabilities, never paths or handles (sandboxing).
 #[derive(Clone)]
 pub struct Host {
+    operator_notice: Arc<Mutex<Option<OperatorNotice>>>,
     plugin: String,
     capabilities: Vec<Capability>,
     control: Option<StationControl>,
@@ -325,6 +326,7 @@ pub struct Host {
 impl Host {
     pub fn new(plugin: &str, capabilities: &[Capability], control: Option<StationControl>) -> Self {
         Self {
+            operator_notice: Arc::new(Mutex::new(None)),
             plugin: plugin.to_string(),
             capabilities: capabilities.to_vec(),
             control,
@@ -392,6 +394,18 @@ impl Host {
     pub fn control(&self, action: ControlAction) -> Result<Option<Transition>, HostError> {
         self.refuse_in_simulation("control")?;
         Ok(self.require(Capability::Control)?.apply(action, &self.plugin)?)
+    }
+
+    /// One indication per plugin; visible only while its slot is Loaded.
+    pub fn set_operator_notice(&self, notice: OperatorNotice) -> Result<(), HostError> {
+        self.refuse_in_simulation("operator_notice")?;
+        self.check(Capability::Control)?;
+        *self.operator_notice.lock().unwrap_or_else(|p| p.into_inner()) = Some(notice);
+        Ok(())
+    }
+
+    fn operator_notice(&self) -> Option<OperatorNotice> {
+        self.operator_notice.lock().unwrap_or_else(|p| p.into_inner()).clone()
     }
 
     pub fn connection_sampling_enabled(&self) -> Result<bool, HostError> {
@@ -602,9 +616,17 @@ impl PluginState {
     }
 }
 
+/// A typed operator indication published by a plugin, independent of its name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum OperatorNotice {
+    AutoSleep { max_connection_age: Option<u64> },
+}
+
 /// A flat, cloneable snapshot of a plugin for `plugin list`.
 #[derive(Debug, Clone)]
 pub struct PluginInfo {
+    pub operator_notice: Option<OperatorNotice>,
     pub name: String,
     pub enabled: bool,
     pub order: u32,
@@ -645,6 +667,9 @@ impl Slot {
             _ => self.failures.len() as u32,
         };
         PluginInfo {
+            operator_notice: if matches!(self.state, PluginState::Loaded) {
+                self.host.as_ref().and_then(Host::operator_notice)
+            } else { None },
             name: self.decl.name.clone(),
             enabled: self.decl.enabled,
             order: self.decl.order,
@@ -732,6 +757,16 @@ impl Slot {
                 self.plugin = Some(plugin);
                 self.state = PluginState::Loaded;
                 self.failures.clear();
+                if let Some(OperatorNotice::AutoSleep { max_connection_age }) =
+                    self.host.as_ref().and_then(Host::operator_notice)
+                {
+                    crate::events::record(crate::events::Level::Info, crate::events::Component::Plugin,
+                        crate::events::Code::PluginModeEnabled, [
+                            ("plugin", self.decl.name.clone()),
+                            ("kind", "auto_sleep".into()),
+                            ("max_connection_age", max_connection_age.map(|age| age.to_string()).unwrap_or_default()),
+                        ]);
+                }
             }
             Ok(Err(reason)) | Err(reason) => {
                 self.plugin = None;
@@ -1582,6 +1617,8 @@ impl Plugin for StopWhenIdlePlugin {
             }
             host.control(ControlAction::Wake).map_err(|e| e.to_string())?;
         }
+        host.set_operator_notice(OperatorNotice::AutoSleep { max_connection_age: self.max_connection_age })
+            .map_err(|e| e.to_string())?;
         self.host = Some(host);
         self.zero_streak = 0;
         Ok(())
@@ -1695,6 +1732,18 @@ fn wasm_push_override(host: &Host, input: &str) -> String {
             .and_then(|r| host.push_override(r).map_err(|e| e.to_string())),
     )
 }
+
+fn wasm_operator_notice(host: &Host, input: &str) -> String {
+    host_reply(serde_json::from_str::<OperatorNotice>(input)
+        .map_err(|e| format!("bad operator_notice input: {e}"))
+        .and_then(|notice| host.set_operator_notice(notice).map_err(|e| e.to_string())))
+}
+
+host_fn!(operator_notice(user_data: Host; input: String) -> String {
+    let host = user_data.get()?;
+    let host = host.lock().map_err(|_| anyhow::anyhow!("host surface poisoned"))?;
+    Ok(wasm_operator_notice(&host, &input))
+});
 
 fn wasm_listener_connections(host: &Host) -> String {
     host_reply((|| {
@@ -1842,6 +1891,7 @@ impl WasmPlugin {
         let manifest = Manifest::new([Wasm::file(path)])
             .with_config([("config".to_string(), config_json)].into_iter());
         let functions = [
+            Function::new("operator_notice", [PTR], [PTR], UserData::new(host.clone()), operator_notice),
             Function::new("listener_connections", [PTR], [PTR], UserData::new(host.clone()), listener_connections),
             Function::new(
                 "station_control",
@@ -2163,6 +2213,7 @@ mod tests {
             };
             control.sleep_now();
             p.on_load(host.clone()).unwrap();
+            assert_eq!(host.operator_notice(), Some(OperatorNotice::AutoSleep { max_connection_age: Some(3600) }));
             assert_eq!(control.state(), BroadcastState::Running, "reload recovers without a baseline");
             control.sample_listeners(2);
             let old = vec![
@@ -2307,6 +2358,57 @@ mod tests {
         assert_eq!(control.gate(), crate::station_control::Gate::Play, "missing details");
         let denied = Host::new("p", &[], Some(control));
         assert!(denied.stop_when_connections_old(3600).is_err());
+    }
+
+    #[tokio::test]
+    async fn native_auto_sleep_notice_is_visible_before_any_eligible_sample() {
+        let control = StationControl::new_in_memory();
+        control.configure_connection_sampling(true);
+        let mut cfg = toml::Table::new();
+        cfg.insert("max_connection_age".into(), toml::Value::String("10m".into()));
+        let mut d = decl("stop-when-idle", true, cfg);
+        d.capabilities = vec![Capability::Control];
+        let h = spawn_env(vec![d], PluginEnv { control: Some(control.clone()), ..Default::default() });
+        let info = h.list().await;
+        assert_eq!(info[0].state, "loaded");
+        assert_eq!(info[0].operator_notice, Some(OperatorNotice::AutoSleep { max_connection_age: Some(600) }));
+        assert_eq!(control.state(), crate::station_control::BroadcastState::Running,
+            "an active policy is not an armed drain");
+        h.control("stop-when-idle", Action::Stop).await.unwrap();
+        assert!(h.list().await[0].operator_notice.is_none());
+        h.control("stop-when-idle", Action::Start).await.unwrap();
+        assert!(h.list().await[0].operator_notice.is_some());
+        let (journal, _) = crate::events::subscribe(crate::events::CAPACITY);
+        assert!(journal.iter().any(|e| e.code == crate::events::Code::PluginModeEnabled
+            && e.param("plugin") == Some("stop-when-idle") && e.param("max_connection_age") == Some("600")));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires compiled stop-when-idle WASM"]
+    async fn wasm_auto_sleep_notice_follows_the_loaded_slot() {
+        let control = StationControl::new_in_memory();
+        control.configure_connection_sampling(true);
+        let wasm = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("plugins/stop-when-idle-wasm/target/wasm32-unknown-unknown/release/stop_when_idle_wasm.wasm");
+        let mut cfg = toml::Table::new();
+        cfg.insert("max_connection_age".into(), toml::Value::String("10m".into()));
+        let mut d = decl("renamed-sleep-policy", true, cfg.clone());
+        d.wasm = Some(wasm.to_str().unwrap().into());
+        d.capabilities = vec![Capability::Control];
+        let h = spawn_env(vec![d.clone()], PluginEnv { control: Some(control.clone()), ..Default::default() });
+        let info = h.list().await;
+        assert_eq!(info[0].state, "loaded", "{}", info[0].reason);
+        assert_eq!(info[0].operator_notice, Some(OperatorNotice::AutoSleep { max_connection_age: Some(600) }));
+        assert_eq!(control.state(), crate::station_control::BroadcastState::Running);
+        h.control("renamed-sleep-policy", Action::Stop).await.unwrap();
+        assert!(h.list().await[0].operator_notice.is_none());
+        h.control("renamed-sleep-policy", Action::Reload).await.unwrap();
+        assert!(h.list().await[0].operator_notice.is_some());
+        let no_sampler = StationControl::new_in_memory();
+        let failed = spawn_env(vec![d], PluginEnv { control: Some(no_sampler), ..Default::default() });
+        let info = failed.list().await;
+        assert_eq!(info[0].state, "failed");
+        assert!(info[0].operator_notice.is_none());
     }
 
     #[test]

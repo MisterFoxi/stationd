@@ -48,6 +48,7 @@ pub fn to_proto(e: &Event) -> proto::Event {
         Code::AudienceUnknown => C::AudienceUnknown,
         Code::ConnectionStarted => C::ConnectionStarted,
         Code::ConnectionEnded => C::ConnectionEnded,
+        Code::PluginModeEnabled => C::PluginModeEnabled,
         Code::TrackChosen => C::TrackChosen,
         Code::OverridePushed => C::OverridePushed,
         Code::OverrideDropped => C::OverrideDropped,

@@ -1518,6 +1518,14 @@ async fn main() -> anyhow::Result<()> {
                     "{:<16} {:<12} {:<9} order={:<3} failures={}{caps}{reason}",
                     p.name, p.state, en, p.order, p.failures
                 );
+                if let Some(notice) = &p.operator_notice {
+                    if notice.code == plugin::operator_notice::Code::AutoSleep as i32 {
+                        match notice.max_connection_age {
+                            Some(age) => println!("  automatic sleep active: all connections >= {age}s"),
+                            None => println!("  automatic sleep active: zero listeners"),
+                        }
+                    }
+                }
             }
         }
         Command::Plugin(PluginCommand::Db { name, cmd }) => {
@@ -2188,6 +2196,14 @@ fn event_line(e: &events::Event, tz: &jiff::tz::TimeZone) -> String {
         .map(|at| at.to_zoned(tz.clone()).strftime("%Y-%m-%d %H:%M:%S").to_string())
         .unwrap_or_default();
     let what = match Code::try_from(e.code).unwrap_or(Code::Unspecified) {
+        Code::PluginModeEnabled if param("kind") == "auto_sleep" => {
+            let age = param("max_connection_age");
+            if age.is_empty() {
+                format!("{}: automatic sleep active (zero listeners)", param("plugin"))
+            } else {
+                format!("{}: automatic sleep active (all connections >= {age}s)", param("plugin"))
+            }
+        },
         Code::ConnectionStarted => format!("connection_started mount={} id={} start≈{} age={}s",
             param("mount"), param("id"), epoch_param("started_at"), param("connected_seconds")),
         Code::ConnectionEnded => format!("connection_ended mount={} id={} start≈{} last_seen={} duration≥{}s end_observed={}",
@@ -2293,7 +2309,7 @@ fn onair_note(n: &onair::Note, tz: &jiff::tz::TimeZone) -> String {
         Ok(C::StationPaused) => "station paused: nothing follows until it resumes".into(),
         Ok(C::StationSleeping) => "station asleep: nothing follows until it wakes".into(),
         Ok(C::SleepAtTrackEnd) => "falls asleep at the end of this track (0 listeners)".into(),
-        Ok(C::SleepArmed) => "sleep armed: the station stops as soon as nobody listens".into(),
+        Ok(C::SleepArmed) => "sleep armed: stops at a track boundary if the sleep conditions still hold".into(),
         Ok(C::LiveOnAir) => format!("DJ {} on air: what follows depends on the end of the live", n.dj),
         Ok(C::NoLiquidsoap) => "no [liquidsoap]: nothing airs; this is what the grid would pick".into(),
         Ok(C::Simulated) => "simulated: what the station will play if nothing changes meanwhile (an override, a live, a new grid, a rescan can change it)".into(),

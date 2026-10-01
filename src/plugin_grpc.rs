@@ -32,6 +32,12 @@ impl PluginGrpc {
 
 fn map_info(i: CoreInfo) -> PluginInfo {
     PluginInfo {
+        operator_notice: i.operator_notice.map(|notice| match notice {
+            crate::plugin::OperatorNotice::AutoSleep { max_connection_age } => plugin::OperatorNotice {
+                code: plugin::operator_notice::Code::AutoSleep as i32,
+                max_connection_age,
+            },
+        }),
         name: i.name,
         enabled: i.enabled,
         order: i.order,

@@ -11,6 +11,7 @@ mod action;
 mod agenda;
 mod app;
 mod banner;
+mod operator_notice;
 mod dialog;
 mod draft;
 mod fit;

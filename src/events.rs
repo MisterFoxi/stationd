@@ -64,6 +64,8 @@ pub enum Code {
     /// A connection disappeared from a successful poll. Same fields;
     /// last_seen_at..observed_at bounds its end; connected_seconds is a lower bound.
     ConnectionEnded,
+    /// Plugin published an active operating mode: plugin, kind, max_connection_age.
+    PluginModeEnabled,
     /// A track was chosen: `media` (empty on a fallback), `playlist`, `rule`,
     /// `origin`.
     TrackChosen,

@@ -11,6 +11,7 @@ use serde_json::{json, Value};
 extern "ExtismHost" {
     fn station_control(input: String) -> String;
     fn listener_connections(input: String) -> String;
+    fn operator_notice(input: String) -> String;
 }
 
 fn settings() -> FnResult<(u32, Option<u64>)> {
@@ -61,6 +62,12 @@ pub fn on_load(_input: String) -> FnResult<()> {
         // No persisted baseline after a load/reload: same conservative recovery
         // as the native plugin. Wake never overrides an operator's pause.
         control(json!({"action": "wake"}))?;
+    }
+    let notice: Value = serde_json::from_str(&unsafe {
+        operator_notice(json!({"kind": "auto_sleep", "max_connection_age": age}).to_string())?
+    })?;
+    if notice.get("ok") != Some(&Value::Bool(true)) {
+        return Err(Error::msg("stop-when-idle-wasm: operator notice refused").into());
     }
     Ok(())
 }

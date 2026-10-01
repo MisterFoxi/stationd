@@ -204,6 +204,16 @@ pub fn event_text(e: &JEvent) -> String {
         ),
         Code::Listeners => tr!("ev-listeners", count = p("count")),
         Code::AudienceUnknown => tr!("ev-audience-unknown"),
+        Code::PluginModeEnabled => {
+            let age = p("max_connection_age");
+            if age.is_empty() {
+                tr!("ev-auto-sleep-zero-enabled", plugin = p("plugin"))
+            } else {
+                let age = age.parse::<u64>().map(|seconds| crate::store::human_duration(
+                    std::time::Duration::from_secs(seconds))).unwrap_or(age);
+                tr!("ev-auto-sleep-age-enabled", plugin = p("plugin"), age = age)
+            }
+        },
         Code::ConnectionStarted => tr!("ev-connection-started",
             mount = p("mount"), id = p("id"), start = time("started_at"), age = p("connected_seconds")),
         Code::ConnectionEnded => tr!("ev-connection-ended",

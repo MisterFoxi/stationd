@@ -14,7 +14,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .protoc_arg("--experimental_allow_proto3_optional")
         .compile_protos(&["proto/library_v1.proto"], &["proto"])?;
     // The plugin service (list + lifecycle control).
-    tonic_build::compile_protos("proto/plugin_v1.proto")?;
+    tonic_build::configure()
+        .protoc_arg("--experimental_allow_proto3_optional")
+        .compile_protos(&["proto/plugin_v1.proto"], &["proto"])?;
     // The broadcast control service (state, overrides, listener injection).
     // Uses proto3 `optional` (listeners) → same flag as schedule_v1.
     tonic_build::configure()

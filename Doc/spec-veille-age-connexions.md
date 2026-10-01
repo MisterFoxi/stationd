@@ -137,3 +137,22 @@ La comparaison est faite par (mount, id), sans IP ni user-agent.
 Une connexion ouverte puis fermée entre deux relevés peut ne pas être vue.
 Le journal garde au maximum 2000 événements en mémoire et se vide au redémarrage.
 
+
+## Indication du mode actif
+
+Le chargement réussi du plugin publie une indication opérateur typée :
+« veille automatique active », avec le seuil d'âge ou la condition zéro auditeur.
+La TUI l'affiche dans son bandeau dès la première lecture de l'état des plugins,
+et dans l'écran Contrôle. Le journal contient aussi l'événement d'activation.
+`stationctl plugin list` expose cette indication.
+
+Cette indication reste présente tant que le plugin est chargé. Elle disparaît
+à l'arrêt du plugin, en cas d'échec ou de quarantaine. Elle est publiée par le
+plugin via la fonction hôte `operator_notice`, pas déduite de son nom, de son
+chemin WASM ou de sa configuration par le core ou la TUI.
+
+« Veille automatique active » signifie que la règle surveille les connexions.
+« Veille armée » correspond à DRAINING : les conditions ont été atteintes et
+le core attend un bord de piste où elles restent remplies. Le mode actif ne
+fait donc pas passer la station en DRAINING dès le chargement.
+

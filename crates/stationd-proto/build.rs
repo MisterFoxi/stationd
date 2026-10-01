@@ -10,7 +10,7 @@ const PROTOS: &[(&str, bool)] = &[
     ("station.proto", false),
     ("schedule_v1.proto", true),
     ("library_v1.proto", true),
-    ("plugin_v1.proto", false),
+    ("plugin_v1.proto", true),
     ("broadcast_v1.proto", true),
     ("liquidsoap_v1.proto", false),
     ("icecast_v1.proto", true),

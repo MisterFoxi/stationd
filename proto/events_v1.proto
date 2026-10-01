@@ -80,6 +80,7 @@ message Event {
     PLUGIN_STATE = 21;        // (plugin, state)
     BPM_ANALYZED = 22;        // (estimated, failed, failed_<decode|too_short|no_rhythm|weak|competing|disagree>)
     CONNECTION_STARTED = 24; // (mount, id, started_at, connected_seconds, last_seen_at, observed_at)
+    PLUGIN_MODE_ENABLED = 26; // (plugin, kind, max_connection_age)
     CONNECTION_ENDED = 25;   // same; end observed, duration lower bound
     OVERRIDE_DROPPED = 23;    // (media ou playlist, by, reason) — n'a pas pu passer, abandonné
   }

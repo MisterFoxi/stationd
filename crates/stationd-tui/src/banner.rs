@@ -36,8 +36,11 @@ pub fn render(area: Rect, buf: &mut Buffer, store: &Store, s: &Styles) {
     let mut segs: Vec<Vec<Span>> = vec![
         vec![Span::styled(format!(" {} ", fit::ellipsize(&name, 24)), s.title())],
         broadcast_state(store, now, s, narrow),
-        vec![listeners(store, now, s, narrow)],
     ];
+    for (_, mode) in crate::operator_notice::active(store, true) {
+        segs.push(vec![Span::styled(mode, s.warn())]);
+    }
+    segs.push(vec![listeners(store, now, s, narrow)]);
     if let Some(dj) = live_dj(store) {
         segs.push(vec![Span::styled(tr!("banner-live", dj = dj), s.warn())]);
     }

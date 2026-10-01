@@ -185,6 +185,12 @@ Une collecte inconnue empêche la veille et réveille une station endormie par c
 règle. Choisir un seuil compatible avec une journée entière d'écoute. Voir
 [la spécification](spec-veille-age-connexions.md).
 
+**Mode de veille visible.** Dès le chargement réussi du plugin, le bandeau
+de la TUI affiche la veille automatique active et son seuil, même en RUNNING.
+L'écran Contrôle et `plugin list` donnent le détail ; le journal affiche
+l'activation. L'indication disparaît si le plugin est arrêté ou en échec.
+« Veille armée » reste réservé à DRAINING, après satisfaction des conditions.
+
 **Suivi des connexions.** Avec `[icecast] listener_snapshots = true`,
 `make ctl A="events --last 20 --follow"` affiche `connection_started` et
 `connection_ended` (également dans le journal de la TUI). Début estimé d'après

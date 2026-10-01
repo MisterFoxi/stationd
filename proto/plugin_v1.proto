@@ -46,6 +46,18 @@ message PluginInfo {
   uint32 failures = 6;   // échecs récents (fenêtre glissante)
   // Capacités DÉCLARÉES (surface hôte autorisée) : control, push_override, db.
   repeated string capabilities = 7;
+  // Published by the plugin itself, only while loaded; no config/name inference.
+  OperatorNotice operator_notice = 8;
+}
+
+message OperatorNotice {
+  enum Code {
+    CODE_UNSPECIFIED = 0;
+    AUTO_SLEEP = 1;
+  }
+  Code code = 1;
+  // Absent: zero-listener policy. Present: connection-age threshold in seconds.
+  optional uint64 max_connection_age = 2;
 }
 
 message PluginControlRequest {

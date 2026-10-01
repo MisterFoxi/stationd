@@ -190,6 +190,9 @@ impl Controle {
             State::Unspecified => (tr!("state-unknown"), s.muted()),
         };
         lines.push(field(tr!("control-state"), Span::styled(txt, style), s));
+        for (plugin, mode) in crate::operator_notice::active(store, false) {
+            lines.push(Line::styled(format!("{plugin} : {mode}"), s.warn()));
+        }
         let listeners = match store.broadcast.value.as_ref().and_then(|b| b.listeners) {
             Some(n) => Span::raw(n.to_string()),
             None => Span::styled("—", s.muted()),
