@@ -244,7 +244,18 @@ pub fn save(
         {
             use std::os::{fd::AsRawFd, unix::fs::MetadataExt};
             if unsafe { libc::fchown(file.as_raw_fd(), metadata.uid(), metadata.gid()) } != 0 {
-                return Err("cannot preserve configuration ownership".into());
+                let error = std::io::Error::last_os_error();
+                // An administrator-owned file can be group-writable by stationd.
+                // An unprivileged writer cannot chown its temporary file back to
+                // that administrator. Keep the writer as owner in this case;
+                // retain the original group and restore permissions below.
+                if error.raw_os_error() != Some(libc::EPERM) {
+                    return Err("cannot preserve configuration ownership".into());
+                }
+                if unsafe { libc::fchown(file.as_raw_fd(), libc::uid_t::MAX, metadata.gid()) } != 0
+                {
+                    return Err("cannot preserve configuration group".into());
+                }
             }
         }
         file.set_permissions(permissions)
@@ -341,5 +352,69 @@ mod tests {
                 0o600
             );
         }
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "requires root to exercise saving as a different Unix owner"]
+    fn atomic_save_as_group_member_of_another_owner() {
+        use std::os::unix::{
+            fs::{MetadataExt, PermissionsExt},
+            process::CommandExt,
+        };
+        const CHILD_PATH: &str = "STATIOND_CONFIG_SAVE_TEST_PATH";
+        let original = b"[[plugin]]\nname = 'stop-when-idle'\n[plugin.config]\nmin_zero_samples = 1 # retained\n";
+        if let Some(path) = std::env::var_os(CHILD_PATH) {
+            assert_ne!(unsafe { libc::geteuid() }, 0);
+            let path = std::path::PathBuf::from(path);
+            let edits = vec![("min_zero_samples".into(), Some("4".into()))];
+            save(&path, original, "stop-when-idle", &edits, &stop_fields()).unwrap();
+            let metadata = std::fs::metadata(&path).unwrap();
+            assert_eq!(metadata.uid(), unsafe { libc::geteuid() });
+            assert_eq!(metadata.gid(), unsafe { libc::getegid() });
+            assert_eq!(metadata.mode() & 0o777, 0o660);
+            let saved = std::fs::read_to_string(path).unwrap();
+            assert!(saved.contains("min_zero_samples = 4 # retained"));
+            return;
+        }
+        assert_eq!(
+            unsafe { libc::geteuid() },
+            0,
+            "run this isolated test as root"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stationd.toml");
+        std::fs::write(&path, original).unwrap();
+        let set_group = |path: &Path| {
+            use std::os::unix::ffi::OsStrExt;
+            let path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+            assert_eq!(unsafe { libc::chown(path.as_ptr(), 0, 65534) }, 0);
+        };
+        set_group(dir.path());
+        set_group(&path);
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o770)).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o660)).unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "plugin_config::tests::atomic_save_as_group_member_of_another_owner",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env(CHILD_PATH, &path)
+            .uid(65534)
+            .gid(65534)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            1,
+            "no temporary file left behind"
+        );
     }
 }

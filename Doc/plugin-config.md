@@ -104,8 +104,13 @@ dans cet intervalle très court ne peut pas être exclue sans verrou partagé.
 
 Seul [plugin.config] du plugin ciblé est modifié, en préservant les paramètres
 inconnus, les autres sections, les commentaires des champs modifiés et les
-mode Unix et propriétaire/groupe du fichier. Écriture dans un fichier temporaire du même dossier,
-synchronisation et remplacement atomique. Le dossier doit être accessible
+mode Unix et groupe du fichier. Le propriétaire est conservé lorsque les droits
+Unix le permettent. Si le fichier appartient à un administrateur et que le daemon
+ne peut pas lui rendre le fichier temporaire, le fichier remplacé appartient au
+daemon ; son groupe et son mode restent identiques. Les administrateurs membres
+du groupe conservent donc leur accès en écriture. Écriture dans un fichier
+temporaire du même dossier, synchronisation et remplacement atomique.
+Le dossier doit être accessible
 en écriture au daemon. Utiliser les tables [plugin.config] ; les tables
 inline sont explicitement refusées. Le chemin de configuration est résolu
 au démarrage. Ajouter/supprimer des déclarations, modifier leurs capacités
