@@ -429,6 +429,16 @@ pub fn render(area: Rect, buf: &mut Buffer, state: &mut Scenery, ctx: &mut Globa
     Ok(())
 }
 
+/// Plain keys for plugin views: terminals such as VS Code can intercept F6.
+fn plugin_tab_direction(key: &KeyEvent) -> Option<bool> {
+    match (key.code, key.modifiers) {
+        (KeyCode::Tab | KeyCode::Char('n'), KeyModifiers::NONE) => Some(false),
+        (KeyCode::BackTab, KeyModifiers::NONE | KeyModifiers::SHIFT)
+        | (KeyCode::Char('p'), KeyModifiers::NONE) => Some(true),
+        _ => None,
+    }
+}
+
 fn cycle_screen(active: usize, count: usize, previous: bool) -> usize {
     if previous { (active + count - 1) % count } else { (active + 1) % count }
 }
@@ -651,6 +661,17 @@ pub fn event(event: &AppEvent, state: &mut Scenery, ctx: &mut Global) -> Result<
                     state.help_open = true;
                     return Ok(Control::Changed);
                 }
+                if state.screens[state.active].plugin_tab_key().is_some()
+                    && !state.screens[state.active].captures_text()
+                    && let Some(previous) = plugin_tab_direction(k)
+                {
+                    let count = state.screens.len() - screens::BUILTIN_COUNT;
+                    state.active = screens::BUILTIN_COUNT
+                        + cycle_screen(state.active - screens::BUILTIN_COUNT, count, previous);
+                    state.status.status(1, tr!("status-screen", screen = state.screens[state.active].title()));
+                    state.active().enter(ctx)?;
+                    return Ok(Control::Changed);
+                }
                 if !state.screens[state.active].captures_text()
                     && ((k.modifiers == KeyModifiers::CONTROL && matches!(k.code, KeyCode::PageUp | KeyCode::PageDown))
                         || (k.code == KeyCode::F(6) && (k.modifiers.is_empty() || k.modifiers == KeyModifiers::SHIFT)))
@@ -735,6 +756,32 @@ mod plugin_tab_tests {
         state.sync_plugin_tabs(&mut ctx).unwrap();
         assert_eq!(state.active, screens::PLUGINS);
     }
+    #[tokio::test]
+    async fn plugin_navigation_keys_reach_the_event_handler_and_wrap_between_views() {
+        let args = crate::Args { addr: "http://127.0.0.1:50051".into(), lang: None, theme: "Imperial".into(), list_themes: false };
+        let channel = rpc::lazy_channel(&args.addr).unwrap();
+        let mut ctx = Global::new(&args, channel.clone(), channel);
+        let mut state = Scenery::new();
+        let mut audience = plugin("listener-stats", "Audience");
+        audience.tabs.push(PluginTab { id: "geography".into(), title: "Géographie".into(), ..Default::default() });
+        ctx.store.plugins.value = Some(vec![audience, plugin("play-stats", "Diffusions")]);
+        state.sync_plugin_tabs(&mut ctx).unwrap();
+        state.active = screens::BUILTIN_COUNT;
+        for (code, modifiers, index) in [
+            (KeyCode::Tab, KeyModifiers::NONE, 9),
+            (KeyCode::Char('n'), KeyModifiers::NONE, 10),
+            (KeyCode::Char('n'), KeyModifiers::NONE, 8),
+            (KeyCode::BackTab, KeyModifiers::SHIFT, 10),
+            (KeyCode::Char('p'), KeyModifiers::NONE, 9),
+            (KeyCode::F(6), KeyModifiers::NONE, 10),
+        ] {
+            let key = AppEvent::Event(Event::Key(KeyEvent::new(code, modifiers)));
+            let _ = event(&key, &mut state, &mut ctx).unwrap();
+            assert_eq!(state.active, index, "{code:?} {modifiers:?}");
+        }
+        assert_eq!(plugin_tab_direction(&KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL)), None);
+    }
+
     #[test]
     fn tab_navigation_wraps_beyond_digit_shortcuts() {
         assert_eq!(cycle_screen(12, 13, false), 0);

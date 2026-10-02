@@ -62,6 +62,9 @@ Entrée ouvre leur première vue ; `s/x/r/l` contrôlent leur cycle de vie.
 - `F6` / `Maj+F6`, ou `Ctrl+PgDown` / `Ctrl+PgUp` : suivant / précédent,
   avec retour au début/à la fin. Les modales et champs de saisie gardent la main.
 - Barre d'onglets : fenêtre autour de l'écran actif avec flèches de débordement.
+- Dans les vues de plugins, Tab / n passe à la vue suivante, Maj+Tab / p revient
+  à la précédente ; la navigation boucle entre les vues des plugins. Ces touches
+  servent aussi dans les terminaux qui interceptent F6 (notamment VS Code).
 - Vue : haut/bas, Home/End pour les lignes ; gauche/droite pour les colonnes ;
   `r` pour actualiser.
 - Actualisation toutes les cinq secondes pour la vue active, une requête

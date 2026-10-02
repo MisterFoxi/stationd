@@ -33,6 +33,8 @@ pub fn declared_tabs(plugins: &[PluginInfo]) -> Vec<(String, PluginTab)> {
 }
 
 const TABLE_KEYS: &[KeyHelp] = &[
+    (k!("key-plugin-next"), k!("help-plugin-next")),
+    (k!("key-plugin-previous"), k!("help-plugin-previous")),
     (k!("key-up-down"), k!("help-select")),
     (k!("key-plugin-columns"), k!("help-plugin-columns")),
     (k!("key-r"), k!("help-reload")),

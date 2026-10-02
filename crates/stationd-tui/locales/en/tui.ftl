@@ -1247,3 +1247,8 @@ plugins-loading = Loading…
 plugins-row-count = { $count } rows · refresh every 5 s
 plugins-empty = No data for this view
 key-plugin-columns = ← / →
+
+key-plugin-next = Tab / n
+key-plugin-previous = Shift+Tab / p
+help-plugin-next = Next view
+help-plugin-previous = Previous view

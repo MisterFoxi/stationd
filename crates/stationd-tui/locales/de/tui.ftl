@@ -1251,3 +1251,8 @@ plugins-loading = Laden…
 plugins-row-count = { $count } Zeilen · Aktualisierung alle 5 s
 plugins-empty = Keine Daten für diese Ansicht
 key-plugin-columns = ← / →
+
+key-plugin-next = Tab / n
+key-plugin-previous = Umschalt+Tab / p
+help-plugin-next = Nächste Ansicht
+help-plugin-previous = Vorherige Ansicht
