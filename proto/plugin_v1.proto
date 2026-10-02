@@ -19,6 +19,8 @@ service PluginService {
 
   // Applique une action de cycle de vie à un plugin et renvoie son nouvel état.
   rpc Control(PluginControlRequest) returns (PluginControlResponse);
+  // Read a declared table; no client-supplied SQL.
+  rpc ReadTab(PluginReadTabRequest) returns (PluginDbQueryResponse);
 
   // Base propre d'un plugin (capacité `db`, cf. Doc/plugin-host.md). Lectures
   // sur une connexion séparée en lecture seule ; le plugin n'est pas touché.
@@ -48,6 +50,7 @@ message PluginInfo {
   repeated string capabilities = 7;
   // Published by the plugin itself, only while loaded; no config/name inference.
   OperatorNotice operator_notice = 8;
+  repeated PluginTab tabs = 9;
 }
 
 message OperatorNotice {
@@ -127,4 +130,14 @@ message PluginDbResetRequest {
 
 message PluginDbResetResponse {
   bool removed = 1;   // false = il n'y avait pas de fichier
+}
+
+message PluginTab {
+  string id = 1; // Identity = (plugin name, tab id), stable across reload.
+  string title = 2;
+  string description = 3;
+}
+message PluginReadTabRequest {
+  string name = 1;
+  string tab_id = 2;
 }

@@ -7,7 +7,7 @@ mod editor;
 pub(crate) mod medias;
 mod ops;
 pub(crate) mod picker;
-mod planned;
+mod plugin_tabs;
 mod playlists;
 mod ruleform;
 mod systeme;
@@ -17,9 +17,8 @@ mod typepick;
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::k;
 use crate::screen::Screen;
-use planned::Planned;
+pub use plugin_tabs::{Catalog, PluginTable, declared_tabs};
 pub use agenda::AgEvent;
 pub use ruleform::diag_text as grid_diag_text;
 pub use playlists::PlEvent;
@@ -28,6 +27,8 @@ pub use tags::TagsEvent;
 
 /// Rang de l'écran Playlists dans le registre (ouvert depuis Médias).
 pub const PLAYLISTS: usize = 2;
+pub const PLUGINS: usize = 7;
+pub const BUILTIN_COUNT: usize = 8;
 
 /// Identifiant unique d'un demandeur (écran, sélecteur, éditeur) : ses
 /// réponses ne sont prises par personne d'autre.
@@ -45,12 +46,7 @@ pub fn registry() -> Vec<Box<dyn Screen>> {
         Box::new(medias::Medias::default()),
         Box::new(tags::Tags::default()),
         Box::new(systeme::Systeme::default()),
-        Box::new(Planned {
-            title: k!("screen-plugins"),
-            lot: 8,
-            summary: &[k!("planned-plugins-1"), k!("planned-plugins-2")],
-            plugin: None,
-        }),
+        Box::new(Catalog::default()),
     ]
 }
 

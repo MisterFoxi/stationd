@@ -243,3 +243,8 @@ attendre sqlx). Démo : `plugins/play-stats-wasm`.
 
 - **Persistance de la file d'override** si un cas réel l'exige (aujourd'hui la
   péremption rend la perte au redémarrage acceptable).
+
+## Interface du plugin
+
+Un plugin peut déclarer ses propres onglets de tableaux dans la TUI :
+voir [plugin-ui.md](plugin-ui.md) pour l'export facultatif ui_tabs et le RPC ReadTab.

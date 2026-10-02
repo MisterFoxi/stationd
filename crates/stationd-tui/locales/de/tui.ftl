@@ -168,8 +168,6 @@ planned-coming = Demnächst
 planned-lot = Paket { $lot }
 planned-plugin-missing = Plugin „{ $plugin }“ nicht geladen
 planned-unavailable = Nicht verfügbar: { $reason }
-planned-plugins-1 = Von geladenen Plugins deklarierte Ansichten
-planned-plugins-2 = Datenbank jedes Plugins (Info, Nur-Lese-Abfrage)
 
 ## Rasterstörungen (Sendehinweise)
 note-rendezvous-will-not-cut = erwartet: Termin { $rule } um { $time } schneidet nicht — „{ $playlist }“ hat nichts zu senden
@@ -1240,3 +1238,16 @@ mode-auto-sleep-zero = Automatische Ruhe aktiv: bei null Hörern
 mode-unknown = Unbekannter Betriebsmodus
 ev-auto-sleep-age-enabled = { $plugin }: automatische Ruhe aktiviert, wenn alle Verbindungen mindestens { $age } alt sind
 ev-auto-sleep-zero-enabled = { $plugin }: automatische Ruhe bei null Hörern aktiviert
+
+key-cycle-tabs = F6 / Umschalt+F6
+help-cycle-tabs = Nächster / vorheriger Tab
+help-plugin-columns = Spalten verschieben
+help-plugin-open = Plugin-Ansicht öffnen
+plugins-directory = Von Plugins deklarierte Ansichten. Eingabe öffnet die erste Ansicht; F6 wechselt die Tabs.
+plugins-capabilities = Fähigkeiten
+plugins-tabs = Tabs
+plugins-stale = Veraltet / nicht verfügbar
+plugins-loading = Laden…
+plugins-row-count = { $count } Zeilen · Aktualisierung alle 5 s
+plugins-empty = Keine Daten für diese Ansicht
+key-plugin-columns = ← / →

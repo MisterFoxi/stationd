@@ -67,3 +67,14 @@ pub fn on_event(input: String) -> FnResult<()> {
     }
     Ok(())
 }
+
+/// Declarative UI owned by this plugin, discovered by any compatible TUI.
+#[plugin_fn]
+pub fn ui_tabs() -> FnResult<String> {
+    Ok(json!([{
+        "id": "plays",
+        "title": "Diffusions",
+        "description": "Passages par média · dernière diffusion en UTC",
+        "sql": "SELECT media AS Media, plays AS Passages, datetime(last_at, 'unixepoch') AS Dernier_UTC FROM play_count ORDER BY plays DESC, media LIMIT 200"
+    }]).to_string())
+}

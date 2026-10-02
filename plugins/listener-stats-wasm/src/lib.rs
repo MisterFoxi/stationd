@@ -47,3 +47,22 @@ pub fn on_event(input: String) -> FnResult<()> {
     }
     Ok(())
 }
+
+/// Generic table tabs; stationd and its TUI know none of these table names.
+#[plugin_fn]
+pub fn ui_tabs() -> FnResult<String> {
+    Ok(serde_json::json!([
+        {
+            "id": "audience",
+            "title": "Audience",
+            "description": "Derniers relevés · NULL signifie collecte inconnue · horaires UTC",
+            "sql": "SELECT mount AS Mount, datetime(at, 'unixepoch') AS UTC, listeners AS Auditeurs FROM listener_snapshot ORDER BY at DESC, mount LIMIT 200"
+        },
+        {
+            "id": "geography",
+            "title": "Géographie",
+            "description": "Répartition au dernier relevé de chaque mount · pays et régions inconnus conservés",
+            "sql": "SELECT mount AS Mount, status AS Statut, country AS Pays, region AS Region, city AS Ville, listeners AS Auditeurs FROM listener_geo AS g WHERE at = (SELECT MAX(at) FROM listener_snapshot AS s WHERE s.mount = g.mount) ORDER BY listeners DESC, mount, country, region, city LIMIT 200"
+        }
+    ]).to_string())
+}

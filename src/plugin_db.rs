@@ -808,6 +808,11 @@ pub fn inspect(path: &Path) -> Result<Option<DbInspect>, DbError> {
 /// <name> query`), on a separate read-only connection, under the plugin's
 /// confinement and row cap (admin time bound: 10 s).
 pub fn query_file(path: &Path, sql: &str, max_rows: u32) -> Result<Rows, DbError> {
+    query_file_bounded(path, sql, max_rows, ADMIN_TIMEOUT.as_millis() as u32)
+}
+
+/// UI reads use their own deadline while keeping the CLI's existing 10 s limit.
+pub fn query_file_bounded(path: &Path, sql: &str, max_rows: u32, timeout_ms: u32) -> Result<Rows, DbError> {
     if !path.exists() {
         return Err(DbError::Open {
             path: path.display().to_string(),
@@ -815,8 +820,10 @@ pub fn query_file(path: &Path, sql: &str, max_rows: u32) -> Result<Rows, DbError
         });
     }
     let (conn, guard) = open_read_only(path)?;
-    let timeout_ms = ADMIN_TIMEOUT.as_millis() as u32;
-    *guard.deadline.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now() + ADMIN_TIMEOUT);
+    let timeout = Duration::from_millis(timeout_ms.into());
+    conn.busy_timeout(timeout.min(Duration::from_secs(2)))
+        .map_err(|e| DbError::Sql(e.to_string()))?;
+    *guard.deadline.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now() + timeout);
     guard.plugin_sql.store(true, Ordering::SeqCst);
     run_query(&conn, sql, &Params::default(), max_rows).map_err(|e| match e {
         StmtError::Sql(e) => map_sql_error(&guard, timeout_ms, e),

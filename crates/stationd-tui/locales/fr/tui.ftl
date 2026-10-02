@@ -168,8 +168,6 @@ planned-coming = À venir
 planned-lot = lot { $lot }
 planned-plugin-missing = plugin « { $plugin } » non chargé
 planned-unavailable = Indisponible : { $reason }
-planned-plugins-1 = Vues déclarées par les plugins chargés
-planned-plugins-2 = Base de chaque plugin (info, requête en lecture seule)
 
 ## Incidents de grille (notes de l'antenne)
 note-rendezvous-will-not-cut = prévu : le rendez-vous { $rule } de { $time } ne coupera pas — « { $playlist } » n'a rien à diffuser
@@ -1246,3 +1244,16 @@ mode-auto-sleep-zero = Veille automatique active : dès zéro auditeur
 mode-unknown = Mode opérateur inconnu
 ev-auto-sleep-age-enabled = { $plugin } : veille automatique activée, toutes les connexions doivent avoir au moins { $age }
 ev-auto-sleep-zero-enabled = { $plugin } : veille automatique activée dès zéro auditeur
+
+key-cycle-tabs = F6 / Maj+F6
+help-cycle-tabs = Onglet suivant / précédent
+help-plugin-columns = Faire défiler les colonnes
+help-plugin-open = Ouvrir la vue du plugin
+plugins-directory = Vues déclarées par les plugins. Entrée ouvre la première vue ; F6 parcourt tous les onglets.
+plugins-capabilities = Capacités
+plugins-tabs = Onglets
+plugins-stale = Données anciennes / indisponibles
+plugins-loading = Chargement…
+plugins-row-count = { $count } lignes · actualisation toutes les 5 s
+plugins-empty = Aucune donnée pour cette vue
+key-plugin-columns = ← / →

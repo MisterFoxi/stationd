@@ -32,6 +32,9 @@ impl PluginGrpc {
 
 fn map_info(i: CoreInfo) -> PluginInfo {
     PluginInfo {
+        tabs: i.tabs.into_iter().map(|t| plugin::PluginTab {
+            id: t.id, title: t.title, description: t.description,
+        }).collect(),
         operator_notice: i.operator_notice.map(|notice| match notice {
             crate::plugin::OperatorNotice::AutoSleep { max_connection_age } => plugin::OperatorNotice {
                 code: plugin::operator_notice::Code::AutoSleep as i32,
@@ -113,6 +116,20 @@ impl PluginService for PluginGrpc {
             .map_err(Status::not_found)?;
         Ok(Response::new(PluginControlResponse {
             plugin: Some(map_info(info)),
+        }))
+    }
+
+    async fn read_tab(
+        &self,
+        request: Request<plugin::PluginReadTabRequest>,
+    ) -> Result<Response<PluginDbQueryResponse>, Status> {
+        let req = request.into_inner();
+        let rows = self.handle.read_tab(&req.name, &req.tab_id).await.map_err(db_status)?;
+        Ok(Response::new(PluginDbQueryResponse {
+            columns: rows.columns,
+            rows: rows.rows.into_iter().map(|r| PluginDbRow {
+                values: r.into_iter().map(map_value).collect(),
+            }).collect(),
         }))
     }
 

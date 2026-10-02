@@ -38,6 +38,7 @@ const MIN_H: u16 = 24;
 /// Touches communes à tous les écrans (hors saisie).
 const GLOBAL_KEYS: &[KeyHelp] = &[
     (k!("key-digits"), k!("help-switch-screen")),
+    (k!("key-cycle-tabs"), k!("help-cycle-tabs")),
     (k!("key-help"), k!("help-screen-help")),
     (k!("key-quit"), k!("help-quit")),
     (k!("key-force-quit"), k!("help-force-quit")),
@@ -166,6 +167,7 @@ pub enum AppEvent {
     /// Écrans Tags et Système : réponses (voir `screens::tags`, `screens::systeme`).
     Tags(Box<crate::screens::TagsEvent>),
     System(Box<crate::screens::SysEvent>),
+    PluginTable(u64, u64, crate::rpc::Read<stationd_proto::plugin::PluginDbQueryResponse>),
 }
 
 impl From<RenderedEvent> for AppEvent {
@@ -189,6 +191,7 @@ impl From<Event> for AppEvent {
 /// État de l'interface.
 pub struct Scenery {
     screens: Vec<Box<dyn Screen>>,
+    plugin_tabs: Vec<(String, stationd_proto::plugin::PluginTab)>,
     active: usize,
     help_open: bool,
     /// stationd s'arrête à notre demande : la perte de liaison est attendue.
@@ -204,6 +207,7 @@ impl Scenery {
     pub fn new() -> Self {
         Self {
             screens: screens::registry(),
+            plugin_tabs: Vec::new(),
             active: 0,
             help_open: false,
             expect_exit: false,
@@ -211,6 +215,28 @@ impl Scenery {
             clock: None,
             modal: None,
         }
+    }
+
+    fn sync_plugin_tabs(&mut self, ctx: &mut Global) -> Result<(), Error> {
+        let desired = screens::declared_tabs(ctx.store.plugins.value.as_deref().unwrap_or_default());
+        if desired == self.plugin_tabs { return Ok(()); }
+        let key = self.screens[self.active].plugin_tab_key();
+        let mut old = self.screens.split_off(screens::BUILTIN_COUNT);
+        for (name, tab) in &desired {
+            let keep = self.plugin_tabs.iter().position(|(n, t)| n == name && t == tab);
+            let screen = keep.and_then(|i| {
+                let key = self.plugin_tabs[i].clone();
+                old.iter().position(|s| s.plugin_tab_key() == Some((key.0.clone(), key.1.id.clone())))
+                    .map(|i| old.remove(i))
+            }).unwrap_or_else(|| Box::new(screens::PluginTable::new(name.clone(), tab.clone())));
+            self.screens.push(screen);
+        }
+        self.plugin_tabs = desired;
+        if let Some(key) = key {
+            self.active = self.screens.iter().position(|s| s.plugin_tab_key().as_ref() == Some(&key)).unwrap_or(screens::PLUGINS);
+            self.active().enter(ctx)?;
+        }
+        Ok(())
     }
 
     fn active(&mut self) -> &mut dyn Screen {
@@ -403,39 +429,39 @@ pub fn render(area: Rect, buf: &mut Buffer, state: &mut Scenery, ctx: &mut Globa
     Ok(())
 }
 
-fn render_tabs(area: Rect, buf: &mut Buffer, state: &Scenery, ctx: &Global) {
-    let s = Styles(&ctx.theme);
-    // Trois densités, de la plus lisible à la plus compacte : titres complets
-    // espacés, titres complets serrés, titres abrégés (sauf l'onglet actif).
-    for density in 0..3 {
-        let mut spans = vec![Span::raw(" ")];
-        for (i, screen) in state.screens.iter().enumerate() {
-            let active = i == state.active;
-            let available = screen.availability(&ctx.store) == Availability::Available;
-            let (key_style, title_style) = if active {
-                (s.tab_active(), s.tab_active())
-            } else if !available {
-                (s.tab_unavailable(), s.tab_unavailable())
-            } else {
-                (s.tab_key(), s.tab())
-            };
-            let title = match density {
-                2 if !active => screen.title().chars().take(4).collect::<String>(),
-                _ => screen.title(),
-            };
-            spans.push(Span::styled(format!(" {} ", i + 1), key_style));
-            spans.push(Span::styled(format!("{title} "), title_style));
-            if density == 0 {
-                spans.push(Span::raw(" "));
-            }
-        }
-        if density == 2 || fit::width(&spans) <= area.width as usize {
-            Paragraph::new(Line::from(spans)).style(s.base()).render(area, buf);
-            return;
-        }
-    }
+fn cycle_screen(active: usize, count: usize, previous: bool) -> usize {
+    if previous { (active + count - 1) % count } else { (active + 1) % count }
 }
 
+fn render_tabs(area: Rect, buf: &mut Buffer, state: &Scenery, ctx: &Global) {
+    let s = Styles(&ctx.theme);
+    let labels: Vec<String> = state.screens.iter().enumerate().map(|(i, screen)| {
+        if i < 9 { format!(" {} {} ", i + 1, screen.title()) } else { format!(" {} ", screen.title()) }
+    }).collect();
+    // Keep the active tab visible at any terminal width, with overflow markers.
+    let mut start = state.active;
+    let mut end = state.active + 1;
+    let mut width = ratatui_core::text::Span::raw(&labels[state.active]).width() + 4;
+    while start > 0 {
+        let extra = ratatui_core::text::Span::raw(&labels[start - 1]).width();
+        if width + extra > area.width as usize { break; }
+        start -= 1; width += extra;
+    }
+    while end < labels.len() {
+        let extra = ratatui_core::text::Span::raw(&labels[end]).width();
+        if width + extra > area.width as usize { break; }
+        end += 1; width += extra;
+    }
+    let mut spans = vec![Span::styled(if start > 0 { "‹ " } else { "  " }, s.muted())];
+    for (i, label) in labels.iter().enumerate().take(end).skip(start) {
+        let style = if i == state.active { s.tab_active() }
+            else if state.screens[i].availability(&ctx.store) != Availability::Available { s.tab_unavailable() }
+            else { s.tab() };
+        spans.push(Span::styled(label.clone(), style));
+    }
+    if end < labels.len() { spans.push(Span::styled(" ›", s.muted())); }
+    Paragraph::new(Line::from(spans)).style(s.base()).render(area, buf);
+}
 /// Raccourcis de l'écran puis raccourcis globaux, tant qu'ils tiennent
 /// entiers (un raccourci à moitié affiché ne sert à rien).
 fn render_keys(area: Rect, buf: &mut Buffer, screen_keys: &[KeyHelp], s: &Styles) {
@@ -493,11 +519,20 @@ fn press(e: &Event) -> Option<&KeyEvent> {
 
 pub fn event(event: &AppEvent, state: &mut Scenery, ctx: &mut Global) -> Result<Control<AppEvent>, Error> {
     match event {
-        AppEvent::Timer(t) if Some(t.handle) == state.clock => return Ok(Control::Changed),
+        AppEvent::Timer(t) if Some(t.handle) == state.clock => {
+            let _ = state.active().event(event, ctx)?;
+            return Ok(Control::Changed);
+        }
+        AppEvent::PluginTable(..) => {
+            // Deliver replies even to inactive tabs; no stranded in-flight requests.
+            for screen in &mut state.screens { let _ = screen.event(event, ctx)?; }
+            return Ok(Control::Changed);
+        }
         AppEvent::Timer(_) => {}
         AppEvent::Banner(read) => {
             let was = ctx.store.link.clone();
             let ok = ctx.store.apply_banner((**read).clone());
+            state.sync_plugin_tabs(ctx)?;
             let was_lost = matches!(was, crate::store::Link::Lost { .. });
             if ok && was != ctx.store.link {
                 state.expect_exit = false;
@@ -616,6 +651,16 @@ pub fn event(event: &AppEvent, state: &mut Scenery, ctx: &mut Global) -> Result<
                     state.help_open = true;
                     return Ok(Control::Changed);
                 }
+                if !state.screens[state.active].captures_text()
+                    && ((k.modifiers == KeyModifiers::CONTROL && matches!(k.code, KeyCode::PageUp | KeyCode::PageDown))
+                        || (k.code == KeyCode::F(6) && (k.modifiers.is_empty() || k.modifiers == KeyModifiers::SHIFT)))
+                {
+                    let previous = k.code == KeyCode::PageUp || k.modifiers == KeyModifiers::SHIFT;
+                    state.active = cycle_screen(state.active, state.screens.len(), previous);
+                    state.status.status(1, tr!("status-screen", screen = state.screens[state.active].title()));
+                    state.active().enter(ctx)?;
+                    return Ok(Control::Changed);
+                }
                 if !state.screens[state.active].captures_text() && k.modifiers.is_empty() {
                     match k.code {
                         KeyCode::Char('q') => return Ok(Control::Quit),
@@ -660,4 +705,59 @@ pub fn event(event: &AppEvent, state: &mut Scenery, ctx: &mut Global) -> Result<
         return Ok(Control::Changed);
     }
     Ok(r)
+}
+
+#[cfg(test)]
+mod plugin_tab_tests {
+    use super::*;
+    use stationd_proto::plugin::{PluginInfo, PluginTab};
+    fn plugin(name: &str, title: &str) -> PluginInfo {
+        PluginInfo { name: name.into(), state: "disabled".into(),
+            tabs: vec![PluginTab { id: "table".into(), title: title.into(), ..Default::default() }],
+            ..Default::default() }
+    }
+    #[tokio::test]
+    async fn dynamic_tabs_preserve_active_identity_on_reorder_and_return_to_catalog_on_removal() {
+        let args = crate::Args { addr: "http://127.0.0.1:50051".into(), lang: None, theme: "Imperial".into(), list_themes: false };
+        let channel = rpc::lazy_channel(&args.addr).unwrap();
+        let mut ctx = Global::new(&args, channel.clone(), channel);
+        let mut state = Scenery::new();
+        assert_eq!(state.screens.len(), screens::BUILTIN_COUNT);
+        ctx.store.plugins.value = Some(vec![plugin("a", "A"), plugin("b", "B")]);
+        state.sync_plugin_tabs(&mut ctx).unwrap();
+        state.active = screens::BUILTIN_COUNT + 1;
+        let key = state.screens[state.active].plugin_tab_key();
+        ctx.store.plugins.value.as_mut().unwrap().reverse();
+        state.sync_plugin_tabs(&mut ctx).unwrap();
+        assert_eq!(state.active, screens::BUILTIN_COUNT);
+        assert_eq!(state.screens[state.active].plugin_tab_key(), key);
+        ctx.store.plugins.value = Some(vec![plugin("a", "A")]);
+        state.sync_plugin_tabs(&mut ctx).unwrap();
+        assert_eq!(state.active, screens::PLUGINS);
+    }
+    #[test]
+    fn tab_navigation_wraps_beyond_digit_shortcuts() {
+        assert_eq!(cycle_screen(12, 13, false), 0);
+        assert_eq!(cycle_screen(0, 13, true), 12);
+        assert_eq!(cycle_screen(9, 13, false), 10);
+    }
+    #[test]
+    fn narrow_tab_bar_keeps_the_active_plugin_visible() {
+        let args = crate::Args { addr: "".into(), lang: None, theme: "Imperial".into(), list_themes: false };
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let channel = rpc::lazy_channel("http://127.0.0.1:50051").unwrap();
+        let mut ctx = Global::new(&args, channel.clone(), channel);
+        let mut state = Scenery::new();
+        state.screens.push(Box::new(screens::PluginTable::new("stats".into(),
+            PluginTab { id: "x".into(), title: "Audience".into(), ..Default::default() })));
+        state.active = screens::BUILTIN_COUNT;
+        ctx.store.plugins.value = Some(vec![PluginInfo { name: "stats".into(), ..Default::default() }]);
+        let area = Rect::new(0, 0, 80, 1);
+        let mut buf = Buffer::empty(area);
+        render_tabs(area, &mut buf, &state, &ctx);
+        let text: String = (0..80).map(|x| buf[(x, 0)].symbol()).collect();
+        assert!(text.contains("Audience"), "{text}");
+        assert!(text.contains('‹'));
+    }
 }

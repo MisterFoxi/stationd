@@ -105,6 +105,10 @@ pub struct ScanEnrichment {
 /// A2 adds the synchronous hooks: `filter_pool` (influences the decision) and
 /// `on_scan` (enriches the library scan).
 pub trait Plugin: Send {
+    /// Optional tabs discovered once after on_load, without write access.
+    fn ui_tabs(&mut self) -> Result<Vec<crate::plugin_ui::UiTab>, String> {
+        Ok(Vec::new())
+    }
     /// Stable name (matches the declaration). Identity for `plugin list`.
     fn name(&self) -> &str;
 
@@ -627,6 +631,7 @@ pub enum OperatorNotice {
 #[derive(Debug, Clone)]
 pub struct PluginInfo {
     pub operator_notice: Option<OperatorNotice>,
+    pub tabs: Vec<crate::plugin_ui::UiTab>,
     pub name: String,
     pub enabled: bool,
     pub order: u32,
@@ -651,6 +656,7 @@ pub enum Action {
 // ---------------------------------------------------------------------------
 
 struct Slot {
+    tabs: Vec<crate::plugin_ui::UiTab>,
     decl: PluginDecl,
     state: PluginState,
     plugin: Option<Box<dyn Plugin>>,
@@ -667,6 +673,7 @@ impl Slot {
             _ => self.failures.len() as u32,
         };
         PluginInfo {
+            tabs: self.tabs.clone(),
             operator_notice: if matches!(self.state, PluginState::Loaded) {
                 self.host.as_ref().and_then(Host::operator_notice)
             } else { None },
@@ -751,8 +758,17 @@ impl Slot {
     /// Run `on_load` with the host surface; `Loaded` or `Failed`.
     fn load(&mut self, mut plugin: Box<dyn Plugin>, host: Host) {
         let kept = host.clone();
-        match catch(|| plugin.on_load(host)) {
-            Ok(Ok(())) => {
+        let loaded = catch(|| plugin.on_load(host)).and_then(|r| r).and_then(|()| {
+            kept.set_simulating(true);
+            let result = catch(|| plugin.ui_tabs()).and_then(|r| r);
+            kept.set_simulating(false);
+            let tabs = result?;
+            crate::plugin_ui::validate(&tabs, self.decl.has_db())?;
+            Ok(tabs)
+        });
+        match loaded {
+            Ok(tabs) => {
+                self.tabs = tabs;
                 self.host = Some(kept);
                 self.plugin = Some(plugin);
                 self.state = PluginState::Loaded;
@@ -768,7 +784,8 @@ impl Slot {
                         ]);
                 }
             }
-            Ok(Err(reason)) | Err(reason) => {
+            Err(reason) => {
+                let _ = catch(|| plugin.on_unload());
                 self.plugin = None;
                 self.state = PluginState::Failed { phase: Phase::Load, reason };
             }
@@ -862,6 +879,11 @@ fn build_plugin(decl: &PluginDecl, host: &Host) -> Result<Box<dyn Plugin>, Strin
 // ---------------------------------------------------------------------------
 
 enum Msg {
+    TabLocate {
+        name: String,
+        tab_id: String,
+        reply: oneshot::Sender<Result<(DbLocation, String), DbAdminError>>,
+    },
     List(oneshot::Sender<Vec<PluginInfo>>),
     AnalyzeMissingBpm(oneshot::Sender<Option<Result<(f64, f64), String>>>),
     TagHints(oneshot::Sender<TagHints>),
@@ -1050,6 +1072,19 @@ impl PluginHandle {
         rx.await.unwrap_or_default()
     }
 
+    /// SQL stays server-side; only declared tabs of loaded plugins are readable.
+    pub async fn read_tab(&self, name: &str, tab_id: &str) -> Result<Rows, DbAdminError> {
+        let (reply, rx) = oneshot::channel();
+        let gone = || DbAdminError::Precondition("plugin actor is no longer running".into());
+        self.tx.send(Msg::TabLocate { name: name.into(), tab_id: tab_id.into(), reply })
+            .await.map_err(|_| gone())?;
+        let (loc, sql) = rx.await.map_err(|_| gone())??;
+        tokio::task::spawn_blocking(move || {
+            plugin_db::query_file_bounded(&loc.path, &sql, loc.limits.max_rows.min(1000), loc.limits.query_timeout_ms.min(1000))
+        }).await.map_err(|e| DbAdminError::Db(DbError::Sql(e.to_string())))?
+            .map_err(DbAdminError::Db)
+    }
+
     async fn db_locate(&self, name: &str) -> Result<DbLocation, DbAdminError> {
         let (reply, rx) = oneshot::channel();
         let gone = || DbAdminError::Precondition("plugin actor is no longer running".into());
@@ -1133,7 +1168,7 @@ pub fn spawn_env(mut decls: Vec<PluginDecl>, env: PluginEnv) -> PluginHandle {
     let mut slots: Vec<Slot> = decls
         .into_iter()
         .map(|decl| {
-            let mut slot = Slot {
+            let mut slot = Slot { tabs: Vec::new(),
                 decl,
                 state: PluginState::Disabled,
                 plugin: None,
@@ -1193,6 +1228,9 @@ pub fn spawn_env(mut decls: Vec<PluginDecl>, env: PluginEnv) -> PluginHandle {
                     };
                     let _ = reply.send(res);
                 }
+                Msg::TabLocate { name, tab_id, reply } => {
+                    let _ = reply.send(tab_location(&slots, &name, &tab_id, &env));
+                }
                 Msg::DbLocate { name, reply } => {
                     let _ = reply.send(db_location(&slots, &name, &env).map(|(_, loc)| loc));
                 }
@@ -1216,7 +1254,18 @@ pub fn spawn_env(mut decls: Vec<PluginDecl>, env: PluginEnv) -> PluginHandle {
     PluginHandle { tx, sim: None }
 }
 
-/// A plugin's database location: `(loaded, location)`.
+fn tab_location(slots: &[Slot], name: &str, tab_id: &str, env: &PluginEnv)
+    -> Result<(DbLocation, String), DbAdminError>
+{
+    let (loaded, loc) = db_location(slots, name, env)?;
+    if !loaded { return Err(DbAdminError::Precondition(format!("plugin {name} is not loaded"))); }
+    let tab = slots.iter().find(|s| s.decl.name == name).unwrap().tabs.iter()
+        .find(|t| t.id == tab_id)
+        .ok_or_else(|| DbAdminError::Precondition(format!("unknown tab {tab_id} for plugin {name}")))?;
+    Ok((loc, tab.sql.clone()))
+}
+
+/// A plugin's database location: (loaded, location).
 fn db_location(slots: &[Slot], name: &str, env: &PluginEnv) -> Result<(bool, DbLocation), DbAdminError> {
     let slot = slots
         .iter()
@@ -1939,6 +1988,13 @@ impl WasmPlugin {
 }
 
 impl Plugin for WasmPlugin {
+    fn ui_tabs(&mut self) -> Result<Vec<crate::plugin_ui::UiTab>, String> {
+        if !self.plugin.function_exists("ui_tabs") { return Ok(Vec::new()); }
+        let out = self.plugin.call::<&str, String>("ui_tabs", "")
+            .map_err(|e| format!("wasm ui_tabs failed: {e}"))?;
+        if out.len() > 65536 { return Err("ui_tabs: descriptor exceeds 64 KiB".into()); }
+        serde_json::from_str(&out).map_err(|e| format!("bad ui_tabs output: {e}"))
+    }
     fn name(&self) -> &str {
         &self.name
     }
@@ -2540,7 +2596,7 @@ mod tests {
     }
 
     fn loaded_panic_slot() -> Slot {
-        Slot {
+        Slot { tabs: Vec::new(),
             decl: decl("panic", true, toml::Table::new()),
             state: PluginState::Loaded,
             plugin: Some(Box::new(PanicPlugin)),
@@ -2607,7 +2663,7 @@ mod tests {
     }
 
     fn loaded_slot(plugin: Box<dyn Plugin>) -> Slot {
-        Slot {
+        Slot { tabs: Vec::new(),
             decl: decl("x", true, toml::Table::new()),
             state: PluginState::Loaded,
             plugin: Some(plugin),
@@ -2707,7 +2763,7 @@ mod tests {
     }
 
     fn loaded(name: &str, plugin: Box<dyn Plugin>) -> Slot {
-        Slot {
+        Slot { tabs: Vec::new(),
             decl: decl(name, true, toml::Table::new()),
             state: PluginState::Loaded,
             plugin: Some(plugin),
@@ -2805,7 +2861,7 @@ mod tests {
     fn db_slot(name: &str) -> Slot {
         let mut d = decl(name, true, toml::Table::new());
         d.capabilities = vec![Capability::Db];
-        Slot { decl: d, state: PluginState::Disabled, plugin: None, failures: VecDeque::new(), host: None }
+        Slot { tabs: Vec::new(), decl: d, state: PluginState::Disabled, plugin: None, failures: VecDeque::new(), host: None }
     }
 
     fn db_env(dir: &std::path::Path) -> PluginEnv {
@@ -2993,7 +3049,7 @@ mod tests {
         let host = Host::new("pushy", &[Capability::PushOverride, Capability::Control], Some(control.clone()));
         let mut p = Pushy { host: None };
         p.on_load(host.clone()).unwrap();
-        let mut slots = vec![Slot {
+        let mut slots = vec![Slot { tabs: Vec::new(),
             decl: decl("pushy", true, toml::Table::new()),
             state: PluginState::Loaded,
             plugin: Some(Box::new(p)),
@@ -3024,7 +3080,7 @@ mod tests {
 
     #[test]
     fn a_failure_in_a_simulation_is_a_note_not_a_strike() {
-        let mut slots = vec![Slot {
+        let mut slots = vec![Slot { tabs: Vec::new(),
             decl: decl("filter-panic", true, toml::Table::new()),
             state: PluginState::Loaded,
             plugin: Some(Box::new(FilterPanic)),
@@ -3127,5 +3183,118 @@ value = "fast"
         let h = d.tag_hints();
         assert_eq!(h.genre_sources, ["Type"]);
         assert_eq!(h.tempo_labels, ["slow", "fast"]);
+    }
+}
+
+#[cfg(test)]
+mod ui_tests {
+    use super::*;
+    use crate::plugin_ui::UiTab;
+    struct TablePlugin { tab: UiTab, host: Option<Host> }
+    impl Plugin for TablePlugin {
+        fn name(&self) -> &str { "table" }
+        fn on_load(&mut self, host: Host) -> Result<(), String> { self.host = Some(host); Ok(()) }
+        fn ui_tabs(&mut self) -> Result<Vec<UiTab>, String> {
+            // Metadata discovery must not be a route to a database mutation.
+            let db = self.host.as_ref().unwrap().db().unwrap();
+            assert!(matches!(db.exec(&plugin_db::Statement {
+                sql: "INSERT INTO sample VALUES (99)".into(), params: Default::default(),
+            }), Err(DbError::ReadOnly)));
+            Ok(vec![self.tab.clone()])
+        }
+    }
+    fn tab(sql: &str) -> UiTab {
+        UiTab { id: "sample".into(), title: "Sample".into(), description: "".into(), sql: sql.into() }
+    }
+    fn slot() -> Slot {
+        let decl: PluginDecl = toml::from_str("name = 'table'\nenabled = true\ncapabilities = ['db']").unwrap();
+        Slot { tabs: vec![], decl, state: PluginState::Disabled, plugin: None, failures: VecDeque::new(), host: None }
+    }
+    #[test]
+    fn ui_tabs_are_read_only_scoped_and_retained_when_stopped() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = PluginEnv { db_dir: Some(dir.path().into()), ..Default::default() };
+        let mut slot = slot();
+        let host = slot.open_host(&env).unwrap();
+        host.db().unwrap().migrate(&["CREATE TABLE sample (n); INSERT INTO sample VALUES (7)".into()]).unwrap();
+        slot.load(Box::new(TablePlugin { tab: tab("SELECT n FROM sample"), host: None }), host);
+        assert_eq!(slot.info().state, "loaded");
+        assert_eq!(slot.info().tabs.len(), 1);
+        let slots = vec![slot];
+        let (loc, sql) = tab_location(&slots, "table", "sample", &env).unwrap();
+        let rows = plugin_db::query_file_bounded(&loc.path, &sql, 1000, 200).unwrap();
+        assert_eq!(rows.rows, vec![vec![serde_json::json!(7)]]);
+        assert!(tab_location(&slots, "missing", "sample", &env).is_err());
+        assert!(tab_location(&slots, "table", "missing", &env).is_err());
+        assert!(plugin_db::query_file_bounded(&loc.path, "DELETE FROM sample", 1000, 200).is_err());
+        assert!(plugin_db::query_file_bounded(&loc.path, "ATTACH DATABASE ':memory:' AS other", 1000, 200).is_err());
+        let mut slots = slots;
+        slots[0].stop();
+        assert_eq!(slots[0].info().tabs.len(), 1);
+        assert!(tab_location(&slots, "table", "sample", &env).is_err());
+    }
+    #[test]
+    fn invalid_ui_is_visible_as_load_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = PluginEnv { db_dir: Some(dir.path().into()), ..Default::default() };
+        let mut slot = slot();
+        let host = slot.open_host(&env).unwrap();
+        let mut invalid = tab("SELECT 1"); invalid.id = "../escape".into();
+        slot.load(Box::new(TablePlugin { tab: invalid, host: None }), host);
+        assert_eq!(slot.info().state, "failed");
+        assert!(slot.info().reason.contains("invalid tab id"));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires STATIOND_TEST_LISTENER_UI_WASM pointing to the rebuilt listener-stats guest"]
+    async fn real_wasm_ui_tabs_distinguish_unknown_audience_and_clear_old_geography() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut decl: PluginDecl = toml::from_str("name = 'audience-test'\nenabled = true\ncapabilities = ['db', 'listener_details', 'geoip']").unwrap();
+        decl.wasm = Some(std::env::var("STATIOND_TEST_LISTENER_UI_WASM").unwrap());
+        let handle = spawn_env(vec![decl], PluginEnv { db_dir: Some(dir.path().into()), ..Default::default() });
+        let info = handle.list().await.remove(0);
+        assert_eq!(info.state, "loaded", "{}", info.reason);
+        assert_eq!(info.tabs.len(), 2);
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+        handle.emit(PluginEvent::ListenerSnapshot { mount: "/radio".into(), at: now,
+            listeners: Some(vec![crate::listener_snapshot::Listener {
+                id: "private-id".into(), ip: "8.8.8.8".parse().unwrap(), connected_seconds: 10, user_agent: None,
+            }]),
+        });
+        let geo = handle.read_tab("audience-test", "geography").await.unwrap();
+        assert_eq!(geo.rows.len(), 1);
+        assert_eq!(geo.rows[0][1], serde_json::json!("unavailable"));
+        handle.emit(PluginEvent::ListenerSnapshot { mount: "/radio".into(), at: now + 1, listeners: None });
+        let table = handle.read_tab("audience-test", "audience").await.unwrap();
+        assert_eq!(table.rows[0][2], serde_json::Value::Null);
+        assert!(handle.read_tab("audience-test", "geography").await.unwrap().rows.is_empty());
+        handle.emit(PluginEvent::ListenerSnapshot { mount: "/radio".into(), at: now + 2, listeners: Some(vec![]) });
+        let table = handle.read_tab("audience-test", "audience").await.unwrap();
+        assert_eq!(table.rows[0][2], serde_json::json!(0));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires STATIOND_TEST_UI_WASM pointing to the rebuilt play-stats guest"]
+    async fn real_wasm_ui_tabs_survive_restart_and_work_with_a_renamed_plugin() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut decl: PluginDecl = toml::from_str("name = 'renamed-stats'\nenabled = true\ncapabilities = ['db']").unwrap();
+        decl.wasm = Some(std::env::var("STATIOND_TEST_UI_WASM").unwrap());
+        let handle = spawn_env(vec![decl], PluginEnv { db_dir: Some(dir.path().into()), ..Default::default() });
+        let info = handle.list().await.remove(0);
+        assert_eq!(info.state, "loaded", "{}", info.reason);
+        assert_eq!(info.tabs[0].id, "plays");
+        let table = handle.read_tab("renamed-stats", "plays").await.unwrap();
+        assert_eq!(table.columns.len(), 3);
+        assert!(table.rows.is_empty());
+        handle.emit(PluginEvent::TrackResolved { media_path: Some("song.mp3".into()), playlist_ref: None, rule_id: None, origin: "test".into() });
+        let table = handle.read_tab("renamed-stats", "plays").await.unwrap();
+        assert_eq!(table.rows[0][0], serde_json::json!("song.mp3"));
+        assert_eq!(table.rows[0][1], serde_json::json!(1));
+        assert!(handle.read_tab("renamed-stats", "unknown").await.is_err());
+        handle.control("renamed-stats", Action::Stop).await.unwrap();
+        assert_eq!(handle.list().await[0].tabs.len(), 1);
+        assert!(handle.read_tab("renamed-stats", "plays").await.is_err());
+        handle.control("renamed-stats", Action::Reload).await.unwrap();
+        assert!(handle.read_tab("renamed-stats", "plays").await.is_ok());
     }
 }

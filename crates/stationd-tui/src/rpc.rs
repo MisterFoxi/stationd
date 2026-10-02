@@ -19,6 +19,13 @@ pub const POLL_MAX: Duration = Duration::from_secs(10);
 
 pub type Read<T> = Result<T, String>;
 
+pub async fn read_plugin_tab(channel: Channel, name: String, tab_id: String)
+    -> Read<plugin::PluginDbQueryResponse>
+{
+    bounded(plugin::plugin_service_client::PluginServiceClient::new(channel)
+        .read_tab(plugin::PluginReadTabRequest { name, tab_id })).await
+}
+
 /// Canal paresseux : la connexion s'établit au premier appel et se rétablit
 /// seule après une coupure (tonic). Aucun appel n'est fait ici.
 pub fn lazy_channel(addr: &str) -> anyhow::Result<Channel> {

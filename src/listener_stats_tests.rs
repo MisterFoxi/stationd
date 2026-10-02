@@ -25,7 +25,7 @@ fn detailed_snapshots_only_reach_opted_in_plugins() {
     }
     let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let declaration: PluginDecl = toml::from_str("name = \"counter\"\nenabled = true").unwrap();
-    let mut slot = Slot {
+    let mut slot = Slot { tabs: Vec::new(),
         decl: declaration, state: PluginState::Loaded,
         plugin: Some(Box::new(Counter(count.clone()))), failures: VecDeque::new(), host: None,
     };

@@ -167,8 +167,6 @@ planned-coming = Coming
 planned-lot = batch { $lot }
 planned-plugin-missing = plugin “{ $plugin }” not loaded
 planned-unavailable = Unavailable: { $reason }
-planned-plugins-1 = Views declared by the loaded plugins
-planned-plugins-2 = Each plugin's database (info, read-only query)
 
 ## Grid incidents (on-air notes)
 note-rendezvous-will-not-cut = expected: rendez-vous { $rule } at { $time } will not cut — "{ $playlist }" has nothing to air
@@ -1236,3 +1234,16 @@ mode-auto-sleep-zero = Automatic sleep active: at zero listeners
 mode-unknown = Unknown operating mode
 ev-auto-sleep-age-enabled = { $plugin }: automatic sleep enabled when all connections are at least { $age } old
 ev-auto-sleep-zero-enabled = { $plugin }: automatic sleep enabled at zero listeners
+
+key-cycle-tabs = F6 / Shift+F6
+help-cycle-tabs = Next / previous tab
+help-plugin-columns = Scroll columns
+help-plugin-open = Open plugin view
+plugins-directory = Plugin-declared views. Enter opens the first view; F6 cycles through all tabs.
+plugins-capabilities = Capabilities
+plugins-tabs = Tabs
+plugins-stale = Stale / unavailable
+plugins-loading = Loading…
+plugins-row-count = { $count } rows · refresh every 5 s
+plugins-empty = No data for this view
+key-plugin-columns = ← / →

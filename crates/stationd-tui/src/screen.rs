@@ -25,6 +25,8 @@ pub enum Availability {
 pub type KeyHelp = (&'static str, &'static str);
 
 pub trait Screen {
+    /// Stable identity for a dynamically discovered plugin tab.
+    fn plugin_tab_key(&self) -> Option<(String, String)> { None }
     /// Libellé de l'onglet (traduit).
     fn title(&self) -> String;
 
