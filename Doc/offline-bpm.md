@@ -1,9 +1,8 @@
 # Offline MP3 BPM analysis
 
-> **Obsolète / étendu.** Ce module (`bpm_analysis`, heuristique BPM maison)
-> est remplacé par l'analyse Essentia (tempo + tonalité + loudness + labels) :
-> voir `Doc/offline-analysis.md`. `bpm_analysis` reste en place le temps que le
-> scan Essentia soit validé, puis sera retiré.
+> **Retiré.** Le module `bpm_analysis` (heuristique BPM maison) a été **supprimé**,
+> remplacé par l'analyse Essentia (tempo + tonalité + loudness + labels) :
+> voir `Doc/offline-analysis.md`. Ce document est conservé pour l'historique.
 
 During a full library scan, the loaded `custom-tags` plugin can request host
 analysis for MP3s without a finite positive BPM tag. The host decodes local

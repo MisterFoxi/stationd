@@ -506,36 +506,6 @@ impl PluginDecl {
         TagHints { genre_sources: strings(self.config.get("tags")), tempo_labels }
     }
 
-    /// The window BPM estimates are folded into: `tempo.analyze_range =
-    /// [lo, hi]`, else [`crate::bpm_analysis::DEFAULT_RANGE`]. `Err` = an
-    /// unusable range (said, the analysis is then skipped).
-    fn bpm_range(&self) -> Result<(f64, f64), String> {
-        let Some(v) = self.config.get("tempo").and_then(|t| t.get("analyze_range")) else {
-            return Ok(crate::bpm_analysis::DEFAULT_RANGE);
-        };
-        let nums: Option<Vec<f64>> = v.as_array().map(|a| {
-            a.iter().filter_map(|x| x.as_float().or_else(|| x.as_integer().map(|i| i as f64))).collect()
-        });
-        match nums.as_deref() {
-            Some([lo, hi]) if v.as_array().is_some_and(|a| a.len() == 2) => {
-                crate::bpm_analysis::check_range((*lo, *hi))?;
-                Ok((*lo, *hi))
-            }
-            _ => Err("tempo.analyze_range must be two numbers [lo, hi] (BPM)".into()),
-        }
-    }
-
-    fn requests_bpm_analysis(&self) -> bool {
-        self.name == "custom-tags"
-            && self.config.get("tempo").and_then(|v| v.as_table()).is_some_and(|t| {
-                t.get("enabled").and_then(|v| v.as_bool()) == Some(true)
-                    && t.get("analyze_missing").and_then(|v| v.as_bool()).unwrap_or(true)
-                    && t.get("source_tags").map_or(true, |v| v.as_array().is_some_and(|names| {
-                        names.iter().any(|n| n.as_str().is_some_and(|n| n.trim().eq_ignore_ascii_case("BPM")))
-                    }))
-            })
-    }
-
     fn has_db(&self) -> bool {
         self.capabilities.contains(&Capability::Db)
     }
@@ -900,7 +870,6 @@ enum Msg {
         reply: oneshot::Sender<Result<(DbLocation, String), DbAdminError>>,
     },
     List(oneshot::Sender<Vec<PluginInfo>>),
-    AnalyzeMissingBpm(oneshot::Sender<Option<Result<(f64, f64), String>>>),
     TagHints(oneshot::Sender<TagHints>),
     Control {
         name: String,
@@ -994,20 +963,6 @@ impl PluginHandle {
             return TagHints::default();
         }
         rx.await.unwrap_or_default()
-    }
-
-    /// Current runtime state, so stopped/quarantined plugins cannot trigger analysis.
-    pub async fn analyze_missing_bpm(&self) -> bool {
-        self.bpm_analysis().await.is_some()
-    }
-
-    /// The BPM analysis a loaded `custom-tags` asks for: `None` = none;
-    /// `Some(Ok(window))` = analyse, folding into `window`; `Some(Err)` =
-    /// asked with an unusable `tempo.analyze_range`.
-    pub async fn bpm_analysis(&self) -> Option<Result<(f64, f64), String>> {
-        let (reply, rx) = oneshot::channel();
-        if self.tx.send(Msg::AnalyzeMissingBpm(reply)).await.is_err() { return None; }
-        rx.await.unwrap_or(None)
     }
 
     /// Fire-and-forget: emit an event to the plugins. Never blocks the caller;
@@ -1226,13 +1181,6 @@ pub fn spawn_configured(mut decls: Vec<PluginDecl>, env: PluginEnv, config_path:
                         .map(|slot| slot.decl.tag_hints())
                         .unwrap_or_default();
                     let _ = reply.send(hints);
-                }
-                Msg::AnalyzeMissingBpm(reply) => {
-                    let asked = slots
-                        .iter()
-                        .find(|slot| matches!(slot.state, PluginState::Loaded) && slot.decl.requests_bpm_analysis())
-                        .map(|slot| slot.decl.bpm_range());
-                    let _ = reply.send(asked);
                 }
                 Msg::List(reply) => {
                     let _ = reply.send(slots.iter().map(Slot::info).collect());
@@ -3184,38 +3132,6 @@ mod tests {
 #[cfg(test)]
 mod bpm_policy_tests {
     use super::*;
-    #[test]
-    fn analysis_requires_custom_tags_tempo_and_bpm_source() {
-        let parse = |extra: &str| toml::from_str::<PluginDecl>(&format!("name = 'custom-tags'\n[config.tempo]\n{extra}")).unwrap();
-        assert!(!parse("").requests_bpm_analysis());
-        assert!(parse("enabled = true").requests_bpm_analysis());
-        assert!(!parse("enabled = true\nanalyze_missing = false").requests_bpm_analysis());
-        assert!(!parse("enabled = false\nanalyze_missing = true").requests_bpm_analysis());
-        assert!(!parse("enabled = true\nsource_tags = ['Other']").requests_bpm_analysis());
-        let mut custom = parse("enabled = true\nsource_tags = ['bpm']");
-        assert!(custom.requests_bpm_analysis());
-        custom.name = "logger".into();
-        assert!(!custom.requests_bpm_analysis());
-    }
-    #[test]
-    fn the_bpm_window_is_read_and_checked() {
-        let decl = |extra: &str| -> PluginDecl {
-            toml::from_str(&format!("name = 'custom-tags'\n[config.tempo]\nenabled = true\n{extra}")).unwrap()
-        };
-        assert_eq!(decl("").bpm_range(), Ok(crate::bpm_analysis::DEFAULT_RANGE));
-        assert_eq!(decl("analyze_range = [50, 100]").bpm_range(), Ok((50.0, 100.0)));
-        assert_eq!(decl("analyze_range = [60.5, 130]").bpm_range(), Ok((60.5, 130.0)));
-        assert!(decl("analyze_range = [70, 120]").bpm_range().unwrap_err().contains("twice"));
-        assert!(decl("analyze_range = [70]").bpm_range().is_err());
-        assert!(decl("analyze_range = 'x'").bpm_range().is_err());
-    }
-
-    #[tokio::test]
-    async fn unloaded_plugin_does_not_trigger_analysis() {
-        let declaration: PluginDecl = toml::from_str("name = 'custom-tags'\nwasm = '/does/not/exist.wasm'\n[config.tempo]\nenabled = true").unwrap();
-        assert!(!spawn(vec![declaration]).analyze_missing_bpm().await);
-    }
-
     #[test]
     fn tag_hints_read_the_custom_tags_configuration() {
         let d: PluginDecl = toml::from_str(

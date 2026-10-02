@@ -110,7 +110,9 @@ STATIOND_ESSENTIA_MODELS=models python3 tools/essentia_analyze.py <fichier>
 
 ## À suivre
 
-- Retrait du module `bpm_analysis` et du chemin BPM plugin-gated de `do_scan`
-  une fois un scan complet Essentia validé (tant qu'il n'a pas tourné, le
-  retirer laisserait la station sans analyse).
 - Parallélisme (`jobs`) et éventuel seuil de confiance avant d'écrire un label.
+- Mood : têtes binaires effnet combinées par `max` (calibration indépendante) ;
+  à seuiller si un titre franchement énergique ressort `relaxed`.
+
+L'ancien module `bpm_analysis` (heuristique BPM maison) a été retiré, remplacé
+par cette analyse.

@@ -430,7 +430,7 @@ pub async fn run(action: Action, channel: Channel, tz: Option<jiff::tz::TimeZone
         }
         Action::Scan => {
             let r = library::library_service_client::LibraryServiceClient::new(channel)
-                .scan(library::ScanRequest {})
+                .scan(library::ScanRequest { reanalyze: false })
                 .await
                 .map_err(err)?
                 .into_inner();

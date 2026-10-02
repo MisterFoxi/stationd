@@ -186,13 +186,9 @@ impl EssentiaExtractor {
             .unwrap_or_else(|| "essentia_streaming_extractor_music".into())
     }
 
-    /// Lance l'extracteur sur `file`, renvoie le JSON brut.
-    ///
-    /// TODO: reprendre tel quel le pattern de `bpm_analysis::decode` :
-    ///   - `Command::new(&self.exe)` avec arguments explicites (profil, in=file,
-    ///     out=stdout), `Stdio::piped`, `creation_flags(0x08000000)` sous Windows ;
-    ///   - lecture stdout/stderr sur threads (sorties bornées) ;
-    ///   - `try_wait` + `self.timeout` → kill → `FailKind::Timeout`.
+    /// Lance l'extracteur sur `file`, renvoie le JSON brut. Spawn sans shell,
+    /// stdout/stderr lus sur threads (sorties bornées), `try_wait` + `timeout`
+    /// → kill → `FailKind::Timeout`, `creation_flags(0x08000000)` sous Windows.
     fn run(&self, file: &Path) -> Result<Vec<u8>, Failure> {
         const MAX_OUT: u64 = 4 * 1024 * 1024; // le JSON est petit ; borne de sûreté
         let extractor = |detail: String| Failure { kind: FailKind::Extractor, detail };
@@ -310,8 +306,8 @@ fn parse(json: &[u8]) -> Result<Analysis, Failure> {
     })
 }
 
-/// Résout `rel_path` sous `root` en refusant toute sortie hors racine (mêmes
-/// garde-fous que l'ancien `bpm_analysis`).
+/// Résout `rel_path` sous `root` en refusant toute sortie hors racine
+/// (canonicalisation + `starts_with`).
 fn resolve_within_root(root: &Path, rel_path: &str) -> Result<PathBuf, Failure> {
     let resolve_err = |e: String| Failure { kind: FailKind::Resolve, detail: e };
     let full = crate::media_tags::resolve(root, rel_path).map_err(|e| resolve_err(e.to_string()))?;
@@ -369,9 +365,6 @@ pub fn pending(report: &ScanReport, force: bool) -> Vec<String> {
 /// `media_analysis`) et pose le marqueur `MARKER_TAG = ANALYSIS_VERSION`.
 /// Échec → fichier laissé jouable, loggé, poussé dans le `Tally`, retenté.
 /// `progress(done, total)` après chaque fichier.
-///
-/// TODO: boucle calquée sur `bpm_analysis::analyze_missing_in` :
-///   resolve(root, rel) → canonicalize → starts_with(base) → `analyzer.analyze`.
 pub fn analyze_pending(
     root: &Path,
     report: &mut ScanReport,

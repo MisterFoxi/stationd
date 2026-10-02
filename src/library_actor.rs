@@ -435,36 +435,6 @@ pub fn spawn_with_analysis(
 
 type StatusTx = std::sync::Arc<watch::Sender<ScanStatus>>;
 
-/// How the BPM analysis of a scan went, into the journal (the log has a
-/// line per file): estimated, not estimated, and why by kind.
-fn journal_bpm(tally: &crate::bpm_analysis::Tally) {
-    use crate::events::{record, Code, Component, Level};
-    if tally.estimated == 0 && tally.failed.is_empty() {
-        return;
-    }
-    let mut params = vec![
-        ("estimated".to_string(), tally.estimated.to_string()),
-        ("failed".to_string(), tally.failed.len().to_string()),
-    ];
-    for (kind, n) in tally.by_kind() {
-        params.push((format!("failed_{}", kind.as_str()), n.to_string()));
-    }
-    let level = if tally.failed.is_empty() { Level::Info } else { Level::Warn };
-    record(level, Component::Library, Code::BpmAnalyzed, params);
-}
-
-/// FFmpeg is there for the BPM analysis; otherwise the analysis is skipped
-/// for this scan and said once (not once per file).
-fn ffmpeg_ready() -> bool {
-    match crate::bpm_analysis::ffmpeg_available() {
-        Ok(()) => true,
-        Err(why) => {
-            tracing::error!(reason = %why, "BPM analysis skipped: FFmpeg unavailable");
-            false
-        }
-    }
-}
-
 /// Résumé d'une passe d'analyse Essentia dans le journal (le log a une ligne
 /// par fichier).
 fn journal_analysis(tally: &crate::media_analysis::Tally) {
@@ -917,30 +887,6 @@ async fn do_scan(
     .map_err(|e| LibraryError::Join(e.to_string()))??;
     let values = tag_values(&report, &file_genres(&report), &sources_of(plugins).await);
     if let Some(plugins) = plugins {
-        match plugins.bpm_analysis().await {
-            Some(Ok(range)) if ffmpeg_ready() => {
-                phase(status, ScanPhase::Analyzing);
-                let analysis_root = write_root.clone();
-                let progress_tx = status.cloned();
-                let (r, tally) = tokio::task::spawn_blocking(move || {
-                    let tally = crate::bpm_analysis::analyze_missing_in(&analysis_root, &mut report, range, &mut |done, total| {
-                        if let Some(s) = &progress_tx {
-                            s.send_modify(|s| {
-                                s.done = done as u64;
-                                s.total = total as u64;
-                            });
-                        }
-                    });
-                    (report, tally)
-                })
-                .await
-                .map_err(|e| LibraryError::Join(e.to_string()))?;
-                report = r;
-                journal_bpm(&tally);
-            }
-            Some(Err(why)) => tracing::error!(reason = %why, "BPM analysis skipped: tempo.analyze_range unusable"),
-            _ => {}
-        }
         phase(status, ScanPhase::Plugins);
         enrich(&mut report, plugins).await;
     }
@@ -1272,53 +1218,3 @@ mod tests {
     }
 }
 
-#[cfg(test)]
-mod offline_bpm_tests {
-    use super::*;
-    #[tokio::test]
-    #[ignore = "requires FFmpeg and STATIOND_CUSTOM_TAGS_WASM"]
-    async fn offline_mp3_scan_through_real_wasm_writes_tags_and_database() {
-        let dir = tempfile::tempdir().unwrap();
-        let mp3 = crate::bpm_analysis::tests::make_mp3(dir.path());
-        let pool = crate::db::init(&dir.path().join("test.db")).await.unwrap();
-        let wasm = std::env::var("STATIOND_CUSTOM_TAGS_WASM").expect("compiled custom-tags WASM path");
-        let mut declaration: crate::plugin::PluginDecl = toml::from_str(r#"
-name = "custom-tags"
-enabled = true
-[config]
-tags = ["Type"]
-[config.creation]
-enabled = true
-source_tags = ["Comment", "Description"]
-match = "made with suno; created="
-[config.tempo]
-enabled = true
-analyze_missing = true
-source_tags = ["BPM"]
-[[config.tempo.range]]
-max = 119.999
-value = "slow"
-[[config.tempo.range]]
-min = 120
-value = "fast"
-"#).unwrap();
-        declaration.wasm = Some(wasm);
-        let plugins = crate::plugin::spawn(vec![declaration]);
-        assert!(plugins.analyze_missing_bpm().await);
-        let library = spawn_with(pool.clone(), dir.path().to_path_buf(), Some(plugins));
-        library.scan().await.unwrap();
-        let before = std::fs::read(&mp3).unwrap();
-        for _ in 0..2 {
-            let tags = crate::media::scan_library(dir.path()).unwrap().custom_tags.remove("rhythm.mp3").unwrap();
-            assert!((crate::bpm_analysis::existing_bpm(&tags).unwrap() - 140.0).abs() <= 2.0);
-            assert!(tags.iter().any(|t| t.name == "tempo" && t.value == "fast"));
-            assert!(tags.iter().any(|t| t.name == "creation" && t.value == "2026-06-14T06:36:48Z"));
-            let tempo: String = sqlx::query_scalar("SELECT value FROM media_meta WHERE key = 'tempo'")
-                .fetch_one(&pool).await.unwrap();
-            assert_eq!(tempo, "fast");
-            assert_eq!(media_index::list(&pool, true, &["song".into()]).await.unwrap().len(), 1);
-            library.scan().await.unwrap();
-            assert_eq!(std::fs::read(&mp3).unwrap(), before);
-        }
-    }
-}

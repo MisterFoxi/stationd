@@ -152,17 +152,6 @@ async fn main() -> anyhow::Result<()> {
         Some(args.config.clone()),
     );
     control.attach_plugins(plugins.clone());
-    // The BPM analysis (custom-tags) decodes with FFmpeg: say at start-up if
-    // it is missing, rather than at the first scan.
-    match plugins.bpm_analysis().await {
-        Some(Ok(_)) => {
-            if let Err(why) = stationd::bpm_analysis::ffmpeg_available() {
-                tracing::error!(reason = %why, "custom-tags asks for the BPM analysis but FFmpeg is unavailable: it will be skipped");
-            }
-        }
-        Some(Err(why)) => tracing::error!(reason = %why, "custom-tags asks for the BPM analysis with an unusable window: it will be skipped"),
-        None => {}
-    }
     let plugin_service = PluginGrpc::new(plugins.clone());
     let mut broadcast_service =
         BroadcastGrpc::new(control.clone()).with_media_root(cfg.media.library_path.clone());
