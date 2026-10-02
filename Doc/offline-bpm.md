@@ -1,5 +1,10 @@
 # Offline MP3 BPM analysis
 
+> **Obsolète / étendu.** Ce module (`bpm_analysis`, heuristique BPM maison)
+> est remplacé par l'analyse Essentia (tempo + tonalité + loudness + labels) :
+> voir `Doc/offline-analysis.md`. `bpm_analysis` reste en place le temps que le
+> scan Essentia soit validé, puis sera retiré.
+
 During a full library scan, the loaded `custom-tags` plugin can request host
 analysis for MP3s without a finite positive BPM tag. The host decodes local
 audio with FFmpeg; it never sends the track to Liquidsoap or to the antenna.

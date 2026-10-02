@@ -368,6 +368,9 @@ enum LibraryCommand {
         /// Show the progress on stderr while it runs
         #[arg(long)]
         progress: bool,
+        /// Force la ré-analyse offline (Essentia) de tous les fichiers
+        #[arg(long)]
+        reanalyze: bool,
     },
     /// Where the scan is (phase, files read / found) and how the last one ended
     ScanStatus {
@@ -1258,7 +1261,7 @@ async fn main() -> anyhow::Result<()> {
                 println!("index genres: {}", if m.genres.is_empty() { "-".into() } else { m.genres.join(", ") });
             }
         }
-        Command::Library(LibraryCommand::Scan { progress }) => {
+        Command::Library(LibraryCommand::Scan { progress, reanalyze }) => {
             let mut lib = LibraryServiceClient::connect(args.addr.clone()).await?;
             let watcher = if progress {
                 let mut w = lib.clone();
@@ -1272,7 +1275,7 @@ async fn main() -> anyhow::Result<()> {
             } else {
                 None
             };
-            let reply = lib.scan(ScanRequest {}).await?.into_inner();
+            let reply = lib.scan(ScanRequest { reanalyze }).await?.into_inner();
             if let Some(w) = watcher {
                 w.abort();
                 eprintln!();

@@ -63,67 +63,102 @@ def signal_descriptors(path: str) -> dict:
     }
 
 
-# --- TENSORFLOW (à compléter avec TES modèles) ----------------------------
+# --- TENSORFLOW (modèles Discogs-EffNet, dans STATIOND_ESSENTIA_MODELS) ----
+#
+# Noms vérifiés sur le model zoo essentia.upf.edu (famille discogs-effnet) :
+#   discogs-effnet-bs64-1.pb                         (embeddings)
+#   genre_discogs400-discogs-effnet-1.pb / .json     (400 styles Discogs)
+#   danceability-discogs-effnet-1.pb / .json
+#   mood_{happy,aggressive,party,relaxed}-discogs-effnet-1.pb / .json
+# Il n'existe PAS de tête mood/theme unique pour discogs-effnet : on combine
+# les têtes binaires d'humeur et on garde la plus marquée. Les .json portent la
+# clé "classes" (ordre des labels). Noeud de sortie des têtes : "model/Softmax".
 
-def _predict_top(embeddings, graph_pb: str, meta_json: str) -> tuple[str, float]:
-    """Classifieur TF 2D sur embeddings → (label dominant, probabilité).
+def _head(embeddings, graph_pb: str, meta_json: str):
+    """(classes, activations moyennes sur les frames) d'une tête TF 2D.
 
-    `meta_json` est le .json d'accompagnement du modèle essentia (clé
-    "classes" = liste ordonnée des labels). À VÉRIFIER contre tes modèles :
-    nom du noeud de sortie, agrégation temporelle (ici: moyenne des frames)."""
+    Les noms de noeuds d'entrée/sortie sont lus dans le `.json` du modèle
+    (clé `schema`), robustes aux variations d'export : graphe figé
+    (`model/Placeholder` / `model/Softmax`) vs SavedModel
+    (`serving_default_model_Placeholder` / `PartitionedCall:0`)."""
     import numpy as np
     import essentia.standard as es
-
     with open(meta_json, "r", encoding="utf-8") as f:
-        classes = json.load(f)["classes"]
-    activations = es.TensorflowPredict2D(graphFilename=graph_pb)(embeddings)
-    mean = np.mean(activations, axis=0)
-    idx = int(np.argmax(mean))
-    return str(classes[idx]), float(mean[idx])
+        meta = json.load(f)
+    classes = meta["classes"]
+    schema = meta.get("schema", {})
+    inputs = schema.get("inputs") or [{}]
+    outputs = schema.get("outputs") or []
+    inp = inputs[0].get("name")
+    out = next((o.get("name") for o in outputs
+                if o.get("output_purpose") in ("predictions", "activations")), None)
+    if out is None and outputs:
+        out = outputs[0].get("name")
+    kwargs = {"graphFilename": graph_pb}
+    if inp:
+        kwargs["input"] = inp
+    if out:
+        kwargs["output"] = out
+    acts = es.TensorflowPredict2D(**kwargs)(embeddings)
+    return classes, np.mean(acts, axis=0)
+
+
+def _positive_index(classes: list) -> int:
+    """Index de la classe « positive » d'une tête binaire (happy vs non_happy)."""
+    for i, c in enumerate(classes):
+        lc = str(c).lower()
+        if not (lc.startswith("non") or lc.startswith("not")):
+            return i
+    return 0
 
 
 def high_level(path: str) -> dict:
-    """danceability, genre_top/prob, mood/prob via essentia-tensorflow.
-
-    Modèles attendus dans STATIOND_ESSENTIA_MODELS (à adapter aux fichiers que
-    TU embarques) :
-      - discogs-effnet-bs64-1.pb                 (embeddings)
-      - genre_discogs400-discogs-effnet-1.pb/.json
-      - mood_* (ou mtg_jamendo_moodtheme)   .pb/.json
-      - danceability-discogs-effnet-1.pb/.json
-    """
+    """danceability, genre_top/prob, mood/prob via essentia-tensorflow."""
     models = os.environ.get("STATIOND_ESSENTIA_MODELS")
     if not models:
         die("STATIOND_ESSENTIA_MODELS non défini : modèles TensorFlow requis "
-            "(voir high_level()). Aucun label émis pour ne pas polluer les tags.")
+            "(voir le module). Aucun label émis pour ne pas polluer les tags.")
 
+    import numpy as np
     import essentia.standard as es
     p = lambda name: os.path.join(models, name)  # noqa: E731
 
-    # Embeddings EffNet-Discogs (entrée commune aux têtes de classif).
+    # Embeddings EffNet-Discogs (entrée commune à toutes les têtes).
     embeddings = es.TensorflowPredictEffnetDiscogs(
         graphFilename=p("discogs-effnet-bs64-1.pb"),
         output="PartitionedCall:1",
     )(es.MonoLoader(filename=path, sampleRate=16000, resampleQuality=4)())
 
-    genre_top, genre_prob = _predict_top(
+    # Genre : argmax sur les 400 styles Discogs.
+    g_classes, g_mean = _head(
         embeddings, p("genre_discogs400-discogs-effnet-1.pb"),
         p("genre_discogs400-discogs-effnet-1.json"))
-    mood_top, mood_prob = _predict_top(
-        embeddings, p("mtg_jamendo_moodtheme-discogs-effnet-1.pb"),
-        p("mtg_jamendo_moodtheme-discogs-effnet-1.json"))
+    g_idx = int(np.argmax(g_mean))
+    genre_top, genre_prob = str(g_classes[g_idx]), float(g_mean[g_idx])
 
-    # danceability : tête régressive (ou binaire) → probabilité « danceable ».
-    import numpy as np
-    dance = es.TensorflowPredict2D(
-        graphFilename=p("danceability-discogs-effnet-1.pb"))(embeddings)
-    danceability = float(np.mean(dance, axis=0)[0])
+    # Danceability : probabilité de la classe « danceable ».
+    d_classes, d_mean = _head(
+        embeddings, p("danceability-discogs-effnet-1.pb"),
+        p("danceability-discogs-effnet-1.json"))
+    danceability = float(d_mean[_positive_index(d_classes)])
+
+    # Mood : têtes binaires effnet ; on garde l'humeur positive la plus forte.
+    mood, mood_prob = "neutral", 0.0
+    for name in ("mood_happy", "mood_aggressive", "mood_party", "mood_relaxed"):
+        pb, js = p(f"{name}-discogs-effnet-1.pb"), p(f"{name}-discogs-effnet-1.json")
+        if not (os.path.isfile(pb) and os.path.isfile(js)):
+            continue
+        classes, mean = _head(embeddings, pb, js)
+        i = _positive_index(classes)
+        prob = float(mean[i])
+        if prob > mood_prob:
+            mood, mood_prob = str(classes[i]), prob
 
     return {
         "danceability": danceability,
         "genre_top": genre_top,
         "genre_prob": genre_prob,
-        "mood": mood_top,
+        "mood": mood,
         "mood_prob": mood_prob,
     }
 

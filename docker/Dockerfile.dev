@@ -16,6 +16,8 @@ FROM ubuntu:26.04
 ARG ICECAST_VERSION=2.5.0-1
 # Vide = version du dépôt ; sinon la chaîne exacte de `apt policy liquidsoap`.
 ARG LIQUIDSOAP_VERSION=
+# essentia-tensorflow (PyPI) pour l'analyse média offline. Vide = dernière.
+ARG ESSENTIA_TF_VERSION=
 # À vérifier / mettre à jour (releases just-containers/s6-overlay).
 ARG S6_OVERLAY_VERSION=3.2.0.2
 ARG RUST_TOOLCHAIN=stable
@@ -35,6 +37,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PATH=/command:/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
     STATIOND_ROOT=/src \
     STATIOND_BIN=/src/target/active \
+    STATIOND_ESSENTIA=/src/tools/essentia_analyze.py \
+    STATIOND_ESSENTIA_MODELS=/src/models \
     S6_CMD_WAIT_FOR_SERVICES_MAXTIME=0
 
 # tzdata : indispensable — jiff résout [station] timezone dans /usr/share/zoneinfo.
@@ -45,9 +49,17 @@ RUN apt-get update \
       ca-certificates curl xz-utils tzdata \
       build-essential pkg-config protobuf-compiler libprotobuf-dev \
       ffmpeg \
+      python3 python3-pip \
       "icecast2=${ICECAST_VERSION}" \
       "liquidsoap${LIQUIDSOAP_VERSION:+=${LIQUIDSOAP_VERSION}}" \
  && rm -rf /var/lib/apt/lists/*
+
+# Analyse média offline (Essentia + TensorFlow) : wheel préconstruit. Le script
+# tools/essentia_analyze.py et le dossier models/ viennent du dépôt monté /src
+# (STATIOND_ESSENTIA / STATIOND_ESSENTIA_MODELS). Rends le script exécutable
+# côté dépôt : chmod +x tools/essentia_analyze.py (le partage Samba peut le perdre).
+RUN pip3 install --no-cache-dir --break-system-packages \
+      "essentia-tensorflow${ESSENTIA_TF_VERSION:+==${ESSENTIA_TF_VERSION}}"
 
 # s6-overlay (PID 1 = /init), archives vérifiées par leur sha256.
 RUN set -eu; \

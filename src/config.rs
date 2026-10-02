@@ -38,6 +38,10 @@ pub struct Config {
     /// `schedule apply`. Requires `[liquidsoap]`.
     #[serde(default)]
     pub live: Option<LiveConfig>,
+
+    /// `[analysis]` — analyse média offline (Essentia). Désactivée par défaut.
+    #[serde(default)]
+    pub analysis: AnalysisConfig,
 }
 
 /// `[live]` — live DJ input (Liquidsoap harbor). Who may connect lives in
@@ -705,6 +709,63 @@ impl Default for GridConfig {
     fn default() -> Self {
         Self { path: default_grid_path() }
     }
+}
+
+/// `[analysis]` — analyse média offline (Essentia), via un extracteur
+/// sous-process. Désactivée par défaut : tant que `enabled = false`, les scans
+/// ne lancent aucune analyse (le cache typé `media_analysis` reste reconstruit
+/// depuis les tags existants). Quand activée, seuls les fichiers sans marqueur
+/// d'analyse à jour sont (ré)analysés ; le résultat est écrit dans les tags.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AnalysisConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Exécutable de l'extracteur. Absent = `STATIOND_ESSENTIA`, sinon le défaut
+    /// (`EssentiaExtractor::default_exe`).
+    #[serde(default)]
+    pub extractor: Option<PathBuf>,
+    /// Profil extracteur optionnel (modèles TF, fenêtre d'analyse).
+    #[serde(default)]
+    pub profile: Option<PathBuf>,
+    /// Délai dur par fichier (s) ; au-delà, le process est tué.
+    #[serde(default = "default_analysis_timeout")]
+    pub timeout_secs: u64,
+    /// Workers parallèles (réservé ; l'analyse est séquentielle pour l'instant).
+    #[serde(default = "default_analysis_jobs")]
+    pub jobs: usize,
+    /// Plafond de fichiers analysés par scan (les N premiers non marqués).
+    /// `0` = illimité (scan complet). Le scan réconcilie toujours toute la
+    /// bibliothèque ; seule l'analyse Essentia (chère) est bornée. Permet de
+    /// grignoter une grosse médiathèque scan après scan (le marqueur évite de
+    /// refaire les précédents) et de tester sur quelques fichiers.
+    #[serde(default = "default_analysis_max_per_scan")]
+    pub max_per_scan: usize,
+}
+
+impl Default for AnalysisConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            extractor: None,
+            profile: None,
+            timeout_secs: default_analysis_timeout(),
+            jobs: default_analysis_jobs(),
+            max_per_scan: default_analysis_max_per_scan(),
+        }
+    }
+}
+
+fn default_analysis_timeout() -> u64 {
+    90
+}
+
+fn default_analysis_jobs() -> usize {
+    1
+}
+
+fn default_analysis_max_per_scan() -> usize {
+    0
 }
 
 fn default_grid_path() -> PathBuf {

@@ -67,6 +67,7 @@ pub struct ScanOutcome {
 enum Command {
     Folders { include_unavailable: bool, after: String, limit: usize, reply: oneshot::Sender<Result<media_index::FolderPage, LibraryError>> },
     Scan {
+        reanalyze: bool,
         reply: oneshot::Sender<Result<ScanOutcome, LibraryError>>,
     },
     List {
@@ -261,9 +262,15 @@ impl LibraryHandle {
     /// Trigger a full scan + reconciliation. Serialised with every other
     /// library command by the owning task.
     pub async fn scan(&self) -> Result<ScanOutcome, LibraryError> {
+        self.scan_with(false).await
+    }
+
+    /// [`scan`](Self::scan) en forçant la ré-analyse offline de tous les
+    /// fichiers (`reanalyze = true`), au lieu des seuls non marqués.
+    pub async fn scan_with(&self, reanalyze: bool) -> Result<ScanOutcome, LibraryError> {
         let (reply, rx) = oneshot::channel();
         self.tx
-            .send(Command::Scan { reply })
+            .send(Command::Scan { reanalyze, reply })
             .await
             .map_err(|_| LibraryError::ActorGone)?;
         rx.await.map_err(|_| LibraryError::ActorGone)?
@@ -363,6 +370,16 @@ pub fn spawn(pool: SqlitePool, root: PathBuf) -> LibraryHandle {
 /// handle is dropped (the channel closes and the loop ends). `plugins`, when
 /// set, runs each scan through the plugins' `on_scan` before indexing.
 pub fn spawn_with(pool: SqlitePool, root: PathBuf, plugins: Option<PluginHandle>) -> LibraryHandle {
+    spawn_with_analysis(pool, root, plugins, crate::config::AnalysisConfig::default())
+}
+
+/// Comme [`spawn_with`], en précisant la config d'analyse offline (`[analysis]`).
+pub fn spawn_with_analysis(
+    pool: SqlitePool,
+    root: PathBuf,
+    plugins: Option<PluginHandle>,
+    analysis: crate::config::AnalysisConfig,
+) -> LibraryHandle {
     let (tx, mut rx) = mpsc::channel::<Command>(32);
     let (status_tx, status) = watch::channel(ScanStatus::default());
     let status_tx = std::sync::Arc::new(status_tx);
@@ -372,8 +389,8 @@ pub fn spawn_with(pool: SqlitePool, root: PathBuf, plugins: Option<PluginHandle>
                 Command::Folders { include_unavailable, after, limit, reply } => {
                     let _ = reply.send(media_index::folders(&pool, include_unavailable, &after, limit).await.map_err(LibraryError::from));
                 }
-                Command::Scan { reply } => {
-                    let _ = reply.send(scan_journaled(&pool, &root, plugins.as_ref(), &status_tx).await);
+                Command::Scan { reanalyze, reply } => {
+                    let _ = reply.send(scan_journaled(&pool, &root, plugins.as_ref(), &status_tx, &analysis, reanalyze).await);
                 }
                 Command::TagInventory { reply } => {
                     let _ = reply.send(tag_inventory(&pool, plugins.as_ref()).await);
@@ -448,16 +465,6 @@ fn ffmpeg_ready() -> bool {
     }
 }
 
-/// L'analyse Essentia (cœur) est opt-in le temps que l'extracteur et ses
-/// modèles soient en place : `STATIOND_ANALYSIS` truthy l'active.
-/// TODO: remplacer par `[analysis].enabled` de la config une fois la section
-/// threadée jusqu'à l'actor.
-fn analysis_enabled() -> bool {
-    std::env::var_os("STATIOND_ANALYSIS")
-        .map(|v| matches!(v.to_string_lossy().trim(), "1" | "true" | "yes" | "on"))
-        .unwrap_or(false)
-}
-
 /// Résumé d'une passe d'analyse Essentia dans le journal (le log a une ligne
 /// par fichier).
 fn journal_analysis(tally: &crate::media_analysis::Tally) {
@@ -477,6 +484,8 @@ async fn scan_journaled(
     root: &Path,
     plugins: Option<&PluginHandle>,
     status: &StatusTx,
+    analysis: &crate::config::AnalysisConfig,
+    reanalyze: bool,
 ) -> Result<ScanOutcome, LibraryError> {
     use crate::events::{record, Code, Component, Level};
     status.send_modify(|s| {
@@ -486,7 +495,7 @@ async fn scan_journaled(
         s.started_at = now_epoch_seconds();
     });
     record(Level::Info, Component::Library, Code::ScanStarted, std::iter::empty::<(&str, &str)>());
-    let out = do_scan(pool, root, plugins, Some(status)).await;
+    let out = do_scan(pool, root, plugins, Some(status), analysis, reanalyze).await;
     let result = match &out {
         Ok(o) => {
             let c = ScanCounts {
@@ -887,6 +896,8 @@ async fn do_scan(
     root: &Path,
     plugins: Option<&PluginHandle>,
     status: Option<&StatusTx>,
+    analysis: &crate::config::AnalysisConfig,
+    reanalyze: bool,
 ) -> Result<ScanOutcome, LibraryError> {
     let write_root = root.to_path_buf();
     let root = root.to_path_buf();
@@ -936,21 +947,27 @@ async fn do_scan(
     // Analyse média offline (Essentia) — cœur, indépendante des plugins. Opt-in
     // (STATIOND_ANALYSIS). Remplit report.metadata pour les fichiers non encore
     // marqués ; scan_writeback écrira les frames, la table typée suivra.
-    if analysis_enabled() {
+    if analysis.enabled || reanalyze {
         phase(status, ScanPhase::Analyzing);
         let analyzer = crate::media_analysis::EssentiaExtractor {
-            exe: crate::media_analysis::EssentiaExtractor::default_exe(),
-            profile: std::env::var_os("STATIOND_ESSENTIA_PROFILE").map(std::path::PathBuf::from),
-            timeout: std::time::Duration::from_secs(90),
+            exe: analysis
+                .extractor
+                .clone()
+                .map(std::ffi::OsString::from)
+                .unwrap_or_else(crate::media_analysis::EssentiaExtractor::default_exe),
+            profile: analysis.profile.clone(),
+            timeout: std::time::Duration::from_secs(analysis.timeout_secs),
         };
         let analysis_root = write_root.clone();
         let progress_tx = status.cloned();
+        let max_per_scan = analysis.max_per_scan;
         let (r, tally) = tokio::task::spawn_blocking(move || {
             let tally = crate::media_analysis::analyze_pending(
                 &analysis_root,
                 &mut report,
                 &analyzer,
-                false,
+                reanalyze,
+                max_per_scan,
                 &mut |done, total| {
                     if let Some(s) = &progress_tx {
                         s.send_modify(|s| {

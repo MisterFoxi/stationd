@@ -234,7 +234,12 @@ message PruneResponse {
   uint64 removed = 1;
 }
 
-message ScanRequest {}
+message ScanRequest {
+  // Force la ré-analyse offline (Essentia) de TOUS les fichiers, pas seulement
+  // ceux sans marqueur à jour. Déclenche aussi l'analyse même si [analysis]
+  // est désactivée dans la config.
+  bool reanalyze = 1;
+}
 
 message ScanResponse {
   uint32 found       = 1;   // fichiers jouables trouvés à ce scan

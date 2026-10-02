@@ -12,6 +12,22 @@ path = "./data/stationd.db"
 [media]
 library_path = "./media"
 
+# Optional — offline media analysis (Essentia). Disabled by default: while
+# disabled, scans run no analysis and the typed `media_analysis` cache is only
+# rebuilt from existing tags. When enabled, a scan analyses every file without
+# an up-to-date analysis marker, writes the descriptors into the file tags
+# (the source of truth) and mirrors them into `media_analysis`.
+# `stationctl library scan --reanalyze` forces re-analysis of everything.
+# [analysis]
+# enabled = true
+# extractor = "tools/essentia_analyze.py"  # empty = STATIOND_ESSENTIA, else default
+# profile = ""                              # optional extractor profile
+# timeout_secs = 90                         # hard per-file timeout
+# jobs = 1                                  # reserved (analysis is sequential for now)
+# max_per_scan = 0                          # 0 = unlimited; N = analyse at most N
+#                                           # un-marked files per scan (chip away at
+#                                           # a big library; set small to test)
+
 # Directory holding the per-playlist TOML files (the source of truth).
 [playlist]
 path = "./playlist"

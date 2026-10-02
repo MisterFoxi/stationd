@@ -37,6 +37,9 @@ FROM ubuntu:26.04
 # Versions épinglées = celles de docker/Dockerfile.dev (validées sur devstationd).
 ARG ICECAST_VERSION=2.5.0-1
 ARG LIQUIDSOAP_VERSION=
+# essentia-tensorflow (PyPI), pour l'analyse média offline. Vide = dernière
+# version ; sinon la chaîne exacte (À VÉRIFIER / épingler, comme ICECAST_VERSION).
+ARG ESSENTIA_TF_VERSION=
 # Renseignés par docker/package.sh.
 ARG VERSION=unknown
 ARG REVISION=unknown
@@ -52,6 +55,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
     STATIOND_BIN=/usr/local/bin \
     STATIOND_USER=stationd \
     STATIOND_UMASK=007 \
+    STATIOND_ESSENTIA=/usr/local/bin/essentia_analyze.py \
+    STATIOND_ESSENTIA_MODELS=/usr/share/stationd/models \
     S6_CMD_WAIT_FOR_SERVICES_MAXTIME=0
 
 # tzdata : jiff résout [station] timezone dans /usr/share/zoneinfo.
@@ -60,9 +65,15 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       ca-certificates tzdata \
       ffmpeg \
+      python3 python3-pip \
       "icecast2=${ICECAST_VERSION}" \
       "liquidsoap${LIQUIDSOAP_VERSION:+=${LIQUIDSOAP_VERSION}}" \
  && rm -rf /var/lib/apt/lists/*
+
+# Analyse média offline (Essentia + TensorFlow). Wheel préconstruit (pas de
+# toolchain) ; embarque libtensorflow. Les modèles TF sont COPYés plus bas.
+RUN pip3 install --no-cache-dir --break-system-packages \
+      "essentia-tensorflow${ESSENTIA_TF_VERSION:+==${ESSENTIA_TF_VERSION}}"
 
 COPY --from=s6 /s6root/ /
 
@@ -86,6 +97,10 @@ RUN mkdir -p /usr/lib/stationd/plugins /usr/share/stationd
 COPY --chmod=0755 bin/ /usr/local/bin/
 COPY --chmod=0644 plugins/ /usr/lib/stationd/plugins/
 COPY --chmod=0644 share/ /usr/share/stationd/
+# Modèles TF de l'analyse offline (baked). Peut être vide si non fournis au
+# packaging : l'analyse échouera alors proprement jusqu'à ce qu'ils soient là.
+# L'extracteur essentia_analyze.py est livré via bin/ (COPY ci-dessus).
+COPY --chmod=0644 models/ /usr/share/stationd/models/
 COPY rootfs/ /
 # Droits du partage W: (Samba) non fiables : COPY les reporte jusque sur /etc.
 # Même normalisation que l'image de dev.

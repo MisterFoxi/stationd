@@ -106,8 +106,16 @@ pub(super) fn config_operation(
         }
         if req.mode != 0 {
             response.revision = cfg::save(path, &bytes, &req.name, &edits, &slot.schema)?;
+            // Confirm the persisted values before reporting success or reloading.
+            // The response and runtime must reflect the file, not just the draft.
+            let (stored_bytes, stored) = cfg::read(path, &req.name)?;
+            if cfg::revision(&stored_bytes) != response.revision || stored != candidate {
+                return Err(
+                    "conflict: configuration changed after saving; refresh before reloading".into(),
+                );
+            }
             response.saved = true;
-            current = candidate;
+            current = stored;
             if req.mode == 2 {
                 let loaded = matches!(slot.state, PluginState::Loaded);
                 slot.decl.config = current.clone();
@@ -489,5 +497,82 @@ mod config_editor_tests {
         assert!(matches!(slots[0].state, PluginState::Failed { .. }));
         let (_, stored) = crate::plugin_config::read(&path, "stop-when-idle").unwrap();
         assert_eq!(stored["max_connection_age"].as_str(), Some("12h"));
+    }
+    #[tokio::test]
+    async fn stop_when_idle_save_reload_persists_both_fields_across_daemon_restart() {
+        let (_dir, path, decls, env) = setup(true);
+        let control = env.control.clone().unwrap();
+        control.configure_connection_sampling(true);
+        let h = spawn_configured(decls, env, Some(path.clone()));
+        let get = || PluginConfigUpdateRequest {
+            name: "stop-when-idle".into(),
+            ..Default::default()
+        };
+        let data = h.config(get(), true).await.unwrap();
+        let mut request = edit(&data, "3", 2);
+        request.edits.push(PluginConfigValue {
+            key: "max_connection_age".into(),
+            value: "24h".into(),
+            present: true,
+            ..Default::default()
+        });
+        let saved = h.config(request, false).await.unwrap();
+        assert!(saved.saved && saved.applied && !saved.pending);
+        let (bytes, stored) = crate::plugin_config::read(&path, "stop-when-idle").unwrap();
+        assert_eq!(stored["min_zero_samples"].as_integer(), Some(3));
+        assert_eq!(stored["max_connection_age"].as_str(), Some("24h"));
+        assert_eq!(stored["future"].as_str(), Some("keep"));
+        let refreshed = h.config(get(), true).await.unwrap();
+        assert_eq!(refreshed.values, saved.values);
+        assert!(!refreshed.pending);
+        let info = h.list().await;
+        assert_eq!(
+            info.iter()
+                .find(|p| p.name == "stop-when-idle")
+                .unwrap()
+                .operator_notice,
+            Some(OperatorNotice::AutoSleep {
+                max_connection_age: Some(86400)
+            })
+        );
+        // Verify that the reloaded instance also uses the new sample threshold.
+        control.sample_listeners(1);
+        control.sample_connections(Some(vec![]), std::time::Duration::from_secs(30));
+        for _ in 0..2 {
+            h.emit(PluginEvent::ConnectionsSampled {
+                at: 0,
+                connections: Some(vec![]),
+            });
+            let _ = h.list().await;
+            assert_eq!(
+                control.state(),
+                crate::station_control::BroadcastState::Running
+            );
+        }
+        h.emit(PluginEvent::ConnectionsSampled {
+            at: 0,
+            connections: Some(vec![]),
+        });
+        let _ = h.list().await;
+        assert_eq!(
+            control.state(),
+            crate::station_control::BroadcastState::Draining
+        );
+        drop(h);
+        let parsed: crate::config::Config =
+            toml::from_str(std::str::from_utf8(&bytes).unwrap()).unwrap();
+        let new_control = StationControl::new_in_memory();
+        new_control.configure_connection_sampling(true);
+        let restarted = spawn_configured(
+            parsed.plugins,
+            PluginEnv {
+                control: Some(new_control),
+                ..Default::default()
+            },
+            Some(path),
+        );
+        let after_restart = restarted.config(get(), true).await.unwrap();
+        assert_eq!(after_restart.values, saved.values);
+        assert!(!after_restart.pending);
     }
 }

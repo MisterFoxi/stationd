@@ -111,7 +111,9 @@ daemon ; son groupe et son mode restent identiques. Les administrateurs membres
 du groupe conservent donc leur accès en écriture. Écriture dans un fichier
 temporaire du même dossier, synchronisation et remplacement atomique.
 Le dossier doit être accessible
-en écriture au daemon. Utiliser les tables [plugin.config] ; les tables
+en écriture au daemon. Après le remplacement, le daemon relit le fichier et
+vérifie la révision et les valeurs avant de confirmer l'enregistrement ou de
+recharger le plugin ; une modification concurrente est signalée comme conflit. Utiliser les tables [plugin.config] ; les tables
 inline sont explicitement refusées. Le chemin de configuration est résolu
 au démarrage. Ajouter/supprimer des déclarations, modifier leurs capacités
 ou leur activation dans le fichier nécessite toujours un redémarrage du daemon.

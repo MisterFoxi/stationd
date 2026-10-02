@@ -377,9 +377,15 @@ pub fn analyze_pending(
     report: &mut ScanReport,
     analyzer: &dyn MediaAnalyzer,
     force: bool,
+    limit: usize,
     progress: &mut dyn FnMut(usize, usize),
 ) -> Tally {
-    let todo = pending(report, force);
+    let mut todo = pending(report, force);
+    // `limit` > 0 borne le nombre de fichiers analysés ce scan (les N premiers
+    // non marqués) ; `0` = illimité. Le reste sera repris aux scans suivants.
+    if limit > 0 && todo.len() > limit {
+        todo.truncate(limit);
+    }
     let total = todo.len();
     let mut tally = Tally::default();
     progress(0, total);

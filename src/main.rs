@@ -365,10 +365,11 @@ async fn main() -> anyhow::Result<()> {
     // actor's command loop. Each scan goes through the plugins' `on_scan`
     // (e.g. `TXXX:Type` → genre) before indexing. Reachable via `stationctl
     // library scan|list`.
-    let library = stationd::library_actor::spawn_with(
+    let library = stationd::library_actor::spawn_with_analysis(
         db_pool.clone(),
         cfg.media.library_path.clone(),
         Some(plugins),
+        cfg.analysis.clone(),
     );
     // Raised as soon as a shutdown is requested: the endless streams (on-air
     // `Watch`, journal, scan progress) end, so the graceful shutdown does not

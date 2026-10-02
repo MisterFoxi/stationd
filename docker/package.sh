@@ -63,7 +63,7 @@ done
 # --- 2. Contexte de build ---------------------------------------------------
 stage="$root/dist/stage"
 rm -rf "$stage"
-mkdir -p "$stage/bin" "$stage/plugins" "$stage/share"
+mkdir -p "$stage/bin" "$stage/plugins" "$stage/share" "$stage/models"
 
 # target/ du crate principal = volume nommé du conteneur, invisible de l'hôte.
 for b in stationd stationctl stationd-tui; do
@@ -88,6 +88,18 @@ done
 cp -r radio/. "$stage/share/"
 cp -r docker/rootfs "$stage/rootfs"
 
+# Analyse média offline : l'extracteur Essentia (livré via bin/ → /usr/local/bin,
+# chmod 0755 par le COPY de Dockerfile.prod) et ses modèles TF (bakés via models/).
+[ -f tools/essentia_analyze.py ] || die "tools/essentia_analyze.py absent"
+cp tools/essentia_analyze.py "$stage/bin/essentia_analyze.py"
+if [ -d models ] && [ -n "$(ls -A models 2>/dev/null)" ]; then
+  cp -r models/. "$stage/models/"
+else
+  echo "package.sh : AVERTISSEMENT — models/ vide ou absent : l'analyse Essentia" \
+       "ne produira rien tant que les modèles TF ne sont pas fournis" \
+       "(cf. tools/essentia_analyze.py)." >&2
+fi
+
 # --- 3. Image ---------------------------------------------------------------
 step "image stationd:$tag"
 docker build -f docker/Dockerfile.prod \
@@ -106,6 +118,8 @@ docker run --rm --entrypoint /bin/sh "stationd:$tag" -euc '
   ls /usr/lib/stationd/plugins
   test -s /usr/share/stationd/error.mp3 && test -s /usr/share/stationd/bruit.mp3
   test -d /usr/share/zoneinfo/Europe
+  test -x /usr/local/bin/essentia_analyze.py
+  python3 --version >/dev/null
 '
 
 # Vérifier aussi sous l'identité qui charge les plugins, pas seulement root.

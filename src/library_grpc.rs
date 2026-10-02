@@ -360,8 +360,9 @@ impl LibraryService for LibraryGrpc {
         Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(out)))
     }
 
-    async fn scan(&self, _request: Request<ScanRequest>) -> Result<Response<ScanResponse>, Status> {
-        let outcome = self.handle.scan().await.map_err(map_error)?;
+    async fn scan(&self, request: Request<ScanRequest>) -> Result<Response<ScanResponse>, Status> {
+        let reanalyze = request.into_inner().reanalyze;
+        let outcome = self.handle.scan_with(reanalyze).await.map_err(map_error)?;
         let report = outcome.report;
         let found = report.media.len() as u32;
         let skipped = report.skipped.len() as u32;
