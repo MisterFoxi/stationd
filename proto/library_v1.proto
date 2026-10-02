@@ -36,6 +36,8 @@ service LibraryService {
   // tri stable (clé puis chemin), pagination par curseur, total. Lecture
   // seule ; ListMedia reste pour le CLI (tout d'un coup).
   rpc SearchMedia(SearchMediaRequest) returns (SearchMediaResponse);
+  // Indexed directories, paginated by exact relative path (ancestors included).
+  rpc ListFolders(ListFoldersRequest) returns (ListFoldersResponse);
 
   // Oublie les médias disparus du disque (lignes available = 0 et leurs
   // genres). `older_than` ("30d", "12h"…) : seulement ceux que le dernier
@@ -324,6 +326,9 @@ message SearchMediaRequest {
   // main), toutes vérifiées : `<` 10d = créé il y a moins de dix jours.
   // Un média sans date de création n'en passe aucune.
   repeated AgeFilter age = 10;
+  // Present: files directly in this exact directory; empty string = root.
+  // Combines with the existing recursive folder prefix and other filters.
+  optional string directory = 11;
 
   message AgeFilter {
     string op = 1;         // <, <=, >, >=
@@ -347,3 +352,11 @@ message SearchMediaResponse {
   uint64 total = 2;          // médias correspondant aux filtres (toutes pages)
   string next_cursor = 3;    // vide = dernière page
 }
+
+message ListFoldersRequest {
+  bool include_unavailable = 1;
+  string cursor = 2;
+  uint32 limit = 3; // default 500, maximum 1000
+}
+message MediaFolder { string path = 1; uint64 count = 2; }
+message ListFoldersResponse { repeated MediaFolder folders = 1; string next_cursor = 2; }

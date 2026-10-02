@@ -488,6 +488,7 @@ pub struct SearchQuery {
     pub genres: Vec<String>,
     /// Path prefix (a folder), case-insensitive. Empty = everything.
     pub folder: String,
+    pub directory: Option<String>,
     pub include_unavailable: bool,
     /// Keep media missing ALL of these.
     pub missing: Vec<SearchField>,
@@ -578,6 +579,7 @@ pub async fn search(pool: &SqlitePool, q: &SearchQuery) -> Result<SearchPage, sq
         })
         .filter(|m| q.include_unavailable || m.available)
         .filter(|m| folder.is_empty() || fold(&m.rel_path).starts_with(&folder))
+        .filter(|m| q.directory.as_ref().is_none_or(|d| m.rel_path.rsplit_once('/').map(|(p,_)| p).unwrap_or("") == d))
         .filter(|m| wanted.is_empty() || m.genres.iter().any(|g| wanted.contains(&genre_key(g))))
         .filter(|m| {
             q.missing.iter().all(|f| match f {
@@ -1258,3 +1260,5 @@ pub(crate) fn normalize_creation(value: &str) -> Result<String, String> {
     let timestamp = value.parse::<jiff::Timestamp>().map_err(|_| bad())?;
     Ok(format!("{timestamp:.9}"))
 }
+
+pub use crate::media_folders::{folders, Folder, FolderPage};

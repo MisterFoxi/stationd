@@ -158,6 +158,8 @@ pub struct Medias {
     descending: bool,
     missing: usize,
     include_unavailable: bool,
+    tree: Option<super::media_tree::Tree>,
+    folders_req: u64,
     rows: Vec<Media>,
     total: u64,
     next: String,
@@ -194,7 +196,7 @@ impl Default for Medias {
     }
 }
 
-fn mmss(ms: u64) -> String {
+pub(super) fn mmss(ms: u64) -> String {
     let s = ms / 1000;
     if s >= 3600 { format!("{}:{:02}:{:02}", s / 3600, (s / 60) % 60, s % 60) } else { format!("{}:{:02}", s / 60, s % 60) }
 }
@@ -226,6 +228,8 @@ impl Medias {
             descending: false,
             missing: 0,
             include_unavailable: false,
+            tree: None,
+            folders_req: 0,
             rows: Vec::new(),
             total: 0,
             next: String::new(),
@@ -255,6 +259,7 @@ impl Medias {
     /// partie pendant qu'un autre écran était actif, ou si la dernière a
     /// échoué (stationd injoignable alors).
     pub fn ensure_loaded(&mut self, ctx: &mut Global) {
+        if self.tree.as_ref().is_some_and(|t| t.folders.is_empty() || t.error.is_some()) { self.load_folders(ctx); }
         if !self.loaded_once || self.loading || self.error.is_some() {
             self.load(ctx, false);
         }
@@ -266,6 +271,7 @@ impl Medias {
             query: p.words,
             genres: p.genres,
             folder: p.folder,
+            directory: self.tree.as_ref().map(|t| t.path.clone()),
             include_unavailable: self.include_unavailable,
             missing: MISSING[self.missing].map(|f| vec![f as i32]).unwrap_or_default(),
             sort: SORTS[self.sort] as i32,
@@ -280,9 +286,25 @@ impl Medias {
         }
     }
 
-    /// Lance une recherche : depuis le début (`append = false`) ou la page
-    /// suivante.
+    /// Charge l’inventaire des dossiers de la bibliothèque indexée.
+    fn load_folders(&mut self, ctx: &mut Global) {
+        let Some(tree) = self.tree.as_mut() else { return; };
+        tree.loading = true;
+        self.folders_req += 1;
+        let (owner, request, channel, all) = (self.owner, self.folders_req, ctx.channel.clone(), self.include_unavailable);
+        ctx.spawn_async(async move { let result = crate::rpc::media_folders(channel, all).await;
+            Ok(Control::Event(AppEvent::MediaFolders(owner, request, result))) });
+    }
+
+    fn change_folder(&mut self, ctx: &mut Global) {
+        self.request += 1; self.list_req = self.request; // invalidate the previous folder/page even before its replacement can load
+        self.rows.clear(); self.selected = 0; self.next.clear(); self.keep = None;
+        self.load(ctx, false);
+    }
+
+    /// Lance la première page ou la page suivante de fichiers.
     fn load(&mut self, ctx: &mut Global, append: bool) {
+        if let Some(tree) = self.tree.as_ref() && tree.folders.is_empty() { self.loading = tree.loading; return; }
         let cursor = if append { self.next.clone() } else { String::new() };
         if append && cursor.is_empty() {
             return;
@@ -432,6 +454,7 @@ impl Medias {
             return;
         }
         self.keep = self.rows.get(self.selected).map(|m| m.rel_path.clone());
+        if self.tree.is_some() { self.load_folders(ctx); }
         self.load(ctx, false);
         if let Some(c) = self.card.take() {
             let path = c.media.rel_path.clone();
@@ -509,6 +532,10 @@ impl Medias {
                 (None, false, true) => Span::styled(tr!("media-none"), s.muted()),
             };
             Paragraph::new(Line::from(vec![Span::raw(" "), msg])).render(area, buf);
+            return;
+        }
+        if self.tree.is_some() {
+            super::media_tree::render_files(area, buf, s, &self.rows, self.selected, &self.marks);
             return;
         }
         let header = Row::new(vec![
@@ -708,6 +735,15 @@ impl Medias {
     fn key(&mut self, k: &ratatui_crossterm::crossterm::event::KeyEvent, ctx: &mut Global) -> bool {
         let page = 15;
         match k.code {
+            KeyCode::Char('v') if !self.picker => {
+                if self.tree.is_some() { self.tree = None; self.folders_req += 1; }
+                else {
+                    let mut tree = super::media_tree::Tree::default();
+                    tree.path = parse_query(&self.searched).folder.trim_matches('/').to_string();
+                    self.tree = Some(tree); self.load_folders(ctx);
+                }
+                self.change_folder(ctx);
+            }
             KeyCode::Char('/') => {
                 self.editing = true;
                 self.input.focus.set(true);
@@ -726,9 +762,10 @@ impl Medias {
             }
             KeyCode::Char('a') => {
                 self.include_unavailable = !self.include_unavailable;
+                if self.tree.is_some() { self.load_folders(ctx); }
                 self.load(ctx, false);
             }
-            KeyCode::Char('r') => self.load(ctx, false),
+            KeyCode::Char('r') => { if self.tree.is_some() { self.load_folders(ctx); } self.load(ctx, false); },
             KeyCode::Char(' ') => {
                 self.toggle_mark();
                 self.move_to(self.selected + 1, ctx);
@@ -748,6 +785,16 @@ impl Medias {
     /// Événements d'une recherche (écran ou sélecteur) : réponses, frappe.
     pub fn handle(&mut self, event: &AppEvent, ctx: &mut Global) -> Control<AppEvent> {
         match event {
+            AppEvent::MediaFolders(owner, id, result) if *owner == self.owner && *id == self.folders_req => {
+                let Some(tree) = self.tree.as_mut() else { return Control::Continue; };
+                tree.loading = false;
+                let initial = tree.folders.is_empty();
+                match result {
+                    Ok(folders) => { if tree.set(folders.clone()) || initial { self.change_folder(ctx); } },
+                    Err(error) => { tree.error = Some(error.clone()); if initial { self.error = Some(error.clone()); self.loading = false; } },
+                }
+                return Control::Changed;
+            }
             AppEvent::Media(owner, id, r, append) if *owner == self.owner => {
                 if *id == self.list_req {
                     self.apply(r, *append);
@@ -940,6 +987,21 @@ impl Medias {
             return Control::Changed;
         }
 
+        if self.tree.is_some() && matches!(k.code, KeyCode::Tab | KeyCode::BackTab) {
+            let tree = self.tree.as_mut().unwrap(); tree.focused = !tree.focused;
+            return Control::Changed;
+        }
+        if self.tree.as_ref().is_some_and(|t| t.focused) {
+            match k.code {
+                KeyCode::Up | KeyCode::Down | KeyCode::Left | KeyCode::Right | KeyCode::PageUp | KeyCode::PageDown | KeyCode::Home | KeyCode::End | KeyCode::Char(' ') => {
+                    if self.tree.as_mut().unwrap().navigate(k.code) { self.change_folder(ctx); }
+                    return Control::Changed;
+                },
+                KeyCode::Enter => { self.tree.as_mut().unwrap().focused = false; return Control::Changed; },
+                KeyCode::Char('v' | '/' | 'r' | 'a' | 's' | 'd' | 'm' | 'c') => {},
+                _ => return Control::Unchanged,
+            }
+        }
         if self.picker {
             match k.code {
                 KeyCode::Esc => {
@@ -1015,7 +1077,20 @@ impl Medias {
             .render(l, buf);
         Paragraph::new(right).render(r, buf);
 
-        self.render_table(table_a, buf, &s);
+        if let Some(tree) = &self.tree {
+            let [dirs, content] = Layout::horizontal([Constraint::Length((table_a.width / 3).clamp(22, 36)), Constraint::Fill(1)]).areas(table_a);
+            let block = Block::bordered().title(tr!("media-tree-title")).border_style(if tree.focused { s.accent() } else { s.border() });
+            let inner = block.inner(dirs); block.render(dirs, buf); tree.render(inner, buf, &s);
+            let path = if tree.path.is_empty() { "/".into() } else { super::media_tree::clean(&tree.path) };
+            let block = Block::bordered().title(tr!("media-tree-content", folder = path)).border_style(if tree.focused { s.border() } else { s.accent() });
+            let inner = block.inner(content); block.render(content, buf);
+            let [files, details] = Layout::vertical([Constraint::Fill(1), Constraint::Length(2)]).areas(inner);
+            self.render_table(files, buf, &s);
+            if let Some(media) = self.rows.get(self.selected) {
+                Paragraph::new(vec![Line::from(super::media_tree::clean(&media.rel_path)), Line::from(tr!("media-tree-genres", genres = super::media_tree::clean(&media.genres.join(", "))))])
+                    .style(s.muted()).render(details, buf);
+            }
+        } else { self.render_table(table_a, buf, &s); }
         if self.card.is_some() {
             self.render_card(area, buf, ctx);
         }
@@ -1061,6 +1136,28 @@ impl Medias {
                 (k!("key-p"), k!("help-media-to-playlist")),
                 (k!("key-f"), k!("help-media-enqueue")),
             ]
+        } else if self.tree.as_ref().is_some_and(|t| t.focused) {
+            &[
+                (k!("key-v"), k!("help-media-tree")),
+                (k!("key-tab"), k!("help-media-tree-focus")),
+                (k!("key-up-down"), k!("help-select")),
+                (k!("key-plugin-columns"), k!("help-media-tree-expand")),
+                (k!("key-enter"), k!("help-media-tree-files")),
+                (k!("key-slash"), k!("help-media-search")),
+                (k!("key-r"), k!("help-media-reload")),
+            ]
+        } else if self.tree.is_some() {
+            &[
+                (k!("key-v"), k!("help-media-tree")),
+                (k!("key-tab"), k!("help-media-tree-focus")),
+                (k!("key-up-down"), k!("help-select")),
+                (k!("key-plugin-columns"), k!("help-media-tree-expand")),
+                (k!("key-enter"), k!("help-media-card")),
+                (k!("key-e"), k!("help-media-edit-tags")),
+                (k!("key-space"), k!("help-media-mark")),
+                (k!("key-slash"), k!("help-media-search")),
+                (k!("key-r"), k!("help-media-reload")),
+            ]
         } else if self.picker {
             &[
                 (k!("key-enter"), k!("help-picker-add")),
@@ -1072,6 +1169,7 @@ impl Medias {
             ]
         } else {
             &[
+                (k!("key-v"), k!("help-media-tree")),
                 (k!("key-slash"), k!("help-media-search")),
                 (k!("key-enter"), k!("help-media-card")),
                 (k!("key-space"), k!("help-media-mark")),
@@ -1111,6 +1209,7 @@ impl Screen for Medias {
     }
 
     fn reconnected(&mut self, ctx: &mut Global) -> Result<(), Error> {
+        if self.tree.is_some() { self.load_folders(ctx); }
         if self.error.is_some() {
             self.load(ctx, false);
         }
@@ -1191,5 +1290,41 @@ mod tests {
         assert_eq!(live_query("daft genre:électro "), "daft genre:électro");
         assert_eq!(live_query("genre:électro daf"), "genre:électro daf");
         assert_eq!(live_query("12:30"), "12:30");
+    }
+
+    #[tokio::test]
+    async fn directory_view_keeps_genres_visible_at_eighty_columns_and_ignores_stale_replies() {
+        let args=crate::Args { addr:"http://127.0.0.1:50051".into(), lang:None, theme:"Imperial".into(), list_themes:false };
+        let channel=crate::rpc::lazy_channel(&args.addr).unwrap();
+        let mut ctx=Global::new(&args,channel.clone(),channel);
+        let mut m=Medias::default();
+        let mut tree=super::super::media_tree::Tree::default();
+        tree.path="Music".into(); tree.focused=false;
+        tree.set(vec![stationd_proto::library::MediaFolder{path:"".into(),count:1},stationd_proto::library::MediaFolder{path:"Music".into(),count:1}]);
+        m.tree=Some(tree); m.folders_req=4; m.list_req=8;
+        m.searched="genre:Rock".into();
+        let req=m.request(String::new()); assert_eq!(req.directory.as_deref(),Some("Music")); assert_eq!(req.genres,["Rock"]);
+        let mut song=media("Music/song.mp3","Song"); song.artist="Artist".into(); song.genres=vec!["Rock".into(),"Jazz".into()];
+        m.rows=vec![song];m.total=1;m.loaded_once=true;
+        let _=m.handle(&AppEvent::Media(m.owner,7,page(vec![media("old.mp3","Old")]),false),&mut ctx);
+        assert_eq!(m.rows[0].rel_path,"Music/song.mp3");
+        let _=m.handle(&AppEvent::MediaFolders(m.owner,3,Err("stale".into())),&mut ctx);
+        assert!(m.tree.as_ref().unwrap().error.is_none());
+        let area=Rect::new(0,0,80,24);let mut buf=Buffer::empty(area);m.draw(area,&mut buf,&mut ctx);
+        let text:String=(0..24).flat_map(|y|(0..80).map(move|x|(x,y))).map(|p|buf[p].symbol()).collect();
+        assert!(text.contains("song.mp3") && text.contains("Rock") && text.contains("Jazz"),"{text}");
+    }
+    #[tokio::test]
+    async fn directory_inventory_failure_is_visible_and_never_reuses_flat_list_results() {
+        let args=crate::Args { addr:"http://127.0.0.1:50051".into(), lang:None, theme:"Imperial".into(), list_themes:false };
+        let channel=crate::rpc::lazy_channel(&args.addr).unwrap();
+        let mut ctx=Global::new(&args,channel.clone(),channel);
+        let mut m=Medias::default();m.tree=Some(super::super::media_tree::Tree::default());
+        m.list_req=2;m.folders_req=3;m.loading=true;
+        let _=m.handle(&AppEvent::Media(m.owner,1,page(vec![media("old.mp3","Old")]),false),&mut ctx);
+        assert!(m.rows.is_empty());
+        let _=m.handle(&AppEvent::MediaFolders(m.owner,3,Err("unsupported directory RPC".into())),&mut ctx);
+        assert!(!m.loading && m.rows.is_empty());
+        assert_eq!(m.error.as_deref(),Some("unsupported directory RPC"));
     }
 }

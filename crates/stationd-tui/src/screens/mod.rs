@@ -5,6 +5,7 @@ mod antenne;
 mod controle;
 mod editor;
 pub(crate) mod medias;
+mod media_tree;
 mod ops;
 pub(crate) mod picker;
 mod plugin_tabs;

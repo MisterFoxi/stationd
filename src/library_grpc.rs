@@ -194,6 +194,11 @@ fn search_field(v: i32) -> crate::media_index::SearchField {
 
 #[tonic::async_trait]
 impl LibraryService for LibraryGrpc {
+    async fn list_folders(&self, request: Request<library::ListFoldersRequest>) -> Result<Response<library::ListFoldersResponse>, Status> {
+        let req = request.into_inner();
+        let page = self.handle.folders(req.include_unavailable, req.cursor, if req.limit == 0 { 500 } else { req.limit as usize }).await.map_err(map_error)?;
+        Ok(Response::new(library::ListFoldersResponse { folders: page.folders.into_iter().map(|f| library::MediaFolder { path:f.path, count:f.count }).collect(), next_cursor: page.next.unwrap_or_default() }))
+    }
     async fn search_media(
         &self,
         request: Request<SearchMediaRequest>,
@@ -228,6 +233,7 @@ impl LibraryService for LibraryGrpc {
                 query: r.query,
                 genres: r.genres,
                 folder: r.folder,
+                directory: r.directory,
                 include_unavailable: r.include_unavailable,
                 missing: r.missing.into_iter().map(search_field).collect(),
                 sort: search_field(r.sort),

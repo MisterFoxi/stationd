@@ -413,3 +413,16 @@ mod tests {
         assert_eq!(d, POLL_MAX);
     }
 }
+
+pub async fn media_folders(channel: Channel, include_unavailable: bool) -> Read<Vec<library::MediaFolder>> {
+    let mut client = library::library_service_client::LibraryServiceClient::new(channel);
+    let mut folders = Vec::new();
+    let mut cursor = String::new();
+    loop {
+        let page: library::ListFoldersResponse = bounded(client.list_folders(library::ListFoldersRequest { include_unavailable, cursor:cursor.clone(), limit:1000 })).await?;
+        folders.extend(page.folders);
+        if page.next_cursor.is_empty() { return Ok(folders); }
+        if page.next_cursor == cursor { return Err("directory pagination did not advance".into()); }
+        cursor = page.next_cursor;
+    }
+}

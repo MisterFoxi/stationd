@@ -1330,6 +1330,7 @@ async fn main() -> anyhow::Result<()> {
                     query,
                     genres,
                     folder: folder.unwrap_or_default(),
+                    directory: None,
                     include_unavailable: all,
                     missing,
                     sort: sort as i32,

@@ -145,6 +145,7 @@ pub enum AppEvent {
     /// Recherche de médias : fin du délai après une frappe (propriétaire,
     /// n° de la frappe).
     MediaTyped(u64, u64),
+    MediaFolders(u64, u64, Result<Vec<stationd_proto::library::MediaFolder>, String>),
     /// Fiche d'un média (propriétaire, n° de requête).
     MediaCard(u64, u64, Box<crate::rpc::MediaCard>),
     /// Tags des fichiers visés (dans l'ordre) et genres connus, lus pour les
@@ -534,7 +535,7 @@ pub fn event(event: &AppEvent, state: &mut Scenery, ctx: &mut Global) -> Result<
             let _ = state.active().event(event, ctx)?;
             return Ok(Control::Changed);
         }
-        AppEvent::PluginTable(..) | AppEvent::PluginConfig(..) => {
+        AppEvent::PluginTable(..) | AppEvent::PluginConfig(..) | AppEvent::MediaFolders(..) => {
             // Deliver replies even to inactive tabs; no stranded in-flight requests.
             for screen in &mut state.screens { let _ = screen.event(event, ctx)?; }
             return Ok(Control::Changed);

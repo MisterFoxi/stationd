@@ -65,6 +65,7 @@ pub struct ScanOutcome {
 }
 
 enum Command {
+    Folders { include_unavailable: bool, after: String, limit: usize, reply: oneshot::Sender<Result<media_index::FolderPage, LibraryError>> },
     Scan {
         reply: oneshot::Sender<Result<ScanOutcome, LibraryError>>,
     },
@@ -290,6 +291,12 @@ impl LibraryHandle {
 
     /// One page of a search (filters, stable sort, cursor). A blank genre is
     /// a loud `BadFilter`, like in [`list`](Self::list).
+    pub async fn folders(&self, include_unavailable: bool, after: String, limit: usize) -> Result<media_index::FolderPage, LibraryError> {
+        let (reply, rx) = oneshot::channel();
+        self.tx.send(Command::Folders { include_unavailable, after, limit, reply }).await.map_err(|_| LibraryError::ActorGone)?;
+        rx.await.map_err(|_| LibraryError::ActorGone)?
+    }
+
     pub async fn search(&self, query: SearchQuery) -> Result<SearchPage, LibraryError> {
         if query.genres.iter().any(|g| g.trim().is_empty()) {
             return Err(LibraryError::BadFilter("empty genre".into()));
@@ -362,6 +369,9 @@ pub fn spawn_with(pool: SqlitePool, root: PathBuf, plugins: Option<PluginHandle>
     tokio::spawn(async move {
         while let Some(cmd) = rx.recv().await {
             match cmd {
+                Command::Folders { include_unavailable, after, limit, reply } => {
+                    let _ = reply.send(media_index::folders(&pool, include_unavailable, &after, limit).await.map_err(LibraryError::from));
+                }
                 Command::Scan { reply } => {
                     let _ = reply.send(scan_journaled(&pool, &root, plugins.as_ref(), &status_tx).await);
                 }
