@@ -142,13 +142,14 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     });
-    let plugins = stationd::plugin::spawn_env(
+    let plugins = stationd::plugin::spawn_configured(
         cfg.plugins.clone(),
         stationd::plugin::PluginEnv {
             control: Some(control.clone()),
             db_dir: Some(plugin_db_dir),
             geoip,
         },
+        Some(args.config.clone()),
     );
     control.attach_plugins(plugins.clone());
     // The BPM analysis (custom-tags) decodes with FFmpeg: say at start-up if

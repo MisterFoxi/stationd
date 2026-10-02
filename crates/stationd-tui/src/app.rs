@@ -168,6 +168,7 @@ pub enum AppEvent {
     Tags(Box<crate::screens::TagsEvent>),
     System(Box<crate::screens::SysEvent>),
     PluginTable(u64, u64, crate::rpc::Read<stationd_proto::plugin::PluginDbQueryResponse>),
+    PluginConfig(u64, u64, u8, crate::rpc::Read<stationd_proto::plugin::PluginConfigResponse>),
 }
 
 impl From<RenderedEvent> for AppEvent {
@@ -228,7 +229,7 @@ impl Scenery {
                 let key = self.plugin_tabs[i].clone();
                 old.iter().position(|s| s.plugin_tab_key() == Some((key.0.clone(), key.1.id.clone())))
                     .map(|i| old.remove(i))
-            }).unwrap_or_else(|| Box::new(screens::PluginTable::new(name.clone(), tab.clone())));
+            }).unwrap_or_else(|| screens::plugin_screen(name.clone(), tab.clone()));
             self.screens.push(screen);
         }
         self.plugin_tabs = desired;
@@ -533,7 +534,7 @@ pub fn event(event: &AppEvent, state: &mut Scenery, ctx: &mut Global) -> Result<
             let _ = state.active().event(event, ctx)?;
             return Ok(Control::Changed);
         }
-        AppEvent::PluginTable(..) => {
+        AppEvent::PluginTable(..) | AppEvent::PluginConfig(..) => {
             // Deliver replies even to inactive tabs; no stranded in-flight requests.
             for screen in &mut state.screens { let _ = screen.event(event, ctx)?; }
             return Ok(Control::Changed);

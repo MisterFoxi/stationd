@@ -21,6 +21,8 @@ service PluginService {
   rpc Control(PluginControlRequest) returns (PluginControlResponse);
   // Read a declared table; no client-supplied SQL.
   rpc ReadTab(PluginReadTabRequest) returns (PluginDbQueryResponse);
+  rpc GetConfig(PluginConfigRequest) returns (PluginConfigResponse);
+  rpc UpdateConfig(PluginConfigUpdateRequest) returns (PluginConfigResponse);
 
   // Base propre d'un plugin (capacité `db`, cf. Doc/plugin-host.md). Lectures
   // sur une connexion séparée en lecture seule ; le plugin n'est pas touché.
@@ -51,6 +53,7 @@ message PluginInfo {
   // Published by the plugin itself, only while loaded; no config/name inference.
   OperatorNotice operator_notice = 8;
   repeated PluginTab tabs = 9;
+  bool configurable = 10; // a validated schema is available
 }
 
 message OperatorNotice {
@@ -136,8 +139,42 @@ message PluginTab {
   string id = 1; // Identity = (plugin name, tab id), stable across reload.
   string title = 2;
   string description = 3;
+  string kind = 4; // empty/table or plugin_config
 }
 message PluginReadTabRequest {
   string name = 1;
   string tab_id = 2;
+}
+
+message PluginConfigRequest { string name = 1; }
+message PluginConfigField {
+  string key = 1;
+  string label = 2;
+  string kind = 3;
+  bool optional = 4;
+  optional string default_value = 5;
+  optional int64 minimum = 6;
+  optional int64 maximum = 7;
+  bool secret = 8;
+}
+message PluginConfigValue { string key = 1; string value = 2; bool present = 3; bool redacted = 4; }
+message PluginConfigUpdateRequest {
+  string name = 1;
+  string revision = 2; // whole configuration file revision
+  string schema_revision = 3;
+  repeated PluginConfigValue edits = 4; // present=false resets a field
+  enum Mode { PREVIEW = 0; SAVE = 1; SAVE_RELOAD = 2; }
+  Mode mode = 5;
+}
+message PluginConfigResponse {
+  string name = 1;
+  string revision = 2;
+  string schema_revision = 3;
+  repeated PluginConfigField fields = 4;
+  repeated PluginConfigValue values = 5; // secrets are never returned
+  bool pending = 6; // saved configuration differs from the running instance
+  repeated string changes = 7; // sanitized preview
+  bool saved = 8;
+  bool applied = 9;
+  string message = 10;
 }

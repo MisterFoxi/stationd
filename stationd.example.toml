@@ -247,3 +247,10 @@ level = "info"
 # field = "creation"
 # op = ">="
 # value = "2026-06-01T00:00:00Z"
+
+# Generic plugin configuration editor in the TUI. No capabilities required.
+# Start with stop-when-idle; rebuild its WASM variant to expose config_schema.
+# See Doc/plugin-config.md.
+# [[plugin]]
+# name = "plugin-config"
+# enabled = true

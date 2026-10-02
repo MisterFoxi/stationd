@@ -16,6 +16,10 @@ extern "ExtismHost" {
 
 fn settings() -> FnResult<(u32, Option<u64>)> {
     let value: Value = serde_json::from_str(&config::get("config")?.unwrap_or_else(|| "{}".into()))?;
+    settings_value(&value)
+}
+
+fn settings_value(value: &Value) -> FnResult<(u32, Option<u64>)> {
     let min = match value.get("min_zero_samples") {
         None => 1,
         Some(v) => v.as_u64().filter(|n| *n >= 1 && *n <= u32::MAX as u64)
@@ -114,4 +118,24 @@ pub fn on_event(input: String) -> FnResult<()> {
         control(request)?;
     }
     Ok(())
+}
+
+#[plugin_fn]
+pub fn config_schema(_input: String) -> FnResult<String> {
+    Ok(json!([
+        {"key":"min_zero_samples","label":"Échantillons consécutifs","kind":"integer","default":"1","minimum":1,"maximum":4294967295u64},
+        {"key":"max_connection_age","label":"Âge maximal des connexions (ex. 12h)","kind":"duration","optional":true}
+    ]).to_string())
+}
+#[plugin_fn]
+pub fn validate_config(input: String) -> FnResult<String> {
+    let value: Value = serde_json::from_str(&input)?;
+    let (_, age) = settings_value(&value)?;
+    if age.is_some() {
+        let available: Value = serde_json::from_str(&unsafe { listener_connections("{}".into())? })?;
+        if available.get("ok") != Some(&Value::Bool(true)) || available.get("enabled") != Some(&Value::Bool(true)) {
+            return Err(Error::msg("max_connection_age requires listener snapshots").into());
+        }
+    }
+    Ok("ok".into())
 }

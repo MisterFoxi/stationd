@@ -1,9 +1,9 @@
 # Onglets TUI déclarés par les plugins — V1
 
 Le plugin fournit ses vues ; la TUI reste un client gRPC générique et ne connaît
-ni le nom du plugin ni son schéma SQL. Ce premier contrat couvre les tableaux
-en lecture seule. Formulaires, actions métier, graphiques et configuration
-éditable pourront étendre ce contrat.
+ni le nom du plugin ni son schéma SQL. Les tableaux sont en lecture seule.
+Le type plugin_config ouvre un éditeur générique de configuration :
+voir [Configuration des plugins](plugin-config.md).
 
 ## Déclaration
 
@@ -28,7 +28,7 @@ contrôle et overrides. Un descripteur invalide provoque un état `failed` avec
 la raison. La SQL est vérifiée à la lecture : une erreur s'affiche dans la vue
 sans mettre le plugin en quarantaine.
 
-V1 nécessite la capacité `db`. Maximum quatre onglets par plugin ; identifiant
+Les tableaux nécessitent la capacité `db` ; un onglet de configuration ne la nécessite pas. Maximum quatre onglets par plugin ; identifiant
 ASCII alphanumérique, `-` ou `_`, non vide, unique, limité à 64 octets.
 Titre non vide : 64 caractères ; description : 512 caractères. Les caractères
 de contrôle sont refusés. SQL non vide : 16 KiB ; sortie WASM : 64 KiB.

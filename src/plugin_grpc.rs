@@ -16,8 +16,8 @@ use plugin::plugin_service_server::PluginService;
 use plugin::{
     plugin_control_request::Action as ProtoAction, plugin_db_value::Kind, PluginControlRequest,
     PluginControlResponse, PluginDbInfoRequest, PluginDbInfoResponse, PluginDbQueryRequest,
-    PluginDbQueryResponse, PluginDbResetRequest, PluginDbResetResponse, PluginDbRow,
-    PluginDbTable, PluginDbValue, PluginInfo, PluginListRequest, PluginListResponse,
+    PluginDbQueryResponse, PluginDbResetRequest, PluginDbResetResponse, PluginDbRow, PluginDbTable,
+    PluginDbValue, PluginInfo, PluginListRequest, PluginListResponse,
 };
 
 pub struct PluginGrpc {
@@ -32,14 +32,24 @@ impl PluginGrpc {
 
 fn map_info(i: CoreInfo) -> PluginInfo {
     PluginInfo {
-        tabs: i.tabs.into_iter().map(|t| plugin::PluginTab {
-            id: t.id, title: t.title, description: t.description,
-        }).collect(),
+        configurable: i.configurable,
+        tabs: i
+            .tabs
+            .into_iter()
+            .map(|t| plugin::PluginTab {
+                id: t.id,
+                title: t.title,
+                description: t.description,
+                kind: t.kind,
+            })
+            .collect(),
         operator_notice: i.operator_notice.map(|notice| match notice {
-            crate::plugin::OperatorNotice::AutoSleep { max_connection_age } => plugin::OperatorNotice {
-                code: plugin::operator_notice::Code::AutoSleep as i32,
-                max_connection_age,
-            },
+            crate::plugin::OperatorNotice::AutoSleep { max_connection_age } => {
+                plugin::OperatorNotice {
+                    code: plugin::operator_notice::Code::AutoSleep as i32,
+                    max_connection_age,
+                }
+            }
         }),
         name: i.name,
         enabled: i.enabled,
@@ -51,6 +61,15 @@ fn map_info(i: CoreInfo) -> PluginInfo {
     }
 }
 
+fn config_status(e: String) -> Status {
+    if e.starts_with("conflict:") {
+        Status::aborted(e)
+    } else if e == "unknown plugin" {
+        Status::not_found(e)
+    } else {
+        Status::failed_precondition(e)
+    }
+}
 fn db_status(e: DbAdminError) -> Status {
     match e {
         DbAdminError::UnknownPlugin(_) => Status::not_found(e.to_string()),
@@ -106,17 +125,50 @@ impl PluginService for PluginGrpc {
             Ok(ProtoAction::Restart) => Action::Restart,
             Ok(ProtoAction::Reload) => Action::Reload,
             Ok(ProtoAction::Unspecified) | Err(_) => {
-                return Err(Status::invalid_argument("action must be start/stop/restart/reload"))
+                return Err(Status::invalid_argument(
+                    "action must be start/stop/restart/reload",
+                ))
             }
         };
-        let info = self
-            .handle
-            .control(&req.name, action)
-            .await
-            .map_err(Status::not_found)?;
+        let info = self.handle.control(&req.name, action).await.map_err(|e| {
+            if e.starts_with("unknown plugin") {
+                Status::not_found(e)
+            } else {
+                Status::failed_precondition(e)
+            }
+        })?;
         Ok(Response::new(PluginControlResponse {
             plugin: Some(map_info(info)),
         }))
+    }
+
+    async fn get_config(
+        &self,
+        request: Request<plugin::PluginConfigRequest>,
+    ) -> Result<Response<plugin::PluginConfigResponse>, Status> {
+        let response = self
+            .handle
+            .config(
+                plugin::PluginConfigUpdateRequest {
+                    name: request.into_inner().name,
+                    ..Default::default()
+                },
+                true,
+            )
+            .await
+            .map_err(config_status)?;
+        Ok(Response::new(response))
+    }
+    async fn update_config(
+        &self,
+        request: Request<plugin::PluginConfigUpdateRequest>,
+    ) -> Result<Response<plugin::PluginConfigResponse>, Status> {
+        let response = self
+            .handle
+            .config(request.into_inner(), false)
+            .await
+            .map_err(config_status)?;
+        Ok(Response::new(response))
     }
 
     async fn read_tab(
@@ -124,12 +176,20 @@ impl PluginService for PluginGrpc {
         request: Request<plugin::PluginReadTabRequest>,
     ) -> Result<Response<PluginDbQueryResponse>, Status> {
         let req = request.into_inner();
-        let rows = self.handle.read_tab(&req.name, &req.tab_id).await.map_err(db_status)?;
+        let rows = self
+            .handle
+            .read_tab(&req.name, &req.tab_id)
+            .await
+            .map_err(db_status)?;
         Ok(Response::new(PluginDbQueryResponse {
             columns: rows.columns,
-            rows: rows.rows.into_iter().map(|r| PluginDbRow {
-                values: r.into_iter().map(map_value).collect(),
-            }).collect(),
+            rows: rows
+                .rows
+                .into_iter()
+                .map(|r| PluginDbRow {
+                    values: r.into_iter().map(map_value).collect(),
+                })
+                .collect(),
         }))
     }
 

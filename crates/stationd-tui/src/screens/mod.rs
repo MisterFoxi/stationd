@@ -8,6 +8,14 @@ pub(crate) mod medias;
 mod ops;
 pub(crate) mod picker;
 mod plugin_tabs;
+mod plugin_config;
+pub fn plugin_screen(name: String, tab: stationd_proto::plugin::PluginTab) -> Box<dyn Screen> {
+    if tab.kind == "plugin_config" {
+        Box::new(plugin_config::ConfigEditor::new(name, tab))
+    } else {
+        Box::new(plugin_tabs::PluginTable::new(name, tab))
+    }
+}
 mod playlists;
 mod ruleform;
 mod systeme;
@@ -18,7 +26,9 @@ mod typepick;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::screen::Screen;
-pub use plugin_tabs::{Catalog, PluginTable, declared_tabs};
+pub use plugin_tabs::{Catalog, declared_tabs};
+#[cfg(test)]
+pub use plugin_tabs::PluginTable;
 pub use agenda::AgEvent;
 pub use ruleform::diag_text as grid_diag_text;
 pub use playlists::PlEvent;

@@ -105,6 +105,9 @@ pub struct ScanEnrichment {
 /// A2 adds the synchronous hooks: `filter_pool` (influences the decision) and
 /// `on_scan` (enriches the library scan).
 pub trait Plugin: Send {
+    /// Optional configuration fields discovered before on_load without write access.
+    fn config_schema(&mut self) -> Result<Vec<crate::plugin_config::Field>, String> { Ok(Vec::new()) }
+    fn validate_config(&mut self, _config: &toml::Table, _host: &Host) -> Result<(), String> { Ok(()) }
     /// Optional tabs discovered once after on_load, without write access.
     fn ui_tabs(&mut self) -> Result<Vec<crate::plugin_ui::UiTab>, String> {
         Ok(Vec::new())
@@ -630,6 +633,7 @@ pub enum OperatorNotice {
 /// A flat, cloneable snapshot of a plugin for `plugin list`.
 #[derive(Debug, Clone)]
 pub struct PluginInfo {
+    pub configurable: bool,
     pub operator_notice: Option<OperatorNotice>,
     pub tabs: Vec<crate::plugin_ui::UiTab>,
     pub name: String,
@@ -653,9 +657,13 @@ pub enum Action {
 
 // ---------------------------------------------------------------------------
 // Slot: a declared plugin plus its live state
+mod config_host;
+use config_host::{ConfigPlugin, config_operation, validate_candidate};
+
 // ---------------------------------------------------------------------------
 
 struct Slot {
+    schema: Vec<crate::plugin_config::Field>,
     tabs: Vec<crate::plugin_ui::UiTab>,
     decl: PluginDecl,
     state: PluginState,
@@ -673,6 +681,7 @@ impl Slot {
             _ => self.failures.len() as u32,
         };
         PluginInfo {
+            configurable: !self.schema.is_empty(),
             tabs: self.tabs.clone(),
             operator_notice: if matches!(self.state, PluginState::Loaded) {
                 self.host.as_ref().and_then(Host::operator_notice)
@@ -758,6 +767,10 @@ impl Slot {
     /// Run `on_load` with the host surface; `Loaded` or `Failed`.
     fn load(&mut self, mut plugin: Box<dyn Plugin>, host: Host) {
         let kept = host.clone();
+        kept.set_simulating(true);
+        let schema = catch(|| plugin.config_schema()).and_then(|r| r).and_then(|s| { crate::plugin_config::validate_schema(&s)?; Ok(s) });
+        kept.set_simulating(false);
+        match schema { Ok(s) => self.schema = s, Err(reason) => { self.state = PluginState::Failed { phase: Phase::Load, reason }; return; } }
         let loaded = catch(|| plugin.on_load(host)).and_then(|r| r).and_then(|()| {
             kept.set_simulating(true);
             let result = catch(|| plugin.ui_tabs()).and_then(|r| r);
@@ -859,6 +872,7 @@ fn catch<R>(f: impl FnOnce() -> R) -> Result<R, String> {
 fn build_plugin(decl: &PluginDecl, host: &Host) -> Result<Box<dyn Plugin>, String> {
     if decl.wasm.is_none() {
         match decl.name.as_str() {
+            "plugin-config" => return Ok(Box::new(ConfigPlugin)),
             "logger" => return Ok(Box::new(LoggerPlugin::from_config(&decl.config))),
             "blacklist" => return Ok(Box::new(BlacklistPlugin::from_config(&decl.config))),
             "stop-when-idle" => return Ok(Box::new(StopWhenIdlePlugin::from_config(&decl.config)?)),
@@ -879,6 +893,7 @@ fn build_plugin(decl: &PluginDecl, host: &Host) -> Result<Box<dyn Plugin>, Strin
 // ---------------------------------------------------------------------------
 
 enum Msg {
+    Config { request: crate::proto::plugin::PluginConfigUpdateRequest, read: bool, reply: oneshot::Sender<Result<crate::proto::plugin::PluginConfigResponse, String>> },
     TabLocate {
         name: String,
         tab_id: String,
@@ -964,6 +979,12 @@ pub struct PluginHandle {
 }
 
 impl PluginHandle {
+    pub async fn config(&self, request: crate::proto::plugin::PluginConfigUpdateRequest, read: bool) -> Result<crate::proto::plugin::PluginConfigResponse, String> {
+        let (tx, rx) = oneshot::channel();
+        self.tx.send(Msg::Config { request, read, reply: tx }).await.map_err(|_| "plugin actor unavailable")?;
+        rx.await.map_err(|_| "plugin actor unavailable")?
+    }
+
     /// What the loaded `custom-tags` plugin makes of a file's tags, for a
     /// tag editor: the user frames it turns into genres (`tags`), and the
     /// tempo labels of its BPM ranges. Empty when it is not loaded.
@@ -1163,18 +1184,22 @@ pub fn spawn_with(decls: Vec<PluginDecl>, control: Option<StationControl>) -> Pl
 /// ones stay `Disabled`. Slots are ordered by (`order`, `name`). `env` carries
 /// the station control behind every plugin's host surface and the directory
 /// of the plugin databases.
-pub fn spawn_env(mut decls: Vec<PluginDecl>, env: PluginEnv) -> PluginHandle {
+pub fn spawn_env(decls: Vec<PluginDecl>, env: PluginEnv) -> PluginHandle { spawn_configured(decls, env, None) }
+
+pub fn spawn_configured(mut decls: Vec<PluginDecl>, env: PluginEnv, config_path: Option<PathBuf>) -> PluginHandle {
+    let config_path = config_path.and_then(|p| std::fs::canonicalize(p).ok());
     decls.sort_by(|a, b| a.order.cmp(&b.order).then_with(|| a.name.cmp(&b.name)));
     let mut slots: Vec<Slot> = decls
         .into_iter()
         .map(|decl| {
-            let mut slot = Slot { tabs: Vec::new(),
+            let mut slot = Slot { schema: Vec::new(), tabs: Vec::new(),
                 decl,
                 state: PluginState::Disabled,
                 plugin: None,
                 failures: VecDeque::new(),
             host: None,
             };
+            if slot.decl.wasm.is_none() && slot.decl.name == "stop-when-idle" { slot.schema = crate::plugin_config::stop_fields(); }
             if slot.decl.enabled {
                 slot.start(&env);
             }
@@ -1186,6 +1211,7 @@ pub fn spawn_env(mut decls: Vec<PluginDecl>, env: PluginEnv) -> PluginHandle {
     tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
             match msg {
+                Msg::Config { request, read, reply } => { let _ = reply.send(config_operation(&mut slots, &env, config_path.as_deref(), request, read)); }
                 Msg::Event(event) => dispatch_event(&mut slots, &event),
                 Msg::FilterPool { candidates, simulation, reply } => {
                     let _ = reply.send(run_filters_mode(&mut slots, candidates, simulation));
@@ -1215,6 +1241,14 @@ pub fn spawn_env(mut decls: Vec<PluginDecl>, env: PluginEnv) -> PluginHandle {
                     let res = match slots.iter_mut().find(|s| s.decl.name == name) {
                         None => Err(format!("unknown plugin `{name}`")),
                         Some(slot) => {
+                            let will_load = matches!(action, Action::Reload | Action::Restart)
+                                || (matches!(action, Action::Start) && !matches!(slot.state, PluginState::Loaded));
+                            if will_load && !slot.schema.is_empty() {
+                                if let Some(path) = config_path.as_deref() {
+                                    let update = crate::plugin_config::read(path, &name).and_then(|(_, config)| { validate_candidate(slot, &env, &config)?; Ok(config) });
+                                    match update { Ok(config) => slot.decl.config = config, Err(e) => { let _ = reply.send(Err(e)); continue; } }
+                                }
+                            }
                             apply_action(slot, action, &env);
                             let info = slot.info();
                             crate::events::record(
@@ -1262,6 +1296,7 @@ fn tab_location(slots: &[Slot], name: &str, tab_id: &str, env: &PluginEnv)
     let tab = slots.iter().find(|s| s.decl.name == name).unwrap().tabs.iter()
         .find(|t| t.id == tab_id)
         .ok_or_else(|| DbAdminError::Precondition(format!("unknown tab {tab_id} for plugin {name}")))?;
+    if tab.kind == "plugin_config" { return Err(DbAdminError::Precondition("this tab is a configuration editor".into())); }
     Ok((loc, tab.sql.clone()))
 }
 
@@ -1650,6 +1685,13 @@ impl StopWhenIdlePlugin {
 }
 
 impl Plugin for StopWhenIdlePlugin {
+    fn config_schema(&mut self) -> Result<Vec<crate::plugin_config::Field>, String> { Ok(crate::plugin_config::stop_fields()) }
+    fn validate_config(&mut self, config: &toml::Table, host: &Host) -> Result<(), String> {
+        let candidate = Self::from_config(config)?;
+        if !host.has(Capability::Control) { return Err("stop-when-idle requires control capability".into()); }
+        if candidate.max_connection_age.is_some() && host.connection_sampling_enabled() != Ok(true) { return Err("max_connection_age requires [icecast] listener_snapshots = true".into()); }
+        Ok(())
+    }
     fn name(&self) -> &str {
         "stop-when-idle"
     }
@@ -1988,6 +2030,18 @@ impl WasmPlugin {
 }
 
 impl Plugin for WasmPlugin {
+    fn config_schema(&mut self) -> Result<Vec<crate::plugin_config::Field>, String> {
+        if !self.plugin.function_exists("config_schema") { return Ok(Vec::new()); }
+        let out = self.plugin.call::<&str, String>("config_schema", "").map_err(|_| "wasm config_schema failed")?;
+        if out.len() > 65536 { return Err("config_schema exceeds 64 KiB".into()); }
+        serde_json::from_str(&out).map_err(|_| "invalid config_schema JSON".into())
+    }
+    fn validate_config(&mut self, config: &toml::Table, _host: &Host) -> Result<(), String> {
+        if !self.plugin.function_exists("validate_config") { return Ok(()); }
+        let input = serde_json::to_string(config).map_err(|_| "cannot encode configuration")?;
+        self.plugin.call::<&str, String>("validate_config", &input).map_err(|_| "plugin refused configuration")?;
+        Ok(())
+    }
     fn ui_tabs(&mut self) -> Result<Vec<crate::plugin_ui::UiTab>, String> {
         if !self.plugin.function_exists("ui_tabs") { return Ok(Vec::new()); }
         let out = self.plugin.call::<&str, String>("ui_tabs", "")
@@ -2596,7 +2650,7 @@ mod tests {
     }
 
     fn loaded_panic_slot() -> Slot {
-        Slot { tabs: Vec::new(),
+        Slot { schema: Vec::new(), tabs: Vec::new(),
             decl: decl("panic", true, toml::Table::new()),
             state: PluginState::Loaded,
             plugin: Some(Box::new(PanicPlugin)),
@@ -2663,7 +2717,7 @@ mod tests {
     }
 
     fn loaded_slot(plugin: Box<dyn Plugin>) -> Slot {
-        Slot { tabs: Vec::new(),
+        Slot { schema: Vec::new(), tabs: Vec::new(),
             decl: decl("x", true, toml::Table::new()),
             state: PluginState::Loaded,
             plugin: Some(plugin),
@@ -2763,7 +2817,7 @@ mod tests {
     }
 
     fn loaded(name: &str, plugin: Box<dyn Plugin>) -> Slot {
-        Slot { tabs: Vec::new(),
+        Slot { schema: Vec::new(), tabs: Vec::new(),
             decl: decl(name, true, toml::Table::new()),
             state: PluginState::Loaded,
             plugin: Some(plugin),
@@ -2861,7 +2915,7 @@ mod tests {
     fn db_slot(name: &str) -> Slot {
         let mut d = decl(name, true, toml::Table::new());
         d.capabilities = vec![Capability::Db];
-        Slot { tabs: Vec::new(), decl: d, state: PluginState::Disabled, plugin: None, failures: VecDeque::new(), host: None }
+        Slot { schema: Vec::new(), tabs: Vec::new(), decl: d, state: PluginState::Disabled, plugin: None, failures: VecDeque::new(), host: None }
     }
 
     fn db_env(dir: &std::path::Path) -> PluginEnv {
@@ -3049,7 +3103,7 @@ mod tests {
         let host = Host::new("pushy", &[Capability::PushOverride, Capability::Control], Some(control.clone()));
         let mut p = Pushy { host: None };
         p.on_load(host.clone()).unwrap();
-        let mut slots = vec![Slot { tabs: Vec::new(),
+        let mut slots = vec![Slot { schema: Vec::new(), tabs: Vec::new(),
             decl: decl("pushy", true, toml::Table::new()),
             state: PluginState::Loaded,
             plugin: Some(Box::new(p)),
@@ -3080,7 +3134,7 @@ mod tests {
 
     #[test]
     fn a_failure_in_a_simulation_is_a_note_not_a_strike() {
-        let mut slots = vec![Slot { tabs: Vec::new(),
+        let mut slots = vec![Slot { schema: Vec::new(), tabs: Vec::new(),
             decl: decl("filter-panic", true, toml::Table::new()),
             state: PluginState::Loaded,
             plugin: Some(Box::new(FilterPanic)),
@@ -3204,11 +3258,11 @@ mod ui_tests {
         }
     }
     fn tab(sql: &str) -> UiTab {
-        UiTab { id: "sample".into(), title: "Sample".into(), description: "".into(), sql: sql.into() }
+        UiTab { id: "sample".into(), title: "Sample".into(), description: "".into(), kind: String::new(), sql: sql.into() }
     }
     fn slot() -> Slot {
         let decl: PluginDecl = toml::from_str("name = 'table'\nenabled = true\ncapabilities = ['db']").unwrap();
-        Slot { tabs: vec![], decl, state: PluginState::Disabled, plugin: None, failures: VecDeque::new(), host: None }
+        Slot { schema: Vec::new(), tabs: vec![], decl, state: PluginState::Disabled, plugin: None, failures: VecDeque::new(), host: None }
     }
     #[test]
     fn ui_tabs_are_read_only_scoped_and_retained_when_stopped() {

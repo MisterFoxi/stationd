@@ -56,6 +56,7 @@ pub mod playlist_grpc;
 pub mod pool_inspection;
 pub mod plugin;
 pub mod plugin_ui;
+pub mod plugin_config;
 pub mod plugin_db;
 pub mod plugin_grpc;
 pub mod proto;

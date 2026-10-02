@@ -19,6 +19,12 @@ pub const POLL_MAX: Duration = Duration::from_secs(10);
 
 pub type Read<T> = Result<T, String>;
 
+pub async fn read_plugin_config(channel: Channel, name: String) -> Read<plugin::PluginConfigResponse> {
+    bounded(plugin::plugin_service_client::PluginServiceClient::new(channel).get_config(plugin::PluginConfigRequest { name })).await
+}
+pub async fn update_plugin_config(channel: Channel, req: plugin::PluginConfigUpdateRequest) -> Read<plugin::PluginConfigResponse> {
+    bounded(plugin::plugin_service_client::PluginServiceClient::new(channel).update_config(req)).await
+}
 pub async fn read_plugin_tab(channel: Channel, name: String, tab_id: String)
     -> Read<plugin::PluginDbQueryResponse>
 {
