@@ -17,7 +17,10 @@ use ratatui_core::{
     widgets::Widget,
 };
 use ratatui_crossterm::crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
-use ratatui_widgets::paragraph::{Paragraph, Wrap};
+use ratatui_widgets::{
+    block::Block,
+    paragraph::{Paragraph, Wrap},
+};
 use stationd_proto::plugin::{
     PluginConfigResponse, PluginConfigUpdateRequest, PluginConfigValue, PluginTab,
 };
@@ -410,6 +413,21 @@ impl Screen for ConfigEditor {
         .render(header, buf);
         let [directory, body] =
             Layout::horizontal([Constraint::Length(26), Constraint::Fill(1)]).areas(body);
+        let directory_block = Block::bordered()
+            .title(Line::from(tr!("screen-plugins")).style(s.title()))
+            .border_style(s.border());
+        let config_block = Block::bordered()
+            .title(
+                Line::from(tr!("config-panel-title", plugin = clean(&self.target)))
+                    .style(s.title()),
+            )
+            .border_style(s.accent());
+        let directory_inner = directory_block.inner(directory);
+        let config_inner = config_block.inner(body);
+        directory_block.render(directory, buf);
+        config_block.render(body, buf);
+        let directory = directory_inner;
+        let body = config_inner;
         let plugins = ctx.store.plugins.value.as_deref().unwrap_or_default();
         let selected = plugins
             .iter()
@@ -428,11 +446,9 @@ impl Screen for ConfigEditor {
                     if p.configurable { " *" } else { "" },
                     clean(&p.state)
                 );
-                Line::from(crate::fit::ellipsize(
-                    &text,
-                    directory.width.saturating_sub(1) as usize,
-                ))
-                .style(if i == selected {
+                let text = crate::fit::ellipsize(&text, directory.width as usize);
+                let padding = (directory.width as usize).saturating_sub(Span::raw(&text).width());
+                Line::from(format!("{text}{}", " ".repeat(padding))).style(if i == selected {
                     s.tab_active()
                 } else {
                     s.muted()

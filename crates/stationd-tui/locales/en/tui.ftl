@@ -1272,3 +1272,4 @@ config-edit-keys = ↑/↓ field · Enter edit · Delete reset · Ctrl+S preview
     Esc discard · r refresh · Tab/n next tab · Shift+Tab/p previous
 config-saved = Configuration saved; reload required
 config-applied = Configuration saved and applied
+config-panel-title = Configuration for { $plugin }

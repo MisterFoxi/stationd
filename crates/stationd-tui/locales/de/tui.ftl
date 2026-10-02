@@ -1276,3 +1276,4 @@ config-edit-keys = ↑/↓ Feld · Enter ändern · Entf zurücksetzen · Ctrl+S
     Esc verwerfen · r aktualisieren · Tab/n nächster Tab · Shift+Tab/p vorheriger
 config-saved = Konfiguration gespeichert; Neuladen erforderlich
 config-applied = Konfiguration gespeichert und angewendet
+config-panel-title = Konfiguration für { $plugin }

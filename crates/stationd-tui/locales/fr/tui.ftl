@@ -1282,3 +1282,4 @@ config-edit-keys = ↑/↓ champ · Entrée modifier · Suppr défaut · Ctrl+S 
     Esc abandonner · r actualiser · Tab/n onglet suivant · Maj+Tab/p précédent
 config-saved = Configuration enregistrée ; rechargement nécessaire
 config-applied = Configuration enregistrée et appliquée
+config-panel-title = Configuration de { $plugin }
