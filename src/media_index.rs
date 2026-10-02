@@ -169,6 +169,48 @@ pub async fn replace_library_with_writeback(
     })
 }
 
+/// Reconstitue le cache typé `media_analysis` (migration 0030) depuis les
+/// descripteurs lus dans les tags — la SOURCE DE VÉRITÉ. Autoritaire comme
+/// `media_meta` : chaque scan efface tout puis réinsère, donc un fichier
+/// disparu ou ré-encodé ne laisse pas de ligne périmée. Reconstructible : sur
+/// une VM neuve, un simple scan des tags repeuple cette table sans relancer
+/// l'analyse. `analysis` ne contient que les médias porteurs d'un marqueur
+/// d'analyse valide (cf. `media_analysis::Analysis::from_tags`), tous présents
+/// dans `media` (la FK est satisfaite).
+pub async fn replace_analysis(
+    pool: &SqlitePool,
+    analysis: &std::collections::BTreeMap<String, (crate::media_analysis::Analysis, String)>,
+    scanned_at: i64,
+) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("DELETE FROM media_analysis").execute(&mut *tx).await?;
+    for (rel_path, (a, version)) in analysis {
+        sqlx::query(
+            "INSERT INTO media_analysis
+                 (rel_path, bpm, key, scale, loudness_lufs, replaygain_db,
+                  danceability, genre_top, genre_prob, mood, mood_prob,
+                  analyzer_version, analyzed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+        )
+        .bind(rel_path)
+        .bind(a.bpm)
+        .bind(&a.key)
+        .bind(&a.scale)
+        .bind(a.loudness_lufs)
+        .bind(a.replaygain_db)
+        .bind(a.danceability)
+        .bind(&a.genre_top)
+        .bind(a.genre_prob)
+        .bind(&a.mood)
+        .bind(a.mood_prob)
+        .bind(version)
+        .bind(scanned_at)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await
+}
+
 /// Refresh ONE media row from a fresh read of its file (after a tag edit):
 /// tags, size, mtime, genres; the row is available. The `unplayed_only`
 /// guards of this file that matched its previous size / mtime follow it (a

@@ -118,3 +118,59 @@ async fn shared_details_cover_all_mounts_and_failure_wakes_age_sleep() {
     assert!(recovered.is_ok(), "a persistently missing mount must wake age-based sleep");
     assert_eq!(control.listener_connections(), None, "partial snapshot is unknown");
 }
+
+#[tokio::test]
+async fn reconnect_preserves_sleep_age_but_journals_raw_sessions() {
+    use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+    use crate::events::{self, Code};
+    use crate::station_control::{BroadcastState, Gate};
+    let reconnect = Arc::new(AtomicBool::new(false));
+    let flag = reconnect.clone();
+    let app = Router::new()
+        .route("/admin/listclients", get(move || {
+            let flag = flag.clone();
+            async move {
+                let (id, age) = if flag.load(Ordering::SeqCst) { (2, 0) } else { (1, 100) };
+                format!(r#"<icestats><source mount="/reconnect-test"><Listeners>1</Listeners>
+                    <listener><ID>{id}</ID><IP>192.0.2.1</IP><Connected>{age}</Connected>
+                    <UserAgent>SL audio</UserAgent></listener></source></icestats>"#)
+            }
+        }))
+        .route("/admin/stats", get(|| async {
+            r#"<icestats><source mount="/reconnect-test"><listeners>1</listeners><stream_start>now</stream_start></source></icestats>"#
+        }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let control = StationControl::new_in_memory();
+    let sampler = spawn_sampler(IcecastClient::new(&config(address, "good")).unwrap(),
+        vec!["/reconnect-test".into()], Duration::from_secs(1), Duration::from_millis(20),
+        control.clone(), IcecastMonitor::default());
+    let result = tokio::time::timeout(Duration::from_secs(3), async {
+        while control.listener_connections().is_none() || control.listeners().is_none() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let first = control.listener_connections().unwrap();
+        control.stop_when_connections_old(100, "p").unwrap();
+        assert_eq!(control.gate(), Gate::Halt(BroadcastState::Sleeping));
+        reconnect.store(true, Ordering::SeqCst);
+        loop {
+            let (journal, _) = events::subscribe(events::CAPACITY);
+            if journal.iter().any(|e| e.code == Code::ConnectionStarted
+                && e.param("mount") == Some("/reconnect-test") && e.param("id") == Some("2")) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(control.state(), BroadcastState::Sleeping);
+        let next = control.listener_connections().unwrap();
+        assert_eq!(next[0].id, first[0].id);
+        assert!(next[0].connected_seconds >= 100);
+        let (journal, _) = events::subscribe(events::CAPACITY);
+        assert!(journal.iter().any(|e| e.code == Code::ConnectionEnded
+            && e.param("mount") == Some("/reconnect-test") && e.param("id") == Some("1")));
+    }).await;
+    sampler.abort();
+    server.abort();
+    assert!(result.is_ok(), "reconnect collection timed out");
+}

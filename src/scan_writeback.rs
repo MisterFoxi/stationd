@@ -1,4 +1,6 @@
-//! Write creation/tempo TXXX frames and estimated TBPM after plugin enrichment.
+//! Write creation/tempo + offline-analysis TXXX frames and estimated TBPM after
+//! plugin enrichment / media analysis. The tags are the source of truth: the
+//! typed `media_analysis` cache is rebuilt from them on a later scan.
 //! The WASM guest never gets filesystem access. The library actor owns writes.
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -34,7 +36,11 @@ impl Drop for Staged {
 /// Returns true only after a verified, atomic replacement. Missing derived
 /// values leave existing frames alone; no inference from the file's mtime.
 pub fn write(root: &Path, rel: &str, expected: (u64, i64), values: &BTreeMap<String, String>) -> Result<bool, TagError> {
+    // creation/tempo (plugin custom-tags) + les descripteurs d'analyse offline
+    // (ANALYSIS_META_KEYS, dont le marqueur), tous écrits en frames TXXX. `bpm`
+    // reste à part (TBPM standard, ci-dessous).
     let wanted: Vec<_> = ["creation", "tempo"].into_iter()
+        .chain(crate::media_analysis::ANALYSIS_META_KEYS.iter().copied())
         .filter_map(|k| values.get(k).map(|v| (k, v))).collect();
     let bpm = values.get("bpm");
     if wanted.is_empty() && bpm.is_none() { return Ok(false); }
@@ -56,7 +62,10 @@ pub fn write(root: &Path, rel: &str, expected: (u64, i64), values: &BTreeMap<Str
     let mut written_bpm = None;
     if let Some(value) = bpm {
         let parsed = value.parse::<u32>().map_err(io)?;
-        if !(45..=240).contains(&parsed) { return Err(io("estimated BPM outside 45..240")); }
+        // Plage musicale large : Essentia peut sortir hors 45..240 (très lent /
+        // très rapide) et ne doit pas bloquer toute l'écriture (donc le marqueur)
+        // pour autant. Seules les valeurs absurdes sont refusées.
+        if !(20..=400).contains(&parsed) { return Err(io("estimated BPM outside 20..400")); }
         // Existing valid TBPM is authoritative, even if an enrichment supplied BPM.
         let valid = tag.get_text(&bpm_id).and_then(|v| v.parse::<f64>().ok())
             .is_some_and(|v| v.is_finite() && v > 0.0);

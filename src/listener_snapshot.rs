@@ -4,7 +4,9 @@ use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 
-/// Privacy-reduced identity scoped to one mount and Icecast process.
+/// Privacy-reduced identity scoped to one mount. The sleep view uses an
+/// ephemeral logical ID and age that survive unambiguous short reconnects;
+/// raw journal sessions retain the Icecast ID and Connected age.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Connection {
     pub mount: String,

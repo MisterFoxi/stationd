@@ -448,6 +448,29 @@ fn ffmpeg_ready() -> bool {
     }
 }
 
+/// L'analyse Essentia (cœur) est opt-in le temps que l'extracteur et ses
+/// modèles soient en place : `STATIOND_ANALYSIS` truthy l'active.
+/// TODO: remplacer par `[analysis].enabled` de la config une fois la section
+/// threadée jusqu'à l'actor.
+fn analysis_enabled() -> bool {
+    std::env::var_os("STATIOND_ANALYSIS")
+        .map(|v| matches!(v.to_string_lossy().trim(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
+}
+
+/// Résumé d'une passe d'analyse Essentia dans le journal (le log a une ligne
+/// par fichier).
+fn journal_analysis(tally: &crate::media_analysis::Tally) {
+    if tally.analyzed == 0 && tally.failed.is_empty() {
+        return;
+    }
+    tracing::info!(
+        analyzed = tally.analyzed,
+        failed = tally.failed.len(),
+        "media analysis pass complete"
+    );
+}
+
 /// A scan, its progress published and its outcome in the journal.
 async fn scan_journaled(
     pool: &SqlitePool,
@@ -910,6 +933,40 @@ async fn do_scan(
         phase(status, ScanPhase::Plugins);
         enrich(&mut report, plugins).await;
     }
+    // Analyse média offline (Essentia) — cœur, indépendante des plugins. Opt-in
+    // (STATIOND_ANALYSIS). Remplit report.metadata pour les fichiers non encore
+    // marqués ; scan_writeback écrira les frames, la table typée suivra.
+    if analysis_enabled() {
+        phase(status, ScanPhase::Analyzing);
+        let analyzer = crate::media_analysis::EssentiaExtractor {
+            exe: crate::media_analysis::EssentiaExtractor::default_exe(),
+            profile: std::env::var_os("STATIOND_ESSENTIA_PROFILE").map(std::path::PathBuf::from),
+            timeout: std::time::Duration::from_secs(90),
+        };
+        let analysis_root = write_root.clone();
+        let progress_tx = status.cloned();
+        let (r, tally) = tokio::task::spawn_blocking(move || {
+            let tally = crate::media_analysis::analyze_pending(
+                &analysis_root,
+                &mut report,
+                &analyzer,
+                false,
+                &mut |done, total| {
+                    if let Some(s) = &progress_tx {
+                        s.send_modify(|s| {
+                            s.done = done as u64;
+                            s.total = total as u64;
+                        });
+                    }
+                },
+            );
+            (report, tally)
+        })
+        .await
+        .map_err(|e| LibraryError::Join(e.to_string()))?;
+        report = r;
+        journal_analysis(&tally);
+    }
     apply_manual(&mut report);
     phase(status, ScanPhase::Writing);
     // Host-owned MP3 writes run off the async runtime, after enrichment.
@@ -921,6 +978,39 @@ async fn do_scan(
     let stats = media_index::replace_library_with_writeback(
         pool, &report.media, &report.metadata, &originals, now_epoch_seconds(),
     ).await?;
+    // Cache typé d'analyse. Source de vérité = les tags :
+    //  - reconstitution : lue depuis report.custom_tags (ce que le scan a relu
+    //    du disque) — repeuple la table sur une VM neuve sans réanalyse ;
+    //  - fraîche ce scan : lue depuis report.metadata, mais SEULEMENT pour les
+    //    fichiers que scan_writeback a effectivement écrits (présents dans
+    //    `originals`), pour ne jamais devancer ce qui est réellement dans le tag.
+    // Un fichier sans marqueur d'analyse valide n'y figure pas.
+    let analysis: std::collections::BTreeMap<String, (crate::media_analysis::Analysis, String)> = report
+        .media
+        .iter()
+        .filter_map(|m| {
+            let fresh = if originals.contains_key(&m.rel_path) {
+                report.metadata.get(&m.rel_path).and_then(|meta| {
+                    let tags: Vec<crate::media::CustomTag> = meta
+                        .iter()
+                        .map(|(name, value)| crate::media::CustomTag { name: name.clone(), value: value.clone() })
+                        .collect();
+                    crate::media_analysis::Analysis::from_tags(&tags)
+                })
+            } else {
+                None
+            };
+            fresh
+                .or_else(|| {
+                    report
+                        .custom_tags
+                        .get(&m.rel_path)
+                        .and_then(|tags| crate::media_analysis::Analysis::from_tags(tags))
+                })
+                .map(|av| (m.rel_path.clone(), av))
+        })
+        .collect();
+    media_index::replace_analysis(pool, &analysis, now_epoch_seconds()).await?;
     media_index::replace_tag_values(pool, &values, true).await?;
     Ok(ScanOutcome { report, stats })
 }

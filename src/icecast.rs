@@ -27,6 +27,9 @@ use http_body_util::{BodyExt, Empty, Limited};
 use hyper_util::client::legacy::{connect::HttpConnector, Client};
 use hyper_util::rt::TokioExecutor;
 
+#[path = "listener_reconnect.rs"]
+mod listener_reconnect;
+
 use crate::config::IcecastConfig;
 use crate::resolver::Epoch;
 use crate::station_control::StationControl;
@@ -440,15 +443,22 @@ pub fn spawn_sampler(
                 return;
             }
             let unique: std::collections::BTreeSet<_> = mounts.iter().collect();
+            let mut continuity = listener_reconnect::Continuity::default();
             loop {
                 let mut connections = Some(Vec::new());
+                let mut detailed = Some(Vec::new());
                 let started = std::time::Instant::now();
                 for mount in &unique {
                     let listeners = client.list_clients(mount).await.ok();
                     match (&mut connections, &listeners) {
-                        (Some(all), Some(clients)) => all.extend(clients.iter().map(|c| crate::listener_snapshot::Connection {
-                            mount: (*mount).clone(), id: c.id.clone(), connected_seconds: c.connected_seconds,
-                        })),
+                        (Some(all), Some(clients)) => {
+                            all.extend(clients.iter().map(|c| crate::listener_snapshot::Connection {
+                                mount: (*mount).clone(), id: c.id.clone(), connected_seconds: c.connected_seconds,
+                            }));
+                            if let Some(details) = &mut detailed {
+                                details.extend(clients.iter().cloned().map(|c| ((*mount).clone(), c)));
+                            }
+                        },
                         _ => connections = None,
                     }
                     control.emit_event(crate::plugin::PluginEvent::ListenerSnapshot {
@@ -462,7 +472,9 @@ pub fn spawn_sampler(
                 if unique.is_empty() || started.elapsed() > ttl {
                     connections = None;
                 }
-                control.sample_connections(connections, ttl.saturating_sub(started.elapsed()));
+                if connections.is_none() { detailed = None; }
+                let effective = continuity.sample(detailed.as_deref(), std::time::Instant::now(), ttl);
+                control.sample_connection_views(connections, effective, ttl.saturating_sub(started.elapsed()));
                 tokio::time::sleep(sample_period(&control, every, asleep)).await;
             }
         };

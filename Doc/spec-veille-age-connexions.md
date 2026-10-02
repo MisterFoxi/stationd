@@ -40,8 +40,8 @@ distincts, publier `ConnectionsSampled` et actualiser la vue hôte
 `listener_connections`. Chaque entrée contient seulement :
 
 - `mount` : scope de l'identifiant ;
-- `id` : identifiant de connexion Icecast, sans identité persistante ;
-- `connected_seconds` : durée rapportée par Icecast.
+- `id` : identifiant logique éphémère de la connexion pour la veille ;
+- `connected_seconds` : âge continu de cette connexion pour la veille.
 
 Les IP et user-agents restent dans le circuit existant de statistiques, protégé
 par `listener_details`. La vue de veille ne les copie pas. Les identifiants,
@@ -50,6 +50,31 @@ Le journal borné en mémoire expose désormais les débuts et fins de connexion
 à la demande de l'opérateur, avec seulement mount, id, durées et horodatages.
 Aucune IP ni aucun user-agent ne figure dans ces événements.
 La baseline de veille est conservée jusqu'au réveil ou à une reprise opérateur.
+
+### Reconnexions rapides (SL)
+
+La collecte conserve une continuité en mémoire entre deux relevés complets
+consécutifs : un remplacement d'ID (ou une remise à zéro de Connected) garde
+l'identifiant logique et l'âge initial si le mount, l'IP et le user-agent non
+vide sont identiques et qu'il y a exactement un client correspondant dans
+chacun des deux relevés. Le début estimé du remplacement doit tomber entre
+ces relevés, avec une seconde de tolérance pour les âges entiers d'Icecast.
+L'âge continue avec une horloge monotone, y compris après plusieurs reconnexions.
+La règle est commune aux plugins natif et WASM, sans détecter une marque de viewer.
+
+Une disparition observée termine la continuité. Un relevé inconnu ou périmé,
+une identité différente ou un rapprochement ambigu empêchent de rattacher un
+remplacement. Une connexion dont l'ID et l'âge Icecast restent cohérents garde
+sa continuité après un échec temporaire de collecte. Aucun client absent n'est
+conservé au-delà du relevé suivant. IP et user-agent servent uniquement au
+rapprochement dans le collecteur ; ils ne sont transmis ni à la vue de veille
+ni aux événements de connexion, et ne sont pas persistés par ce mécanisme.
+Les statistiques et le journal gardent les vrais ID et durées Icecast.
+
+C'est une heuristique : la collecte périodique ne permet pas de mesurer la
+coupure à la seconde près. Un arrêt puis une reprise entre deux relevés, ou
+un autre client avec le même mount/IP/user-agent, peut être assimilé à une
+reconnexion. Plusieurs clients partageant cette identité ne sont pas fusionnés.
 
 Une réponse manquante ou invalide sur un mount invalide le relevé global :
 `None` / JSON null signifie inconnu ; une liste vide signifie zéro connexion
@@ -70,7 +95,7 @@ Le plugin arme une seule fois par période inactive. Le core conserve le seuil
 comme condition du drain et revérifie au prochain bord de piste :
 audience connue, relevé complet et frais, toutes les connexions assez anciennes.
 Une arrivée entre l'armement et le bord empêche donc l'endormissement.
-L'âge reste celui fourni par Icecast : aucun timer individuel à persister.
+L'âge conserve la continuité décrite ci-dessus : aucun timer individuel à persister.
 
 ## Réveil et contrôle opérateur
 
@@ -78,7 +103,8 @@ L'âge reste celui fourni par Icecast : aucun timer individuel à persister.
 Les connexions présentes à cet instant restent servies par le bruit de fond.
 Un couple absent de la baseline, ou une durée redevenue inférieure à sa durée
 initiale (réutilisation d'id), provoque `Wake`. Une disparition seule ne
-réveille pas. Les IP et user-agents ne participent à aucune comparaison.
+réveille pas. Le core compare uniquement la vue logique ; le rapprochement
+IP/user-agent reste dans le collecteur.
 
 Une collecte détaillée devenue inconnue réveille cette veille après trois
 échecs consécutifs. La même tolérance vaut pour les statistiques d'audience :

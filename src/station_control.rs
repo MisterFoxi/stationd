@@ -749,10 +749,20 @@ impl StationControl {
     /// Three consecutive unknown polls wake an age-based sleep; a known new
     /// connection wakes immediately, including after a transient failure.
     pub fn sample_connections(&self, clients: Option<Vec<crate::listener_snapshot::Connection>>, valid_for: std::time::Duration) {
+        self.sample_connection_views(clients.clone(), clients, valid_for);
+    }
+
+    /// Raw sessions feed the journal; reconnect-continuous sessions feed sleep.
+    /// Both views must come from the same complete Icecast poll.
+    pub(crate) fn sample_connection_views(&self,
+        raw: Option<Vec<crate::listener_snapshot::Connection>>,
+        clients: Option<Vec<crate::listener_snapshot::Connection>>,
+        valid_for: std::time::Duration,
+    ) {
         let at = self.now().0;
         let (wake, changes) = {
             let mut g = self.lock();
-            let changes = g.connection_tracker.observe(at, clients.as_deref());
+            let changes = g.connection_tracker.observe(at, raw.as_deref());
             g.connection_failures = if clients.is_none() && g.state == BroadcastState::Sleeping {
                 g.connection_failures.saturating_add(1)
             } else { 0 };
