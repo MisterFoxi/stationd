@@ -9,6 +9,8 @@
 //! reste juge : il refuse aussi de son côté.
 
 use std::time::Duration;
+use std::collections::BTreeSet;
+use super::playlist_tree::{self, Node};
 
 use anyhow::Error;
 use rat_salsa::{Control, SalsaContext};
@@ -89,6 +91,9 @@ pub struct Playlists {
     /// Sélection suivie par identité (le ref, ou l'id d'une entrée sans
     /// fichier), jamais par numéro de ligne.
     selected: Option<String>,
+    selected_branch: Option<Vec<String>>,
+    hierarchical: bool,
+    collapsed: BTreeSet<Vec<String>>,
     moves: u64,
     detail: Option<(String, Result<ExportResponse, String>)>,
     pool: Option<(String, Result<PreviewPoolResponse, String>)>,
@@ -114,6 +119,9 @@ impl Default for Playlists {
             filtering: false,
             sort: 0,
             selected: None,
+            selected_branch: None,
+            hierarchical: true,
+            collapsed: BTreeSet::new(),
             moves: 0,
             detail: None,
             pool: None,
@@ -143,13 +151,13 @@ impl Playlists {
     }
 
     /// Lignes visibles : filtrées (ref ou nom contenant le texte) et triées.
-    fn visible(&self) -> Vec<&PlaylistSummary> {
+    fn visible(&self) -> Vec<Node<'_>> {
         let needle = self.filter.text().trim().to_lowercase();
         let mut v: Vec<&PlaylistSummary> = self
             .rows
             .iter()
             .filter(|p| {
-                needle.is_empty() || p.rel_path.to_lowercase().contains(&needle) || p.name.to_lowercase().contains(&needle)
+                self.hierarchical || needle.is_empty() || p.rel_path.to_lowercase().contains(&needle) || p.name.to_lowercase().contains(&needle)
             })
             .collect();
         match SORTS[self.sort] {
@@ -157,7 +165,11 @@ impl Playlists {
             Sort::Name => v.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()).then(a.rel_path.cmp(&b.rel_path))),
             Sort::Mode => v.sort_by(|a, b| a.mode.cmp(&b.mode).then(a.rel_path.cmp(&b.rel_path))),
         }
-        v
+        if self.hierarchical {
+            playlist_tree::visible(&v, &needle, &self.collapsed)
+        } else {
+            v.into_iter().map(|p| Node { playlist: p, branch: vec![key_of(p)] }).collect()
+        }
     }
 
     /// Sélectionne la playlist `reference` (casse ignorée, comme les refs de
@@ -170,6 +182,8 @@ impl Playlists {
         let key = key_of(p);
         self.filter.set_text("");
         self.filtering = false;
+        self.collapsed.clear();
+        self.selected_branch = None;
         if self.selected.as_deref() != Some(key.as_str()) {
             self.selected = Some(key);
             self.settle(ctx);
@@ -179,24 +193,54 @@ impl Playlists {
 
     fn index(&self) -> usize {
         let vis = self.visible();
-        self.selected.as_ref().and_then(|k| vis.iter().position(|p| key_of(p) == *k)).unwrap_or(0)
+        self.selected_branch.as_ref().and_then(|branch| vis.iter().position(|p| p.branch == *branch))
+            .or_else(|| self.selected.as_ref().and_then(|k| vis.iter().position(|p| key_of(p) == *k)))
+            .unwrap_or(0)
     }
 
     fn current(&self) -> Option<&PlaylistSummary> {
         let vis = self.visible();
-        vis.get(self.index()).copied()
+        vis.get(self.index()).map(|node| node.playlist)
     }
 
     fn select(&mut self, idx: usize, ctx: &mut Global) {
         let vis = self.visible();
         let Some(p) = vis.get(idx.min(vis.len().saturating_sub(1))) else { return };
         let key = key_of(p);
-        if self.selected.as_deref() != Some(key.as_str()) {
+        let branch = p.branch.clone();
+        let changed = self.selected.as_deref() != Some(key.as_str());
+        self.selected_branch = Some(branch);
+        if changed {
             self.selected = Some(key);
             self.settle(ctx);
         }
     }
 
+    /// Fold/unfold the selected occurrence, or move to its parent/first child.
+    fn tree_key(&mut self, key: KeyCode) -> Option<usize> {
+        let vis = self.visible();
+        let idx = self.index();
+        let node = vis.get(idx)?;
+        let branch = node.branch.clone();
+        let group = node.mode == "group";
+        let parent = if branch.len() > 1 {
+            vis.iter().position(|n| n.branch == branch[..branch.len() - 1])
+        } else { None };
+        let child = vis.get(idx + 1).filter(|n| n.branch.len() == branch.len() + 1 && n.branch.starts_with(&branch)).map(|_| idx + 1);
+        drop(vis);
+        match key {
+            KeyCode::Left if group && !self.collapsed.contains(&branch) => { self.collapsed.insert(branch); None },
+            KeyCode::Left => parent,
+            KeyCode::Right if group => {
+                if self.collapsed.remove(&branch) { None } else { child }
+            },
+            KeyCode::Char(' ') if group => {
+                if !self.collapsed.remove(&branch) { self.collapsed.insert(branch); }
+                None
+            },
+            _ => None,
+        }
+    }
     /// Le détail suit la sélection, `SETTLE` après le dernier mouvement.
     fn settle(&mut self, ctx: &mut Global) {
         self.moves += 1;
@@ -309,7 +353,10 @@ impl Playlists {
                     Some(t) => Span::styled(t, s.label()),
                 };
                 let mut row = Row::new(vec![
-                    Cell::from(refname),
+                    Cell::from(Line::from(vec![
+                        Span::raw(if self.hierarchical { p.prefix(&self.collapsed, !self.filter.text().trim().is_empty()) } else { String::new() }),
+                        refname,
+                    ])),
                     Cell::from(p.name.clone()),
                     Cell::from(Span::styled(mode_label(&p.mode), s.accent())),
                     Cell::from(used),
@@ -463,6 +510,8 @@ impl Screen for Playlists {
             return &[(k!("key-enter"), k!("help-media-apply")), (k!("key-esc"), k!("help-media-cancel"))];
         }
         &[
+            (k!("key-v"), k!("help-pl-tree")),
+            (k!("key-left-right"), k!("help-pl-tree-expand")),
             (k!("key-enter"), k!("help-pl-edit")),
             (k!("key-n"), k!("help-pl-new")),
             (k!("key-d"), k!("help-pl-delete")),
@@ -509,7 +558,10 @@ impl Screen for Playlists {
                                 let vis = self.visible();
                                 let still = self.selected.as_ref().is_some_and(|k| vis.iter().any(|p| key_of(p) == *k));
                                 if !still {
-                                    self.selected = vis.first().map(|p| key_of(p));
+                                    let key = vis.first().map(|p| key_of(p));
+                                    let branch = vis.first().map(|p| p.branch.clone());
+                                    self.selected = key;
+                                    self.selected_branch = branch;
                                 }
                                 self.detail = None;
                                 self.load_detail(ctx);
@@ -621,6 +673,14 @@ impl Screen for Playlists {
 
         let idx = self.index();
         match k.code {
+            KeyCode::Char('v') => {
+                self.hierarchical = !self.hierarchical;
+                self.selected_branch = None;
+                if self.hierarchical { self.collapsed.clear(); }
+            },
+            KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') if self.hierarchical => {
+                if let Some(next) = self.tree_key(k.code) { self.select(next, ctx); }
+            },
             KeyCode::Up => self.select(idx.saturating_sub(1), ctx),
             KeyCode::Down => self.select(idx + 1, ctx),
             KeyCode::PageUp => self.select(idx.saturating_sub(15), ctx),
@@ -700,4 +760,58 @@ fn used_count(p: &PlaylistSummary) -> Option<String> {
 
 fn editor_ref_is(ed: &Editor, reference: &str) -> bool {
     ed.reference_is(reference)
+}
+
+#[cfg(test)]
+mod hierarchy_tests {
+    use super::*;
+
+    fn screen() -> Playlists {
+        let mut screen = Playlists::default();
+        screen.loaded = true;
+        screen.rows = [("a", "group", vec![]), ("b", "group", vec![]), ("shared", "dynamic", vec!["a", "b"]), ("solo", "static", vec![])].into_iter()
+            .map(|(reference, mode, groups)| PlaylistSummary {
+                rel_path: reference.into(), name: reference.into(), mode: mode.into(), enabled: true,
+                groups: groups.into_iter().map(str::to_string).collect(), ..Default::default()
+            }).collect();
+        screen
+    }
+
+    #[test]
+    fn shared_member_selection_and_parent_navigation_keep_the_selected_branch() {
+        let mut screen = screen();
+        screen.selected = Some("shared".into());
+        screen.selected_branch = Some(vec!["b".into(), "shared".into()]);
+        assert_eq!(screen.index(), 3);
+        assert_eq!(screen.current().unwrap().rel_path, "shared");
+        assert_eq!(screen.tree_key(KeyCode::Left), Some(2));
+        screen.selected = Some("b".into());
+        screen.selected_branch = Some(vec!["b".into()]);
+        screen.tree_key(KeyCode::Left);
+        assert_eq!(screen.visible().iter().map(|n| n.rel_path.as_str()).collect::<Vec<_>>(), ["a", "shared", "b", "solo"]);
+        assert_eq!(screen.current().unwrap().rel_path, "b");
+        screen.tree_key(KeyCode::Right);
+        assert_eq!(screen.tree_key(KeyCode::Right), Some(3));
+        screen.hierarchical = false;
+        screen.selected_branch = None;
+        assert_eq!(screen.visible().len(), 4);
+        assert_eq!(screen.current().unwrap().rel_path, "b");
+    }
+
+    #[tokio::test]
+    async fn hierarchy_renders_expansion_markers_and_members_at_terminal_sizes() {
+        let args = crate::Args { addr: "http://127.0.0.1:50051".into(), lang: None, theme: "Imperial".into(), list_themes: false };
+        let channel = crate::rpc::lazy_channel(&args.addr).unwrap();
+        let mut ctx = Global::new(&args, channel.clone(), channel);
+        let mut screen = screen();
+        for width in [80, 140] {
+            let area = Rect::new(0, 0, width, 24);
+            let mut buf = Buffer::empty(area);
+            screen.render_list(area, &mut buf, &mut ctx);
+            let lines: Vec<String> = (0..area.height).map(|y| (0..area.width).map(|x| buf[(x, y)].symbol()).collect()).collect();
+            assert!(lines.iter().any(|l| l.contains("▾ a")), "{lines:?}");
+            assert_eq!(lines.iter().filter(|l| l.contains("  · shared")).count(), 2, "{lines:?}");
+            assert!(lines.iter().any(|l| l.contains("· solo")), "{lines:?}");
+        }
+    }
 }

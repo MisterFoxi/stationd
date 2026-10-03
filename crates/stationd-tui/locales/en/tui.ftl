@@ -1287,3 +1287,6 @@ help-media-tree = List / tree
 help-media-tree-focus = Folders / files
 help-media-tree-expand = Expand / collapse folder
 help-media-tree-files = Browse files
+
+help-pl-tree = List / groups
+help-pl-tree-expand = Expand / collapse group

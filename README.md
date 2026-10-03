@@ -566,6 +566,16 @@ permissions on every run. `.env` is root-owned and group-readable (`0640`).
 The installer installs `stationctl` and `stationd-tui` in `/usr/local/bin`.
 These launchers use the clients in the running container as `stationd`, from
 any working directory, with no native host libraries or shell aliases needed.
+The TUI's Media screen opens with the indexed directory tree. Use `Right`/`Left`
+to expand/collapse folders, `Tab` to switch between folders and files, `v` to
+switch to the flat list, and `r` to reload after moving media. Returning to the
+Media screen also refreshes the directory inventory and file list.
+
+The Playlists screen opens with groups and their members in a hierarchy, including
+nested groups and members shared by several groups. `Left`/`Right`/`Space`
+collapse or expand branches; `v` switches to the flat list. Filtering keeps the
+ancestors of matching members visible. `Enter` edits the selected playlist.
+
 The CLI supports pipes; the TUI requires an interactive terminal and forwards
 its terminal type and locale. Until the new groups take effect after SSH
 reconnection, launchers fall back to `sudo docker`.

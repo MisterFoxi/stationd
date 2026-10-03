@@ -1297,3 +1297,6 @@ help-media-tree = Liste / arborescence
 help-media-tree-focus = Dossiers / fichiers
 help-media-tree-expand = Ouvrir / fermer le dossier
 help-media-tree-files = Afficher les fichiers
+
+help-pl-tree = Liste / groupes
+help-pl-tree-expand = Ouvrir / fermer le groupe
