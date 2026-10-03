@@ -1,5 +1,6 @@
 //! Médias (`5`) — la bibliothèque, par `LibraryService.SearchMedia`
-//! (dossier §5.5). Recherche, filtres, tri stable, pages chargées à la
+//! (dossier §5.5). Arborescence par défaut, liste plate avec `v`.
+//! Recherche, filtres, tri stable, pages chargées à la
 //! demande (curseur serveur). Fiche d'un média (`Entrée` : métadonnées,
 //! playlists qui peuvent le diffuser, diffusions), sélection multiple
 //! (`Espace`) et actions sur la sélection : ajout à une playlist statique
@@ -254,7 +255,7 @@ impl Medias {
             descending: false,
             missing: 0,
             include_unavailable: false,
-            tree: None,
+            tree: (!picker).then(super::media_tree::Tree::default),
             folders_req: 0,
             rows: Vec::new(),
             total: 0,
@@ -281,11 +282,12 @@ impl Medias {
         self.picked.take()
     }
 
-    /// Lance la première recherche si rien n'est chargé, si une réponse est
-    /// partie pendant qu'un autre écran était actif, ou si la dernière a
-    /// échoué (stationd injoignable alors).
+    /// Rafraîchit les dossiers à l'entrée de l'écran et charge les fichiers
+    /// si nécessaire (première ouverture, requête en cours ou erreur).
     pub fn ensure_loaded(&mut self, ctx: &mut Global) {
-        if self.tree.as_ref().is_some_and(|t| t.folders.is_empty() || t.error.is_some()) { self.load_folders(ctx); }
+        // Entering the media screen refreshes the disk layout, including
+        // reorganizations performed by stationctl while this tab was inactive.
+        if self.tree.as_ref().is_some_and(|t| !t.loading) { self.load_folders(ctx); }
         if !self.loaded_once || self.loading || self.error.is_some() {
             self.load(ctx, false);
         }
@@ -331,10 +333,34 @@ impl Medias {
             Ok(Control::Event(AppEvent::MediaFolders(owner, request, result))) });
     }
 
-    fn change_folder(&mut self, ctx: &mut Global) {
-        self.request += 1; self.list_req = self.request; // invalidate the previous folder/page even before its replacement can load
+    fn invalidate_folder(&mut self) {
+        self.request += 1; self.list_req = self.request; // invalidate previous folder/page replies
         self.rows.clear(); self.selected = 0; self.next.clear(); self.keep = None;
+    }
+
+    fn change_folder(&mut self, ctx: &mut Global) {
+        self.invalidate_folder();
         self.load(ctx, false);
+    }
+
+    /// Apply the inventory before issuing a fresh direct-file query.
+    fn apply_folders(&mut self, result: &Result<Vec<stationd_proto::library::MediaFolder>, String>) -> bool {
+        let Some(tree) = self.tree.as_mut() else { return false; };
+        tree.loading = false;
+        let initial = tree.folders.is_empty();
+        match result {
+            Ok(folders) => {
+                tree.set(folders.clone());
+                // A stable directory name can contain moved/renamed files.
+                self.invalidate_folder();
+                true
+            }
+            Err(error) => {
+                tree.error = Some(error.clone());
+                if initial { self.error = Some(error.clone()); self.loading = false; }
+                false
+            }
+        }
     }
 
     /// Lance la première page ou la page suivante de fichiers.
@@ -830,13 +856,8 @@ impl Medias {
     pub fn handle(&mut self, event: &AppEvent, ctx: &mut Global) -> Control<AppEvent> {
         match event {
             AppEvent::MediaFolders(owner, id, result) if *owner == self.owner && *id == self.folders_req => {
-                let Some(tree) = self.tree.as_mut() else { return Control::Continue; };
-                tree.loading = false;
-                let initial = tree.folders.is_empty();
-                match result {
-                    Ok(folders) => { if tree.set(folders.clone()) || initial { self.change_folder(ctx); } },
-                    Err(error) => { tree.error = Some(error.clone()); if initial { self.error = Some(error.clone()); self.loading = false; } },
-                }
+                if self.tree.is_none() { return Control::Continue; }
+                if self.apply_folders(result) { self.load(ctx, false); }
                 return Control::Changed;
             }
             AppEvent::Media(owner, id, r, append) if *owner == self.owner => {
@@ -1370,5 +1391,53 @@ mod tests {
         let _=m.handle(&AppEvent::MediaFolders(m.owner,3,Err("unsupported directory RPC".into())),&mut ctx);
         assert!(!m.loading && m.rows.is_empty());
         assert_eq!(m.error.as_deref(),Some("unsupported directory RPC"));
+    }
+}
+
+#[cfg(test)]
+mod directory_refresh_tests {
+    use super::*;
+    use stationd_proto::library::MediaFolder;
+
+    #[tokio::test]
+    async fn refreshed_hierarchy_invalidates_files_even_when_selected_folder_survives() {
+        let args = crate::Args {
+            addr: "http://127.0.0.1:50051".into(), lang: None,
+            theme: "Imperial".into(), list_themes: false,
+        };
+        let channel = crate::rpc::lazy_channel(&args.addr).unwrap();
+        let mut ctx = Global::new(&args, channel.clone(), channel);
+        let mut m = Medias::default();
+        let tree = m.tree.as_mut().expect("media screen opens with the tree");
+        tree.path = "Electronic/House".into();
+        let folders: Vec<_> = ["", "Electronic", "Electronic/House"].into_iter()
+            .map(|path| MediaFolder { path: path.into(), count: 1 }).collect();
+        tree.set(folders.clone());
+        m.rows = vec![Media { rel_path: "Electronic/House/old.mp3".into(), ..Default::default() }];
+        m.request = 5;
+        m.list_req = 5;
+        m.folders_req = 2;
+        m.next = "old cursor".into();
+        assert!(m.apply_folders(&Ok(folders)));
+        assert_eq!(m.request(String::new()).directory.as_deref(), Some("Electronic/House"));
+        assert!(m.rows.is_empty());
+        assert!(m.next.is_empty());
+        assert!(m.list_req > 5);
+        let stale = SearchMediaResponse {
+            media: vec![Media { rel_path: "Electronic/House/old.mp3".into(), ..Default::default() }],
+            ..Default::default()
+        };
+        let _ = m.handle(&AppEvent::Media(m.owner, 5, Ok(stale), false), &mut ctx);
+        assert!(m.rows.is_empty());
+    }
+
+    #[test]
+    fn media_screen_opens_with_directory_navigation_and_picker_searches_everywhere() {
+        let medias = Medias::default();
+        let tree = medias.tree.as_ref().expect("directory navigation by default");
+        assert!(tree.focused);
+        assert_eq!(medias.request(String::new()).directory.as_deref(), Some(""));
+        let picker = Medias::new(true);
+        assert!(picker.request(String::new()).directory.is_none());
     }
 }

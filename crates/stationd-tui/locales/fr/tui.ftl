@@ -821,7 +821,7 @@ ag-month = { $month ->
 } { $year }
 ag-step = pas { $n } min
 ag-utc = heures UTC (station : { $tz })
-ag-utc-rules = les règles restent en heure de la station
+ag-utc-rules = chaque règle garde son fuseau : station ou UTC
 ag-dst = changement d'heure : journée de { $h } h
 ag-dst-week = changement d'heure cette semaine
 ag-stale = données anciennes, relecture en échec : { $reason }
@@ -1297,3 +1297,10 @@ help-media-tree = Liste / arborescence
 help-media-tree-focus = Dossiers / fichiers
 help-media-tree-expand = Ouvrir / fermer le dossier
 help-media-tree-files = Afficher les fichiers
+
+help-pl-tree = Liste / groupes
+help-pl-tree-expand = Ouvrir / fermer le groupe
+
+rf-timezone = Fuseau horaire
+rf-station = Station
+rf-utc-times = heures, jours et dates en UTC

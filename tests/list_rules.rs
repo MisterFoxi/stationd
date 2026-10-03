@@ -22,6 +22,7 @@ async fn lists_every_variant_and_preserves_playback_state() {
     let mut base = rule("a-base", r::RuleKind::BaseRotation { playlist_ref: "general".into() });
     base.enabled = false;
     base.validity = r::Validity {
+        utc: true,
         days: vec![r::Weekday::Sun, r::Weekday::Mon],
         date_start: Some(r::Date { year: 2026, month: 9, day: 13 }),
         date_end: Some(r::Date { year: 2026, month: 10, day: 1 }),
@@ -52,6 +53,8 @@ async fn lists_every_variant_and_preserves_playback_state() {
     assert!(!first.rules[0].enabled, "disabled rules must remain inspectable");
     let validity = first.rules[0].validity.as_ref().unwrap();
     assert_eq!(validity.days, [p::Weekday::Mon as i32, p::Weekday::Sun as i32]);
+    assert!(validity.utc);
+    assert!(!first.rules[1].validity.as_ref().unwrap().utc);
     assert_eq!(validity.date_start, "2026-09-13");
     assert_eq!(validity.date_end, "2026-10-01");
     use p::rule::Kind;

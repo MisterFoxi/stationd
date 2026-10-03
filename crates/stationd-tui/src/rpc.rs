@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use stationd_proto::{broadcast, events, icecast, library, liquidsoap, live, onair, playlist, plugin, schedule, stats, station};
 use tonic::transport::{Channel, Endpoint};
+use tonic::codegen::http::Uri;
 
 /// Délai maximal d'une lecture simple (dossier §18 de la v1, conservé).
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
@@ -32,10 +33,39 @@ pub async fn read_plugin_tab(channel: Channel, name: String, tab_id: String)
         .read_tab(plugin::PluginReadTabRequest { name, tab_id })).await
 }
 
+/// Complete host/IP shorthand with the stationd gRPC scheme and port.
+/// Keep the hostname: tonic resolves it through the system resolver when
+/// connecting, including subsequent reconnects after a network outage.
+pub fn normalize_address(addr: &str) -> anyhow::Result<String> {
+    fn normalize(addr: &str) -> anyhow::Result<String> {
+        let addr = addr.trim();
+        anyhow::ensure!(!addr.is_empty(), "missing host");
+        let address = if addr.contains("://") {
+            addr.to_string()
+        } else if addr.parse::<std::net::Ipv6Addr>().is_ok() {
+            format!("http://[{addr}]")
+        } else {
+            format!("http://{addr}")
+        };
+        let uri: Uri = address.parse()?;
+        anyhow::ensure!(matches!(uri.scheme_str(), Some("http" | "https")), "expected http or https");
+        let authority = uri.authority().ok_or_else(|| anyhow::anyhow!("missing host"))?;
+        anyhow::ensure!(!authority.host().is_empty() && !authority.as_str().contains('@'), "invalid host");
+        if authority.port().is_some() {
+            anyhow::ensure!(authority.port_u16().is_some_and(|p| p != 0), "invalid port (expected 1..65535)");
+            return Ok(uri.to_string());
+        }
+        let with_port = format!("{authority}:50051").parse()?;
+        let mut parts = uri.into_parts();
+        parts.authority = Some(with_port);
+        Ok(Uri::from_parts(parts)?.to_string())
+    }
+    normalize(addr).map_err(|e| anyhow::anyhow!(crate::tr!("rpc-bad-address", addr = addr.to_string(), reason = e.to_string())))
+}
 /// Canal paresseux : la connexion s'établit au premier appel et se rétablit
 /// seule après une coupure (tonic). Aucun appel n'est fait ici.
 pub fn lazy_channel(addr: &str) -> anyhow::Result<Channel> {
-    let endpoint = Endpoint::from_shared(addr.to_string())
+    let endpoint = Endpoint::from_shared(normalize_address(addr)?)
         .map_err(|e| anyhow::anyhow!(crate::tr!("rpc-bad-address", addr = addr.to_string(), reason = e.to_string())))?
         .connect_timeout(Duration::from_secs(3))
         .timeout(READ_TIMEOUT);
@@ -45,7 +75,7 @@ pub fn lazy_channel(addr: &str) -> anyhow::Result<Channel> {
 /// Canal pour les opérations longues (scan de la bibliothèque) : même
 /// adresse, sans délai maximal par appel.
 pub fn lazy_channel_long(addr: &str) -> anyhow::Result<Channel> {
-    let endpoint = Endpoint::from_shared(addr.to_string())
+    let endpoint = Endpoint::from_shared(normalize_address(addr)?)
         .map_err(|e| anyhow::anyhow!(crate::tr!("rpc-bad-address", addr = addr.to_string(), reason = e.to_string())))?
         .connect_timeout(Duration::from_secs(3));
     Ok(endpoint.connect_lazy())
@@ -424,5 +454,90 @@ pub async fn media_folders(channel: Channel, include_unavailable: bool) -> Read<
         if page.next_cursor.is_empty() { return Ok(folders); }
         if page.next_cursor == cursor { return Err("directory pagination did not advance".into()); }
         cursor = page.next_cursor;
+    }
+}
+
+#[cfg(test)]
+mod address_tests {
+    use super::*;
+
+    #[test]
+    fn accepts_hosts_ips_urls_and_preserves_explicit_ports() {
+        for (input, scheme, authority) in [
+            ("stationd.local", "http", "stationd.local:50051"),
+            ("  localhost  ", "http", "localhost:50051"),
+            ("192.0.2.1", "http", "192.0.2.1:50051"),
+            ("stationd.local:6000", "http", "stationd.local:6000"),
+            ("http://stationd.local", "http", "stationd.local:50051"),
+            ("http://stationd.local:6000", "http", "stationd.local:6000"),
+            ("https://stationd.local", "https", "stationd.local:50051"),
+            ("::1", "http", "[::1]:50051"),
+            ("[::1]", "http", "[::1]:50051"),
+            ("[::1]:6000", "http", "[::1]:6000"),
+            ("http://[::1]", "http", "[::1]:50051"),
+        ] {
+            let normalized = normalize_address(input).unwrap();
+            let uri: Uri = normalized.parse().unwrap();
+            assert_eq!(uri.scheme_str(), Some(scheme), "{input}");
+            assert_eq!(uri.authority().unwrap().as_str(), authority, "{input}");
+            assert_eq!(normalize_address(&normalized).unwrap(), normalized);
+        }
+        let url = "http://stationd.local:6000/grpc?x=1";
+        assert_eq!(normalize_address(url).unwrap(), url);
+    }
+
+    #[test]
+    fn rejects_empty_hosts_bad_ports_and_unsupported_schemes() {
+        for input in ["", "  ", "http://", "http://:50051", "stationd.local:abc", "stationd.local:70000", "stationd.local:0", "ftp://stationd.local", "http://user@host", "bad host"] {
+            assert!(normalize_address(input).is_err(), "accepted {input:?}");
+        }
+    }
+
+    // stationd-proto generates clients only. This minimal local service
+    // serves Status without pulling the daemon into the TUI test graph.
+    #[derive(Clone)]
+    struct TestStation;
+    impl tonic::server::NamedService for TestStation {
+        const NAME: &'static str = "station.Station";
+    }
+    impl<B> tonic::codegen::Service<tonic::codegen::http::Request<B>> for TestStation
+    where B: tonic::codegen::Body + Send + 'static,
+          B::Error: Into<tonic::codegen::StdError> + Send + 'static {
+        type Response = tonic::codegen::http::Response<tonic::body::BoxBody>;
+        type Error = std::convert::Infallible;
+        type Future = tonic::codegen::BoxFuture<Self::Response, Self::Error>;
+        fn poll_ready(&mut self, _: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), Self::Error>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+        fn call(&mut self, request: tonic::codegen::http::Request<B>) -> Self::Future {
+            struct Status;
+            impl tonic::server::UnaryService<station::StatusRequest> for Status {
+                type Response = station::StatusReply;
+                type Future = tonic::codegen::BoxFuture<tonic::Response<Self::Response>, tonic::Status>;
+                fn call(&mut self, _: tonic::Request<station::StatusRequest>) -> Self::Future {
+                    Box::pin(async { Ok(tonic::Response::new(station::StatusReply { station_name: "resolved".into(), ..Default::default() })) })
+                }
+            }
+            Box::pin(async move {
+                let mut grpc = tonic::server::Grpc::new(tonic::codec::ProstCodec::default());
+                Ok(grpc.unary(Status, request).await)
+            })
+        }
+    }
+    #[tokio::test]
+    async fn both_channels_resolve_localhost_and_reach_a_grpc_server() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = format!("localhost:{}", listener.local_addr().unwrap().port());
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(tonic::transport::Server::builder()
+            .add_service(TestStation)
+            .serve_with_incoming_shutdown(tokio_stream::wrappers::TcpListenerStream::new(listener), async { let _ = stopped.await; }));
+        for channel in [lazy_channel(&address).unwrap(), lazy_channel_long(&address).unwrap()] {
+            let mut client = station::station_client::StationClient::new(channel);
+            let response = tokio::time::timeout(Duration::from_secs(5), client.status(station::StatusRequest {})).await.unwrap().unwrap();
+            assert_eq!(response.into_inner().station_name, "resolved");
+        }
+        let _ = stop.send(());
+        server.await.unwrap().unwrap();
     }
 }

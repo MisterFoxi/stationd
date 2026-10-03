@@ -14,9 +14,9 @@
 //! TIME BOUNDARY. Instants live as epoch UTC internally (`Epoch`), never a raw
 //! `i64` (per the time doc). DayPart/AtClock compare against *civil local*
 //! time, so the caller must convert `now` (epoch) into `LocalNow` using the
-//! station timezone. That conversion — the only place DST ambiguity is real —
-//! is where the still-undecided time crate (`jiff` vs `chrono` + `chrono-tz`)
-//! will live. This module stays crate-free on purpose.
+//! station timezone. Rules with `utc = true` derive their civil fields from
+//! the epoch instead. The upstream conversion handles station DST ambiguity;
+//! this module stays crate-free on purpose.
 //!
 //! COLLISION ORDER (documented, fixed):
 //!   AtClock hard > AtClock soft > Every > base (DayPart → BaseRotation) > fallback
@@ -32,7 +32,7 @@ use std::collections::{HashMap, HashSet};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Epoch(pub i64);
 
-/// A civil calendar date in the station timezone. Used only for validity
+/// A civil calendar date in the rule timezone (station or UTC). Used only for validity
 /// windows (date_start/date_end) and the AtClock occurrence token.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Date {
@@ -52,7 +52,7 @@ pub enum Weekday {
     Sun,
 }
 
-/// A civil wall-clock time-of-day in the station timezone.
+/// A civil wall-clock time-of-day in the rule timezone (station or UTC).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WallClock {
     pub hour: u8,
@@ -96,6 +96,8 @@ pub struct Rule {
 /// (date_start/date_end). Empty `days` = every day; absent dates = unbounded.
 #[derive(Debug, Clone, Default)]
 pub struct Validity {
+    /// Civil times, weekdays and dates use UTC instead of station time.
+    pub utc: bool,
     pub days: Vec<Weekday>,
     pub date_start: Option<Date>,
     pub date_end: Option<Date>,
@@ -280,7 +282,7 @@ pub fn resolve_ranked(now: LocalNow, grid: &Grid, state: &PlaybackState) -> Vec<
             expiry_secs,
         } = &rule.kind
         {
-            if let Some(token) = at_clock_due(&rule.id, *anchor, *expiry_secs, now) {
+            if let Some(token) = at_clock_due(&rule.id, *anchor, *expiry_secs, rule.validity.civil_now(now)) {
                 if !state.at_clock_taken.contains(&token) {
                     due.push((rule, playlist_ref, *mode, token));
                 }
@@ -341,7 +343,7 @@ pub fn resolve_ranked(now: LocalNow, grid: &Grid, state: &PlaybackState) -> Vec<
         }
         match &rule.kind {
             RuleKind::DayPart { playlist_ref, start, end: Some(end) } => {
-                if let Some(span) = window_covers(*start, *end, now.wall) {
+                if let Some(span) = window_covers(*start, *end, rule.validity.civil_now(now).wall) {
                     dayparts.push((rule, playlist_ref, span));
                 }
             }
@@ -387,8 +389,36 @@ pub fn resolve_next(now: LocalNow, grid: &Grid, state: &PlaybackState) -> GridDe
 // ---------------------------------------------------------------------------
 
 impl Validity {
+
+    /// Civil fields in this rule's clock, derived from the instant for UTC.
+    pub fn civil_now(&self, now: LocalNow) -> LocalNow {
+        if !self.utc { return now; }
+        // Proleptic Gregorian civil_from_days; Euclidean division also covers
+        // timestamps before 1970. No timezone database or frozen offset.
+        let days = now.epoch.0.div_euclid(86400);
+        let z = days + 719468;
+        let era = z.div_euclid(146097);
+        let doe = z - era * 146097;
+        let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+        let mut year = yoe + era * 400;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let day = doy - (153 * mp + 2) / 5 + 1;
+        let month = mp + if mp < 10 { 3 } else { -9 };
+        year += i64::from(month <= 2);
+        let minute = now.epoch.0.rem_euclid(86400) / 60;
+        let weekday = [Weekday::Thu, Weekday::Fri, Weekday::Sat, Weekday::Sun,
+            Weekday::Mon, Weekday::Tue, Weekday::Wed][days.rem_euclid(7) as usize];
+        LocalNow {
+            epoch: now.epoch,
+            date: Date { year: year as i32, month: month as u8, day: day as u8 },
+            weekday,
+            wall: WallClock { hour: (minute / 60) as u8, minute: (minute % 60) as u8 },
+        }
+    }
     /// Does this rule apply on `now`'s civil day?
     fn applies(&self, now: LocalNow) -> bool {
+        let now = self.civil_now(now);
         self.applies_on(now.date, now.weekday)
     }
 
@@ -462,6 +492,7 @@ fn last_start_ago(validity: &Validity, start: WallClock, now: LocalNow) -> Optio
 
 /// [`last_start_ago`], plus the civil date of that start.
 fn last_start(validity: &Validity, start: WallClock, now: LocalNow) -> Option<(i64, Date)> {
+    let now = validity.civil_now(now);
     let now_min = now.wall.minutes() as i64;
     let start_min = start.minutes() as i64;
     let (mut date, mut weekday) = (now.date, now.weekday);
@@ -1133,5 +1164,80 @@ mod tests {
         fri.enabled = false;
         let off = Grid { rules: vec![fri] };
         assert!(live_window(&off, "marc", on((2026, 10, 2), Weekday::Fri, 22, 30)).is_none());
+    }
+}
+
+#[cfg(test)]
+mod utc_tests {
+    use super::*;
+    use crate::clock;
+    fn local(at: &str) -> LocalNow {
+        let ts: jiff::Timestamp = at.parse().unwrap();
+        clock::to_local_now(Epoch(ts.as_second()), "Europe/Paris").unwrap()
+    }
+    fn grid(kind: RuleKind) -> Grid {
+        Grid { rules: vec![Rule { id: "utc".into(), enabled: true,
+            validity: Validity { utc: true, ..Validity::default() }, kind }] }
+    }
+    #[test]
+    fn utc_conversion_matches_clock_including_negative_epochs_and_leap_days() {
+        let validity = Validity { utc: true, ..Validity::default() };
+        for seconds in [-2203977601, -86401, -1, 0, 951868800, 1774746000, 1792890000] {
+            let station = clock::to_local_now(Epoch(seconds), "Europe/Paris").unwrap();
+            let actual = validity.civil_now(station);
+            let expected = clock::to_local_now(Epoch(seconds), "UTC").unwrap();
+            assert_eq!(actual.date, expected.date);
+            assert_eq!(actual.weekday, expected.weekday);
+            assert_eq!(actual.wall, expected.wall);
+        }
+    }
+    #[test]
+    fn utc_daily_marks_stay_fixed_across_both_dst_changes() {
+        let g = grid(RuleKind::AtClock { playlist_ref: "news".into(),
+            anchor: ClockAnchor::At(WallClock { hour: 9, minute: 0 }),
+            mode: Mode::Hard, expiry_secs: Some(0) });
+        for date in ["2026-03-28", "2026-03-29", "2026-10-24", "2026-10-25"] {
+            let now = local(&format!("{date}T09:00:00Z"));
+            let mut state = PlaybackState::default();
+            let decision = resolve_next(now, &g, &state);
+            assert_eq!(decision.origin, Origin::AtClockHard);
+            assert_eq!(decision.mark_taken.as_deref(), Some(format!("utc@{date}T09:00").as_str()));
+            state.at_clock_taken.insert(decision.mark_taken.unwrap());
+            assert_eq!(resolve_next(now, &g, &state).origin, Origin::Fallback);
+            assert_eq!(resolve_next(local(&format!("{date}T08:00:00Z")), &g,
+                &PlaybackState::default()).origin, Origin::Fallback);
+        }
+    }
+    #[test]
+    fn utc_date_and_weekday_use_utc_side_of_midnight() {
+        let mut g = grid(RuleKind::DayPart { playlist_ref: "late".into(),
+            start: WallClock { hour: 22, minute: 0 },
+            end: Some(WallClock { hour: 23, minute: 59 }) });
+        let date = Date { year: 2026, month: 10, day: 3 };
+        g.rules[0].validity.days = vec![Weekday::Sat];
+        g.rules[0].validity.date_start = Some(date);
+        g.rules[0].validity.date_end = Some(date);
+        let now = local("2026-10-03T23:30:00Z"); // Sunday in Paris, Saturday UTC.
+        assert_eq!(resolve_next(now, &g, &PlaybackState::default()).origin, Origin::DayPart);
+        g.rules[0].validity.utc = false;
+        assert_eq!(resolve_next(now, &g, &PlaybackState::default()).origin, Origin::Fallback);
+    }
+    #[test]
+    fn utc_open_parts_and_live_slots_compare_with_station_starts() {
+        let mut g = grid(RuleKind::DayPart { playlist_ref: "late".into(),
+            start: WallClock { hour: 23, minute: 0 }, end: None });
+        g.rules[0].validity.days = vec![Weekday::Sat];
+        g.rules.push(Rule { id: "next".into(), enabled: true, validity: Validity::default(),
+            kind: RuleKind::DayPart { playlist_ref: "morning".into(),
+                start: WallClock { hour: 2, minute: 0 }, end: None } });
+        assert_eq!(resolve_next(local("2026-10-03T23:30:00Z"), &g,
+            &PlaybackState::default()).rule_id.as_deref(), Some("utc"));
+        assert_eq!(resolve_next(local("2026-10-04T00:00:00Z"), &g,
+            &PlaybackState::default()).rule_id.as_deref(), Some("next"));
+        g.rules[0].kind = RuleKind::Live { dj: "alex".into(),
+            start: WallClock { hour: 23, minute: 0 } };
+        let live = live_window(&g, "alex", local("2026-10-03T23:30:00Z")).unwrap();
+        assert_eq!(live.occurrence, "utc@2026-10-03T23:00");
+        assert!(live_window(&g, "alex", local("2026-10-04T00:00:00Z")).is_none());
     }
 }

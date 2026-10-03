@@ -32,6 +32,7 @@ pub mod listener_snapshot;
 pub mod icecast_grpc;
 pub mod icecast_xml;
 pub mod library_actor;
+pub mod library_reorganize;
 pub mod library_grpc;
 pub mod live;
 pub mod live_grpc;

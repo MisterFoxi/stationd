@@ -18,6 +18,7 @@ pub const DAYS: [&str; 7] = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
 pub struct RuleFields {
     pub id: String,
     pub enabled: bool,
+    pub utc: bool,
     pub kind: String,
     pub playlist_ref: String,
     pub dj: String,
@@ -64,6 +65,7 @@ fn text(item: Option<&Item>) -> String {
 pub fn read(t: &Table) -> RuleFields {
     let mut f = RuleFields::new(&text(t.get("kind")));
     f.id = text(t.get("id"));
+    f.utc = t.get("utc").and_then(|i| i.as_bool()).unwrap_or(false);
     f.enabled = t.get("enabled").and_then(|i| i.as_bool()).unwrap_or(true);
     f.playlist_ref = text(t.get("playlist_ref"));
     f.dj = text(t.get("dj"));
@@ -134,6 +136,7 @@ pub fn write(t: &mut Table, f: &RuleFields) {
     let opt = |s: &str| (!s.trim().is_empty()).then(|| value(s.trim()));
     let kind = f.kind.as_str();
     set("id", Some(value(f.id.trim())));
+    set("utc", f.utc.then(|| value(true)));
     set("enabled", (!f.enabled).then(|| value(false)));
     set("kind", Some(value(kind)));
     set("playlist_ref", if kind == "live" { None } else { Some(value(f.playlist_ref.trim())) });
@@ -309,5 +312,26 @@ mod tests {
         assert_eq!(free_id(&doc, "top"), "top-2");
         assert_eq!(free_id(&doc, "evt"), "evt");
         assert!(without_rule(GRID, "nope").is_err());
+    }
+}
+
+#[cfg(test)]
+mod utc_tests {
+    use super::*;
+    #[test]
+    fn utc_choice_survives_edit_and_can_return_to_station_time() {
+        let mut fields = RuleFields::new("at_clock");
+        fields.id = "news".into();
+        fields.playlist_ref = "news".into();
+        fields.anchor_value = "09:00".into();
+        fields.date_start = "2026-10-03".into();
+        fields.utc = true;
+        let out = with_rule("", 0, &fields).unwrap();
+        assert!(out.contains("utc = true"));
+        assert_eq!(read_at(&parse(&out).unwrap(), 0).unwrap(), fields);
+        fields.utc = false;
+        let out = with_rule(&out, 0, &fields).unwrap();
+        assert!(!out.contains("utc ="));
+        assert_eq!(read_at(&parse(&out).unwrap(), 0).unwrap(), fields);
     }
 }

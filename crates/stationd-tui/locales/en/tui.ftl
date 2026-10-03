@@ -817,7 +817,7 @@ ag-month = { $month ->
 } { $year }
 ag-step = { $n } min step
 ag-utc = UTC times (station: { $tz })
-ag-utc-rules = rules stay in station time
+ag-utc-rules = each rule keeps its timezone: station or UTC
 ag-dst = clock change: { $h } h day
 ag-dst-week = clock change this week
 ag-stale = old data, reload failed: { $reason }
@@ -1287,3 +1287,10 @@ help-media-tree = List / tree
 help-media-tree-focus = Folders / files
 help-media-tree-expand = Expand / collapse folder
 help-media-tree-files = Browse files
+
+help-pl-tree = List / groups
+help-pl-tree-expand = Expand / collapse group
+
+rf-timezone = Timezone
+rf-station = Station
+rf-utc-times = times, weekdays and dates in UTC

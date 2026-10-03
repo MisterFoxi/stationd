@@ -361,6 +361,12 @@ enum PluginDbCommand {
 
 #[derive(Subcommand, Debug)]
 enum LibraryCommand {
+    /// Move media into genre/style folders using the AI genre (Electronic---House)
+    Reorganize {
+        /// Preview moves and conflicts without changing disk or index
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Scan the configured media root and reconcile the index. Heavy work runs
     /// off the async runtime server-side; a skipped audio file is reported,
     /// not fatal (the scan itself succeeds).
@@ -1208,6 +1214,17 @@ async fn main() -> anyhow::Result<()> {
                 println!("refused: queue at max_len (buffer len {})", reply.len);
                 std::process::exit(1);
             }
+        }
+        Command::Library(LibraryCommand::Reorganize { dry_run }) => {
+            let mut lib = LibraryServiceClient::connect(args.addr.clone()).await?;
+            let report = lib.reorganize(library::ReorganizeRequest { dry_run }).await?.into_inner();
+            for f in &report.files {
+                println!("{}: {} -> {}{}", f.status, f.from, f.to,
+                    if f.detail.is_empty() { String::new() } else { format!(" ({})", f.detail) });
+            }
+            println!("planned: {}, moved: {}, unchanged: {}, skipped: {}, failed: {}",
+                report.planned, report.moved, report.unchanged, report.skipped, report.failed);
+            anyhow::ensure!(report.failed == 0, "{} media could not be reorganized", report.failed);
         }
         Command::Library(LibraryCommand::Prune { older_than }) => {
             let mut lib = LibraryServiceClient::connect(args.addr.clone()).await?;

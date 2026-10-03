@@ -10,8 +10,7 @@
 //! `Ctrl+R` relit le fichier et y reporte la saisie (rien d'écrasé, rien de
 //! perdu).
 //!
-//! Les heures d'une règle sont des heures civiles de la station (la grammaire
-//! de la grille), quel que soit l'affichage UTC de l'agenda.
+//! Le fuseau choisi s'applique aux heures, aux jours et aux bornes de dates.
 
 use std::time::Duration;
 
@@ -49,6 +48,7 @@ const DEBOUNCE: Duration = Duration::from_millis(300);
 enum F {
     Id,
     Enabled,
+    Timezone,
     Playlist,
     Dj,
     Start,
@@ -74,7 +74,7 @@ enum Kind {
 
 /// Les lignes d'une nature de règle, dans l'ordre.
 fn rows_of(kind: &str) -> Vec<F> {
-    let mut v = vec![F::Id, F::Enabled];
+    let mut v = vec![F::Id, F::Enabled, F::Timezone];
     match kind {
         "base_rotation" => v.push(F::Playlist),
         "day_part" => v.extend([F::Playlist, F::Start, F::End]),
@@ -89,7 +89,7 @@ fn rows_of(kind: &str) -> Vec<F> {
 
 fn widget(f: F) -> Kind {
     match f {
-        F::Enabled | F::Anchor | F::Mode | F::Cadence => Kind::Choice,
+        F::Enabled | F::Timezone | F::Anchor | F::Mode | F::Cadence => Kind::Choice,
         F::Days => Kind::Days,
         F::Playlist => Kind::Playlist,
         _ => Kind::Text,
@@ -101,6 +101,7 @@ fn field_of(key: &str) -> Option<F> {
     Some(match key {
         "id" => F::Id,
         "enabled" => F::Enabled,
+        "utc" => F::Timezone,
         "playlist_ref" => F::Playlist,
         "dj" => F::Dj,
         "start" => F::Start,
@@ -277,6 +278,7 @@ impl RuleForm {
             F::DateStart => x.date_start.clone(),
             F::DateEnd => x.date_end.clone(),
             F::Enabled => x.enabled.to_string(),
+            F::Timezone => x.utc.to_string(),
             F::Anchor => x.anchor.clone(),
             F::Mode => x.mode.clone(),
             F::Cadence => x.cadence.clone(),
@@ -305,6 +307,7 @@ impl RuleForm {
         match f {
             F::Id => tr!("rf-id"),
             F::Enabled => tr!("pl-f-enabled"),
+            F::Timezone => tr!("rf-timezone"),
             F::Playlist => tr!("rf-playlist"),
             F::Dj => tr!("rf-dj"),
             F::Start => tr!("rf-start"),
@@ -333,6 +336,7 @@ impl RuleForm {
     fn choices(f: F) -> Vec<(&'static str, String)> {
         match f {
             F::Enabled => vec![("true", tr!("val-yes")), ("false", tr!("val-no"))],
+            F::Timezone => vec![("false", tr!("rf-station")), ("true", "UTC".into())],
             F::Anchor => vec![
                 ("at", tr!("rf-anchor-at")),
                 ("minute", tr!("rf-anchor-minute")),
@@ -589,6 +593,7 @@ impl RuleForm {
                 let v = opts[next].0.to_string();
                 match f {
                     F::Enabled => self.fields.enabled = v == "true",
+                    F::Timezone => self.fields.utc = v == "true",
                     F::Anchor => self.fields.anchor = v,
                     F::Mode => self.fields.mode = v,
                     F::Cadence => self.fields.cadence = v,
@@ -677,7 +682,7 @@ impl RuleForm {
         let l2 = match &self.message {
             Some((m, true)) => Line::styled(format!(" {m}"), s.error()),
             Some((m, false)) => Line::styled(format!(" {m}"), s.accent()),
-            None => Line::styled(format!(" {}", tr!("rf-local-times")), s.muted()),
+            None => Line::styled(format!(" {}", if self.fields.utc { tr!("rf-utc-times") } else { tr!("rf-local-times") }), s.muted()),
         };
         Paragraph::new(vec![Line::from(l1), l2]).render(area, buf);
     }

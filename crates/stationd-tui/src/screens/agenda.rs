@@ -77,7 +77,7 @@ pub enum AgEvent {
 #[derive(Debug, Clone)]
 pub enum Purpose {
     /// Nouvelle règle de cette nature, pré-remplie au créneau choisi.
-    New { kind: &'static str, time: String, date: String },
+    New { utc: bool, kind: &'static str, time: String, date: String },
     Edit { rule_id: String },
     Delete { rule_id: String },
 }
@@ -468,10 +468,9 @@ impl Agenda {
         });
     }
 
-    /// Nouvelle règle au créneau choisi : son heure et son jour, en heure de
-    /// la STATION (la grammaire de la grille), quel que soit l'affichage.
+    /// Nouvelle règle au créneau choisi, dans le fuseau affiché.
     fn start_new(&mut self, kind: &'static str, ctx: &mut Global) {
-        let Some(station) = ctx.store.tz.clone() else { return };
+        let Some(station) = self.tz(ctx) else { return };
         let Some(t) = self.cursor_time(ctx) else { return };
         let (time, date) = match jiff::Timestamp::from_second(t) {
             Ok(ts) => {
@@ -480,7 +479,7 @@ impl Agenda {
             }
             Err(_) => return,
         };
-        self.fetch_text(Purpose::New { kind, time, date }, ctx);
+        self.fetch_text(Purpose::New { utc: self.utc, kind, time, date }, ctx);
     }
 
     fn on_text(&mut self, purpose: &Purpose, r: &Read<GetGridResponse>, ctx: &mut Global) {
@@ -505,8 +504,9 @@ impl Agenda {
         let Some(tz) = self.tz(ctx) else { return };
         let Some(day) = self.date.and_then(|d| agenda::day(d, &tz)) else { return };
         match purpose {
-            Purpose::New { kind, time, date } => {
+            Purpose::New { utc, kind, time, date } => {
                 let mut f = RuleFields::new(kind);
+                f.utc = *utc;
                 let base = format!("evt-{}-{}", date.replace('-', ""), time.replace(':', ""));
                 f.id = gridraft::free_id(&doc, &base);
                 match *kind {
@@ -654,6 +654,7 @@ fn rule_text(r: &Rule) -> String {
         None => {}
     }
     if let Some(v) = &r.validity {
+        if v.utc { parts.push("UTC".into()); }
         if !v.days.is_empty() && v.days.len() < 7 {
             let days: Vec<String> = v.days.iter().map(|d| tr!("ag-weekday-short", wd = i64::from(*d))).collect();
             parts.push(days.join(" "));

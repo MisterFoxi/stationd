@@ -18,6 +18,7 @@ pub fn plugin_screen(name: String, tab: stationd_proto::plugin::PluginTab) -> Bo
     }
 }
 mod playlists;
+mod playlist_tree;
 mod ruleform;
 mod systeme;
 mod tagform;

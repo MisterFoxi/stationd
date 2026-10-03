@@ -148,7 +148,11 @@ slots for DJs. When several rules apply, the highest priority wins:
 Most boundaries are *soft*: stationd never cuts a track; it changes what
 comes next. A source whose pool is empty falls through to the next priority,
 down to the floor. Times are handled as UTC epochs internally and converted
-to the station timezone (e.g. `Europe/Paris`) only for input and display.
+to the station timezone (e.g. `Europe/Paris`) by default. A rule with
+`utc = true` interprets its hours, weekdays and inclusive date bounds in UTC,
+including recurring schedules across daylight-saving changes. In the TUI agenda,
+choose **Station / UTC** in the rule form; new rules inherit the agenda display
+timezone (`u` toggles it).
 
 ```toml
 schema_version = 1
@@ -566,6 +570,21 @@ permissions on every run. `.env` is root-owned and group-readable (`0640`).
 The installer installs `stationctl` and `stationd-tui` in `/usr/local/bin`.
 These launchers use the clients in the running container as `stationd`, from
 any working directory, with no native host libraries or shell aliases needed.
+The TUI's Media screen opens with the indexed directory tree. Use `Right`/`Left`
+to expand/collapse folders, `Tab` to switch between folders and files, `v` to
+switch to the flat list, and `r` to reload after moving media. Returning to the
+Media screen also refreshes the directory inventory and file list.
+
+The Playlists screen opens with groups and their members in a hierarchy, including
+nested groups and members shared by several groups. `Left`/`Right`/`Space`
+collapse or expand branches; `v` switches to the flat list. Filtering keeps the
+ancestors of matching members visible. `Enter` edits the selected playlist.
+
+`stationd-tui --addr stationd.local` resolves the hostname through the system
+resolver and connects on the default gRPC port `50051`. `--addr host:6000`,
+`--addr 192.0.2.1`, `--addr [::1]:6000`, and full HTTP URLs also work; an
+explicit port is preserved.
+
 The CLI supports pipes; the TUI requires an interactive terminal and forwards
 its terminal type and locale. Until the new groups take effect after SSH
 reconnection, launchers fall back to `sudo docker`.
@@ -616,6 +635,7 @@ stationd-tui
 |---|---|
 | `stationctl status` / `quit` | Daemon status / clean exit (restarted by its supervisor) |
 | `library scan` \| `list` \| `genres` | Scan the media root, list the index (`--genre`), genre inventory |
+| `library reorganize [--dry-run]` | Move indexed media to AI genre/style folders (`Electronic---House` → `Electronic/House/song.mp3`) |
 | `playlist add` \| `sync` \| `list` | Register or reconcile playlist TOML files |
 | `schedule validate` \| `apply` \| `export` \| `list` | Manage the grid |
 | `schedule grids` \| `show` \| `save` \| `activate` \| `reload` | Grid files of the node, the active grid |
@@ -707,3 +727,29 @@ path no longer exists, stationd searches for that same filename in the installed
 and development locations. It logs the resolved path; a missing module reports
 the searched locations. Declaring a plugin is still required: finding modules
 does not automatically enable undeclared plugins.
+
+### Reorganize the media library by AI genre
+
+```sh
+stationctl library reorganize --dry-run
+stationctl library reorganize
+```
+
+Uses the indexed `genre_ai` (`media_analysis.genre_top`) from the last scan.
+`Electronic---House` becomes `Electronic/House/<original filename>` under
+`media.library_path`; labels keep their spelling, with filesystem-unsafe
+characters replaced by `_` (e.g. `Funk / Soul` becomes `Funk _ Soul`).
+Files without an AI genre stay in place. Already organized files are unchanged.
+Conflicting filenames, existing destinations, changed files and symlinks are
+reported per file and never overwritten. Failures give a nonzero CLI exit status;
+other eligible files can still move. `--dry-run` creates no directories and
+changes neither files nor the index.
+
+The server serializes this operation with scans and tag edits. Each move preserves
+file contents, permissions and modification time; index metadata, analysis,
+play-once guards, playlist cursors and queued requests follow the new path.
+Historical broadcast paths remain historical. Hard links are required on the
+media filesystem; moves between different mounts fail without changing the source.
+Empty source directories remain. Playlist TOML folder filters and explicit media
+paths are not rewritten, so review those references when changing the disk layout.
+Run while playout is stopped to avoid invalidating paths already sent to Liquidsoap.

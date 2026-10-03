@@ -1602,10 +1602,9 @@ impl GridEngine {
             let local = clock::to_local_now(at, &self.tz)?;
             // A rendez-vous FALLS on this minute — not an older one still due
             // (within its expiry): its occurrence token names this HH:MM.
-            let this_mark = format!("T{:02}:{:02}", local.wall.hour, local.wall.minute);
             let due = resolve_ranked(local, &hard, &state).into_iter().any(|d| {
                 d.origin == Origin::AtClockHard
-                    && d.mark_taken.as_deref().is_some_and(|t| t.ends_with(&this_mark))
+                    && is_hard_mark_at(&d, &hard, local)
             });
             if due {
                 return Ok(Some(at));
@@ -1643,13 +1642,12 @@ impl GridEngine {
         }
         let local = clock::to_local_now(now, &self.tz)?;
         let mark_local = clock::to_local_now(mark, &self.tz)?;
-        let this_mark = format!("T{:02}:{:02}", mark_local.wall.hour, mark_local.wall.minute);
         let grid = grid_index::load_grid(&self.pool).await?;
         let state = grid_store::load_playback_state(&self.pool).await?;
         // The hard rendez-vous of THIS mark (not an older one still due).
         let Some(decision) = resolve_ranked(local, &grid, &state).into_iter().find(|d| {
             d.origin == Origin::AtClockHard
-                && d.mark_taken.as_deref().is_some_and(|t| t.ends_with(&this_mark))
+                && is_hard_mark_at(d, &grid, mark_local)
         }) else {
             return Ok(None); // already aired by a pull at this boundary, or not due
         };
@@ -1934,6 +1932,19 @@ fn fmt_local(local: &LocalNow, tz: &str) -> String {
         "{:04}-{:02}-{:02} {:02}:{:02} {tz}",
         local.date.year, local.date.month, local.date.day, local.wall.hour, local.wall.minute
     )
+}
+
+
+/// Match the requested instant in the selected rule's civil clock, including
+/// its date: an unexpired mark from another minute is not a hard cut now.
+fn is_hard_mark_at(decision: &GridDecision, grid: &Grid, now: LocalNow) -> bool {
+    let Some(rule) = decision.rule_id.as_deref()
+        .and_then(|id| grid.rules.iter().find(|r| r.id == id)) else { return false };
+    let civil = rule.validity.civil_now(now);
+    let token = format!("{}@{:04}-{:02}-{:02}T{:02}:{:02}",
+        rule.id, civil.date.year, civil.date.month, civil.date.day,
+        civil.wall.hour, civil.wall.minute);
+    decision.mark_taken.as_deref() == Some(token.as_str())
 }
 
 #[cfg(test)]
@@ -2258,6 +2269,23 @@ mod tests {
             insert_rule(&eng.pool, &clock_rule("jingle", "jingle", 5, Mode::Soft)).await.unwrap();
         }
         (dir, eng)
+    }
+
+    #[tokio::test]
+    async fn utc_hard_marks_in_a_paris_station_are_cut_and_consumed() {
+        let (_d, mut eng) = hard_fixture(false).await;
+        eng.tz = "Europe/Paris".into();
+        sqlx::query("UPDATE grid_rule SET utc = 1 WHERE id = 'news'")
+            .execute(&eng.pool).await.unwrap();
+        sqlx::query("UPDATE grid_at_clock SET every_minutes = NULL, at_hour = 9, at_minute = 0 WHERE rule_id = 'news'")
+            .execute(&eng.pool).await.unwrap();
+        for (month, day) in [(3, 28), (3, 29), (10, 24), (10, 25)] {
+            let mark = clock::civil_to_epoch("UTC", 2026, month, day, 9, 0).unwrap();
+            assert_eq!(eng.next_hard_mark(Epoch(mark.0 - 30)).await.unwrap(), Some(mark));
+            let cut = eng.air_at_clock_hard(mark, Epoch(mark.0 + 2)).await.unwrap().unwrap();
+            assert_eq!(cut.decision.rule_id.as_deref(), Some("news"));
+            assert!(eng.air_at_clock_hard(mark, mark).await.unwrap().is_none());
+        }
     }
 
     #[tokio::test]

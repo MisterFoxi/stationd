@@ -818,7 +818,7 @@ ag-month = { $month ->
 } { $year }
 ag-step = Raster { $n } Min.
 ag-utc = UTC-Zeiten (Sender: { $tz })
-ag-utc-rules = Regeln bleiben in Senderzeit
+ag-utc-rules = jede Regel behält ihre Zeitzone: Sender oder UTC
 ag-dst = Zeitumstellung: Tag mit { $h } Std.
 ag-dst-week = Zeitumstellung in dieser Woche
 ag-stale = alte Daten, Neuladen fehlgeschlagen: { $reason }
@@ -1291,3 +1291,10 @@ help-media-tree = Liste / Baum
 help-media-tree-focus = Ordner / Dateien
 help-media-tree-expand = Ordner öffnen / schließen
 help-media-tree-files = Dateien anzeigen
+
+help-pl-tree = Liste / Gruppen
+help-pl-tree-expand = Gruppe öffnen / schließen
+
+rf-timezone = Zeitzone
+rf-station = Sender
+rf-utc-times = Uhrzeiten, Wochentage und Daten in UTC
