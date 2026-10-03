@@ -616,6 +616,7 @@ stationd-tui
 |---|---|
 | `stationctl status` / `quit` | Daemon status / clean exit (restarted by its supervisor) |
 | `library scan` \| `list` \| `genres` | Scan the media root, list the index (`--genre`), genre inventory |
+| `library reorganize [--dry-run]` | Move indexed media to AI genre/style folders (`Electronic---House` → `Electronic/House/song.mp3`) |
 | `playlist add` \| `sync` \| `list` | Register or reconcile playlist TOML files |
 | `schedule validate` \| `apply` \| `export` \| `list` | Manage the grid |
 | `schedule grids` \| `show` \| `save` \| `activate` \| `reload` | Grid files of the node, the active grid |
@@ -707,3 +708,29 @@ path no longer exists, stationd searches for that same filename in the installed
 and development locations. It logs the resolved path; a missing module reports
 the searched locations. Declaring a plugin is still required: finding modules
 does not automatically enable undeclared plugins.
+
+### Reorganize the media library by AI genre
+
+```sh
+stationctl library reorganize --dry-run
+stationctl library reorganize
+```
+
+Uses the indexed `genre_ai` (`media_analysis.genre_top`) from the last scan.
+`Electronic---House` becomes `Electronic/House/<original filename>` under
+`media.library_path`; labels keep their spelling, with filesystem-unsafe
+characters replaced by `_` (e.g. `Funk / Soul` becomes `Funk _ Soul`).
+Files without an AI genre stay in place. Already organized files are unchanged.
+Conflicting filenames, existing destinations, changed files and symlinks are
+reported per file and never overwritten. Failures give a nonzero CLI exit status;
+other eligible files can still move. `--dry-run` creates no directories and
+changes neither files nor the index.
+
+The server serializes this operation with scans and tag edits. Each move preserves
+file contents, permissions and modification time; index metadata, analysis,
+play-once guards, playlist cursors and queued requests follow the new path.
+Historical broadcast paths remain historical. Hard links are required on the
+media filesystem; moves between different mounts fail without changing the source.
+Empty source directories remain. Playlist TOML folder filters and explicit media
+paths are not rewritten, so review those references when changing the disk layout.
+Run while playout is stopped to avoid invalidating paths already sent to Liquidsoap.

@@ -198,6 +198,19 @@ fn search_field(v: i32) -> crate::media_index::SearchField {
 
 #[tonic::async_trait]
 impl LibraryService for LibraryGrpc {
+    async fn reorganize(&self, request: Request<library::ReorganizeRequest>) -> Result<Response<library::ReorganizeResponse>, Status> {
+        let report = self.handle.reorganize(request.into_inner().dry_run).await.map_err(map_error)?;
+        Ok(Response::new(library::ReorganizeResponse {
+            moved: report.count("moved"),
+            planned: report.count("planned"),
+            unchanged: report.count("unchanged"),
+            skipped: report.count("skipped"),
+            failed: report.count("failed"),
+            files: report.files.into_iter().map(|f| library::ReorganizeFile {
+                from: f.from, to: f.to, status: f.status.into(), detail: f.detail,
+            }).collect(),
+        }))
+    }
     async fn list_folders(&self, request: Request<library::ListFoldersRequest>) -> Result<Response<library::ListFoldersResponse>, Status> {
         let req = request.into_inner();
         let page = self.handle.folders(req.include_unavailable, req.cursor, if req.limit == 0 { 500 } else { req.limit as usize }).await.map_err(map_error)?;

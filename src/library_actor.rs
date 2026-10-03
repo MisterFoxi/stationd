@@ -65,6 +65,10 @@ pub struct ScanOutcome {
 }
 
 enum Command {
+    Reorganize {
+        dry_run: bool,
+        reply: oneshot::Sender<Result<crate::library_reorganize::Report, LibraryError>>,
+    },
     Folders { include_unavailable: bool, after: String, limit: usize, reply: oneshot::Sender<Result<media_index::FolderPage, LibraryError>> },
     Scan {
         reanalyze: bool,
@@ -216,6 +220,11 @@ pub struct RenamePreview {
 }
 
 impl LibraryHandle {
+    pub async fn reorganize(&self, dry_run: bool) -> Result<crate::library_reorganize::Report, LibraryError> {
+        let (reply, rx) = oneshot::channel();
+        self.tx.send(Command::Reorganize { dry_run, reply }).await.map_err(|_| LibraryError::ActorGone)?;
+        rx.await.map_err(|_| LibraryError::ActorGone)?
+    }
     /// The scan's progress, current value then each change.
     pub fn watch_scan(&self) -> watch::Receiver<ScanStatus> {
         self.status.clone()
@@ -386,6 +395,9 @@ pub fn spawn_with_analysis(
     tokio::spawn(async move {
         while let Some(cmd) = rx.recv().await {
             match cmd {
+                Command::Reorganize { dry_run, reply } => {
+                    let _ = reply.send(crate::library_reorganize::run(&pool, &root, dry_run).await);
+                }
                 Command::Folders { include_unavailable, after, limit, reply } => {
                     let _ = reply.send(media_index::folders(&pool, include_unavailable, &after, limit).await.map_err(LibraryError::from));
                 }
