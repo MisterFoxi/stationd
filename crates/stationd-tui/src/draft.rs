@@ -148,6 +148,8 @@ pub struct MemberView {
     pub r#ref: String,
     pub weight: String,
     pub take: String,
+    pub take_random_min: String,
+    pub take_random_max: String,
     pub runtime: String,
 }
 
@@ -163,6 +165,8 @@ pub enum MemberPart {
     Ref,
     Weight,
     Take,
+    TakeRandomMin,
+    TakeRandomMax,
     Runtime,
 }
 
@@ -172,6 +176,8 @@ impl MemberPart {
             MemberPart::Ref => "ref",
             MemberPart::Weight => "weight",
             MemberPart::Take => "take",
+            MemberPart::TakeRandomMin => "take_random_min",
+            MemberPart::TakeRandomMax => "take_random_max",
             MemberPart::Runtime => "runtime",
         }
     }
@@ -610,7 +616,11 @@ impl Draft {
             .into_iter()
             .map(|t| {
                 let g = |k: &str| t.get(k).and_then(show_item).unwrap_or_default();
-                MemberView { r#ref: g("ref"), weight: g("weight"), take: g("take"), runtime: g("runtime") }
+                MemberView {
+                    r#ref: g("ref"), weight: g("weight"), take: g("take"),
+                    take_random_min: g("take_random_min"), take_random_max: g("take_random_max"),
+                    runtime: g("runtime"),
+                }
             })
             .collect()
     }
@@ -634,7 +644,7 @@ impl Draft {
             t.remove(k);
         } else {
             let kind = match part {
-                MemberPart::Weight | MemberPart::Take => Kind::Int,
+                MemberPart::Weight | MemberPart::Take | MemberPart::TakeRandomMin | MemberPart::TakeRandomMax => Kind::Int,
                 MemberPart::Ref | MemberPart::Runtime => Kind::Str,
             };
             let slot = t.entry(k).or_insert(Item::None);
@@ -923,6 +933,22 @@ no_same_artist_within = "1h"
         assert_eq!(d.get(Key::Order).as_deref(), Some("shuffle"), "lifo mis de côté, shuffle revenu");
         assert_eq!(d.get(Key::NoSameArtist).as_deref(), Some("1h"), "diffusion inchangée");
         assert!(Draft::parse(d.text()).readable());
+    }
+
+    #[test]
+    fn random_member_quotas_round_trip_as_integers_and_can_be_cleared() {
+        let mut d = Draft::parse("name = \"G\"\n[selection]\nmode = \"group\"\nstrategy = \"sequence\"\nmembers = [{ ref = \"a\" }]");
+        d.set_member(0, MemberPart::TakeRandomMin, "2");
+        d.set_member(0, MemberPart::TakeRandomMax, "4");
+        let doc: DocumentMut = d.text().parse().unwrap();
+        assert_eq!(doc["selection"]["members"][0]["take_random_min"].as_integer(), Some(2));
+        assert_eq!(doc["selection"]["members"][0]["take_random_max"].as_integer(), Some(4));
+        let parsed = Draft::parse(d.text());
+        assert_eq!(parsed.members()[0].take_random_min, "2");
+        assert_eq!(parsed.members()[0].take_random_max, "4");
+        d.set_member(0, MemberPart::TakeRandomMin, "");
+        d.set_member(0, MemberPart::TakeRandomMax, "");
+        assert!(!d.text().contains("take_random"));
     }
 
     #[test]

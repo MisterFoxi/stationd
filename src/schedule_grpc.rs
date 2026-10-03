@@ -200,6 +200,8 @@ fn map_group_member(m: crate::pool_inspection::InspectedMember) -> Result<schedu
     use crate::playlist::MemberQuota;
     let quota = m.quota.map(|q| match q {
         MemberQuota::Take(n) => schedule::group_member::Quota::Take(n),
+        MemberQuota::TakeRandom { min, max } => schedule::group_member::Quota::TakeRandom(
+            schedule::TakeRandomQuota { min, max }),
         MemberQuota::Runtime(secs) => schedule::group_member::Quota::Runtime(secs_to_duration(secs)),
     });
     Ok(schedule::GroupMember {

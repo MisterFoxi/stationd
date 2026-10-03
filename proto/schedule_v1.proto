@@ -185,9 +185,15 @@ message Occurrence {
 
 // Un membre d'un groupe, tel que PROJETÉ dans le preview (pas résolu : aucun
 // média concret ici).
+message TakeRandomQuota {
+  uint32 min = 1;
+  uint32 max = 2;
+}
+
 message GroupMember {
   string ref = 1;                          // ref du membre
   oneof quota {
+    TakeRandomQuota take_random = 7;       // inclusive random track quota
     uint32 take = 2;                       // quota en pistes — jamais de position (durée inconnue)
     google.protobuf.Duration runtime = 3;  // budget temps
   }

@@ -1075,6 +1075,7 @@ async fn main() -> anyhow::Result<()> {
                     let branch = if i + 1 == n { '\u{2514}' } else { '\u{251c}' };
                     let quota = match &m.quota {
                         Some(schedule::group_member::Quota::Take(t)) => format!("take {t}"),
+                        Some(schedule::group_member::Quota::TakeRandom(r)) => format!("take random {}..{}", r.min, r.max),
                         Some(schedule::group_member::Quota::Runtime(d)) => {
                             format!("runtime {}", fmt_dur(d.seconds))
                         }

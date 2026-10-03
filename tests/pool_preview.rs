@@ -362,6 +362,7 @@ members = [{ ref = "jazz", runtime = "20m" }, { ref = "remote", runtime = "5m" }
     let state = group_state::GroupState {
         member_idx: 1,
         take_count: 2,
+        random_take: Some(4),
         member_started_at: Some(100),
         permutation: Some(vec![1, 0]),
     };

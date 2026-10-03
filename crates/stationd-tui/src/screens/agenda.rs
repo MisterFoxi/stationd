@@ -764,6 +764,7 @@ fn detail_lines(
                 let branch = if i + 1 == n { '└' } else { '├' };
                 let quota = match &m.quota {
                     Some(group_member::Quota::Take(t)) => tr!("ag-take", n = i64::from(*t)),
+                    Some(group_member::Quota::TakeRandom(r)) => tr!("ag-take-random", min = i64::from(r.min), max = i64::from(r.max)),
                     Some(group_member::Quota::Runtime(d)) => tr!("ag-runtime", d = dur(d.seconds.max(0) as u64 * 1000)),
                     None => String::new(),
                 };

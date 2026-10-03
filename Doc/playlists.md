@@ -152,6 +152,34 @@ que `mtime` (qu'une copie NFS ou un `rsync` réécrit, réordonnant la série).
   imbriquées), mais imposent une **détection de cycle** côté `stationd`
   (valider le graphe comme un DAG).
 
+### Blocs de morceaux de longueur aléatoire
+
+Dans un groupe sequence ou shuffle, un membre peut définir les deux bornes
+take_random_min et take_random_max, inclusives, avec 1 ≤ minimum ≤ maximum.
+Elles remplacent take ou runtime : ces quotas ne se cumulent pas.
+
+Au début de chaque passage du membre, stationd tire uniformément le nombre
+de morceaux à jouer. Ce quota reste fixe pendant le passage et après un
+redémarrage, puis est retiré au changement de membre. Le prochain passage
+reçoit un nouveau tirage. Les aperçus affichent les bornes sans consommer de
+tirage.
+
+Exemple : alterner 2 à 4 morceaux de la première playlist, puis 1 à 3 de la
+seconde. Les moyennes sont 3 et 2 morceaux, soit environ 60/40 des morceaux
+sur la durée ; cela ne garantit pas 60/40 du temps d'antenne.
+
+~~~toml
+name = "Nuit"
+
+[selection]
+mode = "group"
+strategy = "sequence"
+members = [
+  { ref = "liste-1", take_random_min = 2, take_random_max = 4 },
+  { ref = "liste-2", take_random_min = 1, take_random_max = 3 },
+]
+~~~
+
 ## Relais (`mode = "remote"`, `url`)
 
 Une playlist `remote` relaie un flux externe (`input.http` côté Liquidsoap,

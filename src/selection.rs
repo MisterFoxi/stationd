@@ -29,6 +29,7 @@
 use std::collections::{HashMap, HashSet};
 
 use rand::seq::SliceRandom;
+use rand::Rng;
 use sqlx::SqlitePool;
 
 use crate::broadcast_log;
@@ -505,6 +506,7 @@ async fn resolve_group_rotation(
             _ => {
                 st.member_idx = 0;
                 st.take_count = 0;
+                st.random_take = None;
                 st.member_started_at = None;
                 new_permutation(pool, group_ref, n).await?
             }
@@ -528,6 +530,7 @@ async fn resolve_group_rotation(
         if st.member_idx >= n {
             st.member_idx = 0;
             st.take_count = 0;
+            st.random_take = None;
             st.member_started_at = None;
             if shuffle {
                 order = new_permutation(pool, group_ref, n).await?;
@@ -548,10 +551,28 @@ async fn resolve_group_rotation(
                 if now.saturating_sub(started) >= budget {
                     st.member_idx += 1;
                     st.take_count = 0;
+                    st.random_take = None;
                     st.member_started_at = None;
                     continue;
                 }
             }
+        }
+
+        if let Some((min, max)) = member.random_take_bounds().map_err(SelectionError::Unsupported)? {
+            if st.random_take.is_some_and(|n| n < min || n > max) {
+                st.random_take = None;
+                st.take_count = 0;
+            }
+            if st.random_take.is_none() {
+                let mut rng = crate::draw::rng(pool, &format!("take:{group_ref}")).await?;
+                st.random_take = Some(rng.gen_range(min..=max));
+                st.permutation = shuffle.then(|| order.clone());
+                // Save before resolving the child: even an aborted passage
+                // must keep its draw when retried or after a restart.
+                crate::group_state::set(pool, group_ref, &st).await?;
+            }
+        } else {
+            st.random_take = None;
         }
 
         match resolve_member(pool, plugins, now, &member_key, depth, scope).await {
@@ -564,11 +585,12 @@ async fn resolve_group_rotation(
                     }
                 } else {
                     // Track budget: count this track, advance once `take` met.
-                    let take = member.take.unwrap_or(1).max(1);
+                    let take = st.random_take.unwrap_or_else(|| member.take.unwrap_or(1).max(1));
                     st.take_count += 1;
                     if st.take_count >= take {
                         st.member_idx += 1;
                         st.take_count = 0;
+                        st.random_take = None;
                         st.member_started_at = None;
                     }
                 }
@@ -576,6 +598,7 @@ async fn resolve_group_rotation(
                 if st.member_idx >= n {
                     st.member_idx = 0;
                     st.take_count = 0;
+                    st.random_take = None;
                     st.member_started_at = None;
                     if shuffle {
                         order = new_permutation(pool, group_ref, n).await?;
@@ -589,6 +612,7 @@ async fn resolve_group_rotation(
             Err(SelectionError::PoolEmpty) if policy == MemberUnavailable::Skip => {
                 st.member_idx += 1;
                 st.take_count = 0;
+                st.random_take = None;
                 st.member_started_at = None;
                 continue;
             }
@@ -2666,6 +2690,86 @@ mod tests {
     }
 
     // ----- per-member time budget (runtime) ---------------------------
+
+    #[tokio::test]
+    async fn random_take_keeps_one_draw_per_passage_across_restarts() {
+        for strategy in ["sequence", "shuffle"] {
+            let (dir, mut pool) = fresh_db().await;
+            media_index::replace_library(&pool, &[
+                media("a.mp3", "", 0, &[]), media("b.mp3", "", 0, &[]),
+            ], 1000).await.unwrap();
+            for name in ["a", "b"] {
+                add_playlist(&pool, name, &format!(
+                    "name = \"{name}\"\n[selection]\nmode = \"static\"\norder = \"shuffle\"\nfiles = [\"{name}.mp3\"]"
+                )).await;
+            }
+            add_playlist(&pool, "g", &format!(
+                "name = \"Group\"\n[selection]\nmode = \"group\"\nstrategy = \"{strategy}\"\n\
+                 members = [{{ ref = \"a\", take_random_min = 2, take_random_max = 4 }},\
+                            {{ ref = \"b\", take_random_min = 3, take_random_max = 5 }}]"
+            )).await;
+            let mut draws = 0i64;
+            for _ in 0..8 {
+                let mut previous = None;
+                for slot in 0..2 {
+                    let first = resolve_ref(&pool, "g").await.unwrap();
+                    if strategy == "sequence" {
+                        assert_eq!(first, if slot == 0 { "a.mp3" } else { "b.mp3" });
+                    }
+                    if let Some(ref last) = previous {
+                        assert_ne!(&first, last, "both members must play once per cycle");
+                    }
+                    previous = Some(first.clone());
+                    let state = crate::group_state::get(&pool, "g").await.unwrap();
+                    let quota = state.random_take.unwrap();
+                    let bounds = if first == "a.mp3" { 2..=4 } else { 3..=5 };
+                    assert!(bounds.contains(&quota));
+                    assert_eq!(state.take_count, 1);
+                    pool.close().await;
+                    pool = db::init(&dir.path().join("t.db")).await.unwrap();
+                    assert_eq!(crate::group_state::get(&pool, "g").await.unwrap(), state);
+                    for count in 1..quota {
+                        assert_eq!(resolve_ref(&pool, "g").await.unwrap(), first);
+                        let next = crate::group_state::get(&pool, "g").await.unwrap();
+                        if count + 1 < quota {
+                            assert_eq!(next.random_take, Some(quota));
+                            assert_eq!(next.take_count, count + 1);
+                        } else {
+                            assert_eq!(next.random_take, None);
+                            assert_eq!(next.take_count, 0);
+                        }
+                    }
+                    draws += 1;
+                    let (actual,): (i64,) = sqlx::query_as("SELECT draws FROM rng_draws WHERE scope = 'take:g'")
+                        .fetch_one(&pool).await.unwrap();
+                    assert_eq!(actual, draws, "one random quota per passage");
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn random_take_abort_keeps_draw_and_skip_clears_it() {
+        let (_dir, pool) = fresh_db().await;
+        media_index::replace_library(&pool, &[media("b.mp3", "", 0, &[])], 1000).await.unwrap();
+        add_playlist(&pool, "empty", "name = \"Empty\"\n[selection]\nmode = \"static\"\norder = \"shuffle\"\nfiles = [\"missing.mp3\"]").await;
+        add_playlist(&pool, "b", "name = \"B\"\n[selection]\nmode = \"static\"\norder = \"shuffle\"\nfiles = [\"b.mp3\"]").await;
+        for policy in ["abort", "skip"] {
+            add_playlist(&pool, policy, &format!(
+                "name = \"Group\"\n[selection]\nmode = \"group\"\nstrategy = \"sequence\"\n\
+                 on_member_unavailable = \"{policy}\"\n\
+                 members = [{{ ref = \"empty\", take_random_min = 3, take_random_max = 5 }}, {{ ref = \"b\", take = 1 }}]"
+            )).await;
+        }
+        for _ in 0..2 {
+            assert!(matches!(resolve_ref(&pool, "abort").await, Err(SelectionError::PoolEmpty)));
+        }
+        let (draws,): (i64,) = sqlx::query_as("SELECT draws FROM rng_draws WHERE scope = 'take:abort'")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(draws, 1);
+        assert_eq!(resolve_ref(&pool, "skip").await.unwrap(), "b.mp3");
+        assert_eq!(crate::group_state::get(&pool, "skip").await.unwrap(), crate::group_state::GroupState::default());
+    }
 
     #[tokio::test]
     async fn group_sequence_runtime_budget_switches_after_elapsed() {

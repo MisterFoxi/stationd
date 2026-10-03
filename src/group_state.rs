@@ -11,6 +11,7 @@
 //!   `permutation`.
 //! - `take_count` — tracks already handed out for the current member (its
 //!   `take` quota, in tracks).
+//! - `random_take` — the current passage's drawn track quota, kept across restarts.
 //! - `member_started_at` — epoch (s) the current member began, for a `runtime`
 //!   quota (time budget). `None` when the member has no time budget, or on a
 //!   fresh activation.
@@ -18,7 +19,7 @@
 //!   only), so a restart mid-cycle does NOT redraw and risk repeating a member.
 //!   `None` for `sequence` (declared order).
 //!
-//! `GroupState::default()` = `(0, 0, None, None)` — a fresh activation from the
+//! `GroupState::default()` = `(0, 0, None, None, None)` — a fresh activation from the
 //! top.
 
 use sqlx::SqlitePool;
@@ -28,25 +29,28 @@ use sqlx::SqlitePool;
 pub struct GroupState {
     pub member_idx: usize,
     pub take_count: u32,
+    /// Random track quota for the current passage; cleared on member change.
+    pub random_take: Option<u32>,
     /// Epoch (s) the current member started — only for a `runtime` budget.
     pub member_started_at: Option<i64>,
     /// The shuffled order of the current cycle (`shuffle` groups only).
     pub permutation: Option<Vec<usize>>,
 }
 
-/// Current state for a group, or the default `(0, 0, None, None)` if unset.
+/// Current state for a group, or the default `(0, 0, None, None, None)` if unset.
 pub async fn get(pool: &SqlitePool, group_ref: &str) -> Result<GroupState, sqlx::Error> {
-    let row: Option<(i64, i64, Option<i64>, Option<String>)> = sqlx::query_as(
-        "SELECT member_idx, take_count, member_started_at, permutation \
+    let row: Option<(i64, i64, Option<i64>, Option<String>, Option<i64>)> = sqlx::query_as(
+        "SELECT member_idx, take_count, member_started_at, permutation, random_take \
          FROM group_state WHERE group_ref = ?1",
     )
     .bind(group_ref)
     .fetch_optional(pool)
     .await?;
     Ok(row
-        .map(|(idx, count, started, perm)| GroupState {
+        .map(|(idx, count, started, perm, random_take)| GroupState {
             member_idx: idx as usize,
             take_count: count as u32,
+            random_take: random_take.map(|n| n as u32),
             member_started_at: started,
             permutation: perm.as_deref().and_then(parse_perm),
         })
@@ -62,20 +66,22 @@ pub async fn set(
     let now = now_epoch_seconds();
     let perm = state.permutation.as_deref().map(fmt_perm);
     sqlx::query(
-        "INSERT INTO group_state (group_ref, member_idx, take_count, member_started_at, permutation, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+        "INSERT INTO group_state (group_ref, member_idx, take_count, member_started_at, permutation, random_take, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
          ON CONFLICT(group_ref) DO UPDATE SET
              member_idx        = ?2,
              take_count        = ?3,
              member_started_at = ?4,
              permutation       = ?5,
-             updated_at        = ?6",
+             random_take       = ?6,
+             updated_at        = ?7",
     )
     .bind(group_ref)
     .bind(state.member_idx as i64)
     .bind(state.take_count as i64)
     .bind(state.member_started_at)
     .bind(perm)
+    .bind(state.random_take.map(i64::from))
     .bind(now)
     .execute(pool)
     .await?;
@@ -123,6 +129,7 @@ mod tests {
         let st = GroupState {
             member_idx: 1,
             take_count: 2,
+            random_take: Some(4),
             member_started_at: None,
             permutation: None,
         };
@@ -141,6 +148,7 @@ mod tests {
         let st = GroupState {
             member_idx: 2,
             take_count: 0,
+            random_take: None,
             member_started_at: Some(1_700_000_000),
             permutation: Some(vec![2, 0, 1]),
         };

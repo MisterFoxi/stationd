@@ -179,11 +179,27 @@ pub struct Member {
     pub weight: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub take: Option<u32>,
+    /// Inclusive track-count bounds, drawn once per member passage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub take_random_min: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub take_random_max: Option<u32>,
     /// Per-member time budget (e.g. "20m"), alternative to `take`. Soft: the
     /// member's last track may overrun the budget; the switch happens at the
     /// next track boundary.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<String>,
+}
+
+impl Member {
+    pub(crate) fn random_take_bounds(&self) -> Result<Option<(u32, u32)>, String> {
+        match (self.take_random_min, self.take_random_max) {
+            (None, None) => Ok(None),
+            (Some(min), Some(max)) if min > 0 && min <= max => Ok(Some((min, max))),
+            (Some(_), Some(_)) => Err("take_random_min/max require 1 <= min <= max".into()),
+            _ => Err("take_random_min and take_random_max must both be specified".into()),
+        }
+    }
 }
 
 /// The playlist's own **consumption policy** — NOT scheduling. When (and
@@ -358,6 +374,20 @@ impl Playlist {
         let quota_group = matches!(sel.strategy, Some(Strategy::Sequence) | Some(Strategy::Shuffle));
         for (i, m) in sel.members.iter().enumerate() {
             let at = |f: &str| format!("selection.members[{}].{f}", i + 1);
+            let random = m.take_random_min.is_some() || m.take_random_max.is_some();
+            if random {
+                if !quota_group {
+                    out.push(Diag::error(DiagCode::NotAllowed, &at("take_random_min"),
+                        "take_random_min/max require a sequence or shuffle group"));
+                }
+                if m.take.is_some() || m.runtime.is_some() {
+                    out.push(Diag::error(DiagCode::Conflict, &at("take_random_min"),
+                        "take_random_min/max cannot be combined with take or runtime"));
+                }
+                if let Err(e) = m.random_take_bounds() {
+                    out.push(Diag::error(DiagCode::BadValue, &at("take_random_max"), &e));
+                }
+            }
             if m.take.is_some() && m.runtime.is_some() {
                 out.push(Diag::error(
                     DiagCode::Conflict,
@@ -723,6 +753,7 @@ pub fn parse_duration_secs(s: &str) -> Result<u64, String> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MemberQuota {
     Take(u32),
+    TakeRandom { min: u32, max: u32 },
     Runtime(u64),
 }
 
@@ -783,7 +814,10 @@ impl Playlist {
                     cumulative = None;
                     ProjectedMember {
                         r#ref: m.r#ref.clone(),
-                        quota: MemberQuota::Take(m.take.unwrap_or(1).max(1)),
+                        quota: match (m.take_random_min, m.take_random_max) {
+                            (Some(min), Some(max)) => MemberQuota::TakeRandom { min, max },
+                            _ => MemberQuota::Take(m.take.unwrap_or(1).max(1)),
+                        },
                         offset_secs: None,
                     }
                 }
@@ -1182,6 +1216,35 @@ mod tests {
             mode = "dynamic"
         "#;
         assert!(Playlist::parse(toml_str).is_err());
+    }
+
+    #[test]
+    fn random_take_validates_bounds_conflicts_and_group_strategy() {
+        let parse = |strategy: &str, fields: &str| Playlist::parse(&format!(
+            "name = \"G\"\n[selection]\nmode = \"group\"\nstrategy = \"{strategy}\"\n\
+             members = [{{ ref = \"a\", {fields} }}]"
+        )).unwrap();
+        for strategy in ["sequence", "shuffle"] {
+            for fields in ["take_random_min = 2, take_random_max = 4",
+                           "take_random_min = 1, take_random_max = 1",
+                           "take_random_min = 4294967295, take_random_max = 4294967295"] {
+                parse(strategy, fields).validate().unwrap();
+            }
+        }
+        for fields in ["take_random_min = 2", "take_random_max = 4",
+                       "take_random_min = 0, take_random_max = 4",
+                       "take_random_min = 4, take_random_max = 2",
+                       "take_random_min = 2, take_random_max = 4, take = 3",
+                       "take_random_min = 2, take_random_max = 4, runtime = \"5m\""] {
+            assert!(parse("sequence", fields).validate().is_err(), "{fields}");
+        }
+        for strategy in ["weighted", "rotate"] {
+            assert!(parse(strategy, "take_random_min = 2, take_random_max = 4").validate().is_err());
+        }
+        let projection = parse("sequence", "take_random_min = 2, take_random_max = 4")
+            .project_group_members().unwrap();
+        assert_eq!(projection.members[0].quota, MemberQuota::TakeRandom { min: 2, max: 4 });
+        assert_eq!(projection.members[0].offset_secs, None);
     }
 
     #[test]

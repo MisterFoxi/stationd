@@ -518,6 +518,12 @@ impl Editor {
                     if quota || !m.take.is_empty() {
                         text(&mut out, Target::Member(i, MemberPart::Take), format!("  {}", tr!("pl-f-take")), m.take.clone(), format!("{base}.take"));
                     }
+                    if quota || !m.take_random_min.is_empty() {
+                        text(&mut out, Target::Member(i, MemberPart::TakeRandomMin), format!("  {}", tr!("pl-f-take-random-min")), m.take_random_min.clone(), format!("{base}.take_random_min"));
+                    }
+                    if quota || !m.take_random_max.is_empty() {
+                        text(&mut out, Target::Member(i, MemberPart::TakeRandomMax), format!("  {}", tr!("pl-f-take-random-max")), m.take_random_max.clone(), format!("{base}.take_random_max"));
+                    }
                     if quota || !m.runtime.is_empty() {
                         text(&mut out, Target::Member(i, MemberPart::Runtime), format!("  {}", tr!("pl-f-runtime")), m.runtime.clone(), format!("{base}.runtime"));
                     }

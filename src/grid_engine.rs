@@ -565,7 +565,7 @@ fn member_verdict(m: &crate::pool_inspection::InspectedMember) -> (Verdict, Vec<
             }
             (Verdict::Ok, Vec::new())
         }
-        Some(MemberQuota::Take(n)) => {
+        Some(MemberQuota::Take(n) | MemberQuota::TakeRandom { max: n, .. }) => {
             if let Some(count) = m.stats.selected_count {
                 if count < *n as u64 {
                     return (Verdict::Thin, vec![Reason::TakeRepeat { take: *n as u64, count }]);
