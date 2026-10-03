@@ -473,8 +473,10 @@ pub fn spawn_sampler(
                     connections = None;
                 }
                 if connections.is_none() { detailed = None; }
-                let effective = continuity.sample(detailed.as_deref(), std::time::Instant::now(), ttl);
-                control.sample_connection_views(connections, effective, ttl.saturating_sub(started.elapsed()));
+                let now = std::time::Instant::now();
+                let effective = continuity.sample(detailed.as_deref(), now, ttl);
+                let valid_for = continuity.valid_for(now, ttl.saturating_sub(started.elapsed()));
+                control.sample_connection_views(connections, effective, valid_for);
                 tokio::time::sleep(sample_period(&control, every, asleep)).await;
             }
         };

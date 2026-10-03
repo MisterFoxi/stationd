@@ -62,14 +62,23 @@ ces relevés, avec une seconde de tolérance pour les âges entiers d'Icecast.
 L'âge continue avec une horloge monotone, y compris après plusieurs reconnexions.
 La règle est commune aux plugins natif et WASM, sans détecter une marque de viewer.
 
-Une disparition observée termine la continuité. Un relevé inconnu ou périmé,
-une identité différente ou un rapprochement ambigu empêchent de rattacher un
-remplacement. Une connexion dont l'ID et l'âge Icecast restent cohérents garde
-sa continuité après un échec temporaire de collecte. Aucun client absent n'est
-conservé au-delà du relevé suivant. IP et user-agent servent uniquement au
+Une disparition observée conserve temporairement le client et son âge, pendant
+30 secondes au maximum après sa dernière observation. Les relevés vides ne
+prolongent pas cette période. Une reconnexion non ambiguë pendant ce délai
+reprend le même identifiant logique ; après expiration, c'est une nouvelle
+connexion. La validité du relevé est bornée par l'expiration des clients retenus.
+Un relevé inconnu ou périmé, une identité différente ou un rapprochement ambigu
+empêchent de rattacher un remplacement. Une connexion dont l'ID et l'âge Icecast
+restent cohérents garde sa continuité après un échec temporaire de collecte.
+IP et user-agent servent uniquement au
 rapprochement dans le collecteur ; ils ne sont transmis ni à la vue de veille
 ni aux événements de connexion, et ne sont pas persistés par ce mécanisme.
-Les statistiques et le journal gardent les vrais ID et durées Icecast.
+Les statistiques détaillées et le journal gardent les vrais ID et durées
+Icecast. Le compteur de la station (TUI, RPC de diffusion, événements
+ListenersSampled) conserve les auditeurs de la vue logique pendant ce délai :
+une microcoupure ne produit donc pas un zéro transitoire. Les statistiques
+Icecast et géographiques restent les mesures brutes. Une audience inconnue
+reste inconnue ; la continuité ne transforme pas un échec de lecture en compte.
 
 C'est une heuristique : la collecte périodique ne permet pas de mesurer la
 coupure à la seconde près. Un arrêt puis une reprise entre deux relevés, ou

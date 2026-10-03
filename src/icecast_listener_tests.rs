@@ -121,31 +121,41 @@ async fn shared_details_cover_all_mounts_and_failure_wakes_age_sleep() {
 
 #[tokio::test]
 async fn reconnect_preserves_sleep_age_but_journals_raw_sessions() {
-    use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+    use std::sync::{Arc, atomic::{AtomicU8, Ordering}};
     use crate::events::{self, Code};
     use crate::station_control::{BroadcastState, Gate};
-    let reconnect = Arc::new(AtomicBool::new(false));
+    let reconnect = Arc::new(AtomicU8::new(0));
     let flag = reconnect.clone();
+    let stats_flag = reconnect.clone();
     let app = Router::new()
         .route("/admin/listclients", get(move || {
             let flag = flag.clone();
             async move {
-                let (id, age) = if flag.load(Ordering::SeqCst) { (2, 0) } else { (1, 100) };
+                let phase = flag.load(Ordering::SeqCst);
+                if phase == 1 {
+                    return r#"<icestats><source mount="/reconnect-test"><Listeners>0</Listeners></source></icestats>"#.to_string();
+                }
+                let (id, age) = if phase == 2 { (2, 0) } else { (1, 100) };
                 format!(r#"<icestats><source mount="/reconnect-test"><Listeners>1</Listeners>
                     <listener><ID>{id}</ID><IP>192.0.2.1</IP><Connected>{age}</Connected>
                     <UserAgent>SL audio</UserAgent></listener></source></icestats>"#)
             }
         }))
-        .route("/admin/stats", get(|| async {
-            r#"<icestats><source mount="/reconnect-test"><listeners>1</listeners><stream_start>now</stream_start></source></icestats>"#
+        .route("/admin/stats", get(move || {
+            let flag = stats_flag.clone();
+            async move {
+                let count = if flag.load(Ordering::SeqCst) == 1 { 0 } else { 1 };
+                format!(r#"<icestats><source mount="/reconnect-test"><listeners>{count}</listeners><stream_start>now</stream_start></source></icestats>"#)
+            }
         }));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let control = StationControl::new_in_memory();
+    let monitor = IcecastMonitor::default();
     let sampler = spawn_sampler(IcecastClient::new(&config(address, "good")).unwrap(),
         vec!["/reconnect-test".into()], Duration::from_secs(1), Duration::from_millis(20),
-        control.clone(), IcecastMonitor::default());
+        control.clone(), monitor.clone());
     let result = tokio::time::timeout(Duration::from_secs(3), async {
         while control.listener_connections().is_none() || control.listeners().is_none() {
             tokio::time::sleep(Duration::from_millis(5)).await;
@@ -153,7 +163,17 @@ async fn reconnect_preserves_sleep_age_but_journals_raw_sessions() {
         let first = control.listener_connections().unwrap();
         control.stop_when_connections_old(100, "p").unwrap();
         assert_eq!(control.gate(), Gate::Halt(BroadcastState::Sleeping));
-        reconnect.store(true, Ordering::SeqCst);
+        reconnect.store(1, Ordering::SeqCst);
+        loop {
+            let (journal, _) = events::subscribe(events::CAPACITY);
+            let ended = journal.iter().any(|e| e.code == Code::ConnectionEnded
+                && e.param("mount") == Some("/reconnect-test") && e.param("id") == Some("1"));
+            if ended && monitor.snapshot().audience == Some(0) { break; }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(control.listeners(), Some(1), "an observed SL microcut must not zero the station audience");
+        assert_eq!(control.state(), BroadcastState::Sleeping);
+        reconnect.store(2, Ordering::SeqCst);
         loop {
             let (journal, _) = events::subscribe(events::CAPACITY);
             if journal.iter().any(|e| e.code == Code::ConnectionStarted

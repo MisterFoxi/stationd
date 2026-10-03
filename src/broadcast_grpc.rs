@@ -222,6 +222,30 @@ impl BroadcastService for BroadcastGrpc {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn tui_rpc_reports_the_retained_audience_until_reconnect_lease_expires() {
+        use crate::listener_snapshot::Connection;
+        use crate::station_control::Gate;
+        use std::time::Duration;
+        let control = StationControl::new_in_memory();
+        control.configure_connection_sampling(true);
+        let svc = BroadcastGrpc::new(control.clone());
+        control.sample_listeners(0);
+        let held = vec![Connection { mount: "/radio".into(), id: "sleep:1".into(), connected_seconds: 100 }];
+        control.sample_connection_views(Some(vec![]), Some(held.clone()), Duration::from_secs(30));
+        let state = svc.get_state(Request::new(GetStateRequest {})).await.unwrap().into_inner();
+        assert_eq!(state.listeners, Some(1), "the banner must not display the raw zero during a microcut");
+        control.apply(ControlAction::StopWhenIdle, "cli").unwrap();
+        assert_eq!(control.gate(), Gate::Play, "a retained audience must prevent a zero-audience drain");
+
+        control.sample_connection_views(Some(vec![]), Some(held), Duration::ZERO);
+        let state = svc.get_state(Request::new(GetStateRequest {})).await.unwrap().into_inner();
+        assert_eq!(state.listeners, Some(0), "a stale hold cannot keep a ghost listener");
+        assert_eq!(control.gate(), Gate::Halt(BroadcastState::Sleeping));
+        control.clear_listeners();
+        assert_eq!(svc.get_state(Request::new(GetStateRequest {})).await.unwrap().into_inner().listeners, None);
+    }
+
     fn push(path: &str) -> PushOverrideRequest {
         PushOverrideRequest {
             content: Some(ProtoContent::MediaPath(path.into())),

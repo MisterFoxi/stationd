@@ -295,6 +295,17 @@ struct Inner {
     incidents: VecDeque<Incident>,
 }
 
+impl Inner {
+    fn listener_count(&self) -> Option<u32> {
+        let raw = self.listeners.map(|(count, _)| count)?;
+        let effective = self.connections.as_ref()
+            .filter(|(_, at, ttl)| self.connection_sampling_enabled && at.elapsed() < *ttl)
+            .map(|(clients, _, _)| u32::try_from(clients.len()).unwrap_or(u32::MAX))
+            .unwrap_or(0);
+        Some(raw.max(effective))
+    }
+}
+
 /// Cheap, clonable handle. One per station; shared by the grid engine, the
 /// gRPC services and the plugin host surface.
 #[derive(Clone)]
@@ -689,11 +700,12 @@ impl StationControl {
     /// completes only at a track boundary (`gate`).
     pub fn sample_listeners(&self, count: u32) {
         let at = self.now();
-        {
+        let count = {
             let mut g = self.lock();
             g.listeners = Some((count, at));
             g.audience_failures = 0;
-        }
+            g.listener_count().unwrap_or(count)
+        };
         self.bump_meta();
         self.emit(PluginEvent::ListenersSampled { count, at: at.0 });
     }
@@ -724,9 +736,10 @@ impl StationControl {
         forgot
     }
 
-    /// Last listener count, if ever sampled (and not forgotten since).
+    /// Station audience, including fresh reconnect leases from detailed sampling.
+    /// An unknown raw audience remains unknown; expired leases never add listeners.
     pub fn listeners(&self) -> Option<u32> {
-        self.lock().listeners.map(|(c, _)| c)
+        self.lock().listener_count()
     }
 
     /// Generic availability of the detailed Icecast sampler, independent of plugins.
@@ -760,8 +773,9 @@ impl StationControl {
         valid_for: std::time::Duration,
     ) {
         let at = self.now().0;
-        let (wake, changes) = {
+        let (wake, changes, count_changed) = {
             let mut g = self.lock();
+            let before_count = g.listener_count();
             let changes = g.connection_tracker.observe(at, raw.as_deref());
             g.connection_failures = if clients.is_none() && g.state == BroadcastState::Sleeping {
                 g.connection_failures.saturating_add(1)
@@ -777,13 +791,18 @@ impl StationControl {
                 }
             } else { None };
             g.connections = clients.clone().map(|c| (c, std::time::Instant::now(), valid_for));
-            (wake, changes)
+            let count = g.listener_count();
+            (wake, changes, (count != before_count).then_some(count).flatten())
         };
         for change in changes {
             change.record();
         }
         if let Some(reason) = wake {
             self.wake_if_sleeping(reason);
+        }
+        if let Some(count) = count_changed {
+            self.bump_meta();
+            self.emit(PluginEvent::ListenersSampled { count, at });
         }
         self.emit(PluginEvent::ConnectionsSampled { at: self.now().0, connections: clients });
     }
@@ -804,7 +823,7 @@ impl StationControl {
                     let idle = match g.connection_age {
                         Some(age) => g.listeners.is_some() && g.connections.as_ref().is_some_and(|(clients, at, ttl)|
                             at.elapsed() <= *ttl && clients.iter().all(|c| c.connected_seconds >= age)),
-                        None => g.listeners.map(|(c, _)| c) == Some(0),
+                        None => g.listener_count() == Some(0),
                     };
                     if idle {
                         g.sleeping_connections = g.connections.as_ref().map(|(clients, _, _)|

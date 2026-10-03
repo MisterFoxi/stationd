@@ -181,6 +181,10 @@ reste inchangée. Toutes les connexions de tous les mounts doivent avoir atteint
 le seuil ; `min_zero_samples` compte alors les relevés complets consécutifs
 éligibles. La station dort au prochain bord de piste, après une nouvelle vérification.
 Les clients anciens restent sur le bruit ; une nouvelle connexion la réveille.
+Les microcoupures conservent l'auditeur et son âge pendant 30 secondes au
+maximum après sa dernière observation. Le compteur de la station (TUI et
+événements d'audience) utilise cette continuité ; les statistiques Icecast
+et géographiques restent brutes. Sans retour du client, la rétention expire.
 Une collecte inconnue empêche la veille dès le premier échec ; trois échecs
 consécutifs réveillent une station endormie par cette règle. Un relevé complet
 réussi remet le compteur d'échecs à zéro. Choisir un seuil compatible avec une journée entière d'écoute. Voir

@@ -4,6 +4,8 @@ use crate::listener_snapshot::{Connection, Listener};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+const RECONNECT_GRACE: Duration = Duration::from_secs(30);
+
 type Endpoint = (String, std::net::IpAddr, Option<String>);
 struct Session {
     raw_id: String,
@@ -11,6 +13,7 @@ struct Session {
     logical_id: String,
     age: u64,
     since: Instant,
+    last_seen: Instant,
 }
 #[derive(Default)]
 pub(super) struct Continuity {
@@ -52,7 +55,9 @@ impl Continuity {
                 let replaced = fresh && unique && same.is_none()
                     // Estimated start within the unobserved interval, with
                     // one second of tolerance for Icecast's integer ages.
-                    && elapsed.is_some_and(|dt| client.connected_seconds <= dt.as_secs().saturating_add(1))
+                    && previous.first().is_some_and(|old|
+                        now.saturating_duration_since(old.last_seen) < RECONNECT_GRACE
+                        && client.connected_seconds <= now.saturating_duration_since(old.last_seen).as_secs().saturating_add(1))
                     && key.2.as_ref().is_some_and(|ua| !ua.is_empty());
                 let session = if let Some(index) = same.or_else(|| replaced.then_some(0)) {
                     let old = previous.remove(index);
@@ -60,8 +65,10 @@ impl Continuity {
                         raw_id: client.id.clone(),
                         raw_age: client.connected_seconds,
                         logical_id: old.logical_id,
-                        age: old.age,
-                        since: old.since,
+                        age: client.connected_seconds.max(old.age.saturating_add(
+                            now.saturating_duration_since(old.since).as_secs())),
+                        since: now,
+                        last_seen: now,
                     }
                 } else {
                     self.next_id += 1;
@@ -71,6 +78,7 @@ impl Continuity {
                         logical_id: format!("sleep:{}", self.next_id),
                         age: client.connected_seconds,
                         since: now,
+                        last_seen: now,
                     }
                 };
                 connections.push(Connection {
@@ -86,10 +94,32 @@ impl Continuity {
             }
             next.insert(key, sessions);
         }
-        // An observed departure ends continuity; no departed-client cache.
+        // Keep absent endpoints briefly. Empty polls must not extend the lease.
+        // Endpoints present in this poll replace their old group, so ambiguous
+        // reconnects cannot create duplicate held listeners.
+        for (key, mut sessions) in self.previous.drain() {
+            sessions.retain(|s| now.saturating_duration_since(s.last_seen) < RECONNECT_GRACE);
+            if sessions.is_empty() { continue; }
+            for session in &sessions {
+                connections.push(Connection {
+                    mount: key.0.clone(),
+                    id: session.logical_id.clone(),
+                    connected_seconds: session.age.saturating_add(
+                        now.saturating_duration_since(session.since).as_secs()),
+                });
+            }
+            next.insert(key, sessions);
+        }
         self.previous = next;
         self.observed = Some(now);
         Some(connections)
+    }
+
+    /// A held listener must expire even if the next poll stalls or fails.
+    pub(super) fn valid_for(&self, now: Instant, limit: Duration) -> Duration {
+        self.previous.values().flatten().fold(limit, |ttl, session| {
+            ttl.min(RECONNECT_GRACE.saturating_sub(now.saturating_duration_since(session.last_seen)))
+        })
     }
 }
 
@@ -112,6 +142,68 @@ mod tests {
         t.sample(Some(clients), at, Duration::from_secs(30))
             .unwrap()
     }
+    #[test]
+    fn empty_polls_hold_audience_age_and_sleep_only_until_the_lease_expires() {
+        let mut t = Continuity::default();
+        let at = Instant::now();
+        let c = StationControl::new_in_memory();
+        c.configure_connection_sampling(true);
+        c.sample_listeners(1);
+        let first = poll(&mut t, &[client("1", 100)], at);
+        c.sample_connection_views(Some(first.clone()), Some(first.clone()), Duration::from_secs(30));
+        c.stop_when_connections_old(100, "plugin").unwrap();
+        assert_eq!(c.gate(), Gate::Halt(BroadcastState::Sleeping));
+
+        for seconds in [3, 15, 29] {
+            let now = at + Duration::from_secs(seconds);
+            let held = poll(&mut t, &[], now);
+            assert_eq!(held.len(), 1);
+            assert_eq!(held[0].id, first[0].id);
+            assert_eq!(held[0].connected_seconds, 100 + seconds);
+            assert_eq!(t.valid_for(now, Duration::from_secs(30)), Duration::from_secs(30 - seconds));
+            c.sample_connection_views(Some(vec![]), Some(held), t.valid_for(now, Duration::from_secs(30)));
+            c.sample_listeners(0);
+            assert_eq!(c.listeners(), Some(1), "TUI RPC and audience event must retain the listener");
+            assert_eq!(c.state(), BroadcastState::Sleeping);
+        }
+        let expired = poll(&mut t, &[], at + Duration::from_secs(30));
+        assert!(expired.is_empty(), "empty polls cannot renew the lease");
+        c.sample_connection_views(Some(vec![]), Some(expired), Duration::from_secs(30));
+        assert_eq!(c.listeners(), Some(0));
+        assert_eq!(c.state(), BroadcastState::Sleeping);
+
+        let next = poll(&mut t, &[client("2", 0)], at + Duration::from_secs(31));
+        assert_ne!(next[0].id, first[0].id);
+        c.sample_connection_views(Some(next.clone()), Some(next), Duration::from_secs(30));
+        assert_eq!(c.listeners(), Some(1));
+        assert_eq!(c.state(), BroadcastState::Running, "a return after expiry is a new arrival");
+    }
+
+    #[test]
+    fn a_held_session_keeps_the_latest_observed_age() {
+        let mut t = Continuity::default();
+        let at = Instant::now();
+        poll(&mut t, &[client("1", 100)], at);
+        let latest = poll(&mut t, &[client("1", 105)], at + Duration::from_secs(1));
+        let held = poll(&mut t, &[], at + Duration::from_secs(2));
+        assert_eq!(held[0].connected_seconds, latest[0].connected_seconds + 1);
+        let next = poll(&mut t, &[client("2", 0)], at + Duration::from_secs(3));
+        assert_eq!(next[0].connected_seconds, 107);
+    }
+
+    #[test]
+    fn reconnect_after_an_empty_poll_keeps_one_logical_listener() {
+        let mut t = Continuity::default();
+        let at = Instant::now();
+        let first = poll(&mut t, &[client("1", 100)], at);
+        poll(&mut t, &[], at + Duration::from_secs(3));
+        let next = poll(&mut t, &[client("2", 1)], at + Duration::from_secs(5));
+        assert_eq!(next.len(), 1, "the held session must not be counted twice");
+        assert_eq!(next[0].id, first[0].id);
+        assert_eq!(next[0].connected_seconds, 105);
+        assert_eq!(t.valid_for(at + Duration::from_secs(5), Duration::from_secs(30)), Duration::from_secs(30));
+    }
+
     #[test]
     fn repeated_reconnects_preserve_age_and_do_not_wake_sleep() {
         let mut t = Continuity::default();
@@ -144,7 +236,7 @@ mod tests {
         assert_eq!(c.state(), BroadcastState::Running);
     }
     #[test]
-    fn departures_failures_and_stale_polls_end_continuity() {
+    fn expired_departures_failures_and_stale_polls_end_continuity() {
         let at = Instant::now();
         for mode in 0..3 {
             let mut t = Continuity::default();
@@ -152,7 +244,7 @@ mod tests {
             let gap = match mode {
                 0 => {
                     poll(&mut t, &[], at + Duration::from_secs(1));
-                    2
+                    31
                 }
                 1 => {
                     t.sample(None, at + Duration::from_secs(1), Duration::from_secs(30));
@@ -186,8 +278,12 @@ mod tests {
             }
             let first = poll(&mut t, &before, at);
             let next = poll(&mut t, &after, at + Duration::from_secs(15));
-            assert!(next.iter().all(|c| first.iter().all(|old| old.id != c.id)));
-            assert!(next.iter().all(|c| c.connected_seconds < 100));
+            let arrivals: Vec<_> = next.iter()
+                .filter(|c| first.iter().all(|old| old.id != c.id)).collect();
+            assert_eq!(arrivals.len(), after.len(), "different or ambiguous arrivals cannot inherit age");
+            assert!(arrivals.iter().all(|c| c.connected_seconds < 100));
+            assert_eq!(next.len(), after.len() + usize::from(mode <= 2),
+                "a different endpoint retains the old absent listener only during its lease");
         }
     }
     #[test]

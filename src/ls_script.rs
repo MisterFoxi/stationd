@@ -438,7 +438,7 @@ end
          # would go unreported. Off the streaming thread (HTTP call).\n\
          def stationd.switched_to(kind, b) =\n  \
            if kind == \"halted\" then\n    \
-             b.insert_metadata(new_track=false, stationd.idle_metadata())\n  \
+             source.methods(halted_noise).insert_metadata(new_track=false, stationd.idle_metadata())\n  \
            end\n  \
            thread.run(fast=false, {{stationd.report([], kind)}})\n  \
            b\n\
@@ -493,9 +493,9 @@ def stationd.cmd_resume(_) =
   if stationd.paused() then
     # The frozen track resumes without an on_track callback. Restore its
     # cached metadata without creating a new track or another bridge report.
-    m = pull.last_metadata()
+    m = source.methods(pull).last_metadata()
     if null.defined(m) then
-      pull.insert_metadata(new_track=false, null.get(m))
+      source.methods(pull).insert_metadata(new_track=false, null.get(m))
     end
   end
   stationd.paused := false
