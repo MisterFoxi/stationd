@@ -576,6 +576,11 @@ nested groups and members shared by several groups. `Left`/`Right`/`Space`
 collapse or expand branches; `v` switches to the flat list. Filtering keeps the
 ancestors of matching members visible. `Enter` edits the selected playlist.
 
+`stationd-tui --addr stationd.local` resolves the hostname through the system
+resolver and connects on the default gRPC port `50051`. `--addr host:6000`,
+`--addr 192.0.2.1`, `--addr [::1]:6000`, and full HTTP URLs also work; an
+explicit port is preserved.
+
 The CLI supports pipes; the TUI requires an interactive terminal and forwards
 its terminal type and locale. Until the new groups take effect after SSH
 reconnection, launchers fall back to `sudo docker`.

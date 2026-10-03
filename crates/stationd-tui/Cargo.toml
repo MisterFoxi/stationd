@@ -34,4 +34,5 @@ unic-langid = "0.9"
 toml_edit = "0.22"
 
 [dev-dependencies]
+tokio-stream = { version = "0.1", features = ["net"] }
 regex = "1"

@@ -33,7 +33,7 @@ use rat_salsa::{RunConfig, run_tui};
 #[derive(Parser, Debug)]
 #[command(name = "stationd-tui", about = "stationd administration in a terminal")]
 pub struct Args {
-    /// stationd gRPC address (same default as stationctl)
+    /// stationd host, host:port or URL (default port: 50051)
     #[arg(long, default_value = "http://127.0.0.1:50051")]
     pub addr: String,
 
@@ -51,7 +51,7 @@ pub struct Args {
 }
 
 fn main() -> Result<()> {
-    let args = Args::parse();
+    let mut args = Args::parse();
     i18n::init(args.lang.as_deref());
     if args.list_themes {
         for name in rat_theme4::salsa_themes() {
@@ -59,6 +59,8 @@ fn main() -> Result<()> {
         }
         return Ok(());
     }
+
+    args.addr = rpc::normalize_address(&args.addr)?;
 
     let rt = tokio::runtime::Runtime::new()?;
     // Le canal tonic se crée dans le contexte du runtime (connexion paresseuse :
