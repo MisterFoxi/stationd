@@ -45,10 +45,12 @@ message Rule {
 }
 
 message Validity {
+  // Civil hours, weekdays and dates use UTC when true; station timezone otherwise.
+  bool utc = 4;
   // Récurrence : jours de la semaine où la règle s'applique. Vide → tous.
   repeated Weekday days = 1;
   // Bornes de dates optionnelles (override daté). Inclusives. En date CIVILE
-  // du fuseau station, pas en instant — l'expansion en epoch applique le DST
+  // du fuseau de la règle (station ou UTC), pas en instant — l'expansion en epoch applique le DST
   // à la volée (cf. time.md : règle = civil + fuseau IANA, jamais offset gelé).
   string date_start = 2;            // "YYYY-MM-DD", optionnel
   string date_end   = 3;            // "YYYY-MM-DD", optionnel, ≥ date_start

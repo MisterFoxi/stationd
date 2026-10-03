@@ -38,8 +38,8 @@ pub enum GridLoadError {
 /// assembles in memory; grids are small.
 pub async fn load_grid(pool: &SqlitePool) -> Result<Grid, GridLoadError> {
     // Base rows.
-    let base: Vec<(String, i64, String, Option<String>, Option<String>)> =
-        sqlx::query_as("SELECT id, enabled, kind, date_start, date_end FROM grid_rule")
+    let base: Vec<(String, i64, String, Option<String>, Option<String>, bool)> =
+        sqlx::query_as("SELECT id, enabled, kind, date_start, date_end, utc FROM grid_rule")
             .fetch_all(pool)
             .await?;
 
@@ -117,8 +117,9 @@ pub async fn load_grid(pool: &SqlitePool) -> Result<Grid, GridLoadError> {
             .collect();
 
     let mut rules = Vec::with_capacity(base.len());
-    for (id, enabled, kind, date_start, date_end) in base {
+    for (id, enabled, kind, date_start, date_end, utc) in base {
         let validity = Validity {
+            utc,
             days: days.remove(&id).unwrap_or_default(),
             date_start: parse_opt_date(&id, date_start)?,
             date_end: parse_opt_date(&id, date_end)?,
@@ -232,12 +233,13 @@ async fn insert_rule_in_tx(
         RuleKind::Every { .. } => "every",
         RuleKind::Live { .. } => "live",
     };
-    sqlx::query("INSERT INTO grid_rule (id, enabled, kind, date_start, date_end) VALUES (?1,?2,?3,?4,?5)")
+    sqlx::query("INSERT INTO grid_rule (id, enabled, kind, date_start, date_end, utc) VALUES (?1,?2,?3,?4,?5,?6)")
         .bind(&rule.id)
         .bind(rule.enabled as i64)
         .bind(kind)
         .bind(rule.validity.date_start.map(fmt_date))
         .bind(rule.validity.date_end.map(fmt_date))
+        .bind(rule.validity.utc)
         .execute(&mut **tx)
         .await?;
 

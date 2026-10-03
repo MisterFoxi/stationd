@@ -728,6 +728,7 @@ fn map_rule(rule: crate::resolver::Rule) -> Result<schedule::Rule, Status> {
     }).collect();
     days.sort_unstable();
     let validity = schedule::Validity {
+        utc: rule.validity.utc,
         days,
         date_start: rule.validity.date_start.map(date).unwrap_or_default(),
         date_end: rule.validity.date_end.map(date).unwrap_or_default(),

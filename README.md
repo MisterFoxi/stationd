@@ -148,7 +148,11 @@ slots for DJs. When several rules apply, the highest priority wins:
 Most boundaries are *soft*: stationd never cuts a track; it changes what
 comes next. A source whose pool is empty falls through to the next priority,
 down to the floor. Times are handled as UTC epochs internally and converted
-to the station timezone (e.g. `Europe/Paris`) only for input and display.
+to the station timezone (e.g. `Europe/Paris`) by default. A rule with
+`utc = true` interprets its hours, weekdays and inclusive date bounds in UTC,
+including recurring schedules across daylight-saving changes. In the TUI agenda,
+choose **Station / UTC** in the rule form; new rules inherit the agenda display
+timezone (`u` toggles it).
 
 ```toml
 schema_version = 1

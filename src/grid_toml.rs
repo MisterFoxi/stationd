@@ -51,6 +51,8 @@ pub struct RuleDoc {
     pub id: String,
     #[serde(default = "default_enabled", skip_serializing_if = "is_true")]
     pub enabled: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub utc: bool,
     pub kind: KindTag,
     /// Every kind but `live` (which selects no playlist).
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -477,7 +479,7 @@ fn to_rule(rd: RuleDoc, n: usize) -> Result<Rule, Vec<GridDiag>> {
             );
         }
     }
-    let validity = Validity { days, date_start, date_end };
+    let validity = Validity { utc: rd.utc, days, date_start, date_end };
 
 
     // Fields present that this kind does not take.
@@ -839,6 +841,7 @@ fn rule_to_doc(r: &Rule) -> RuleDoc {
     let mut d = RuleDoc {
         id: r.id.clone(),
         enabled: r.enabled,
+        utc: r.validity.utc,
         kind: KindTag::BaseRotation, // placeholder, overwritten below
         playlist_ref: String::new(),
         dj: None,
@@ -1479,5 +1482,22 @@ mod tests {
         assert!(validate_djs(&rules, Some(&known)).is_empty());
         // a grid without live rule needs nothing
         assert!(validate_djs(&parse_grid(GRID).unwrap(), None).is_empty());
+    }
+}
+#[cfg(test)]
+mod utc_tests {
+    use super::*;
+    #[test]
+    fn utc_roundtrips_and_station_is_the_default() {
+        let input = "schema_version = 1\n[[rule]]\nid = \"utc\"\nkind = \"at_clock\"\nplaylist_ref = \"news\"\nat = \"09:00\"\nutc = true\n";
+        let mut rules = parse_grid(input).unwrap();
+        assert!(rules[0].validity.utc);
+        let output = to_toml(&rules).unwrap();
+        assert!(output.contains("utc = true"));
+        assert!(parse_grid(&output).unwrap()[0].validity.utc);
+        rules[0].validity.utc = false;
+        let output = to_toml(&rules).unwrap();
+        assert!(!output.contains("utc ="));
+        assert!(!parse_grid(&output).unwrap()[0].validity.utc);
     }
 }
