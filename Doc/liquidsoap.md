@@ -514,3 +514,22 @@ de systemd = groupe ou utilisateur de l'unité inexistant.
   `resume`, `ls status` affiche encore `halted` alors que la piste gelée
   joue (affichage seulement). Fin d'un live par kick : pas de fondu de
   sortie sur la voix du DJ (sa source s'arrête).
+
+
+### Métadonnées pendant la pause
+
+Le passage au bruit de pause vide explicitement artist, title, album et song.
+Les valeurs vides sont conservées dans la chaîne de métadonnées pour effacer
+le dernier titre dans Icecast. La boucle de bruit remplace ses propres tags
+par ces mêmes valeurs vides ; un filtre de dédoublonnage avant les sorties
+évite de republier une mise à jour identique à chaque tour de boucle.
+
+À la reprise, les métadonnées conservées par la source du morceau gelé sont
+réinsérées sans créer de nouveau début de piste : l'historique de stationd
+continue le même passage. Le filtre de sortie se place après le fichier
+custom_include et ne change pas les callbacks du pont de diffusion.
+
+Après recompilation de stationd et régénération du script : make check-liq,
+puis make restart-ls. Vérifier côté lecteur (par exemple Second Life) que le
+titre disparaît en pause et revient à la reprise. Les annonces produites
+uniquement par le timer d'un lecteur restent du ressort de ce lecteur.

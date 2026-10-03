@@ -330,6 +330,12 @@ def stationd.track_fields(j, m) =
   j.add("log", m["stationd_log"])
 end
 
+# Explicit empty values clear Icecast's last song. Do not strip them: an
+# absent metadata chunk would leave the previous title visible to clients.
+def stationd.idle_metadata() =
+  [("artist", ""), ("title", ""), ("album", ""), ("song", "")]
+end
+
 # Report what REALLY starts airing: one of our tracks (metadata `m`, kind "")
 # or one of Liquidsoap's own sources (m = [], kind = halted | fallback |
 # relay | live).
@@ -394,6 +400,9 @@ end
         "\n# Liquidsoap's own sources. Plain `single` on a local file (no annotate:)\n\
          # stays infallible.\n\
          halted_noise = single(id=\"stationd_halted\", {halted})\n\
+         # The idle loop must never keep the previous song's ICY title.\n\
+         halted_noise = metadata.map(update=false, strip=false, insert_missing=true,\n  \
+           fun (_) -> stationd.idle_metadata(), halted_noise)\n\
          safety = single(id=\"stationd_fallback\", {fallback})\n\
          startup = blank(id=\"stationd_startup\")\n\n\
          # Relay of a `remote` playlist: idle until stationd answers `relay`.\n\
@@ -428,6 +437,9 @@ end
          # start: a noise loop left mid-way is resumed (no new track), a later stop\n\
          # would go unreported. Off the streaming thread (HTTP call).\n\
          def stationd.switched_to(kind, b) =\n  \
+           if kind == \"halted\" then\n    \
+             b.insert_metadata(new_track=false, stationd.idle_metadata())\n  \
+           end\n  \
            thread.run(fast=false, {{stationd.report([], kind)}})\n  \
            b\n\
          end\n\n\
@@ -478,6 +490,14 @@ def stationd.cmd_pause(_) =
 end
 
 def stationd.cmd_resume(_) =
+  if stationd.paused() then
+    # The frozen track resumes without an on_track callback. Restore its
+    # cached metadata without creating a new track or another bridge report.
+    m = pull.last_metadata()
+    if null.defined(m) then
+      pull.insert_metadata(new_track=false, null.get(m))
+    end
+  end
   stationd.paused := false
   stationd.next_not_before := 0.
   log.important(label="stationd", "resume")
@@ -575,6 +595,13 @@ server.register(namespace="stationd", usage="on_air", description="What is on ai
         ));
     }
 
+    // The idle file loops, emitting the same empty metadata each time. Filter
+    // repeated chunks only at the output boundary, after custom processing;
+    // track reports upstream still run normally, including repeated songs.
+    o.push_str(
+        "\n# Suppress repeated ICY metadata from the idle loop.\n\
+         radio = metadata.deduplicate(id=\"stationd_output_metadata\", radio)\n",
+    );
     o.push_str("\n# ─── outputs ───────────────────────────────────────────────────────────\n");
     for (i, out) in ls.outputs.iter().enumerate() {
         o.push_str(&render_output(i + 1, out, station_name));
