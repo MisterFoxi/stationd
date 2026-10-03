@@ -73,7 +73,7 @@ pub fn live_query(text: &str) -> String {
 
 fn is_prefix_token(tok: &str) -> bool {
     tok.split_once(':')
-        .is_some_and(|(k, _)| matches!(k.to_lowercase().as_str(), "genre" | "dossier" | "dir" | "folder" | "age" | "âge"))
+        .is_some_and(|(k, _)| matches!(k.to_lowercase().as_str(), "genre" | "dossier" | "dir" | "folder" | "age" | "âge" | "bpm" | "mood" | "genre_ai" | "genre_ia"))
 }
 
 /// La barre de recherche découpée : mots, genres, dossier, âges.
@@ -85,6 +85,13 @@ pub struct Parsed {
     /// `âge:<10d` → (`<`, `10d`) : âge de la date de création. Envoyé tel
     /// quel, stationd refuse (et dit pourquoi) un opérateur ou une durée faux.
     pub age: Vec<(String, String)>,
+    /// `bpm:>120`, `bpm:120-130` → comparaisons `(op, valeur)` sur le BPM
+    /// analysé (media_analysis). Une plage `lo-hi` donne `>=lo` et `<=hi`.
+    pub bpm: Vec<(String, String)>,
+    /// `genre_ai:italo`, `mood:party` → sous-chaînes du genre Essentia / mood
+    /// (distincts de `genre:` qui porte sur les tags fichier).
+    pub genre_ai: Vec<String>,
+    pub mood: Vec<String>,
 }
 
 /// `daft genre:électro dossier:Musique/Rock âge:<10d punk` → mots `daft
@@ -106,7 +113,25 @@ pub fn parse_query(text: &str) -> Parsed {
                 let (op, dur) = val.split_at(n);
                 p.age.push((op.to_string(), dur.to_string()));
             }
-            "genre" | "dossier" | "dir" | "folder" | "age" | "âge" => {}
+            "bpm" if !val.is_empty() => {
+                // `bpm:120-130` → plage (>=lo, <=hi) ; `bpm:>120` → une comparaison.
+                if let Some((lo, hi)) = val.split_once('-') {
+                    if !lo.is_empty() {
+                        p.bpm.push((">=".into(), lo.to_string()));
+                    }
+                    if !hi.is_empty() {
+                        p.bpm.push(("<=".into(), hi.to_string()));
+                    }
+                } else {
+                    let n = val.chars().take_while(|c| matches!(c, '<' | '>' | '=' | '!')).count();
+                    let (op, v) = val.split_at(n);
+                    let op = if op.is_empty() { "=" } else { op };
+                    p.bpm.push((op.to_string(), v.to_string()));
+                }
+            }
+            "mood" if !val.is_empty() => p.mood.push(val.to_string()),
+            "genre_ai" | "genre_ia" if !val.is_empty() => p.genre_ai.push(val.to_string()),
+            "genre" | "dossier" | "dir" | "folder" | "age" | "âge" | "bpm" | "mood" | "genre_ai" | "genre_ia" => {}
             _ => words.push(tok),
         }
     }
@@ -210,6 +235,7 @@ fn field_label(f: Field) -> String {
         Field::Year => tr!("media-field-year"),
         Field::Duration => tr!("media-field-duration"),
         Field::Genre => tr!("media-field-genre"),
+        Field::Bpm => "BPM".to_string(),
     }
 }
 
@@ -283,6 +309,15 @@ impl Medias {
                 .into_iter()
                 .map(|(op, value)| stationd_proto::library::search_media_request::AgeFilter { op, value })
                 .collect(),
+            bpm: p
+                .bpm
+                .into_iter()
+                .filter_map(|(op, value)| value.trim().parse::<f64>().ok().map(|value| {
+                    stationd_proto::library::search_media_request::BpmFilter { op, value }
+                }))
+                .collect(),
+            genre_ai: p.genre_ai,
+            mood: p.mood,
         }
     }
 
@@ -546,6 +581,8 @@ impl Medias {
             Cell::from(tr!("media-field-year")),
             Cell::from(tr!("media-field-duration")),
             Cell::from(tr!("media-field-genre")),
+            Cell::from("Genre IA"),
+            Cell::from("Mood"),
         ])
         .style(s.label());
         let h = area.height.saturating_sub(1) as usize;
@@ -563,6 +600,7 @@ impl Medias {
                 let artist = if m.artist.is_empty() { Span::styled("—", s.muted()) } else { Span::raw(m.artist.clone()) };
                 let year = if m.year == 0 { String::new() } else { m.year.to_string() };
                 let mark = if self.marks.contains(&m.rel_path) { Span::styled("●", s.accent()) } else { Span::raw(" ") };
+                let dash = |v: &str| if v.is_empty() { Span::styled("—", s.muted()) } else { Span::raw(v.to_string()) };
                 let mut row = Row::new(vec![
                     Cell::from(mark),
                     Cell::from(artist),
@@ -571,6 +609,8 @@ impl Medias {
                     Cell::from(Span::styled(year, s.label())),
                     Cell::from(Span::styled(mmss(m.duration_ms), s.label())),
                     Cell::from(Span::styled(m.genres.join(", "), s.muted())),
+                    Cell::from(dash(&m.genre_ai)),
+                    Cell::from(Span::styled(if m.mood.is_empty() { "—".to_string() } else { m.mood.clone() }, s.label())),
                 ]);
                 if !m.available {
                     row = row.style(s.muted());
@@ -590,6 +630,8 @@ impl Medias {
                 Constraint::Length(year_w),
                 Constraint::Length(dur_w),
                 Constraint::Fill(1),
+                Constraint::Fill(2),
+                Constraint::Fill(1),
             ]
         } else {
             vec![
@@ -600,6 +642,8 @@ impl Medias {
                 Constraint::Length(year_w),
                 Constraint::Length(dur_w),
                 Constraint::Length(0),
+                Constraint::Fill(1),
+                Constraint::Length(8),
             ]
         };
         Widget::render(Table::new(rows, widths).header(header).column_spacing(1), area, buf);

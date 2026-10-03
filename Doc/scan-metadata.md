@@ -12,6 +12,15 @@ The scanner also exposes standard Comment, Description and BPM fields through
 and multi-values remain available. After enrichment, the host writes creation/tempo into MP3 TXXX frames; see
 `Doc/mp3-writeback.md`. Other audio formats remain read only.
 
+For MP3s, creation is completed after plugin enrichment and manual overrides.
+A valid saved TXXX:creation is reused when neither supplies a date. Otherwise,
+the scan assigns its current UTC date/time minus two calendar months, clamping
+the day to the last valid day of the target month (April 30 → February 28/29).
+The fallback is written as TXXX:creation, e.g. 2026-08-03T16:20:55Z,
+and indexed like any other creation date. Subsequent scans reuse this saved
+date rather than moving it forward. A source date or manual override still
+takes precedence. Other audio formats retain their existing behavior.
+
 Migration 0023 creates `media_meta`. A full scan atomically replaces metadata
 alongside media and genres. Removed tags, missing files and disabled plugins
 cannot leave stale metadata. The source tags are not persisted. Arbitrary

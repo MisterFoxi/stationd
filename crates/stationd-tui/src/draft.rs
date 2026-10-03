@@ -41,13 +41,14 @@ pub fn orders(mode: &str) -> &'static [&'static str] {
 }
 
 /// Champs de filtre du catalogue, et opérateurs proposés pour chacun.
-pub const FILTER_FIELDS: [&str; 10] =
-    ["path", "genre", "artist", "title", "album", "year", "duration", "age", "creation", "tempo"];
+pub const FILTER_FIELDS: [&str; 12] =
+    ["path", "genre", "genre_ai", "mood", "artist", "title", "album", "year", "duration", "age", "creation", "tempo"];
 
 pub fn filter_ops(field: &str) -> &'static [&'static str] {
     match field {
         "path" => &["prefix", "eq", "ne"],
         "title" | "artist" | "album" => &["contains", "eq", "ne", "prefix"],
+        "genre_ai" | "mood" => &["contains", "eq", "ne"],
         "year" | "duration" => &[">=", "<=", "=", "!=", ">", "<"],
         "genre" => &["has_any", "has", "has_all", "has_none"],
         // Âge de la date de création, durée (`10d`) : `<` = plus récent que.
@@ -883,6 +884,28 @@ no_same_artist_within = "1h"
         assert_eq!(d.filters()[0].op, "eq");
         d.set_filter(0, FilterPart::Value, "fast");
         assert!(d.text().contains("value = \"fast\""), "{}", d.text());
+    }
+
+    #[test]
+    fn analysis_filters_replace_genre_lists_with_text_and_round_trip() {
+        let mut d = Draft::parse(MUSIQUE);
+        for (field, value) in [("genre_ai", "Electronic---Italo-Disco"), ("mood", "party")] {
+            d.set_filter(1, FilterPart::Field, "genre");
+            d.set_filter(1, FilterPart::Op, "has_any");
+            d.set_filter(1, FilterPart::Value, "talks, jingle");
+            d.set_filter(1, FilterPart::Field, field);
+            assert_eq!(d.filters()[1].op, "contains", "le filtre de liste devient un filtre texte");
+            d.set_filter(1, FilterPart::Value, value);
+            for op in ["contains", "eq", "ne"] {
+                d.set_filter(1, FilterPart::Op, op);
+                let doc: DocumentMut = d.text().parse().unwrap();
+                assert_eq!(doc["selection"]["filter"][1]["value"].as_str(), Some(value));
+                assert_eq!(
+                    Draft::parse(d.text()).filters()[1],
+                    FilterView { field: field.into(), op: op.into(), value: value.into() }
+                );
+            }
+        }
     }
 
     #[test]

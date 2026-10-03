@@ -860,6 +860,7 @@ pub(crate) async fn materialize_dynamic(
         q = match b {
             Bind::Text(s) => q.bind(s.clone()),
             Bind::Int(i) => q.bind(*i),
+            Bind::Real(r) => q.bind(*r),
         };
     }
     let rows = q.fetch_all(pool).await?;
@@ -883,6 +884,7 @@ pub(crate) async fn dynamic_matches(
         q = match b {
             Bind::Text(s) => q.bind(s.clone()),
             Bind::Int(i) => q.bind(*i),
+            Bind::Real(r) => q.bind(*r),
         };
     }
     let (n,) = q.fetch_one(pool).await?;
@@ -1002,6 +1004,7 @@ fn placeholders(n: usize) -> String {
 enum Bind {
     Text(String),
     Int(i64),
+    Real(f64),
 }
 
 /// A generated predicate: SQL with `?` placeholders plus the binds, in the
@@ -1153,6 +1156,41 @@ fn filter_sql(f: &Filter, now: i64) -> Result<Where, SelectionError> {
                 binds: vec![Bind::Int(as_int(f)? * 1000)],
             })
         }
+        // Champs d'analyse offline (media_analysis) : mêmes sous-requêtes EXISTS
+        // que tempo/creation, mais sur la table typée. `genre_ai` = genre
+        // Essentia (dominant), distinct du filtre `genre` des tags fichier.
+        "bpm" | "loudness" | "danceability" => {
+            let col = match f.field.as_str() {
+                "bpm" => "bpm",
+                "loudness" => "loudness_lufs",
+                _ => "danceability",
+            };
+            let op = num_op(&f.op).ok_or_else(unsupported)?;
+            Ok(Where {
+                sql: format!(
+                    "EXISTS (SELECT 1 FROM media_analysis a WHERE a.rel_path = media.rel_path AND a.{col} {op} ?)"
+                ),
+                binds: vec![Bind::Real(as_float(f)?)],
+            })
+        }
+        "key" | "scale" | "mood" | "genre_ai" => {
+            let col = match f.field.as_str() {
+                "genre_ai" => "genre_top",
+                other => other, // key | scale | mood : noms de colonnes directs
+            };
+            let (expr, value) = match f.op.as_str() {
+                "eq" | "=" | "==" => (format!("a.{col} = ?"), as_text(f)?),
+                "ne" | "!=" => (format!("a.{col} <> ?"), as_text(f)?),
+                "contains" => (format!("instr(a.{col}, ?) > 0"), as_text(f)?),
+                _ => return Err(unsupported()),
+            };
+            Ok(Where {
+                sql: format!(
+                    "EXISTS (SELECT 1 FROM media_analysis a WHERE a.rel_path = media.rel_path AND {expr})"
+                ),
+                binds: vec![Bind::Text(value)],
+            })
+        }
         // Set-valued fields (genre today, others slot into `set_field`): the
         // `has` / `has_any` operators live in `set_field_sql`, field-agnostic —
         // never hardcoded to genre.
@@ -1296,6 +1334,16 @@ fn as_int(f: &Filter) -> Result<i64, SelectionError> {
         .ok_or_else(|| SelectionError::BadFilterValue {
             field: f.field.clone(),
             reason: "expected an integer".into(),
+        })
+}
+
+fn as_float(f: &Filter) -> Result<f64, SelectionError> {
+    f.value
+        .as_float()
+        .or_else(|| f.value.as_integer().map(|i| i as f64))
+        .ok_or_else(|| SelectionError::BadFilterValue {
+            field: f.field.clone(),
+            reason: "expected a number".into(),
         })
 }
 
@@ -3443,7 +3491,7 @@ mod tests {
             let sql = format!("SELECT count(*) FROM media WHERE available = 1 AND {}", w.sql);
             let mut query = sqlx::query_as::<_, (i64,)>(&sql);
             for bind in w.binds {
-                query = match bind { Bind::Text(v) => query.bind(v), Bind::Int(v) => query.bind(v) };
+                query = match bind { Bind::Text(v) => query.bind(v), Bind::Int(v) => query.bind(v), Bind::Real(v) => query.bind(v) };
             }
             assert_eq!(query.fetch_one(&pool).await.unwrap().0, expected, "{field} {op} {value}");
         }

@@ -89,6 +89,26 @@ stationctl library scan              # analyse les non-marqués (si enabled)
 stationctl library scan --reanalyze  # force la ré-analyse de tous les fichiers
 ```
 
+## Filtres (playlists + recherche)
+
+Les descripteurs typés sont filtrables à deux endroits :
+
+- **Grammaire des playlists** (`[[selection.filter]]`, `selection.rs`) — champs
+  `bpm`, `loudness`, `danceability` (numériques : `< <= > >= = !=`), `key`,
+  `scale`, `mood`, `genre_ai` (texte : `eq`/`ne`/`contains`). `genre_ai` est le
+  genre Essentia, distinct de `genre` (tags fichier). Ex. :
+  ```toml
+  [[selection.filter]]
+  field = "bpm"
+  op = ">"
+  value = 120
+  ```
+- **Recherche média** (`media_index::search`, écran Media, `library search`) :
+  la recherche texte matche aussi `genre_ai`/`mood` (taper « party » ou
+  « house » retrouve), filtre `bpm` (`bpm:>120`, `bpm:120-130` dans l'écran
+  Media ; `--bpm ">120"` en CLI), tri par `bpm`. L'écran Media affiche les
+  colonnes **Genre IA** et **Mood**.
+
 ## Docker
 
 Images `prod`/`dev` : `python3` + `pip install essentia-tensorflow`

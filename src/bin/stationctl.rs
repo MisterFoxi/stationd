@@ -487,7 +487,17 @@ enum LibraryCommand {
         /// Units: s, m, h, d. Media without a creation date never match
         #[arg(long = "age", value_name = "OP DURATION", allow_hyphen_values = true)]
         age: Vec<String>,
-        /// Sort key: path, title, artist, album, year, duration
+        /// BPM filter on the analysed value: `>120`, `<=130`, `=128`
+        /// (repeatable: all must hold). Media not analysed never match.
+        #[arg(long = "bpm", value_name = "OP BPM", allow_hyphen_values = true)]
+        bpm: Vec<String>,
+        /// Keep media whose Essentia genre contains this (repeatable: any of them)
+        #[arg(long = "genre-ai", value_name = "SUBSTR")]
+        genre_ai: Vec<String>,
+        /// Keep media whose mood contains this (repeatable: any of them)
+        #[arg(long = "mood", value_name = "SUBSTR")]
+        mood: Vec<String>,
+        /// Sort key: path, title, artist, album, year, duration, bpm
         #[arg(long, default_value = "path")]
         sort: String,
         /// Reverse order
@@ -1308,7 +1318,7 @@ async fn main() -> anyhow::Result<()> {
             }
             // A skipped audio file is diagnostic, not a failure: exit zero.
         }
-        Command::Library(LibraryCommand::Search { query, genres, folder, missing, age, sort, desc, limit, cursor, all }) => {
+        Command::Library(LibraryCommand::Search { query, genres, folder, missing, age, bpm, genre_ai, mood, sort, desc, limit, cursor, all }) => {
             use library::search_media_request::Field;
             let field = |s: &str| -> anyhow::Result<Field> {
                 Ok(match s.to_ascii_lowercase().as_str() {
@@ -1318,15 +1328,29 @@ async fn main() -> anyhow::Result<()> {
                     "album" => Field::Album,
                     "year" => Field::Year,
                     "duration" => Field::Duration,
+                    "bpm" => Field::Bpm,
                     "genre" => Field::Genre,
-                    other => anyhow::bail!("unknown field `{other}` (path, title, artist, album, year, duration, genre)"),
+                    other => anyhow::bail!("unknown field `{other}` (path, title, artist, album, year, duration, bpm, genre)"),
                 })
             };
             let sort = field(&sort)?;
             if sort == Field::Genre {
-                anyhow::bail!("`genre` is not a sort key (path, title, artist, album, year, duration)");
+                anyhow::bail!("`genre` is not a sort key (path, title, artist, album, year, duration, bpm)");
             }
             let missing = missing.iter().map(|m| field(m).map(|f| f as i32)).collect::<anyhow::Result<Vec<_>>>()?;
+            // `>120`, `<=130`, `=128` → BpmFilter { op, value }.
+            let bpm = bpm
+                .iter()
+                .map(|s| {
+                    let s = s.trim();
+                    let n = s.chars().take_while(|c| matches!(c, '<' | '>' | '=' | '!')).count();
+                    let (op, val) = s.split_at(n);
+                    let value: f64 = val.trim().parse().map_err(|_| {
+                        anyhow::anyhow!("bpm `{s}`: expected a number after the operator (e.g. >120)")
+                    })?;
+                    Ok(library::search_media_request::BpmFilter { op: op.to_string(), value })
+                })
+                .collect::<anyhow::Result<Vec<_>>>()?;
             let mut lib = LibraryServiceClient::connect(args.addr.clone()).await?;
             let r = lib
                 .search_media(library::SearchMediaRequest {
@@ -1341,6 +1365,9 @@ async fn main() -> anyhow::Result<()> {
                     limit,
                     cursor: cursor.unwrap_or_default(),
                     age: age.iter().map(String::as_str).map(age_filter).collect::<anyhow::Result<Vec<_>>>()?,
+                    bpm,
+                    genre_ai,
+                    mood,
                 })
                 .await?
                 .into_inner();
@@ -1497,6 +1524,18 @@ async fn main() -> anyhow::Result<()> {
             }
             if reply.untagged > 0 {
                 println!("{:>5}  (no genre)", reply.untagged);
+            }
+            if !reply.genre_ai.is_empty() {
+                println!("\nGenre IA (racine):");
+                for b in &reply.genre_ai {
+                    println!("{:>5}  {}", b.count, b.label);
+                }
+            }
+            if !reply.mood.is_empty() {
+                println!("\nMood:");
+                for b in &reply.mood {
+                    println!("{:>5}  {}", b.count, b.label);
+                }
             }
         }
         Command::Listeners(command) => listeners::run(&args.addr, command).await?,
@@ -2567,7 +2606,19 @@ fn fmt_media_line(m: &library::Media) -> String {
     } else {
         m.genres.join(", ")
     };
-    format!("{dur:>7}  {}  {who}  [{genres}]{flag}", m.rel_path)
+    // Analyse offline, quand présente : BPM · genre IA · mood.
+    let mut ai = Vec::new();
+    if m.bpm > 0.0 {
+        ai.push(format!("{} bpm", m.bpm.round() as i64));
+    }
+    if !m.genre_ai.is_empty() {
+        ai.push(m.genre_ai.clone());
+    }
+    if !m.mood.is_empty() {
+        ai.push(m.mood.clone());
+    }
+    let ai = if ai.is_empty() { String::new() } else { format!("  {{{}}}", ai.join(" · ")) };
+    format!("{dur:>7}  {}  {who}  [{genres}]{ai}{flag}", m.rel_path)
 }
 
 fn fmt_pool(count: Option<u64>, duration: Option<&prost_types::Duration>) -> String {

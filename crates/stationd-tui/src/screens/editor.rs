@@ -137,6 +137,8 @@ fn val_label(v: &str) -> String {
         "false" => return tr!("val-no"),
         "path" => tr!("media-field-path"),
         "genre" => tr!("media-field-genre"),
+        "genre_ai" => tr!("val-genre-ai"),
+        "mood" => tr!("val-mood"),
         "artist" => tr!("media-field-artist"),
         "title" => tr!("media-field-title"),
         "album" => tr!("media-field-album"),

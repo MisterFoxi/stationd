@@ -277,6 +277,15 @@ message ListGenresRequest {
 message ListGenresResponse {
   repeated GenreCount genres = 1;   // trié par clé repliée (ordre alphabétique)
   uint32 untagged            = 2;   // médias sans aucun genre
+  // Inventaire de l'analyse offline : genre Essentia par racine (Electronic,
+  // Rock…) et mood. Triés par nombre décroissant, puis libellé.
+  repeated Bucket genre_ai = 3;
+  repeated Bucket mood     = 4;
+}
+
+message Bucket {
+  string label = 1;
+  uint32 count = 2;
 }
 
 // Un genre, toutes graphies confondues (repli de casse).
@@ -303,6 +312,10 @@ message Media {
   uint64 size_bytes      = 7;
   bool   available       = 8;
   repeated string genres = 9;   // ensemble (0..n)
+  // Analyse offline (media_analysis). Valeurs « vides » = non analysé.
+  double bpm      = 10;         // 0 = non analysé
+  string genre_ai = 11;         // genre Essentia dominant ("" = non analysé)
+  string mood     = 12;         // mood dominant ("" = non analysé)
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -334,10 +347,22 @@ message SearchMediaRequest {
   // Present: files directly in this exact directory; empty string = root.
   // Combines with the existing recursive folder prefix and other filters.
   optional string directory = 11;
+  // Filtres BPM sur la valeur analysée (media_analysis). Un média non analysé
+  // n'en passe aucun. Toutes les comparaisons doivent tenir.
+  repeated BpmFilter bpm = 12;
+  // Genre Essentia / mood (media_analysis) : garde les médias dont le champ
+  // contient l'une de ces sous-chaînes (insensible à la casse). Vide = pas de filtre.
+  repeated string genre_ai = 13;
+  repeated string mood = 14;
 
   message AgeFilter {
     string op = 1;         // <, <=, >, >=
     string value = 2;      // durée : 30m, 12h, 10d
+  }
+
+  message BpmFilter {
+    string op = 1;         // <, <=, >, >=, =, !=
+    double value = 2;
   }
 
   enum Field {
@@ -349,6 +374,7 @@ message SearchMediaRequest {
     YEAR     = 5;
     DURATION = 6;
     GENRE    = 7;          // pour `missing` seulement (pas un tri)
+    BPM      = 8;
   }
 }
 

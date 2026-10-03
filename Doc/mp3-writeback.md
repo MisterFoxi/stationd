@@ -11,10 +11,12 @@ Existing Comment/Description/Type/BPM and other ID3 frames are preserved.
 Existing ID3v2.3/2.4 versions are kept. No standard date field is repurposed.
 The filesystem modification time is restored, not set to the creation date.
 
-Only derived values are written: no BPM means no new tempo; no matching date
-means no new creation. An absent derived value does not remove an existing
-TXXX frame. Matching values are a no-op. Existing case variants of the target
-TXXX names are replaced by one lowercase target name.
+No BPM means no new tempo. Creation uses the source date or manual override
+first, then a valid existing TXXX:creation. If none is available, the scan writes
+its current UTC date/time minus two calendar months, at second precision
+(YYYY-MM-DDTHH:MM:SSZ). The saved fallback remains stable on later scans.
+Matching values are a no-op. Existing case variants of the target TXXX names
+are replaced by one lowercase target name.
 
 Each changed file is copied into a unique sibling temporary MP3, edited, and
 read back before an atomic rename replaces the original. The directory must

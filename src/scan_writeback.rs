@@ -115,9 +115,39 @@ pub fn write(root: &Path, rel: &str, expected: (u64, i64), values: &BTreeMap<Str
     Ok(true)
 }
 
+/// Complete MP3 creation metadata after plugins and manual overrides. A saved
+/// TXXX:creation is reused when no source date was derived, so an estimated
+/// date never advances with later scans. Other formats remain read only.
+fn complete_creation(report: &mut ScanReport, now: jiff::Timestamp) -> Result<(), TagError> {
+    let mut fallback = None;
+    for m in &report.media {
+        if !Path::new(&m.rel_path).extension().is_some_and(|e| e.eq_ignore_ascii_case("mp3")) { continue; }
+        let values = report.metadata.entry(m.rel_path.clone()).or_default();
+        if values.contains_key("creation") { continue; }
+        let saved = report.custom_tags.get(&m.rel_path).into_iter().flatten()
+            .filter(|t| t.name.trim().eq_ignore_ascii_case("creation"))
+            .map(|t| t.value.trim())
+            .find(|v| crate::media_index::normalize_creation(v).is_ok());
+        let creation = match saved {
+            Some(value) => value.to_string(),
+            None => {
+                if fallback.is_none() {
+                    let date = now.to_zoned(jiff::tz::TimeZone::UTC)
+                        .checked_sub(jiff::Span::new().months(2)).map_err(io)?;
+                    fallback = Some(date.strftime("%Y-%m-%dT%H:%M:%SZ").to_string());
+                }
+                fallback.as_ref().unwrap().clone()
+            }
+        };
+        values.insert("creation".into(), creation);
+    }
+    Ok(())
+}
+
 /// Only MP3s are written. Keep the fresh size/mtime in the snapshot, so database
 /// identity and play-once guards describe the actual file after tag growth.
 pub fn apply(root: &Path, report: &mut ScanReport) -> Result<Originals, TagError> {
+    complete_creation(report, jiff::Timestamp::now())?;
     let mut originals = Originals::new();
     for m in &mut report.media {
         if !Path::new(&m.rel_path).extension().is_some_and(|e| e.eq_ignore_ascii_case("mp3")) { continue; }
@@ -134,6 +164,70 @@ pub fn apply(root: &Path, report: &mut ScanReport) -> Result<Originals, TagError
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn missing_creation_is_written_once_and_survives_later_scans() {
+        for v3 in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let p = dir.path().join("test.mp3");
+            let audio = fixture(&p, v3);
+            let mut tag = read_tag(&p).unwrap();
+            tag.remove_user_text("comment");
+            tag.remove_user_text("CREATION");
+            tag.save_to_path(&p, WriteOptions::default().use_id3v23(v3)).unwrap();
+            let old_mtime = identity(&p).unwrap().1;
+            let mut report = crate::media::scan_library(dir.path()).unwrap();
+            complete_creation(&mut report, "2026-10-03T16:20:55Z".parse().unwrap()).unwrap();
+            assert_eq!(report.metadata["test.mp3"]["creation"], "2026-08-03T16:20:55Z");
+            assert_eq!(apply(dir.path(), &mut report).unwrap().len(), 1);
+            assert_eq!(read_tag(&p).unwrap().get_user_text("creation"), Some("2026-08-03T16:20:55Z"));
+            assert!(std::fs::read(&p).unwrap().ends_with(&audio));
+            assert_eq!(identity(&p).unwrap().1, old_mtime);
+            let bytes = std::fs::read(&p).unwrap();
+            let mut later = crate::media::scan_library(dir.path()).unwrap();
+            complete_creation(&mut later, "2027-01-03T16:20:55Z".parse().unwrap()).unwrap();
+            assert_eq!(later.metadata["test.mp3"]["creation"], "2026-08-03T16:20:55Z");
+            assert!(apply(dir.path(), &mut later).unwrap().is_empty());
+            assert_eq!(std::fs::read(&p).unwrap(), bytes);
+        }
+    }
+
+    #[test]
+    fn creation_defaults_use_calendar_months_and_handle_invalid_saved_dates() {
+        let dir = tempfile::tempdir().unwrap();
+        fixture(&dir.path().join("test.mp3"), false); // CREATION = "old" is invalid.
+        for (now, expected) in [
+            ("2026-04-30T12:34:56.123Z", "2026-02-28T12:34:56Z"),
+            ("2024-04-30T12:34:56Z", "2024-02-29T12:34:56Z"),
+            ("2026-01-31T12:34:56Z", "2025-11-30T12:34:56Z"),
+        ] {
+            let mut report = crate::media::scan_library(dir.path()).unwrap();
+            complete_creation(&mut report, now.parse().unwrap()).unwrap();
+            assert_eq!(report.metadata["test.mp3"]["creation"], expected);
+        }
+    }
+
+    #[test]
+    fn derived_or_manual_creation_wins_over_saved_creation_and_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        fixture(&dir.path().join("test.mp3"), false);
+        let now = "2026-10-03T16:20:55Z".parse().unwrap();
+        let mut report = crate::media::scan_library(dir.path()).unwrap();
+        report.custom_tags.get_mut("test.mp3").unwrap().push(crate::media::CustomTag {
+            name: "creation".into(), value: "2020-01-01T00:00:00Z".into(),
+        });
+        complete_creation(&mut report, now).unwrap();
+        assert_eq!(report.metadata["test.mp3"]["creation"], "2020-01-01T00:00:00Z");
+        // The actor supplies plugin output, then applies any manual override.
+        for value in ["2026-09-26T15:14:09.488014+00:00", "2026-09-26T16:20:55Z"] {
+            report.metadata.get_mut("test.mp3").unwrap().insert("creation".into(), value.into());
+            complete_creation(&mut report, now).unwrap();
+            assert_eq!(report.metadata["test.mp3"]["creation"], value);
+        }
+        report.media[0].rel_path = "test.wav".into();
+        complete_creation(&mut report, now).unwrap();
+        assert!(!report.metadata.contains_key("test.wav"), "other formats remain read only");
+    }
+
     #[test]
     fn bpm_write_preserves_audio_and_never_overwrites_valid_tbpm() {
         let dir = tempfile::tempdir().unwrap();

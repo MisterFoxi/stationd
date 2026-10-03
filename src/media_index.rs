@@ -30,6 +30,11 @@ pub struct MediaRow {
     pub size_bytes: i64,
     pub available: bool,
     pub genres: Vec<String>,
+    /// Depuis `media_analysis` (`None` = non analysé). BPM arrondi, genre
+    /// Essentia (dominant), mood. Peuplés par [`search`] ; `None` ailleurs.
+    pub bpm: Option<i64>,
+    pub genre_ai: Option<String>,
+    pub mood: Option<String>,
 }
 
 /// Summary of a reconciliation, for the scan report / CLI output.
@@ -333,7 +338,7 @@ pub async fn row(pool: &SqlitePool, rel_path: &str) -> Result<Option<MediaRow>, 
             .into_iter()
             .map(|(g,)| g)
             .collect();
-    Ok(Some(MediaRow { rel_path, title, artist, album, year, duration_ms, size_bytes, available: available != 0, genres }))
+    Ok(Some(MediaRow { rel_path, title, artist, album, year, duration_ms, size_bytes, available: available != 0, genres, bpm: None, genre_ai: None, mood: None }))
 }
 
 /// Forget the media that vanished from disk (`available = 0`): their rows
@@ -474,6 +479,9 @@ pub async fn list(
             size_bytes,
             available: available != 0,
             genres,
+            bpm: None,
+            genre_ai: None,
+            mood: None,
         });
     }
     Ok(out)
@@ -493,6 +501,7 @@ pub enum SearchField {
     Album,
     Year,
     Duration,
+    Bpm,
     /// For `missing` only (not a sort key: sorts by path).
     Genre,
 }
@@ -542,6 +551,13 @@ pub struct SearchQuery {
     /// instant)` on the stored form. A media without a creation date passes
     /// none of them.
     pub creation: Vec<(&'static str, String)>,
+    /// BPM comparisons on the analysed value: `(op, value)`. A media without an
+    /// analysed BPM passes none of them.
+    pub bpm: Vec<(&'static str, f64)>,
+    /// Essentia genre / mood: keep media whose field contains any of these
+    /// substrings (case-insensitive). Empty = no filter.
+    pub genre_ai: Vec<String>,
+    pub mood: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -555,7 +571,7 @@ pub struct SearchPage {
 
 /// rel_path, title, artist, album, year, duration_ms, size_bytes,
 /// available, genres (joined by U+001F).
-type SearchRow = (String, Option<String>, Option<String>, Option<String>, Option<i64>, i64, i64, i64, Option<String>, Option<String>);
+type SearchRow = (String, Option<String>, Option<String>, Option<String>, Option<i64>, i64, i64, i64, Option<String>, Option<String>, Option<f64>, Option<String>, Option<String>);
 
 pub const SEARCH_LIMIT_DEFAULT: usize = 50;
 pub const SEARCH_LIMIT_MAX: usize = 500;
@@ -573,6 +589,7 @@ fn sort_key(m: &MediaRow, by: SearchField) -> (i64, String) {
         SearchField::Album => (0, text(&m.album)),
         SearchField::Year => (m.year.unwrap_or(0), String::new()),
         SearchField::Duration => (m.duration_ms, String::new()),
+        SearchField::Bpm => (m.bpm.unwrap_or(0), String::new()),
     }
 }
 
@@ -585,8 +602,11 @@ pub async fn search(pool: &SqlitePool, q: &SearchQuery) -> Result<SearchPage, sq
         sqlx::query_as(
             "SELECT m.rel_path, m.title, m.artist, m.album, m.year, m.duration_ms, m.size_bytes, m.available,
                     GROUP_CONCAT(g.genre, char(31)),
-                    (SELECT d.value FROM media_meta d WHERE d.rel_path = m.rel_path AND d.key = 'creation')
-             FROM media m LEFT JOIN media_genre g ON g.rel_path = m.rel_path
+                    (SELECT d.value FROM media_meta d WHERE d.rel_path = m.rel_path AND d.key = 'creation'),
+                    a.bpm, a.genre_top, a.mood
+             FROM media m
+                  LEFT JOIN media_genre g ON g.rel_path = m.rel_path
+                  LEFT JOIN media_analysis a ON a.rel_path = m.rel_path
              GROUP BY m.rel_path",
         )
         .fetch_all(pool)
@@ -610,19 +630,63 @@ pub async fn search(pool: &SqlitePool, q: &SearchQuery) -> Result<SearchPage, sq
             })
         })
     };
+    let bpm_ok = |b: Option<i64>| {
+        q.bpm.iter().all(|(op, bound)| {
+            b.is_some_and(|b| {
+                let b = b as f64;
+                match *op {
+                    "<" => b < *bound,
+                    "<=" => b <= *bound,
+                    ">" => b > *bound,
+                    ">=" => b >= *bound,
+                    "=" | "==" => (b - *bound).abs() < 0.5,
+                    "!=" | "ne" => (b - *bound).abs() >= 0.5,
+                    _ => false,
+                }
+            })
+        })
+    };
     let mut hits: Vec<MediaRow> = rows
         .into_iter()
         .filter(|row| created(&row.9))
-        .map(|(rel_path, title, artist, album, year, duration_ms, size_bytes, available, genres, _creation)| {
+        .map(|(rel_path, title, artist, album, year, duration_ms, size_bytes, available, genres, _creation, bpm, genre_ai, mood)| {
             let mut genres: Vec<String> =
                 genres.map(|g| g.split('\u{1f}').map(str::to_string).collect()).unwrap_or_default();
             genres.sort();
-            MediaRow { rel_path, title, artist, album, year, duration_ms, size_bytes, available: available != 0, genres }
+            MediaRow {
+                rel_path,
+                title,
+                artist,
+                album,
+                year,
+                duration_ms,
+                size_bytes,
+                available: available != 0,
+                genres,
+                bpm: bpm.map(|b| b.round() as i64),
+                genre_ai,
+                mood,
+            }
         })
+        .filter(|m| bpm_ok(m.bpm))
         .filter(|m| q.include_unavailable || m.available)
         .filter(|m| folder.is_empty() || fold(&m.rel_path).starts_with(&folder))
         .filter(|m| q.directory.as_ref().is_none_or(|d| m.rel_path.rsplit_once('/').map(|(p,_)| p).unwrap_or("") == d))
         .filter(|m| wanted.is_empty() || m.genres.iter().any(|g| wanted.contains(&genre_key(g))))
+        .filter(|m| {
+            q.genre_ai.is_empty()
+                || m.genre_ai.as_deref().is_some_and(|g| {
+                    let g = fold(g);
+                    q.genre_ai.iter().any(|x| g.contains(&fold(x)))
+                })
+        })
+        .filter(|m| {
+            q.mood.is_empty()
+                || m.mood.as_deref().is_some_and(|mo| {
+                    let mo = fold(mo);
+                    q.mood.iter().any(|x| mo.contains(&fold(x)))
+                })
+        })
         .filter(|m| {
             q.missing.iter().all(|f| match f {
                 SearchField::Title => m.title.as_deref().is_none_or(|s| s.trim().is_empty()),
@@ -630,6 +694,7 @@ pub async fn search(pool: &SqlitePool, q: &SearchQuery) -> Result<SearchPage, sq
                 SearchField::Album => m.album.as_deref().is_none_or(|s| s.trim().is_empty()),
                 SearchField::Year => m.year.is_none(),
                 SearchField::Genre => m.genres.is_empty(),
+                SearchField::Bpm => m.bpm.is_none(),
                 SearchField::Path | SearchField::Duration => false,
             })
         })
@@ -637,7 +702,14 @@ pub async fn search(pool: &SqlitePool, q: &SearchQuery) -> Result<SearchPage, sq
             if words.is_empty() {
                 return true;
             }
-            let hay = [m.title.as_deref(), m.artist.as_deref(), m.album.as_deref(), Some(m.rel_path.as_str())]
+            let hay = [
+                m.title.as_deref(),
+                m.artist.as_deref(),
+                m.album.as_deref(),
+                Some(m.rel_path.as_str()),
+                m.genre_ai.as_deref(),
+                m.mood.as_deref(),
+            ]
                 .into_iter()
                 .flatten()
                 .map(fold)
@@ -696,6 +768,11 @@ pub struct GenreInventory {
     pub genres: Vec<GenreCount>,
     /// Media carrying no genre at all.
     pub untagged: usize,
+    /// Analyse offline : genre Essentia par RACINE (« Electronic » de
+    /// « Electronic---Italo-Disco ») et mood, `(label, count)`, triés par
+    /// nombre décroissant puis libellé.
+    pub genre_ai: Vec<(String, usize)>,
+    pub moods: Vec<(String, usize)>,
 }
 
 /// Count media per genre, case-insensitively (see [`genre_key`]). Same
@@ -744,7 +821,44 @@ pub async fn genres(pool: &SqlitePool, only_available: bool) -> Result<GenreInve
         })
         .collect();
 
-    Ok(GenreInventory { genres, untagged: untagged as usize })
+    let (genre_ai, moods) = analysis_inventory(pool, only_available).await?;
+    Ok(GenreInventory { genres, untagged: untagged as usize, genre_ai, moods })
+}
+
+/// Inventaire de l'analyse offline : genre Essentia par RACINE (« Electronic »
+/// de « Electronic---Italo-Disco ») et mood, chacun `(label, count)` trié par
+/// nombre décroissant puis libellé. Même portée `only_available` que [`genres`].
+async fn analysis_inventory(
+    pool: &SqlitePool,
+    only_available: bool,
+) -> Result<(Vec<(String, usize)>, Vec<(String, usize)>), sqlx::Error> {
+    use std::collections::BTreeMap;
+    let sql = if only_available {
+        "SELECT a.genre_top, a.mood FROM media_analysis a
+         JOIN media m ON m.rel_path = a.rel_path WHERE m.available = 1"
+    } else {
+        "SELECT a.genre_top, a.mood FROM media_analysis a"
+    };
+    let rows: Vec<(Option<String>, Option<String>)> = sqlx::query_as(sql).fetch_all(pool).await?;
+    let mut g: BTreeMap<String, usize> = BTreeMap::new();
+    let mut mo: BTreeMap<String, usize> = BTreeMap::new();
+    for (genre, mood) in rows {
+        if let Some(gt) = genre.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            let root = gt.split("---").next().unwrap_or(gt).trim();
+            if !root.is_empty() {
+                *g.entry(root.to_string()).or_default() += 1;
+            }
+        }
+        if let Some(md) = mood.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            *mo.entry(md.to_string()).or_default() += 1;
+        }
+    }
+    let rank = |m: BTreeMap<String, usize>| {
+        let mut v: Vec<(String, usize)> = m.into_iter().collect();
+        v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        v
+    };
+    Ok((rank(g), rank(mo)))
 }
 
 /// Where each value of a file comes from: `(origin, value)` per `rel_path`;

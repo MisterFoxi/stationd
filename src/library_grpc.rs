@@ -175,6 +175,9 @@ fn map_media(m: crate::media_index::MediaRow) -> Media {
         size_bytes: m.size_bytes as u64,
         available: m.available,
         genres: m.genres,
+        bpm: m.bpm.unwrap_or(0) as f64,
+        genre_ai: m.genre_ai.unwrap_or_default(),
+        mood: m.mood.unwrap_or_default(),
     }
 }
 
@@ -188,6 +191,7 @@ fn search_field(v: i32) -> crate::media_index::SearchField {
         P::Album => F::Album,
         P::Year => F::Year,
         P::Duration => F::Duration,
+        P::Bpm => F::Bpm,
         P::Genre => F::Genre,
     }
 }
@@ -222,6 +226,26 @@ impl LibraryService for LibraryGrpc {
                 })
             })
             .collect::<Result<Vec<_>, Status>>()?;
+        let bpm = r
+            .bpm
+            .iter()
+            .map(|b| {
+                let op: &'static str = match b.op.trim() {
+                    "<" => "<",
+                    "<=" => "<=",
+                    ">" => ">",
+                    ">=" => ">=",
+                    "=" | "==" => "=",
+                    "!=" | "ne" => "!=",
+                    other => {
+                        return Err(Status::invalid_argument(format!(
+                            "bpm: unknown operator `{other}` (<, <=, >, >=, =, !=)"
+                        )))
+                    }
+                };
+                Ok((op, b.value))
+            })
+            .collect::<Result<Vec<_>, Status>>()?;
         let cursor = if r.cursor.trim().is_empty() {
             None
         } else {
@@ -241,6 +265,9 @@ impl LibraryService for LibraryGrpc {
                 limit: r.limit as usize,
                 cursor,
                 creation,
+                bpm,
+                genre_ai: r.genre_ai,
+                mood: r.mood,
             })
             .await
             .map_err(map_error)?;
@@ -441,6 +468,16 @@ impl LibraryService for LibraryGrpc {
                 })
                 .collect(),
             untagged: inv.untagged as u32,
+            genre_ai: inv
+                .genre_ai
+                .into_iter()
+                .map(|(label, count)| library::Bucket { label, count: count as u32 })
+                .collect(),
+            mood: inv
+                .moods
+                .into_iter()
+                .map(|(label, count)| library::Bucket { label, count: count as u32 })
+                .collect(),
         }))
     }
 }
