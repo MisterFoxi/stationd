@@ -74,6 +74,14 @@ docker compose -f /data/dev/stationd/compose.yaml exec -it -u dev station \
   sh /src/scripts/update-geolite2.sh
 ```
 
+The production bundle installs the same script in `scripts/`; the production
+image provides `/usr/local/bin/update-geolite2.sh`. On the production node:
+
+```sh
+cd /opt/stationd
+docker compose exec -it -u stationd station /usr/local/bin/update-geolite2.sh
+```
+
 The license key is hidden during entry and written only to a temporary mode-0600
 netrc file removed on exit. It is not passed in process arguments or stored in
 stationd.toml. A protected existing netrc may be supplied as the second argument
