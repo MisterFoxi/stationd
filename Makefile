@@ -21,6 +21,9 @@ SVC     ?= station
 P       ?=
 # A = arguments de stationctl (make ctl A="…").
 A       ?= status
+# VM = cible SSH de livraison (alias ~/.ssh/config ou utilisateur@hôte).
+VM      ?=
+export VM
 # T = arguments de stationd-tui (make tui T="…").
 T       ?=
 # Script Liquidsoap généré, vu du conteneur ([liquidsoap] script_path).
@@ -42,7 +45,7 @@ CTL       = $(EXEC) sh -c '"$$STATIOND_BIN/stationctl" "$$@"' stationctl
 .DEFAULT_GOAL := help
 .PHONY: help up down image logs shell build release test clippy fmt plugins \
         all restart restart-ls restart-icecast restart-air check-liq tui ctl \
-        state stop start package mrproper
+        state stop start package dist mrproper
 
 help: ## Liste des cibles
 > @grep -hE '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | \
@@ -134,5 +137,6 @@ mrproper: ## Grand ménage : cargo clean (dépôt + plugins), puis conteneur, im
 > $(DC) down --volumes --rmi all --remove-orphans
 
 # --- livraison ---------------------------------------------------------------
-package: ## Compile tous les binaires + plugins WASM + TUI en release, puis package (ARGS=--allow-dirty sinon)
+package: ## Package release puis transfert et installation si VM=<cible SSH> (ARGS=--allow-dirty pour un arbre modifié)
 > docker/package.sh $(ARGS)
+dist: package ## Alias de package : make dist VM=<cible SSH>

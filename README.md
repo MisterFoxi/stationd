@@ -517,7 +517,9 @@ image (`docker/rootfs`).
 **Package** (on the development machine, development container running):
 
 ```sh
-make package                      # clean git tree required
+make package                      # clean git tree required; archive only
+make package VM=stationd-prod      # build, transfer over SSH, extract and install
+make dist VM=foxi@stationd         # alias of package
 # make package ARGS=--allow-dirty   # allow uncommitted changes
 # → dist/stationd-<version>-<rev>.tar
 #   (image + compose.yaml + install.sh + client.sh + stationd.example.toml + examples/ + radio/ + SHA256SUMS)
@@ -530,6 +532,18 @@ It builds all workspace binaries, including `stationd` / `stationctl` /
 plugins) and saves it. Compilation always runs before image creation and export;
 any binary or plugin build failure stops packaging. Packages always use the
 release profile, regardless of the branch or Make's `PROFILE` / `P` settings.
+
+With `VM`, packaging runs `scp`, extracts the bundle in a unique remote
+`/tmp` directory, and invokes `sudo install.sh` over an interactive SSH session.
+Use an SSH config alias or `user@host`; SSH and sudo can ask for credentials.
+The local archive remains available. Remote temporary files are removed after
+success and retained on failure. The installer preserves existing configuration
+and data; a first installation still requires creating `stationd.toml`.
+To retry deployment of an existing package without rebuilding:
+
+```sh
+bash docker/deploy.sh dist/stationd-<tag>.tar stationd-prod
+```
 
 **Deploy** (node: Docker from `docker-ce` + compose plugin, media mounted).
 Everything lives in **one directory**, `/opt/stationd` by default:
