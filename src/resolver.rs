@@ -605,6 +605,24 @@ fn occurrence_token(rule_id: &str, date: Date, mark: WallClock) -> String {
     )
 }
 
+/// Clock occurrences strictly before a wake instant. They must not be
+/// caught up when a sleeping station starts airing again.
+pub fn missed_at_clock_marks(now: LocalNow, grid: &Grid) -> Vec<String> {
+    grid.rules
+        .iter()
+        .filter(|r| r.enabled && r.validity.applies(now))
+        .filter_map(|rule| {
+            let RuleKind::AtClock { anchor, .. } = rule.kind else {
+                return None;
+            };
+            let civil = rule.validity.civil_now(now);
+            let token = at_clock_due(&rule.id, anchor, None, civil)?;
+            let current = occurrence_token(&rule.id, civil.date, civil.wall);
+            (token != current || now.epoch.0.rem_euclid(60) != 0).then_some(token)
+        })
+        .collect()
+}
+
 /// Is an AtClock due at `now`, within tolerance? Returns the occurrence token
 /// of the repère it would satisfy, or `None`. Minute granularity (boundary
 /// evaluation): the most recent repère at or before `now` is considered.

@@ -97,8 +97,11 @@ piste, ou durée restante inconnue (-1) : demande immédiate.
 - **skip** : rien n'est préparé d'avance la plupart du temps → `urgent`
   levé et `pull_raw.fetch()` **avant** `source.skip` (sinon le fichier de
   secours comblerait le trou).
-- **interrupt** (override / `AtClock` hard) : la piste coupée est sautée, le
-  pull (sans piste) redemande tout de suite, pendant l'insert.
+- **interrupt** (override / `AtClock` hard) : `source.skip(pull)` saute la
+  piste à travers le crossfade et purge sa traîne tamponnée ; `no_cross`
+  interdit de mélanger la chanson coupée à la piste de retour. Le pull
+  redemande pendant l'insert. Le test `python3 tests/liquidsoap_interrupt.py`
+  mesure la sortie audio avec et sans crossfade (Liquidsoap 2.4).
 - **stop / override soft** : le `flush` n'a en général plus rien à vider ;
   la demande de fin de piste reçoit `halted` / l'override.
 - Validé contre Liquidsoap **2.2.4** (script généré, adapté à la syntaxe
@@ -286,7 +289,10 @@ Qui envoie quoi :
   démarrage de stationd, l'état restauré est réaffirmé une fois ;
 - la **veille** (`sleeping`, 2026-09-28 — remplace `stopped`) est atteinte
   au pull, donc à un bord de piste : rien à pousser. Réveil (`wake` /
-  `resume`) → `resume` : le pull redemande, piste du créneau courant ;
+  `resume`) → `resume` : le pull redemande, piste du créneau courant.
+  Les occurrences `AtClock` antérieures au réveil sont marquées consommées :
+  aucun rattrapage du TOPH passé. Le repère à l'instant du réveil et les
+  repères futurs restent éligibles ;
 - **arrêt opérateur** (`stationctl station stop`, RPC `Station.Shutdown`) :
   stationd écrit le marqueur `data/stationd.stopped`, ne résout plus rien
   (tout pull reçoit `halted`), pousse `stationd.park` (drapeau `halted` levé

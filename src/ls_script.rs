@@ -216,7 +216,7 @@ let stationd.relay_url = ref("")
 let stationd.relaying = ref(false)
 let stationd.relay_on = ref(fun (_) -> ())
 let stationd.relay_off = ref(fun () -> ())
-# Set when a live gives the air back: the track the live froze is dropped
+# Set by a hard cut or when a live gives the air back: the old track is dropped
 # without a crossfade (else its buffered tail would be mixed into the return
 # track). Consumed by the next crossfade transition.
 let stationd.no_cross = ref(false)
@@ -532,7 +532,10 @@ end
 # re-asked — never when it is itself an override).
 def stationd.cmd_interrupt(uri) =
   interrupt.push(request.create(uri))
-  source.skip(pull_raw)
+  # Skip through the crossfade so its buffered tail is discarded too.
+  # The return track must not be mixed with audio from the interrupted song.
+  stationd.no_cross := true
+  source.skip(pull)
   log.important(label="stationd", "interrupt: hard override cut in")
   "OK"
 end

@@ -103,3 +103,65 @@ fn regional_migration_preserves_history_and_statistics_keep_zero_denominators() 
     assert_eq!(weekly[0][5], 2.0);
     assert_eq!(weekly[1][5], 1.0);
 }
+
+#[test]
+fn plugin_statistics_include_zero_exclude_failures_and_bound_windows() {
+    let db = rusqlite::Connection::open_in_memory().unwrap();
+    db.execute_batch(include_str!("../plugins/listener-stats-wasm/migrations/001_snapshots.sql")).unwrap();
+    db.execute_batch(include_str!("../plugins/listener-stats-wasm/migrations/002_regions.sql")).unwrap();
+    db.execute_batch("INSERT INTO listener_snapshot VALUES
+        ('/radio',345610,9), ('/radio',345620,0),
+        ('/radio',345630,3), ('/radio',345640,NULL),
+        ('/zero',345610,0), ('/failed',345610,NULL),
+        ('/old',259299,8), ('/future',345701,8);
+        INSERT INTO listener_geo VALUES
+        ('/radio',345610,'found','FR','IDF','Paris',4),
+        ('/radio',345630,'found','FR','IDF','Paris',2),
+        ('/radio',345610,'unavailable','','','',5),
+        ('/radio',345630,'unavailable','','','',1);").unwrap();
+    let query = |sql: &str| {
+        let sql = sql.replace("unixepoch()", "345700");
+        let mut stmt = db.prepare(&sql).unwrap();
+        let count = stmt.column_count();
+        stmt.query_map([], |row| {
+            let values = (0..count).map(|i| {
+                use rusqlite::types::ValueRef;
+                match row.get_ref(i).unwrap() {
+                    ValueRef::Null => serde_json::Value::Null,
+                    ValueRef::Integer(v) => json!(v),
+                    ValueRef::Real(v) => json!(v),
+                    ValueRef::Text(v) => json!(std::str::from_utf8(v).unwrap()),
+                    ValueRef::Blob(_) => panic!("unexpected blob"),
+                }
+            }).collect::<Vec<_>>();
+            Ok(values)
+        }).unwrap().collect::<Result<Vec<_>, _>>().unwrap()
+    };
+    let summary = query(include_str!("../plugins/listener-stats-wasm/src/ui/audience.sql"));
+    assert_eq!(summary.len(), 3); // old and future samples are excluded
+    assert_eq!(&summary[0][..5], &[json!("/radio"), json!(null), json!(4.0), json!(9), json!(75.0)]);
+    assert_eq!(&summary[1][..5], &[json!("/zero"), json!(0), json!(0.0), json!(0), json!(100.0)]);
+    assert_eq!(&summary[2][..5], &[json!("/failed"), json!(null), json!(null), json!(null), json!(0.0)]);
+    let geo = query(include_str!("../plugins/listener-stats-wasm/src/ui/geography.sql"));
+    assert_eq!(geo.len(), 2);
+    let paris = geo.iter().find(|r| r[3] == json!("Paris")).unwrap();
+    assert_eq!(&paris[4..7], &[json!(2.0), json!(4), json!(50.0)]);
+    assert!(geo.iter().any(|r| r[1] == json!("Inconnu") && r[7] == json!("unavailable")));
+    for sql in [
+        include_str!("../plugins/listener-stats-wasm/src/ui/hourly.sql"),
+        include_str!("../plugins/listener-stats-wasm/src/ui/daily.sql"),
+    ] {
+        let rows = query(sql);
+        let radio = rows.iter().find(|r| r[1] == json!("/radio")).unwrap();
+        assert_eq!(&radio[2..], &[json!(4.0), json!(9), json!(0), json!(3), json!(1)]);
+        assert!(!rows.iter().any(|r| r[1] == json!("/future")));
+        if sql.contains("Jour_UTC") {
+            assert!(rows.iter().any(|r| r[1] == json!("/old")));
+        } else {
+            assert!(!rows.iter().any(|r| r[1] == json!("/old")));
+        }
+    }
+    db.execute_batch("DELETE FROM listener_geo; DELETE FROM listener_snapshot;").unwrap();
+    assert!(query(include_str!("../plugins/listener-stats-wasm/src/ui/audience.sql")).is_empty());
+    assert!(query(include_str!("../plugins/listener-stats-wasm/src/ui/geography.sql")).is_empty());
+}

@@ -48,21 +48,33 @@ pub fn on_event(input: String) -> FnResult<()> {
     Ok(())
 }
 
-/// Generic table tabs; stationd and its TUI know none of these table names.
+/// Aggregated statistics owned by the plugin; the TUI stays generic.
 #[plugin_fn]
 pub fn ui_tabs() -> FnResult<String> {
-    Ok(serde_json::json!([
+    Ok(json!([
         {
             "id": "audience",
             "title": "Audience",
-            "description": "Derniers relevés · NULL signifie collecte inconnue · horaires UTC",
-            "sql": "SELECT mount AS Mount, datetime(at, 'unixepoch') AS UTC, listeners AS Auditeurs FROM listener_snapshot ORDER BY at DESC, mount LIMIT 200"
+            "description": "Synthèse 24 h par mount : dernier effectif, moyenne, pic et % de collectes réussies. NULL = collecte inconnue. Vérifier Dernier_UTC pour la fraîcheur. Moyennes par relevé, pas d'auditeurs uniques.",
+            "sql": include_str!("ui/audience.sql")
+        },
+        {
+            "id": "hourly",
+            "title": "Audience / heure",
+            "description": "Évolution sur 24 h, par heure UTC et mount : moyenne, pic, minimum, relevés valides et échecs. Zéros inclus ; échecs exclus des moyennes. Heures sans relevé absentes ; période courante partielle.",
+            "sql": include_str!("ui/hourly.sql")
+        },
+        {
+            "id": "daily",
+            "title": "Audience / jour",
+            "description": "Évolution sur 30 jours (selon rétention), par jour UTC et mount. Moyennes par relevé, zéros inclus et échecs exclus. Jours sans relevé absents ; périodes aux bornes partielles.",
+            "sql": include_str!("ui/daily.sql")
         },
         {
             "id": "geography",
             "title": "Géographie",
-            "description": "Répartition au dernier relevé de chaque mount · pays et régions inconnus conservés",
-            "sql": "SELECT mount AS Mount, status AS Statut, country AS Pays, region AS Region, city AS Ville, listeners AS Auditeurs FROM listener_geo AS g WHERE at = (SELECT MAX(at) FROM listener_snapshot AS s WHERE s.mount = g.mount) ORDER BY listeners DESC, mount, country, region, city LIMIT 200"
+            "description": "Répartition sur 24 h : moyenne, pic et part par lieu et mount. Moyenne sur tous les relevés valides, y compris les absences du lieu. Part = proportion des observations d'auditeurs, pas des personnes uniques. Lieux inconnus conservés ; top 200.",
+            "sql": include_str!("ui/geography.sql")
         }
     ]).to_string())
 }
