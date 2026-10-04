@@ -3217,31 +3217,40 @@ mod ui_tests {
 
     #[tokio::test]
     #[ignore = "requires STATIOND_TEST_LISTENER_UI_WASM pointing to the rebuilt listener-stats guest"]
-    async fn real_wasm_ui_tabs_distinguish_unknown_audience_and_clear_old_geography() {
+    async fn real_wasm_ui_tabs_aggregate_audience_and_preserve_historical_geography() {
         let dir = tempfile::tempdir().unwrap();
         let mut decl: PluginDecl = toml::from_str("name = 'audience-test'\nenabled = true\ncapabilities = ['db', 'listener_details', 'geoip']").unwrap();
         decl.wasm = Some(std::env::var("STATIOND_TEST_LISTENER_UI_WASM").unwrap());
         let handle = spawn_env(vec![decl], PluginEnv { db_dir: Some(dir.path().into()), ..Default::default() });
         let info = handle.list().await.remove(0);
         assert_eq!(info.state, "loaded", "{}", info.reason);
-        assert_eq!(info.tabs.len(), 2);
+        assert_eq!(info.tabs.len(), 4);
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
-        handle.emit(PluginEvent::ListenerSnapshot { mount: "/radio".into(), at: now,
+        handle.emit(PluginEvent::ListenerSnapshot { mount: "/radio".into(), at: now - 2,
             listeners: Some(vec![crate::listener_snapshot::Listener {
                 id: "private-id".into(), ip: "8.8.8.8".parse().unwrap(), connected_seconds: 10, user_agent: None,
             }]),
         });
         let geo = handle.read_tab("audience-test", "geography").await.unwrap();
         assert_eq!(geo.rows.len(), 1);
-        assert_eq!(geo.rows[0][1], serde_json::json!("unavailable"));
-        handle.emit(PluginEvent::ListenerSnapshot { mount: "/radio".into(), at: now + 1, listeners: None });
+        assert_eq!(geo.rows[0][7], serde_json::json!("unavailable"));
+        handle.emit(PluginEvent::ListenerSnapshot { mount: "/radio".into(), at: now - 1, listeners: None });
         let table = handle.read_tab("audience-test", "audience").await.unwrap();
-        assert_eq!(table.rows[0][2], serde_json::Value::Null);
-        assert!(handle.read_tab("audience-test", "geography").await.unwrap().rows.is_empty());
-        handle.emit(PluginEvent::ListenerSnapshot { mount: "/radio".into(), at: now + 2, listeners: Some(vec![]) });
+        assert_eq!(table.rows[0][1], serde_json::Value::Null);
+        assert_eq!(handle.read_tab("audience-test", "geography").await.unwrap().rows.len(), 1);
+        handle.emit(PluginEvent::ListenerSnapshot { mount: "/radio".into(), at: now, listeners: Some(vec![]) });
         let table = handle.read_tab("audience-test", "audience").await.unwrap();
-        assert_eq!(table.rows[0][2], serde_json::json!(0));
+        assert_eq!(table.rows[0][1], serde_json::json!(0));
+        assert_eq!(table.rows[0][2], serde_json::json!(0.5));
+        assert_eq!(table.rows[0][3], serde_json::json!(1));
+        assert_eq!(table.rows[0][4], serde_json::json!(66.7));
+        let geo = handle.read_tab("audience-test", "geography").await.unwrap();
+        assert_eq!(geo.rows[0][4], serde_json::json!(0.5));
+        for tab in ["hourly", "daily"] {
+            assert!(!handle.read_tab("audience-test", tab).await.unwrap().rows.is_empty());
+        }
     }
+
 
     #[tokio::test]
     #[ignore = "requires STATIOND_TEST_UI_WASM pointing to the rebuilt play-stats guest"]

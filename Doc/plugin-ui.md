@@ -72,8 +72,25 @@ Entrée ouvre leur première vue ; `s/x/r/l` contrôlent leur cycle de vie.
 - Erreur : dernières données conservées et marquées anciennes ; sans données,
   l'erreur seule s'affiche. Une vue retirée ramène au catalogue Plugins.
 
-`play-stats` fournit Diffusions ; `listener-stats` fournit Audience et
-Géographie (dernier relevé par mount, collecte inconnue conservée).
+`play-stats` fournit Diffusions ; `listener-stats` fournit quatre vues statistiques :
+
+- **Audience** : synthèse des dernières 24 h par mount, dernier effectif observé,
+  moyenne, pic, pourcentage de collectes réussies et date du dernier relevé UTC.
+  Un dernier échec affiche NULL ; vérifier la date pour détecter une collecte arrêtée.
+- **Audience / heure** : moyennes, pics, minima, relevés valides et échecs par
+  heure UTC sur les dernières 24 h (au plus 1000 lignes).
+- **Audience / jour** : mêmes indicateurs par jour UTC sur 30 jours, selon
+  la rétention disponible (au plus 1000 lignes).
+- **Géographie** : classement des lieux sur 24 h, avec moyenne, pic et part
+  d'audience par mount ; lieux inconnus conservés (top 200).
+
+Les moyennes sont arithmétiques par relevé réussi : les zéros comptent,
+les collectes échouées sont exclues. Pour un lieu, tous les relevés réussis du
+mount comptent au dénominateur, même quand ce lieu est absent. La part est
+la proportion des observations d'auditeurs du mount sur la période ; ce ne
+sont pas des auditeurs uniques ni une durée d'écoute. Les périodes aux bornes
+peuvent être partielles ; les périodes sans relevé ne produisent aucune ligne.
+Les vues Audience et Géographie sont limitées à 200 lignes.
 Reconstruire les guests WASM puis recharger les plugins pour voir les onglets.
 Aucun reset de base ni changement des migrations n'est nécessaire.
 
