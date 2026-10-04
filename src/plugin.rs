@@ -1858,7 +1858,7 @@ fn wasm_db_batch(host: &Host, input: &str) -> String {
     )
 }
 
-/// Local MMDB lookup. No network call, no IP log. Missing/invalid database
+/// Local MMDB lookup. No network call; IP capture is opt-in. Missing/invalid database
 /// at startup yields unavailable; absent/reserved addresses yield not_found.
 fn wasm_geoip_lookup(host: &Host, input: &str) -> String {
     #[derive(Deserialize)]

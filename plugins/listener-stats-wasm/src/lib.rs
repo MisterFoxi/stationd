@@ -73,7 +73,7 @@ pub fn ui_tabs() -> FnResult<String> {
         {
             "id": "geography",
             "title": "Géographie",
-            "description": "Répartition sur 24 h : moyenne, pic et part par lieu et mount. Moyenne sur tous les relevés valides, y compris les absences du lieu. Part = proportion des observations d'auditeurs, pas des personnes uniques. Lieux inconnus conservés ; top 200.",
+            "description": "Répartition sur 24 h : moyenne, pic et part par lieu et mount. Moyenne sur tous les relevés valides, y compris les absences du lieu. Part = proportion des observations d'auditeurs, pas des personnes uniques. Lieux inconnus conservés ; top 200. GeoLite2 data created by MaxMind (https://www.maxmind.com). Historique DB-IP : IP Geolocation by DB-IP (https://db-ip.com).",
             "sql": include_str!("ui/geography.sql")
         }
     ]).to_string())

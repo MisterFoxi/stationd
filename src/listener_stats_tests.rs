@@ -41,9 +41,9 @@ fn detailed_snapshots_only_reach_opted_in_plugins() {
 }
 
 #[test]
-#[ignore = "requires STATIOND_TEST_DBIP and STATIOND_TEST_LISTENER_WASM"]
-fn real_dbip_wasm_host_and_database_roundtrip() {
-    let mmdb = std::env::var_os("STATIOND_TEST_DBIP").expect("STATIOND_TEST_DBIP");
+#[ignore = "requires STATIOND_TEST_GEOIP (or STATIOND_TEST_DBIP) and STATIOND_TEST_LISTENER_WASM"]
+fn real_geoip_wasm_host_and_database_roundtrip() {
+    let mmdb = std::env::var_os("STATIOND_TEST_GEOIP").or_else(|| std::env::var_os("STATIOND_TEST_DBIP")).expect("STATIOND_TEST_GEOIP or STATIOND_TEST_DBIP");
     let wasm = std::env::var("STATIOND_TEST_LISTENER_WASM").expect("STATIOND_TEST_LISTENER_WASM");
     let dir = tempfile::tempdir().unwrap();
     let db = Arc::new(PluginDb::open(dir.path(), "listener-stats", Default::default()).unwrap());

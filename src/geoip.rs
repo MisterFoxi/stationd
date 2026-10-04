@@ -1,8 +1,9 @@
-//! Local DB-IP City Lite reader. No HTTP and no persistence of queried IPs.
+//! Local GeoLite2 City / DB-IP City Lite reader. IP persistence is opt-in for diagnostics only.
 use std::collections::BTreeMap;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use maxminddb::{MaxMindDBError, Reader};
 use serde::{Deserialize, Serialize};
@@ -12,11 +13,71 @@ use serde::{Deserialize, Serialize};
 pub struct GeoipConfig {
     /// Operator-controlled file; relative to stationd's working directory.
     pub database: PathBuf,
+    /// Optional bounded JSONL capture of IPs and lookup results for debugging.
+    #[serde(default)]
+    pub debug_log: Option<PathBuf>,
 }
 
 /// Shared immutable reader. Reload by restarting stationd after file replacement.
 pub struct Geoip {
     reader: Reader<Vec<u8>>,
+    debug_log: Option<DebugLog>,
+}
+
+const DEBUG_LOG_MAX_BYTES: u64 = 10 * 1024 * 1024;
+
+struct DebugLog {
+    // None after the first write failure or when the size limit is reached.
+    file: Mutex<Option<std::fs::File>>,
+}
+
+impl DebugLog {
+    fn open(path: &Path) -> std::io::Result<Self> {
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).append(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let file = options.open(path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        }
+        Ok(Self { file: Mutex::new(Some(file)) })
+    }
+
+    fn record(&self, ip: IpAddr, database_type: &str, database_build_epoch: u64, result: &Result<Location, String>) {
+        let mut guard = self.file.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(file) = guard.as_mut() else { return };
+        let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default().as_secs();
+        let value = match result {
+            Ok(location) => serde_json::json!({
+                "at": at, "ip": ip, "database_type": database_type, "database_build_epoch": database_build_epoch,
+                "result": location,
+            }),
+            Err(reason) => serde_json::json!({
+                "at": at, "ip": ip, "database_type": database_type, "database_build_epoch": database_build_epoch,
+                "error": reason,
+            }),
+        };
+        let mut bytes = value.to_string().into_bytes();
+        bytes.push(b'\n');
+        let written = (|| -> Result<(), &'static str> {
+            let size = file.metadata().map_err(|_| "cannot read capture size")?.len();
+            if size.saturating_add(bytes.len() as u64) > DEBUG_LOG_MAX_BYTES {
+                return Err("capture reached its 10 MiB limit");
+            }
+            file.write_all(&bytes).map_err(|_| "cannot write capture")
+        })();
+        if let Err(reason) = written {
+            *guard = None;
+            tracing::warn!(reason, "GeoIP debug capture stopped; lookup results are unaffected");
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize)]
@@ -54,7 +115,7 @@ struct Record {
     country: Country,
     #[serde(default)]
     city: City,
-    // DB-IP orders subdivisions from broadest to most specific. Index zero
+    // Both supported databases order subdivisions from broadest to most specific. Index zero
     // is the administrative region/state; do not confuse it with the city.
     #[serde(default)]
     subdivisions: Vec<City>,
@@ -74,13 +135,29 @@ impl Geoip {
         let reader = std::panic::catch_unwind(|| Reader::from_source(bytes))
             .map_err(|_| "invalid GeoIP MMDB database")?
             .map_err(|_| "invalid GeoIP MMDB database")?;
-        if reader.metadata.database_type != "DBIP-City-Lite" {
-            return Err("expected a DBIP-City-Lite MMDB database".into());
-        }
-        Ok(Self { reader })
+        validate_database_type(&reader.metadata.database_type)?;
+        Ok(Self { reader, debug_log: None })
+    }
+
+    pub fn database_type(&self) -> &str {
+        &self.reader.metadata.database_type
+    }
+
+    /// The parent directory must already exist. Failure does not change lookups.
+    pub fn enable_debug_log(&mut self, path: &Path) -> std::io::Result<()> {
+        self.debug_log = Some(DebugLog::open(path)?);
+        Ok(())
     }
 
     pub fn lookup(&self, ip: IpAddr) -> Result<Location, String> {
+        let result = self.lookup_inner(ip);
+        if let Some(log) = &self.debug_log {
+            log.record(ip, self.database_type(), self.reader.metadata.build_epoch, &result);
+        }
+        result
+    }
+
+    fn lookup_inner(&self, ip: IpAddr) -> Result<Location, String> {
         let ip = match ip {
             IpAddr::V6(v6) => v6.to_ipv4_mapped().map(IpAddr::V4).unwrap_or(ip),
             _ => ip,
@@ -98,6 +175,16 @@ impl Geoip {
         }
     }
 }
+
+fn validate_database_type(database_type: &str) -> Result<(), String> {
+    match database_type {
+        "GeoLite2-City" | "DBIP-City-Lite" => Ok(()),
+        _ => Err("expected a GeoLite2-City or DBIP-City-Lite MMDB database".into()),
+    }
+}
+
+// History can contain observations from both providers; attribution covers both.
+pub const DATA_ATTRIBUTION: &str = "This product includes GeoLite2 data created by MaxMind - https://www.maxmind.com\nIP Geolocation by DB-IP - https://db-ip.com\n";
 
 fn location(record: Record) -> Location {
     let Some(country) = record.country.iso_code else { return Location::not_found() };
@@ -137,6 +224,107 @@ fn non_public(ip: IpAddr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn accepts_city_databases_and_rejects_other_editions() {
+        for edition in ["GeoLite2-City", "DBIP-City-Lite"] {
+            assert!(validate_database_type(edition).is_ok());
+        }
+        for edition in ["GeoLite2-Country", "GeoLite2-ASN", "GeoIP2-City", "unknown", ""] {
+            assert!(validate_database_type(edition).is_err());
+        }
+    }
+
+    #[test]
+    fn debug_capture_is_opt_in_and_records_results_and_errors() {
+        let config: GeoipConfig = toml::from_str("database = 'db.mmdb'").unwrap();
+        assert!(config.debug_log.is_none());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("debug.jsonl");
+        let log = DebugLog::open(&path).unwrap();
+        let found = Ok(Location {
+            status: "found", country: Some("FR".into()),
+            city: Some("Paris".into()), region: Some("Ile-de-France".into()),
+        });
+        log.record("8.8.8.8".parse().unwrap(), "GeoLite2-City", 1234, &found);
+        log.record("192.168.1.254".parse().unwrap(), "GeoLite2-City", 1234, &Ok(Location::not_found()));
+        log.record("1.1.1.1".parse().unwrap(), "GeoLite2-City", 1234, &Err("GeoIP database lookup failed".into()));
+        let records: Vec<serde_json::Value> = std::fs::read_to_string(&path).unwrap()
+            .lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+        assert_eq!(records.len(), 3);
+        assert_eq!(records[0]["ip"], "8.8.8.8");
+        assert_eq!(records[0]["database_build_epoch"], 1234);
+        assert_eq!(records[0]["database_type"], "GeoLite2-City");
+        assert!(records[0]["at"].as_u64().unwrap() > 0);
+        assert_eq!(records[0]["result"]["country"], "FR");
+        assert_eq!(records[1]["result"]["status"], "not_found");
+        assert_eq!(records[2]["error"], "GeoIP database lookup failed");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(path).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+    }
+
+    #[test]
+    fn debug_capture_appends_and_stops_at_size_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("debug.jsonl");
+        let result = Ok(Location::not_found());
+        let log = DebugLog::open(&path).unwrap();
+        log.record("127.0.0.1".parse().unwrap(), "GeoLite2-City", 1234, &result);
+        drop(log);
+        let log = DebugLog::open(&path).unwrap();
+        log.record("::1".parse().unwrap(), "GeoLite2-City", 1234, &result);
+        assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 2);
+        log.file.lock().unwrap().as_ref().unwrap().set_len(DEBUG_LOG_MAX_BYTES).unwrap();
+        log.record("::1".parse().unwrap(), "GeoLite2-City", 1234, &result);
+        assert!(log.file.lock().unwrap().is_none());
+        log.record("::1".parse().unwrap(), "GeoLite2-City", 1234, &result);
+        assert_eq!(std::fs::metadata(path).unwrap().len(), DEBUG_LOG_MAX_BYTES);
+        assert!(DebugLog::open(&dir.path().join("missing/debug.jsonl")).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn debug_capture_write_failure_disables_capture() {
+        let log = DebugLog {
+            file: Mutex::new(Some(std::fs::OpenOptions::new().write(true).open("/dev/full").unwrap())),
+        };
+        log.record("8.8.8.8".parse().unwrap(), "GeoLite2-City", 1234, &Ok(Location::not_found()));
+        assert!(log.file.lock().unwrap().is_none());
+    }
+
+    #[test]
+    #[ignore = "requires STATIOND_TEST_GEOLITE_FIXTURE (official GeoLite2-City-Test.mmdb)"]
+    fn geolite2_fixture_maps_country_city_and_region() {
+        let path = std::env::var_os("STATIOND_TEST_GEOLITE_FIXTURE").expect("STATIOND_TEST_GEOLITE_FIXTURE");
+        let reader = Geoip::open(Path::new(&path)).unwrap();
+        assert_eq!(reader.database_type(), "GeoLite2-City");
+        let result = reader.lookup("81.2.69.160".parse().unwrap()).unwrap();
+        assert_eq!(result.status, "found");
+        assert_eq!(result.country.as_deref(), Some("GB"));
+        assert_eq!(result.city.as_deref(), Some("London"));
+        assert_eq!(result.region.as_deref(), Some("Angleterre"));
+    }
+
+    #[test]
+    #[ignore = "requires STATIOND_TEST_GEOIP (or STATIOND_TEST_DBIP)"]
+    fn real_geoip_debug_capture_matches_lookup() {
+        let path = std::env::var_os("STATIOND_TEST_GEOIP").or_else(|| std::env::var_os("STATIOND_TEST_DBIP")).expect("STATIOND_TEST_GEOIP or STATIOND_TEST_DBIP");
+        let mut reader = Geoip::open(Path::new(&path)).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let capture = dir.path().join("debug.jsonl");
+        reader.enable_debug_log(&capture).unwrap();
+        for ip in ["104.28.42.16", "104.28.42.27", "8.8.8.8", "1.1.1.1", "::ffff:192.168.1.254"] {
+            let result = reader.lookup(ip.parse().unwrap()).unwrap();
+            let last = std::fs::read_to_string(&capture).unwrap();
+            let record: serde_json::Value = serde_json::from_str(last.lines().last().unwrap()).unwrap();
+            assert_eq!(record["ip"], ip);
+            assert_eq!(record["result"], serde_json::to_value(result).unwrap());
+            println!("{record}");
+        }
+    }
 
     #[test]
     fn maps_city_country_and_missing_values() {
