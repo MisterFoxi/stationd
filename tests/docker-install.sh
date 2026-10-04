@@ -189,8 +189,8 @@ cat > "$tmp/mock/ssh" <<'EOF'
 #!/usr/bin/env bash
 printf 'ssh %s\n' "$*" >> "$TEST_LOG"
 case "${@: -1}" in
-  'mktemp -d /tmp/stationd-deploy.XXXXXXXXXX')
-    printf '%s\n' "${TEST_REMOTE_DIR:-/tmp/stationd-deploy.abcdefghij}" ;;
+  'mktemp -d /var/tmp/stationd-deploy.XXXXXXXXXX')
+    printf '%s\n' "${TEST_REMOTE_DIR:-/var/tmp/stationd-deploy.abcdefghij}" ;;
   *'sudo '*) exit "${TEST_REMOTE_INSTALL_FAIL:-0}" ;;
 esac
 EOF
@@ -203,9 +203,9 @@ chmod +x "$tmp/mock/ssh" "$tmp/mock/scp"
 : > "$TEST_LOG"
 make -C "$tmp/repo" dist VM=foxi@node ARGS=--allow-dirty > "$tmp/output"
 grep -Fq 'scp -- ' "$TEST_LOG"
-grep -Fq 'foxi@node:/tmp/stationd-deploy.abcdefghij/bundle.tar' "$TEST_LOG"
-grep -Fq "ssh -t foxi@node cd '/tmp/stationd-deploy.abcdefghij' && tar -xf bundle.tar && sudo './stationd-0.1.0-deadbeef/install.sh'" "$TEST_LOG"
-grep -Fq "ssh foxi@node rm -rf -- '/tmp/stationd-deploy.abcdefghij'" "$TEST_LOG"
+grep -Fq 'foxi@node:/var/tmp/stationd-deploy.abcdefghij/bundle.tar' "$TEST_LOG"
+grep -Fq "ssh -t foxi@node cd '/var/tmp/stationd-deploy.abcdefghij' && tar -xf bundle.tar && sudo './stationd-0.1.0-deadbeef/install.sh'" "$TEST_LOG"
+grep -Fq "ssh foxi@node rm -rf -- '/var/tmp/stationd-deploy.abcdefghij'" "$TEST_LOG"
 test -s "$tmp/repo/dist/stationd-0.1.0-deadbeef.tar"
 : > "$TEST_LOG"
 bash "$tmp/repo/docker/package.sh" --vm node --allow-dirty > "$tmp/output"

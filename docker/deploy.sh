@@ -17,9 +17,9 @@ for cmd in ssh scp; do
 done
 
 echo "== préparation du transfert vers $vm"
-remote="$(ssh "$vm" 'mktemp -d /tmp/stationd-deploy.XXXXXXXXXX')"
+remote="$(ssh "$vm" 'mktemp -d /var/tmp/stationd-deploy.XXXXXXXXXX')"
 # Le chemin reçu est utilisé dans des commandes distantes, notamment le nettoyage.
-[[ "$remote" =~ ^/tmp/stationd-deploy\.[a-zA-Z0-9]{10}$ ]] || die "répertoire distant invalide : $remote"
+[[ "$remote" =~ ^/var/tmp/stationd-deploy\.[a-zA-Z0-9]{10}$ ]] || die "répertoire distant invalide : $remote"
 failed() {
   result=$?
   if [ "$result" != 0 ]; then

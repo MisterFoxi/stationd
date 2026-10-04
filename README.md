@@ -534,7 +534,7 @@ any binary or plugin build failure stops packaging. Packages always use the
 release profile, regardless of the branch or Make's `PROFILE` / `P` settings.
 
 With `VM`, packaging runs `scp`, extracts the bundle in a unique remote
-`/tmp` directory, and invokes `sudo install.sh` over an interactive SSH session.
+`/var/tmp` directory on disk (avoiding RAM-backed `/tmp` mounts), and invokes `sudo install.sh` over an interactive SSH session.
 Use an SSH config alias or `user@host`; SSH and sudo can ask for credentials.
 The local archive remains available. Remote temporary files are removed after
 success and retained on failure. The installer preserves existing configuration
