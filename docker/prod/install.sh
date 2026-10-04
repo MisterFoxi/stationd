@@ -32,7 +32,7 @@ exec 9>/run/lock/stationd-install.lock
 flock -n 9 || die "une installation stationd est déjà en cours"
 docker compose version >/dev/null 2>&1 || die "plugin docker compose absent"
 docker info >/dev/null 2>&1 || die "daemon Docker indisponible"
-for f in VERSION SHA256SUMS compose.yaml stationd.example.toml client.sh radio/error.mp3 radio/bruit.mp3; do
+for f in VERSION SHA256SUMS compose.yaml stationd.example.toml client.sh scripts/update-geolite2.sh radio/error.mp3 radio/bruit.mp3; do
   [ -s "$here/$f" ] || die "bundle incomplet : $f absent ou vide"
 done
 [ -d "$here/examples" ] || die "bundle incomplet : examples/"
@@ -54,6 +54,8 @@ docker run --rm --entrypoint /bin/sh "stationd:$tag" -euc '
   /usr/local/bin/stationd-tui --help >/dev/null
   test -s /usr/share/stationd/error.mp3
   test -s /usr/share/stationd/bruit.mp3
+  test -x /usr/local/bin/update-geolite2.sh
+  for cmd in curl tar gzip stty; do command -v "$cmd" >/dev/null; done
 '
 getent group stationd >/dev/null || groupadd --system stationd
 id stationd >/dev/null 2>&1 || useradd --system -g stationd -d "$dir" -M -s /usr/sbin/nologin stationd
@@ -84,7 +86,9 @@ docker compose --project-directory "$dir" --env-file "$tmp/.env" -f "$here/compo
 media_line="$(docker compose --project-directory "$dir" --env-file "$tmp/.env" -f "$here/compose.yaml" config --environment | sed -n 's/^MEDIA_PATH=//p')"
 [ -n "$media_line" ] && [ -d "$media_line" ] || die "médiathèque configurée absente : $media_line"
 install -d -m 2770 -o stationd -g stationd "$dir" "$dir/playlist" "$dir/radio" "$dir/grid"
-install -d -m 0750 -o stationd -g stationd "$dir/data"
+install -d -m 0750 -o stationd -g stationd "$dir/data" "$dir/data/geoip"
+install -d -m 0755 "$dir/scripts"
+install -m 0755 "$here/scripts/update-geolite2.sh" "$dir/scripts/update-geolite2.sh"
 cp -r --no-clobber "$here/radio/." "$dir/radio/"
 if [ -f "$dir/grid.toml" ] && [ ! -e "$dir/grid/grid.toml" ]; then
   mv "$dir/grid.toml" "$dir/grid/grid.toml"

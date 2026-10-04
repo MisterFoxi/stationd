@@ -630,6 +630,30 @@ point them at your own files in `radio/`. The only name to set is
 `[station] name` (Icecast's `<location>`, default stream name); public
 listen URLs are the reverse proxy's.
 
+GeoLite2 City: the bundle installs `scripts/update-geolite2.sh`, and the image
+also includes `/usr/local/bin/update-geolite2.sh` with its download tools.
+The installer prepares `data/geoip` for the stationd user. Download the database
+on the production node by entering the MaxMind Account ID and license key:
+
+```sh
+cd /opt/stationd
+docker compose exec -it -u stationd station /usr/local/bin/update-geolite2.sh
+```
+
+Use the same relative path in development and production, in the existing
+`[geoip]` section of `stationd.toml`:
+
+```toml
+[geoip]
+database = "./data/geoip/GeoLite2-City.mmdb"
+```
+
+Then run `stationctl quit` to restart stationd and load the new database.
+The installer preserves existing `stationd.toml` and MMDB files; replacing the
+example configuration does not change the active database path. No license
+key or MMDB is included in the delivery. See [GeoLite2 setup](Doc/listener-stats-v1.md#geolite2-city-maxmind)
+for diagnostics and updates.
+
 Update: same three commands with the new bundle (only `STATIOND_VERSION`
 changes in `.env`). Roll back: put the previous version back in `.env`, then
 `docker compose up -d` (older images stay loaded).

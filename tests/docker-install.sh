@@ -5,7 +5,7 @@ set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
-mkdir -p "$tmp/mock" "$tmp/node" "$tmp/media" "$tmp/bundle/radio/sub" "$tmp/bundle/examples" "$tmp/system/bin" "$tmp/system/libexec"
+mkdir -p "$tmp/mock" "$tmp/node" "$tmp/media" "$tmp/bundle/radio/sub" "$tmp/bundle/examples" "$tmp/bundle/scripts" "$tmp/system/bin" "$tmp/system/libexec"
 export TEST_HOME="$tmp"
 export TEST_LOG="$tmp/log"
 export TEST_MEDIA="$tmp/media"
@@ -57,6 +57,7 @@ printf ' %q' "$@" >> "$TEST_LOG"
 printf '\n' >> "$TEST_LOG"
 if [ "$1" = info ]; then exit "${TEST_INFO_FAIL:-0}"; fi
 if [ "$1" = save ]; then printf image; exit 0; fi
+if [ "$1" = build ]; then test -x "${@: -1}/bin/update-geolite2.sh" || exit 1; fi
 if [ "$1" = compose ]; then
   if [[ " $* " = *" cargo build "* ]]; then
     if [[ " $* " = *" --workspace "* ]] && [ "${TEST_FAIL_BUILD:-0}" = 1 ]; then exit 1; fi
@@ -95,6 +96,7 @@ sed -e "s|/run/lock/stationd-install.lock|$tmp/install.lock|g" \
     -e "s|/usr/local/bin|$tmp/system/bin|g" \
     "$root/docker/prod/install.sh" > "$tmp/bundle/install.sh"
 cp "$root/docker/prod/client.sh" "$tmp/bundle/client.sh"
+cp "$root/scripts/update-geolite2.sh" "$tmp/bundle/scripts/update-geolite2.sh"
 cp "$root/docker/prod/compose.yaml" "$tmp/bundle/compose.yaml"
 printf config > "$tmp/bundle/stationd.example.toml"
 printf error > "$tmp/bundle/radio/error.mp3"
@@ -115,17 +117,22 @@ bash "$tmp/bundle/install.sh" --dir "$tmp/node" --media "$tmp/media" --admin fox
 diff -r "$tmp/bundle/radio" "$tmp/node/radio"
 test -x "$tmp/system/bin/stationctl"
 test -x "$tmp/system/bin/stationd-tui"
+test -x "$tmp/node/scripts/update-geolite2.sh"
+cmp "$tmp/bundle/scripts/update-geolite2.sh" "$tmp/node/scripts/update-geolite2.sh"
+test -d "$tmp/node/data/geoip"
 grep -q 'usermod -aG docker foxi' "$TEST_LOG"
 grep -q 'usermod -aG stationd foxi' "$TEST_LOG"
 grep -q 'configuration requise' "$tmp/output"
 # Mise à jour : garder config, fichiers personnalisés et montage ; ajouter VERSION si absente.
 printf custom > "$tmp/node/radio/error.mp3"
+printf geodb > "$tmp/node/data/geoip/GeoLite2-City.mmdb"
 printf config > "$tmp/node/stationd.toml"
 printf 'MEDIA_PATH=%s\nSTATIOND_UID=982\nSTATIOND_GID=982\nMEDIA_GID=982\n' "$tmp/media" > "$tmp/node/.env"
 cp "$tmp/node/stationd.toml" "$tmp/expected-config"
 bash "$tmp/bundle/install.sh" --dir "$tmp/node" --admin foxi > "$tmp/output"
 test "$(cat "$tmp/node/radio/error.mp3")" = custom
 cmp "$tmp/expected-config" "$tmp/node/stationd.toml"
+test "$(cat "$tmp/node/data/geoip/GeoLite2-City.mmdb")" = geodb
 grep -qx STATIOND_VERSION=v1 "$tmp/node/.env"
 grep -q 'conteneur démarré' "$tmp/output"
 ! grep -q 'stationctl status' "$TEST_LOG"
@@ -158,7 +165,8 @@ cp "$root/docker/package.sh" "$tmp/repo/docker/package.sh"
 cp "$root/docker/deploy.sh" "$tmp/repo/docker/deploy.sh"
 cp "$root/Makefile" "$tmp/repo/Makefile"
 chmod +x "$tmp/repo/docker/package.sh"
-mkdir -p "$tmp/repo/tools"
+mkdir -p "$tmp/repo/tools" "$tmp/repo/scripts"
+cp "$root/scripts/update-geolite2.sh" "$tmp/repo/scripts/update-geolite2.sh"
 printf extractor > "$tmp/repo/tools/essentia_analyze.py"
 cp "$root/docker/prod/"{install.sh,client.sh,compose.yaml} "$tmp/repo/docker/prod/"
 cp -r "$tmp/bundle/radio" "$tmp/repo/radio"
@@ -174,6 +182,8 @@ bundle="$tmp/unpack/stationd-0.1.0-deadbeef"
 (cd "$bundle"; sha256sum --quiet -c SHA256SUMS)
 diff -r "$tmp/repo/radio" "$bundle/radio"
 test -x "$bundle/client.sh"
+test -x "$bundle/scripts/update-geolite2.sh"
+cmp "$tmp/repo/scripts/update-geolite2.sh" "$bundle/scripts/update-geolite2.sh"
 grep -q -- 'cargo build --release --locked --workspace --bins' "$TEST_LOG"
 grep -q 'station:/src/target/release/stationd-tui' "$TEST_LOG"
 : > "$TEST_LOG"

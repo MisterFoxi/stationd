@@ -63,7 +63,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # ca-certificates : flux `remote` en https relayés par Liquidsoap.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      ca-certificates tzdata \
+      ca-certificates tzdata curl tar gzip \
       ffmpeg \
       python3 python3-pip \
       "icecast2=${ICECAST_VERSION}" \

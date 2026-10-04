@@ -9,7 +9,7 @@
 # 2. construit l'image d'exploitation (docker/Dockerfile.prod, sans toolchain) ;
 # 3. vérifie l'image (bibliothèques, Liquidsoap, Icecast, plugins) ;
 # 4. produit dist/stationd-<version>-<rev>.tar : image + compose.yaml +
-#    install.sh + stationd.example.toml + examples/ + radio/ + SHA256SUMS.
+#    install.sh + stationd.example.toml + scripts/ + examples/ + radio/ + SHA256SUMS.
 #
 # Sur le nœud :
 #   scp dist/stationd-<tag>.tar <vm>:/tmp/
@@ -103,6 +103,7 @@ cp -r docker/rootfs "$stage/rootfs"
 # chmod 0755 par le COPY de Dockerfile.prod) et ses modèles TF (bakés via models/).
 [ -f tools/essentia_analyze.py ] || die "tools/essentia_analyze.py absent"
 cp tools/essentia_analyze.py "$stage/bin/essentia_analyze.py"
+install -m 0755 scripts/update-geolite2.sh "$stage/bin/update-geolite2.sh"
 if [ -d models ] && [ -n "$(ls -A models 2>/dev/null)" ]; then
   cp -r models/. "$stage/models/"
 else
@@ -130,6 +131,8 @@ docker run --rm --entrypoint /bin/sh "stationd:$tag" -euc '
   test -s /usr/share/stationd/error.mp3 && test -s /usr/share/stationd/bruit.mp3
   test -d /usr/share/zoneinfo/Europe
   test -x /usr/local/bin/essentia_analyze.py
+  test -x /usr/local/bin/update-geolite2.sh
+  for cmd in curl tar gzip stty; do command -v "$cmd" >/dev/null; done
   python3 --version >/dev/null
 '
 
@@ -149,6 +152,8 @@ mkdir -p "$out"
 step "export de l'image"
 docker save "stationd:$tag" | gzip > "$out/stationd-$tag.image.tar.gz"
 cp docker/prod/compose.yaml stationd.example.toml "$out/"
+install -d "$out/scripts"
+install -m 0755 scripts/update-geolite2.sh "$out/scripts/update-geolite2.sh"
 cp -r examples "$out/examples"
 cp -r radio "$out/radio"
 install -m 0755 docker/prod/install.sh "$out/install.sh"
