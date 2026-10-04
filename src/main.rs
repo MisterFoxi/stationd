@@ -132,8 +132,14 @@ async fn main() -> anyhow::Result<()> {
     // optional file must not stop broadcasting; the host reports unavailable.
     let geoip = cfg.geoip.as_ref().and_then(|config| {
         match stationd::geoip::Geoip::open(&config.database) {
-            Ok(reader) => {
-                info!("DB-IP City Lite loaded: IP Geolocation by DB-IP (https://db-ip.com)");
+            Ok(mut reader) => {
+                info!(database_type = reader.database_type(), "GeoIP city database loaded");
+                if let Some(path) = &config.debug_log {
+                    match reader.enable_debug_log(path) {
+                        Ok(()) => info!(path = %path.display(), "GeoIP debug capture enabled (raw IPs, 10 MiB maximum)"),
+                        Err(_) => warn!(path = %path.display(), "Cannot open GeoIP debug capture; lookups remain enabled"),
+                    }
+                }
                 Some(std::sync::Arc::new(reader))
             }
             Err(reason) => {

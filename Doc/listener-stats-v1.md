@@ -2,7 +2,7 @@
 
 Small, opt-in extension to the existing plugin architecture. No core database
 migration, new HTTP dependency, public API, dashboard, or external GeoIP service.
-The host reads a local DB-IP City Lite MMDB using the maxminddb crate.
+The host reads a local GeoLite2 City or DB-IP City Lite MMDB using the maxminddb crate.
 
 ## Enable
 
@@ -49,7 +49,7 @@ polling use independent futures; stopping the sampler cancels both.
   can drop it. Consumers must not infer continuous coverage.
 - A listener ID is scoped to a mount and Icecast process. Restarts can reuse it.
 - Only plugins declaring `listener_details` receive these events. Detailed
-  events are omitted from the core journal. IPs and user agents are transient.
+  events are omitted from the core journal. IPs and user agents are transient unless the operator enables the host GeoIP debug capture described below (IPs only).
 
 The HTTP client reuses Basic auth, the three-second whole-request timeout and
 the 2 MiB response cap. The parser accepts the capitalized Icecast 2.4 fields
@@ -61,7 +61,47 @@ Protocol references:
 [Icecast 2.4 admin implementation](https://github.com/xiph/Icecast-Server/blob/v2.4.4/src/admin.c)
 and [Icecast 2.5 admin implementation](https://github.com/xiph/Icecast-Server/blob/v2.5.0/src/admin.c).
 
-## Local DB-IP City Lite GeoIP
+## GeoLite2 City (MaxMind)
+
+The host accepts MaxMind GeoLite2 City in MMDB format, in addition to legacy
+DB-IP City Lite databases. No API key is used by stationd itself, and no HTTP
+request is made for listener lookups. Use a MaxMind account with a license key
+permitted to download GeoLite2 City.
+
+```sh
+# From the dev host; enter Account ID and License Key at the prompts:
+docker compose -f /data/dev/stationd/compose.yaml exec -it -u dev station \
+  sh /src/scripts/update-geolite2.sh
+```
+
+The license key is hidden during entry and written only to a temporary mode-0600
+netrc file removed on exit. It is not passed in process arguments or stored in
+stationd.toml. A protected existing netrc may be supplied as the second argument
+for non-interactive updates. The script uses HTTPS, authenticated downloads,
+archive integrity and edition checks, a 512 MiB extraction limit, and an atomic
+rename; failures preserve the installed file. The host fully validates MMDB
+on loading. No background update schedule is created.
+
+```toml
+[geoip]
+database = "./data/geoip/GeoLite2-City.mmdb"
+debug_log = "./data/geoip/lookup-debug.jsonl" # optional temporary capture
+```
+
+After downloading, rebuild/restart stationd to load the database. Rebuild the
+listener-stats WASM once for the updated UI attribution. No plugin database
+reset or migration is needed. Existing aggregates
+are retained with their original locations: IPs were not stored, so historical
+rows cannot be corrected. Diagnostic records now include `database_type`, so
+captures from different providers can be distinguished.
+
+CLI outputs credit MaxMind and DB-IP because history can contain both. A UI
+using GeoLite2 must include MaxMind attribution: this product includes GeoLite2
+data created by MaxMind, available from https://www.maxmind.com.
+See [MaxMind database updates](https://dev.maxmind.com/geoip/updating-databases/)
+and [GeoLite terms](https://www.maxmind.com/en/geolite/eula).
+
+## Local DB-IP City Lite GeoIP (legacy)
 
 After applying the DB-IP patch, the host reads the same free database bundled
 by default with AzuraCast: DB-IP City Lite in MMDB format. Download it on the
@@ -87,8 +127,8 @@ database = "./data/geoip/dbip-city-lite.mmdb"
 
 Restart stationd after configuring or replacing the file. The host loads it
 once into memory (about 122 MiB for the September 2026 release) and shares it
-across plugins. No disk or network access happens per listener. The configured
-file is limited to 512 MiB and must identify itself as DBIP-City-Lite.
+across plugins. No disk or network access happens per listener by default; optional debug capture writes a bounded local file. The configured
+file is limited to 512 MiB and must identify itself as GeoLite2-City or DBIP-City-Lite.
 An absent/invalid file produces a startup warning and leaves GeoIP unavailable;
 it does not stop broadcasting or the listener count collection. A decoding
 failure during lookup returns a host error and the guest rejects that batch.
@@ -126,6 +166,40 @@ Data attribution: [IP Geolocation by DB-IP](https://db-ip.com),
 A future statistics page must display that linked attribution wherever it
 uses these results. This patch includes no UI and redistributes no database.
 See [DB-IP City Lite](https://db-ip.com/db/download/ip-to-city-lite).
+
+## Temporary IP diagnostics
+
+To compare the IP received from Icecast with the exact host lookup result,
+add `debug_log` to the existing top-level section:
+
+```toml
+[geoip]
+database = "./data/geoip/dbip-city-lite.mmdb"
+debug_log = "./data/geoip/lookup-debug.jsonl"
+```
+
+Rebuild/restart stationd; no guest rebuild or database migration is needed.
+The parent directory must exist and be writable by stationd. Capture is
+disabled when `debug_log` is absent. JSONL records include Unix timestamp `at`,
+the input `ip`, `database_type`, `database_build_epoch`, and `result` containing `status`,
+`country`, `region`, and `city` (or `error` for a lookup failure). These are
+lookups, not individual connections: the guest caches each IP within one
+snapshot. Mount, client ID and user agent are not included. A missing/unloaded
+database cannot produce a capture; check the startup warnings.
+
+```sh
+# On the dev host, after returning from an external listening test:
+tail -n 50 /data/dev/stationd/data/geoip/lookup-debug.jsonl
+```
+
+On Unix the file has mode 0600. It appends across restarts, without rotation
+or automatic deletion. At 10 MiB (including earlier runs), or on a write
+failure, capture stops with one warning; lookups and statistics continue.
+An invalid capture path also leaves GeoIP operational.
+To resume a full capture, stop stationd, move the file aside, then restart.
+To disable, remove `debug_log` and restart stationd. Delete the diagnostic
+file manually when finished; disabling does not erase existing IPs.
+Historical aggregate rows cannot be joined back to IPs.
 
 ## Storage and queries
 
@@ -204,7 +278,7 @@ cargo test --lib geoip
 # Optional real-database check after downloading:
 STATIOND_TEST_DBIP=./data/geoip/dbip-city-lite.mmdb cargo test --lib reads_real_dbip -- --ignored
 # Optional host + WASM + SQLite roundtrip (build the guest first):
-STATIOND_TEST_DBIP=./data/geoip/dbip-city-lite.mmdb STATIOND_TEST_LISTENER_WASM=plugins/listener-stats-wasm/target/wasm32-unknown-unknown/release/listener_stats_wasm.wasm cargo test --lib real_dbip_wasm -- --ignored
+STATIOND_TEST_DBIP=./data/geoip/dbip-city-lite.mmdb STATIOND_TEST_LISTENER_WASM=plugins/listener-stats-wasm/target/wasm32-unknown-unknown/release/listener_stats_wasm.wasm cargo test --lib real_geoip_wasm -- --ignored
 cargo test --lib listener_snapshot
 cargo test --lib listener_stats_tests
 cargo test --lib icecast_listener_tests

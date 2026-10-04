@@ -142,7 +142,7 @@ pub fn render_stats(response: &PluginDbQueryResponse) -> anyhow::Result<String> 
     out.push_str("Moyenne des releves reussis, zeros inclus dans le calcul; pic d'auditeurs simultanes observes.\n");
     out.push_str("Ce ne sont pas des visiteurs uniques. Collectes echouees exclues; periodes partielles possibles.\n");
     out.push_str("Semaines du lundi au dimanche UTC. Mounts separes; lignes a zero masquees.\n");
-    out.push_str("IP Geolocation by DB-IP - https://db-ip.com\n");
+    out.push_str(stationd::geoip::DATA_ATTRIBUTION);
     Ok(out)
 }
 
@@ -182,7 +182,7 @@ pub fn render(response: &PluginDbQueryResponse) -> anyhow::Result<String> {
         out.push('\n');
     }
     out.push_str("Les horodatages peuvent differer ou etre anciens si la collecte est arretee.\n");
-    out.push_str("IP Geolocation by DB-IP - https://db-ip.com\n");
+    out.push_str(stationd::geoip::DATA_ATTRIBUTION);
     Ok(out)
 }
 

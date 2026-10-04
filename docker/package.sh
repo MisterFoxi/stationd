@@ -2,7 +2,7 @@
 # Packager d'exploitation — à lancer sur la machine de dev (devstationd), à la
 # racine du dépôt ou d'ailleurs :
 #
-#   docker/package.sh [--allow-dirty]
+#   docker/package.sh [--allow-dirty] [--vm utilisateur@hôte]
 #
 # 1. compile stationd, stationctl et stationd-tui (--release --locked) et les plugins WASM
 #    dans le conteneur de dev (qui doit tourner : docker compose up -d) ;
@@ -25,11 +25,22 @@ die() { echo "package.sh : $*" >&2; exit 1; }
 step() { echo; echo "== $*"; }
 
 allow_dirty=0
-case "${1:-}" in
-  "") ;;
-  --allow-dirty) allow_dirty=1 ;;
-  *) die "option inconnue : $1" ;;
-esac
+vm="${VM:-}"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --allow-dirty) allow_dirty=1; shift ;;
+    --vm)
+      [ $# -ge 2 ] && [ -n "$2" ] || die "--vm attend une cible SSH"
+      vm="$2"; shift 2 ;;
+    *) die "option inconnue : $1" ;;
+  esac
+done
+if [ -n "$vm" ]; then
+  [[ "$vm" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.@:-]*$ ]] || die "cible SSH invalide : $vm"
+  for cmd in ssh scp; do
+    command -v "$cmd" >/dev/null || die "commande requise absente : $cmd"
+  done
+fi
 
 # --- Version ----------------------------------------------------------------
 version="$(sed -n 's/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -n1)"
@@ -149,7 +160,11 @@ tar -C "$root/dist" -cf "$out.tar" "stationd-$tag"
 rm -rf "$out" "$stage"
 
 step "prêt : dist/stationd-$tag.tar ($(du -h "$out.tar" | cut -f1))"
-cat <<EOF
-  scp dist/stationd-$tag.tar <vm>:/tmp/
-  ssh <vm> 'cd /tmp && tar xf stationd-$tag.tar && sudo stationd-$tag/install.sh'
+if [ -n "$vm" ]; then
+  bash "$root/docker/deploy.sh" "$out.tar" "$vm"
+else
+  cat <<EOF
+  make package VM=<cible SSH>  # compiler et installer automatiquement
+  bash docker/deploy.sh dist/stationd-$tag.tar <cible SSH>  # installer ce paquet
 EOF
+fi

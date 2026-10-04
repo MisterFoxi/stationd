@@ -90,7 +90,7 @@ level = "info"
 # Listener snapshots in the plugin's own database (30-day default retention).
 # Also enable listener_snapshots in [icecast] below and restart stationd.
 # Build the WASM first; the path is relative to stationd's working directory.
-# Configure [geoip] below for local country/city lookups with DB-IP City Lite.
+# Configure [geoip] below for local country/city lookups with MaxMind GeoLite2 City.
 # No client IP, ID or user agent is stored by this plugin.
 # See Doc/listener-stats-v1.md for the event contract and query examples.
 # [[plugin]]
@@ -105,12 +105,13 @@ level = "info"
 # Only positive audience rows are shown; periods are in UTC.
 
 # Local geolocation shared by plugins declaring capability "geoip".
-# Run: sh scripts/update-dbip.sh ./data/geoip/dbip-city-lite.mmdb
+# Run interactively: sh scripts/update-geolite2.sh (MaxMind Account ID + License Key)
 # Restart stationd after updating the database (loaded once into memory).
 # Missing/invalid file: stats continue with status "unavailable".
-# Display "IP Geolocation by DB-IP" linking to https://db-ip.com with results.
+# Display MaxMind attribution linking to https://www.maxmind.com with GeoLite2 results.
 # [geoip]
-# database = "./data/geoip/dbip-city-lite.mmdb"
+# database = "./data/geoip/GeoLite2-City.mmdb"
+# debug_log = "./data/geoip/lookup-debug.jsonl" # optional raw-IP capture, max 10 MiB
 
 # Liquidsoap wiring (optional). Absent = nothing airs (scheduling only).
 # stationd writes the generated script to `script_path` at start-up (only when

@@ -155,6 +155,11 @@ grep -q 'terminal interactif' "$tmp/output"
 # Exécuter le packager complet avec compilation/image simulées.
 mkdir -p "$tmp/repo/docker/prod" "$tmp/repo/docker/rootfs" "$tmp/repo/plugins/example/target/wasm32-unknown-unknown/release"
 cp "$root/docker/package.sh" "$tmp/repo/docker/package.sh"
+cp "$root/docker/deploy.sh" "$tmp/repo/docker/deploy.sh"
+cp "$root/Makefile" "$tmp/repo/Makefile"
+chmod +x "$tmp/repo/docker/package.sh"
+mkdir -p "$tmp/repo/tools"
+printf extractor > "$tmp/repo/tools/essentia_analyze.py"
 cp "$root/docker/prod/"{install.sh,client.sh,compose.yaml} "$tmp/repo/docker/prod/"
 cp -r "$tmp/bundle/radio" "$tmp/repo/radio"
 cp -r "$tmp/bundle/examples" "$tmp/repo/examples"
@@ -179,5 +184,46 @@ if TEST_FAIL_BUILD=1 bash "$tmp/repo/docker/package.sh" > "$tmp/output" 2>&1; th
 if TEST_FAIL_PLUGIN=1 bash "$tmp/repo/docker/package.sh" > "$tmp/output" 2>&1; then exit 1; fi
 ! grep -q 'docker build' "$TEST_LOG"
 ! grep -q 'docker save' "$TEST_LOG"
-echo 'OK: preflight, fresh install, update, radio, groups, launchers, rollback, intentional stop, checksum, CLI, packaging + TUI'
-
+# Livraison distante simulée : aucun accès SSH réel.
+cat > "$tmp/mock/ssh" <<'EOF'
+#!/usr/bin/env bash
+printf 'ssh %s\n' "$*" >> "$TEST_LOG"
+case "${@: -1}" in
+  'mktemp -d /var/tmp/stationd-deploy.XXXXXXXXXX')
+    printf '%s\n' "${TEST_REMOTE_DIR:-/var/tmp/stationd-deploy.abcdefghij}" ;;
+  *'sudo '*) exit "${TEST_REMOTE_INSTALL_FAIL:-0}" ;;
+esac
+EOF
+cat > "$tmp/mock/scp" <<'EOF'
+#!/usr/bin/env bash
+printf 'scp %s\n' "$*" >> "$TEST_LOG"
+exit "${TEST_SCP_FAIL:-0}"
+EOF
+chmod +x "$tmp/mock/ssh" "$tmp/mock/scp"
+: > "$TEST_LOG"
+make -C "$tmp/repo" dist VM=foxi@node ARGS=--allow-dirty > "$tmp/output"
+grep -Fq 'scp -- ' "$TEST_LOG"
+grep -Fq 'foxi@node:/var/tmp/stationd-deploy.abcdefghij/bundle.tar' "$TEST_LOG"
+grep -Fq "ssh -t foxi@node cd '/var/tmp/stationd-deploy.abcdefghij' && tar -xf bundle.tar && sudo './stationd-0.1.0-deadbeef/install.sh'" "$TEST_LOG"
+grep -Fq "ssh foxi@node rm -rf -- '/var/tmp/stationd-deploy.abcdefghij'" "$TEST_LOG"
+test -s "$tmp/repo/dist/stationd-0.1.0-deadbeef.tar"
+: > "$TEST_LOG"
+bash "$tmp/repo/docker/package.sh" --vm node --allow-dirty > "$tmp/output"
+grep -Fq 'ssh -t node ' "$TEST_LOG"
+: > "$TEST_LOG"
+if TEST_SCP_FAIL=1 bash "$root/docker/deploy.sh" "$tmp/repo/dist/stationd-0.1.0-deadbeef.tar" node > "$tmp/output" 2>&1; then exit 1; fi
+! grep -Fq 'sudo ' "$TEST_LOG"
+! grep -Fq 'rm -rf' "$TEST_LOG"
+grep -Fq 'fichiers distants conservés' "$tmp/output"
+: > "$TEST_LOG"
+if TEST_REMOTE_INSTALL_FAIL=1 bash "$root/docker/deploy.sh" "$tmp/repo/dist/stationd-0.1.0-deadbeef.tar" node > "$tmp/output" 2>&1; then exit 1; fi
+! grep -Fq 'rm -rf' "$TEST_LOG"
+: > "$TEST_LOG"
+if TEST_REMOTE_DIR=/ bash "$root/docker/deploy.sh" "$tmp/repo/dist/stationd-0.1.0-deadbeef.tar" node > "$tmp/output" 2>&1; then exit 1; fi
+! grep -Fq 'scp ' "$TEST_LOG"
+! grep -Fq 'rm -rf' "$TEST_LOG"
+: > "$TEST_LOG"
+if bash "$tmp/repo/docker/package.sh" --vm '-oProxyCommand=bad' > "$tmp/output" 2>&1; then exit 1; fi
+! grep -Fq 'docker' "$TEST_LOG"
+if bash "$tmp/repo/docker/package.sh" --vm > "$tmp/output" 2>&1; then exit 1; fi
+echo 'OK: installation, packaging + TUI, make dist VM, SSH deployment, transfer/install failures, remote path validation'
