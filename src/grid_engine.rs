@@ -1302,6 +1302,13 @@ impl GridEngine {
             });
         }
         if self.control.take_woken() {
+            // A wake starts the programme of now, without catching up clock
+            // occurrences missed while asleep. Only past marks are consumed.
+            let local = clock::to_local_now(now, &self.tz)?;
+            let grid = grid_index::load_grid(&self.pool).await?;
+            for token in crate::resolver::missed_at_clock_marks(local, &grid) {
+                grid_store::record_at_clock_taken(&self.pool, &token, now).await?;
+            }
             if let Some(hold) = grid_store::get_hold(&self.pool).await? {
                 tracing::info!(playlist = %hold.playlist_ref, "woke from sleep: held group released");
                 self.end_hold(&hold.playlist_ref, true).await?;
@@ -2269,6 +2276,31 @@ mod tests {
             insert_rule(&eng.pool, &clock_rule("jingle", "jingle", 5, Mode::Soft)).await.unwrap();
         }
         (dir, eng)
+    }
+
+    #[tokio::test]
+    async fn wake_drops_missed_toph_but_keeps_the_next_rendezvous() {
+        use crate::station_control::ControlAction;
+        let (_d, eng) = hard_fixture(false).await;
+        sqlx::query("UPDATE grid_at_clock SET every_minutes = NULL, at_minute = 0, expiry_secs = NULL WHERE rule_id = 'news'")
+            .execute(&eng.pool).await.unwrap();
+        eng.control().sleep_now();
+        assert!(eng.next_media(at(9, 59)).await.unwrap().halted.is_some());
+        eng.control().apply(ControlAction::Wake, "connections-changed").unwrap();
+        // :00 of this hour was missed in sleep, not the upcoming :00.
+        assert_eq!(media_at(&eng, at(9, 59)).await.1, Origin::BaseRotation);
+        assert_eq!(media_at(&eng, Epoch(at(9, 59).0 + 30)).await.1, Origin::BaseRotation);
+        let cut = eng.air_at_clock_hard(at(10, 0), at(10, 0)).await.unwrap().unwrap();
+        assert_eq!(cut.media_path.as_deref(), Some("news/n.mp3"));
+    }
+
+    #[tokio::test]
+    async fn waking_at_the_mark_keeps_it_eligible() {
+        use crate::station_control::ControlAction;
+        let (_d, eng) = hard_fixture(false).await;
+        eng.control().sleep_now();
+        eng.control().apply(ControlAction::Wake, "connections-changed").unwrap();
+        assert_eq!(media_at(&eng, at(9, 15)).await.1, Origin::AtClockHard);
     }
 
     #[tokio::test]
