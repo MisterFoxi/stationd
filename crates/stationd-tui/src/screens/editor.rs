@@ -230,6 +230,34 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
     out
 }
 
+/// Un nom de fichier simple, sans chemin, disponible dans la liste connue.
+fn suggested_filename(name: &str, playlists: &[PlaylistSummary]) -> String {
+    let name = name.trim();
+    let name = name.strip_suffix(".toml").unwrap_or(name);
+    let mut base = String::new();
+    for c in name.chars().flat_map(char::to_lowercase) {
+        if c.is_alphanumeric() {
+            base.push(c);
+        } else if !base.is_empty() && !base.ends_with('-') {
+            base.push('-');
+        }
+    }
+    let base = base.trim_end_matches('-');
+    if base.is_empty() {
+        return String::new();
+    }
+    let taken = |candidate: &str| playlists.iter().any(|p| {
+        p.rel_path.trim_end_matches(".toml").eq_ignore_ascii_case(candidate)
+    });
+    let mut candidate = base.to_string();
+    let mut suffix = 2;
+    while taken(&candidate) {
+        candidate = format!("{base}-{suffix}");
+        suffix += 1;
+    }
+    format!("{candidate}.toml")
+}
+
 fn is_error(d: &Diagnostic) -> bool {
     d.severity == Severity::Error as i32
 }
@@ -265,10 +293,12 @@ pub enum Outcome {
 pub struct Editor {
     /// Identifie les réponses de CET éditeur.
     owner: u64,
-    /// Ref de la playlist (vide pour une nouvelle tant qu'on ne l'a pas saisi).
+    /// Ref de la playlist existante (vide pendant la création).
     reference: String,
     is_new: bool,
     ref_text: String,
+    /// Suit le nom tant que le fichier n'a pas été modifié manuellement.
+    suggest_ref: bool,
     /// Révision du fichier lue à l'ouverture (vide = création).
     revision: String,
     draft: Draft,
@@ -312,7 +342,7 @@ impl Editor {
     /// Nouvelle playlist, du mode donné.
     pub fn new_playlist(mode: &str, playlists: Vec<PlaylistSummary>, ctx: &mut Global) -> Self {
         let mut e = Self::with(String::new(), true, String::new(), Draft::template(mode, ""), playlists, ctx);
-        e.focus = Target::Ref;
+        e.focus = Target::Key(Key::Name);
         e.saved_text = String::new(); // rien n'existe encore : tout est à enregistrer
         e.bind_input();
         e
@@ -329,6 +359,7 @@ impl Editor {
         let mut e = Self {
             owner: super::next_owner(),
             ref_text: reference.clone(),
+            suggest_ref: is_new,
             reference,
             is_new,
             revision,
@@ -408,6 +439,7 @@ impl Editor {
         };
 
         header(&mut out, tr!("pl-h-identity"));
+        text(&mut out, Target::Key(Key::Name), tr!("pl-f-name"), d.get(Key::Name).unwrap_or_default(), Key::Name.path());
         if self.is_new {
             text(&mut out, Target::Ref, tr!("pl-f-ref"), self.ref_text.clone(), String::new());
         } else {
@@ -419,7 +451,6 @@ impl Editor {
                 path: String::new(),
             });
         }
-        text(&mut out, Target::Key(Key::Name), tr!("pl-f-name"), d.get(Key::Name).unwrap_or_default(), Key::Name.path());
         let enabled = d.get(Key::Enabled).unwrap_or_else(|| "true".into());
         out.push(Row {
             target: Some(Target::Key(Key::Enabled)),
@@ -616,6 +647,13 @@ impl Editor {
 
     /// Une modification : aperçu relancé après `DEBOUNCE`.
     fn changed(&mut self, ctx: &mut Global) {
+        if self.is_new && self.suggest_ref && self.draft.readable() {
+            self.ref_text = suggested_filename(&self.draft.get(Key::Name).unwrap_or_default(), &self.playlists);
+            if self.input_for == Some(Target::Ref) {
+                self.input.set_text(&self.ref_text);
+                self.input.move_to_line_end(false);
+            }
+        }
         self.typing += 1;
         self.preview_pending = true;
         let (owner, id) = (self.owner, self.typing);
@@ -767,7 +805,10 @@ impl Editor {
 
     fn apply_text(&mut self, v: &str, ctx: &mut Global) {
         match self.focus {
-            Target::Ref => self.ref_text = v.to_string(),
+            Target::Ref => {
+                self.ref_text = v.to_string();
+                self.suggest_ref = false;
+            },
             Target::Key(k) => self.draft.set(k, v),
             Target::Filter(i, part) => self.draft.set_filter(i, part, v),
             Target::Member(i, part) => self.draft.set_member(i, part, v),
@@ -1568,6 +1609,17 @@ impl Editor {
 mod tests {
     use super::*;
 
+    #[test]
+    fn suggested_files_are_safe_and_avoid_existing_refs() {
+        assert_eq!(suggested_filename("  Ma Playlist / Rock!  ", &[]), "ma-playlist-rock.toml");
+        assert_eq!(suggested_filename("Été.toml", &[]), "été.toml");
+        assert_eq!(suggested_filename("../", &[]), "");
+        let playlists = ["Rock", "rock-2.toml", "shows/rock-3"].map(|reference| PlaylistSummary {
+            rel_path: reference.into(),
+            ..Default::default()
+        });
+        assert_eq!(suggested_filename("Rock", &playlists), "rock-3.toml");
+    }
     #[test]
     fn a_diagnostic_lands_on_its_row_or_the_nearest_one() {
         let paths = [
