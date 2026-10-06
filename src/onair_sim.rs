@@ -398,13 +398,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hard_boundary_selects_tracks_that_fit_when_available() {
+    async fn hard_boundary_chooses_the_best_fitting_tracks() {
         let (_d, path, pool) = station(420).await;
-        sqlx::query("UPDATE media SET duration_ms = 240000 WHERE rel_path = 'music/1.mp3'")
+        // Deliberately put a shorter sequential candidate first: best-effort
+        // must prefer the longest media that still fits the protected mark,
+        // not merely the first media that fits.
+        sqlx::query("UPDATE media SET duration_ms = 120000 WHERE rel_path = 'music/1.mp3'")
             .execute(&pool)
             .await
             .unwrap();
-        sqlx::query("UPDATE media SET duration_ms = 60000 WHERE rel_path = 'music/2.mp3'")
+        sqlx::query("UPDATE media SET duration_ms = 240000 WHERE rel_path = 'music/2.mp3'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE media SET duration_ms = 60000 WHERE rel_path = 'music/3.mp3'")
             .execute(&pool)
             .await
             .unwrap();
@@ -427,9 +434,9 @@ mod tests {
         .await;
 
         assert_eq!(out.tracks.len(), 3, "notes: {:?}", out.notes);
-        assert_eq!(out.tracks[0].media, "music/1.mp3");
+        assert_eq!(out.tracks[0].media, "music/2.mp3", "4 min is the closest fit to 09:15");
         assert_eq!(out.tracks[0].starts_at, Some(at(9, 10)));
-        assert_eq!(out.tracks[1].media, "music/2.mp3");
+        assert_eq!(out.tracks[1].media, "music/3.mp3", "1 min closes the remaining gap");
         assert_eq!(out.tracks[1].starts_at, Some(at(9, 14)));
         assert_eq!(out.tracks[2].origin, "AtClockHard");
         assert_eq!(out.tracks[2].media, "news/n.mp3");
