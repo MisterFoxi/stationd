@@ -1475,7 +1475,7 @@ impl GridEngine {
         const MAX_DEAD_PICKS: u32 = 32;
         for _ in 0..MAX_DEAD_PICKS {
             let picked = match max_duration_ms {
-                Some(max) => crate::selection::resolve_turn_fitting(
+                Some(max) => match crate::selection::resolve_turn_fitting(
                     &self.pool,
                     self.plugins.as_ref(),
                     now.0,
@@ -1483,7 +1483,25 @@ impl GridEngine {
                     start,
                     max,
                 )
-                .await,
+                .await
+                {
+                    Err(SelectionError::NoFit) => {
+                        tracing::info!(
+                            playlist = %playlist_ref,
+                            max_duration_ms = max,
+                            "nothing fits before AtClock hard; keeping continuity and letting the hard run late"
+                        );
+                        crate::selection::resolve_turn(
+                            &self.pool,
+                            self.plugins.as_ref(),
+                            now.0,
+                            playlist_ref,
+                            start,
+                        )
+                        .await
+                    }
+                    other => other,
+                },
                 None => crate::selection::resolve_turn(
                     &self.pool,
                     self.plugins.as_ref(),
