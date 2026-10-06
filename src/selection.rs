@@ -63,6 +63,11 @@ pub enum SelectionError {
     BadFilterValue { field: String, reason: String },
     #[error("no available media matches the selection")]
     PoolEmpty,
+    /// The source has playable media, but none can fit before the protected
+    /// hard boundary. This is transient and must not be treated as an
+    /// unavailable group member.
+    #[error("no available media fits before the hard boundary")]
+    NoFit,
     /// A held group (`resolve_turn` with `continuing`) has no member left in
     /// its current cycle: the hold ends there, the group is not restarted.
     #[error("group cycle complete")]
@@ -316,7 +321,7 @@ async fn resolve_media(
         // stream so the engine never disk-checks it. Liquidsoap does the relay.
         Mode::Remote => {
             if max_duration_ms.is_some() {
-                return Err(SelectionError::PoolEmpty);
+                return Err(SelectionError::NoFit);
             }
             let url = sel
                 .url
@@ -334,6 +339,9 @@ async fn resolve_media(
             };
             match path {
                 Some(path) => Ok(Resolved::File { path, leaf: Some(reference.to_string()) }),
+                None if max_duration_ms.is_some() && crate::queue_state::count(pool, reference).await? > 0 => {
+                    Err(SelectionError::NoFit)
+                }
                 None => Err(SelectionError::PoolEmpty),
             }
         }
@@ -398,7 +406,11 @@ async fn resolve_leaf(
     }
 
     if let Some(max) = max_duration_ms {
+        let had_candidates = !candidates.is_empty();
         candidates.retain(|c| c.duration_ms > 0 && c.duration_ms <= max);
+        if had_candidates && candidates.is_empty() {
+            return Err(SelectionError::NoFit);
+        }
     }
 
     if candidates.is_empty() {
@@ -832,7 +844,7 @@ async fn resolve_member(
         // A remote member relays its stream (e.g. a night relay inside a group).
         Mode::Remote => {
             if max_duration_ms.is_some() {
-                return Err(SelectionError::PoolEmpty);
+                return Err(SelectionError::NoFit);
             }
             let url = playlist.selection.url.clone().ok_or_else(|| {
                 SelectionError::Unsupported(format!("remote member `{member_key}` without url"))
@@ -848,6 +860,9 @@ async fn resolve_member(
             };
             match path {
                 Some(path) => Ok(Resolved::File { path, leaf: Some(member_key.to_string()) }),
+                None if max_duration_ms.is_some() && crate::queue_state::count(pool, member_key).await? > 0 => {
+                    Err(SelectionError::NoFit)
+                }
                 None => Err(SelectionError::PoolEmpty),
             }
         }
