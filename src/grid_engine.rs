@@ -663,6 +663,17 @@ impl GridEngine {
             .unwrap_or_else(real_now)
     }
 
+    /// Indexed duration of a media, for consumers that must reason about the
+    /// next natural track boundary (notably the Liquidsoap prefetch bridge).
+    /// Unknown/unindexed media return `None`; the scheduler remains the owner
+    /// of all actual playout decisions.
+    pub async fn media_duration_ms(&self, rel_path: &str) -> Result<Option<i64>, EngineError> {
+        Ok(crate::media_index::brief(&self.pool, rel_path)
+            .await?
+            .map(|(_, _, _, duration_ms)| duration_ms)
+            .filter(|duration_ms| *duration_ms > 0))
+    }
+
     /// Does the chosen media still exist under the media root? `true` when no
     /// root is configured (check off, e.g. in tests).
     fn media_exists(&self, rel_path: &str) -> bool {
