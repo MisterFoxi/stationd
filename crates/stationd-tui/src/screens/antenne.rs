@@ -375,12 +375,12 @@ impl Antenne {
         let hard = snap
             .next_playlists
             .iter()
-            .find(|p| p.origin.as_deref() == Some("AtClockHard") && p.from.is_some())
+            .find(|p| p.origin.as_str() == "AtClockHard" && p.from.is_some())
             .filter(|p| {
                 !snap
                     .upcoming
                     .iter()
-                    .any(|t| t.origin.as_deref() == Some("AtClockHard") && t.rule_id == p.rule_id)
+                    .any(|t| t.origin.as_str() == "AtClockHard" && t.rule_id == p.rule_id)
             });
 
         let mut hard_done = false;
