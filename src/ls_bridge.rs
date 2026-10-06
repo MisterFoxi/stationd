@@ -3,8 +3,10 @@
 //! Liquidsoap has no gRPC client, hence this thin adapter ("A" of the A+C
 //! decision). Two routes, both behind the shared token:
 //!
-//! - `POST /ls/v1/next`  — the pull: resolve the next track NOW (broadcast
-//!   gate, override queue, grid — `GridEngine::next_media`) and answer
+//! - `POST /ls/v1/next`  — the pull: resolve the next track at its estimated
+//!   natural start boundary (not merely at HTTP request time; Liquidsoap
+//!   prefetches before the current track ends), then apply broadcast gate,
+//!   override queue and grid through `GridEngine::next_media`, and answer
 //!   `{kind, uri, state, reason}` (all four always present, empty when not
 //!   relevant — Liquidsoap parses a fixed record):
 //!   - `file`   → `uri` = `annotate:stationd_boot="B",stationd_rid="N",…:/abs/path`
@@ -405,10 +407,51 @@ impl LsBridge {
         self.inner.lock().unwrap_or_else(|p| p.into_inner())
     }
 
-    /// The pull: resolve now and translate the decision for Liquidsoap.
+    /// Instant at which a freshly prefetched file is expected to start.
+    ///
+    /// Liquidsoap asks for the next file before the current one ends. Resolving
+    /// the grid at the HTTP request time can therefore skip an AtClock mark
+    /// that falls exactly on the natural boundary (e.g. 21:59 pull for a
+    /// 22:00 TOPH). For an indexed track on air, project that boundary from
+    /// its indexed duration and the time already aired. Unknown-duration
+    /// sources deliberately fall back to `now`.
+    async fn next_boundary(&self, now: crate::resolver::Epoch) -> crate::resolver::Epoch {
+        let on_air = self.lock().status.on_air.clone();
+        let Some(track) = on_air.filter(|a| a.kind == OnAirKind::Track) else {
+            return now;
+        };
+        let Some(media) = track.media_path.as_deref() else {
+            return now;
+        };
+        let duration_ms = match self.engine.media_duration_ms(media).await {
+            Ok(Some(ms)) => ms,
+            Ok(None) => return now,
+            Err(e) => {
+                tracing::warn!(%media, error = %e, "could not estimate next boundary; resolving prefetch at request time");
+                return now;
+            }
+        };
+        let aired_ms = track.aired_at(now.0).max(0).saturating_mul(1000);
+        let remaining_ms = duration_ms.saturating_sub(aired_ms);
+        if remaining_ms <= 0 {
+            return now;
+        }
+        crate::resolver::Epoch(now.0.saturating_add((remaining_ms + 999) / 1000))
+    }
+
+    /// The pull: resolve at the estimated natural start boundary of the file
+    /// being prefetched, then translate the decision for Liquidsoap.
     pub async fn next(&self) -> NextReply {
         let now = self.engine.effective_now(None);
-        let reply = match self.engine.next_media(now).await {
+        let resolve_at = self.next_boundary(now).await;
+        if resolve_at != now {
+            tracing::debug!(
+                pull_at = now.0,
+                resolve_at = resolve_at.0,
+                "Liquidsoap prefetch resolved at estimated track boundary"
+            );
+        }
+        let reply = match self.engine.next_media(resolve_at).await {
             Ok(r) => {
                 if let Some(state) = r.halted {
                     NextReply::halted(state.as_str())
@@ -1074,6 +1117,21 @@ mod tests {
         let r2 = b.next().await;
         assert_eq!(ann(&r2.uri, "stationd_rid").as_deref(), Some("2"));
         assert_eq!(b.status().pulls, 2);
+    }
+
+    #[tokio::test]
+    async fn prefetch_resolves_at_the_current_tracks_natural_boundary() {
+        let (_d, b) = bridge().await;
+        b.engine.set_clock(Some(crate::resolver::Epoch(1_000)));
+        let first = b.next().await;
+        b.track_started(&echo(&first.uri)).await;
+
+        // music/a.mp3 is 1 second long. Halfway through that second the bridge
+        // only has whole-second air accounting, so at 1000 it projects 1001.
+        // More importantly, the projected instant is the media boundary, not
+        // simply the HTTP pull instant.
+        let now = crate::resolver::Epoch(1_000);
+        assert_eq!(b.next_boundary(now).await, crate::resolver::Epoch(1_001));
     }
 
     #[test]
