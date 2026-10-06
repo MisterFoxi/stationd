@@ -1350,6 +1350,21 @@ impl GridEngine {
         });
         let had_candidates = !ranked.is_empty();
 
+        // Close to a future hard rendez-vous, protect its boundary at the
+        // selection stage instead of cutting the current song at the mark.
+        // The small finish tolerance absorbs metadata/crossfade imprecision;
+        // outside the guard window normal playlist selection is untouched.
+        let hard_fit_ms = match self.next_hard_mark(Epoch(now.0.saturating_add(1))).await? {
+            Some(mark) if mark.0 > now.0 => {
+                let remaining = mark.0 - now.0;
+                (remaining <= HARD_GUARD_S).then_some(
+                    (remaining.saturating_add(HARD_FINISH_TOLERANCE_S) as u64)
+                        .saturating_mul(1000),
+                )
+            }
+            _ => None,
+        };
+
         for (i, decision) in ranked.into_iter().enumerate() {
             let Some(playlist_ref) = decision.playlist_ref.clone() else {
                 continue;
@@ -1362,7 +1377,7 @@ impl GridEngine {
             } else {
                 TurnStart::Resume
             };
-            let produced = self.produce(&playlist_ref, now, start).await?;
+            let produced = self.produce(&playlist_ref, now, start, hard_fit_ms).await?;
 
             if let Some(turn) = produced {
                 if held {
@@ -1453,19 +1468,32 @@ impl GridEngine {
         playlist_ref: &str,
         now: Epoch,
         start: crate::selection::TurnStart,
+        max_duration_ms: Option<u64>,
     ) -> Result<Option<crate::selection::Turn>, EngineError> {
         use crate::selection::{Resolved, SelectionError, Turn};
         // Capped so a pool of dead entries can't spin.
         const MAX_DEAD_PICKS: u32 = 32;
         for _ in 0..MAX_DEAD_PICKS {
-            match crate::selection::resolve_turn(
-                &self.pool,
-                self.plugins.as_ref(),
-                now.0,
-                playlist_ref,
-                start,
-            )
-            .await
+            let picked = match max_duration_ms {
+                Some(max) => crate::selection::resolve_turn_fitting(
+                    &self.pool,
+                    self.plugins.as_ref(),
+                    now.0,
+                    playlist_ref,
+                    start,
+                    max,
+                )
+                .await,
+                None => crate::selection::resolve_turn(
+                    &self.pool,
+                    self.plugins.as_ref(),
+                    now.0,
+                    playlist_ref,
+                    start,
+                )
+                .await,
+            };
+            match picked
             {
                 // A remote stream: no file on disk to check, no re-pick.
                 Ok(turn @ Turn { resolved: Resolved::Stream(_), .. }) => return Ok(Some(turn)),
@@ -1661,7 +1689,7 @@ impl GridEngine {
         let Some(playlist_ref) = decision.playlist_ref.clone() else {
             return Ok(None);
         };
-        let Some(turn) = self.produce(&playlist_ref, now, TurnStart::Fresh).await? else {
+        let Some(turn) = self.produce(&playlist_ref, now, TurnStart::Fresh, None).await? else {
             tracing::warn!(
                 rule = decision.rule_id.as_deref().unwrap_or("-"),
                 playlist = %playlist_ref,
@@ -1872,6 +1900,14 @@ impl GridEngine {
 /// the ticker waking a little after the mark. Later (a restart, a clock
 /// jump), no cut — the rule airs soft at the next boundary instead.
 pub const HARD_CUT_LATE_S: i64 = 10;
+
+/// How early normal selection starts protecting the next hard boundary.
+pub const HARD_GUARD_S: i64 = 10 * 60;
+
+/// A selected track may finish this many seconds after the nominal hard mark.
+/// This covers crossfade / indexed-duration imprecision without reintroducing
+/// a mid-track cut.
+pub const HARD_FINISH_TOLERANCE_S: i64 = 15;
 
 /// How far ahead (minutes) the next hard rendez-vous is searched; the
 /// ticker re-plans at least every minute anyway.
