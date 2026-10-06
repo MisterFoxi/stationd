@@ -176,7 +176,7 @@ async fn run(start: &SimStart<'_>, plugins: Option<&PluginHandle>) -> SimOutcome
         } else {
             crate::media_index::brief(&pool, &media).await.ok().flatten()
         };
-        let mut tr = track(&r, media.clone(), brief, known.then_some(t));
+        let tr = track(&r, media.clone(), brief, known.then_some(t));
         // A track starting: the `Every` track counters move, as on the air.
         let _ = engine.on_track_completed().await;
 
@@ -195,15 +195,6 @@ async fn run(start: &SimStart<'_>, plugins: Option<&PluginHandle>) -> SimOutcome
         };
         let end = Epoch(t.0 + (d_ms + 999) / 1000);
 
-        out.tracks.push(tr);
-                let _ = engine
-                    .track_left(r.log_id, &media, r.leaf_ref.as_deref(), m.0 - t.0, m)
-                    .await;
-                forced = Some(cut_in);
-                t = m;
-                continue;
-            }
-        }
         out.tracks.push(tr);
         let _ = engine
             .track_left(r.log_id, &media, r.leaf_ref.as_deref(), end.0 - t.0, end)
