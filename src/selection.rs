@@ -304,7 +304,7 @@ async fn resolve_media(
             // sequence walk with the default take = 1 already IS a rotation;
             // position persists across turns via group_state.
             Some(Strategy::Rotate) => {
-                resolve_group_rotation(pool, plugins, now, reference, sel, false, depth, &scope, false)
+                resolve_group_rotation(pool, plugins, now, reference, sel, false, depth, &scope, false, max_duration_ms)
                     .await
             }
             Some(Strategy::Weighted) => {
