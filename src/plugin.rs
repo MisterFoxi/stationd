@@ -628,6 +628,7 @@ pub enum Action {
 // ---------------------------------------------------------------------------
 // Slot: a declared plugin plus its live state
 mod config_host;
+mod metadata_config;
 use config_host::{ConfigPlugin, config_operation, validate_candidate};
 
 // ---------------------------------------------------------------------------
@@ -1143,6 +1144,9 @@ pub fn spawn_env(decls: Vec<PluginDecl>, env: PluginEnv) -> PluginHandle { spawn
 
 pub fn spawn_configured(mut decls: Vec<PluginDecl>, env: PluginEnv, config_path: Option<PathBuf>) -> PluginHandle {
     let config_path = config_path.and_then(|p| std::fs::canonicalize(p).ok());
+    let metadata_runtime = config_path.as_deref()
+        .and_then(|path| metadata_config::read(path).ok().map(|(_, rules)| rules))
+        .unwrap_or_default();
     decls.sort_by(|a, b| a.order.cmp(&b.order).then_with(|| a.name.cmp(&b.name)));
     let mut slots: Vec<Slot> = decls
         .into_iter()
@@ -1166,7 +1170,7 @@ pub fn spawn_configured(mut decls: Vec<PluginDecl>, env: PluginEnv, config_path:
     tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
             match msg {
-                Msg::Config { request, read, reply } => { let _ = reply.send(config_operation(&mut slots, &env, config_path.as_deref(), request, read)); }
+                Msg::Config { request, read, reply } => { let _ = reply.send(config_operation(&mut slots, &env, config_path.as_deref(), &metadata_runtime, request, read)); }
                 Msg::Event(event) => dispatch_event(&mut slots, &event),
                 Msg::FilterPool { candidates, simulation, reply } => {
                     let _ = reply.send(run_filters_mode(&mut slots, candidates, simulation));

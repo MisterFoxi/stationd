@@ -35,6 +35,7 @@ pub struct ConfigEditor {
     data: Option<PluginConfigResponse>,
     edits: Vec<PluginConfigValue>,
     input: Option<String>,
+    metadata_editor: Option<super::metadata_rules::Editor>,
     preview: Option<Vec<String>>,
     choice: usize,
     preview_scroll: u16,
@@ -53,6 +54,7 @@ impl ConfigEditor {
             data: None,
             edits: vec![],
             input: None,
+            metadata_editor: None,
             preview: None,
             choice: 0,
             preview_scroll: 0,
@@ -139,7 +141,7 @@ impl ConfigEditor {
             self.message = tr!("config-draft-kept");
             return;
         }
-        let names: Vec<_> = ctx
+        let mut names: Vec<_> = ctx
             .store
             .plugins
             .value
@@ -148,6 +150,9 @@ impl ConfigEditor {
             .iter()
             .map(|p| p.name.clone())
             .collect();
+        if self.name == "plugin-config" {
+            names.push(super::metadata_rules::TARGET.into());
+        }
         if names.is_empty() {
             return;
         }
@@ -162,7 +167,20 @@ impl ConfigEditor {
         self.selected = 0;
         self.read(ctx);
     }
+    fn target_label(&self) -> String {
+        if self.target == super::metadata_rules::TARGET { tr!("metadata-target") }
+        else { clean(&self.target) }
+    }
+    fn max_choice(&self) -> usize {
+        if self.target == super::metadata_rules::TARGET { 1 } else { 2 }
+    }
     fn shown(&self, field: &stationd_proto::plugin::PluginConfigField) -> String {
+        if field.kind == "metadata_rules" {
+            let count = self.value(&field.key).filter(|v| v.present)
+                .and_then(|v| serde_json::from_str::<Vec<serde_json::Value>>(&v.value).ok())
+                .map_or(0, |v| v.len());
+            return tr!("metadata-count", count = count);
+        }
         match self.value(&field.key) {
             Some(v) if v.present && field.secret => "••••".into(),
             Some(v) if v.present => clean(&v.value),
@@ -202,7 +220,7 @@ impl Screen for ConfigEditor {
         Some((self.name.clone(), self.tab.id.clone()))
     }
     fn captures_text(&self) -> bool {
-        self.input.is_some() || self.preview.is_some() || self.busy
+        self.input.is_some() || self.metadata_editor.is_some() || self.preview.is_some() || self.busy
     }
     fn availability(&self, store: &Store) -> Availability {
         match store
@@ -244,7 +262,7 @@ impl Screen for ConfigEditor {
         Ok(())
     }
     fn reconnected(&mut self, ctx: &mut Global) -> Result<(), Error> {
-        if self.edits.is_empty() && self.input.is_none() && self.preview.is_none() {
+        if self.edits.is_empty() && self.input.is_none() && self.metadata_editor.is_none() && self.preview.is_none() {
             self.read(ctx);
         }
         Ok(())
@@ -281,6 +299,7 @@ impl Screen for ConfigEditor {
                         self.edits.clear();
                         self.preview = None;
                         self.input = None;
+                        self.metadata_editor = None;
                     }
                 }
             }
@@ -290,6 +309,18 @@ impl Screen for ConfigEditor {
                     return Ok(Control::Changed);
                 }
                 if self.busy {
+                    return Ok(Control::Changed);
+                }
+                if let Some(editor) = self.metadata_editor.as_mut() {
+                    match editor.handle(key) {
+                        super::metadata_rules::Outcome::Pending => {}
+                        super::metadata_rules::Outcome::Cancel => self.metadata_editor = None,
+                        super::metadata_rules::Outcome::Submit(value) => {
+                            self.metadata_editor = None;
+                            self.edit(Some(value));
+                            self.request(ctx, 1);
+                        }
+                    }
                     return Ok(Control::Changed);
                 }
                 if let Some(input) = self.input.as_mut() {
@@ -324,7 +355,7 @@ impl Screen for ConfigEditor {
                             self.preview_scroll = self.preview_scroll.saturating_add(1)
                         }
                         KeyCode::Left => self.choice = self.choice.saturating_sub(1),
-                        KeyCode::Right => self.choice = (self.choice + 1).min(2),
+                        KeyCode::Right => self.choice = (self.choice + 1).min(self.max_choice()),
                         KeyCode::Enter if self.choice == 0 => self.preview = None,
                         KeyCode::Enter => self.request(ctx, if self.choice == 1 { 2 } else { 3 }),
                         _ => {}
@@ -340,7 +371,14 @@ impl Screen for ConfigEditor {
                         }
                         KeyCode::Enter => {
                             if let Some(f) = self.field() {
-                                if f.kind == "boolean" {
+                                if f.kind == "metadata_rules" {
+                                    let value = self.value(&f.key).filter(|v| v.present)
+                                        .map(|v| v.value.clone()).unwrap_or_else(|| "[]".into());
+                                    match super::metadata_rules::Editor::new(&value) {
+                                        Ok(editor) => self.metadata_editor = Some(editor),
+                                        Err(e) => self.message = e,
+                                    }
+                                } else if f.kind == "boolean" {
                                     let value = self
                                         .value(&f.key)
                                         .filter(|v| v.present)
@@ -387,6 +425,10 @@ impl Screen for ConfigEditor {
     }
     fn render(&mut self, area: Rect, buf: &mut Buffer, ctx: &mut Global) -> Result<(), Error> {
         let s = Styles(&ctx.theme);
+        if let Some(editor) = &self.metadata_editor {
+            editor.render(area, buf, &s);
+            return Ok(());
+        }
         let [header, body, footer] = Layout::vertical([
             Constraint::Length(3),
             Constraint::Fill(1),
@@ -396,7 +438,7 @@ impl Screen for ConfigEditor {
         let pending = self.data.as_ref().is_some_and(|d| d.pending);
         Paragraph::new(format!(
             "{}\n{}{}",
-            tr!("config-target", plugin = clean(&self.target)),
+            tr!("config-target", plugin = self.target_label()),
             if pending {
                 tr!("config-pending")
             } else {
@@ -418,7 +460,7 @@ impl Screen for ConfigEditor {
             .border_style(s.border());
         let config_block = Block::bordered()
             .title(
-                Line::from(tr!("config-panel-title", plugin = clean(&self.target)))
+                Line::from(tr!("config-panel-title", plugin = self.target_label()))
                     .style(s.title()),
             )
             .border_style(s.accent());
@@ -481,11 +523,12 @@ impl Screen for ConfigEditor {
                 .scroll((self.preview_scroll, 0))
                 .render(changes_area, buf);
             let mut lines = Vec::new();
-            let actions = [
+            let mut actions = vec![
                 tr!("config-cancel"),
                 tr!("config-save"),
                 tr!("config-save-reload"),
             ];
+            actions.truncate(self.max_choice() + 1);
             for (i, a) in actions.iter().enumerate() {
                 lines.push(Line::from(if i == self.choice {
                     format!("[{a}]")
@@ -543,6 +586,7 @@ impl Screen for ConfigEditor {
         let detail = self
             .field()
             .map(|f| {
+                if f.kind == "metadata_rules" { return tr!("metadata-restart"); }
                 format!(
                     "{} · type {} · min {:?} · max {:?}",
                     f.key, f.kind, f.minimum, f.maximum
@@ -588,6 +632,52 @@ mod tests {
         assert_eq!(e.choice, 0);
     }
 
+    #[tokio::test]
+    async fn metadata_target_opens_a_form_and_offers_save_without_plugin_reload() {
+        let args = crate::Args {
+            addr: "http://127.0.0.1:50051".into(), lang: None,
+            theme: "Imperial".into(), list_themes: false,
+        };
+        let channel = rpc::lazy_channel(&args.addr).unwrap();
+        let mut ctx = Global::new(&args, channel.clone(), channel);
+        ctx.store.plugins.value = Some(vec![stationd_proto::plugin::PluginInfo {
+            name: "plugin-config".into(), state: "loaded".into(), ..Default::default()
+        }]);
+        let mut editor = ConfigEditor::new("plugin-config".into(), PluginTab::default());
+        editor.target = super::super::metadata_rules::TARGET.into();
+        editor.data = Some(PluginConfigResponse {
+            fields: vec![stationd_proto::plugin::PluginConfigField {
+                key: "rules".into(), label: "Rules".into(), kind: "metadata_rules".into(),
+                ..Default::default()
+            }],
+            values: vec![PluginConfigValue {
+                key: "rules".into(), present: true,
+                value: r#"[{"tag":"jingle","text":"Ma Radio"}]"#.into(), ..Default::default()
+            }],
+            ..Default::default()
+        });
+        assert_eq!(editor.max_choice(), 1);
+        let enter = AppEvent::Event(Event::Key(
+            ratatui_crossterm::crossterm::event::KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        editor.event(&enter, &mut ctx).unwrap();
+        assert!(editor.metadata_editor.is_some() && editor.captures_text());
+        let area = Rect::new(0, 0, 100, 20);
+        let mut buf = Buffer::empty(area);
+        editor.render(area, &mut buf, &mut ctx).unwrap();
+        let text: String = (0..20).flat_map(|y| (0..100).map(move |x| (x, y)))
+            .map(|p| buf[p].symbol()).collect();
+        assert!(text.contains("jingle") && text.contains("Ma Radio"));
+        let cancel = AppEvent::Event(Event::Key(
+            ratatui_crossterm::crossterm::event::KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+        editor.event(&cancel, &mut ctx).unwrap();
+        assert!(editor.metadata_editor.is_none());
+        editor.preview = Some(vec!["Changed rules".into()]);
+        let right = AppEvent::Event(Event::Key(
+            ratatui_crossterm::crossterm::event::KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)));
+        editor.event(&right, &mut ctx).unwrap();
+        editor.event(&right, &mut ctx).unwrap();
+        assert_eq!(editor.choice, 1);
+    }
     #[tokio::test]
     async fn conflict_keeps_draft_and_late_responses_are_ignored_and_secrets_do_not_render() {
         let args = crate::Args {

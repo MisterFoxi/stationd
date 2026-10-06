@@ -349,6 +349,7 @@ pub struct LsBridge {
     /// relative `library_path` is made absolute once, here.
     media_root: PathBuf,
     inner: Arc<Mutex<BridgeState>>,
+    metadata_policy: Option<(sqlx::SqlitePool, Arc<[crate::config::MetadataRule]>)>,
 }
 
 impl LsBridge {
@@ -362,7 +363,35 @@ impl LsBridge {
             boot: Arc::from(format!("{boot:x}")),
             media_root: std::path::absolute(media_root)?,
             inner: Arc::new(Mutex::new(BridgeState { next_rid: 1, ..Default::default() })),
+            metadata_policy: None,
         })
+    }
+
+    /// Configure public metadata without changing playback or history.
+    pub fn with_metadata_rules(mut self, pool: sqlx::SqlitePool, rules: &[crate::config::MetadataRule]) -> Self {
+        if !rules.is_empty() {
+            self.metadata_policy = Some((pool, Arc::from(rules)));
+        }
+        self
+    }
+
+    async fn metadata_rule(&self, media: &str) -> Option<String> {
+        let (pool, rules) = self.metadata_policy.as_ref()?;
+        let rows: Result<Vec<(Option<String>, String)>, sqlx::Error> = sqlx::query_as(
+            "SELECT origin, value_key FROM media_tag WHERE rel_path = ?1
+             UNION ALL SELECT NULL, genre_key FROM media_genre WHERE rel_path = ?1"
+        ).bind(media).fetch_all(pool).await;
+        match rows {
+            Ok(tags) => rules.iter().position(|rule| {
+                let key = crate::media_index::genre_key(&rule.tag);
+                tags.iter().any(|(origin, value)| value == &key
+                    && rule.origin.as_ref().map_or(true, |o| Some(o) == origin.as_ref()))
+            }).map(|i| i.to_string()),
+            Err(e) => {
+                tracing::error!(%media, error = %e, "metadata policy lookup failed: clearing public metadata");
+                Some("clear".into())
+            }
+        }
     }
 
     /// This instance's stamp (see `boot`).
@@ -406,7 +435,7 @@ impl LsBridge {
                                 r.decision.playlist_ref.clone(),
                                 r.leaf_ref.clone(),
                                 r.log_id,
-                            );
+                            ).await;
                             self.lock().status.next = Some(NextUp {
                                 rid,
                                 media_path: media,
@@ -447,13 +476,14 @@ impl LsBridge {
 
     /// Number a track handed to Liquidsoap and remember it until it starts:
     /// returns (rid, annotated absolute uri).
-    fn hand_out(
+    async fn hand_out(
         &self,
         media: &str,
         playlist_ref: Option<String>,
         leaf_ref: Option<String>,
         log_id: Option<i64>,
     ) -> (u64, String) {
+        let policy = self.metadata_rule(media).await;
         let mut st = self.lock();
         let rid = st.next_rid;
         st.next_rid += 1;
@@ -472,6 +502,9 @@ impl LsBridge {
         }
         if let Some(id) = log_id {
             let _ = write!(ann, ",stationd_log=\"{id}\"");
+        }
+        if let Some(policy) = policy {
+            let _ = write!(ann, ",stationd_metadata_rule=\"{policy}\"");
         }
         let uri = format!("annotate:{ann}:{}", abs.to_string_lossy());
         st.pending.push_back(Pending { rid, media_path: media.to_string(), playlist_ref, leaf_ref, log_id });
@@ -493,7 +526,7 @@ impl LsBridge {
                     None
                 }
                 Some(media) => {
-                    Some(self.hand_out(&media, r.decision.playlist_ref.clone(), r.leaf_ref.clone(), r.log_id).1)
+                    Some(self.hand_out(&media, r.decision.playlist_ref.clone(), r.leaf_ref.clone(), r.log_id).await.1)
                 }
                 None => None,
             },
@@ -521,7 +554,7 @@ impl LsBridge {
                     None
                 }
                 Some(media) => {
-                    Some(self.hand_out(&media, r.decision.playlist_ref.clone(), r.leaf_ref.clone(), r.log_id).1)
+                    Some(self.hand_out(&media, r.decision.playlist_ref.clone(), r.leaf_ref.clone(), r.log_id).await.1)
                 }
                 None => None,
             },
@@ -975,6 +1008,34 @@ mod tests {
         .unwrap();
         let eng = GridEngine::new(pool, "UTC");
         (dir, LsBridge::new(eng, Path::new("/srv/media")).unwrap())
+    }
+
+    #[tokio::test]
+    async fn metadata_policy_matches_tags_and_origins_in_order() {
+        let (_dir, b) = bridge().await;
+        let pool = b.engine.pool_for_tests();
+        sqlx::query("INSERT INTO media_genre VALUES ('music/a.mp3', 'JINGLE', 'jingle')")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO media_tag VALUES ('music/a.mp3', 'Type', 'JINGLE', 'jingle')")
+            .execute(&pool).await.unwrap();
+        let rules: Vec<crate::config::MetadataRule> = [
+            "tag = 'jingle'\norigin = ''\nfields = []",
+            "tag = '  JiNgLe  '\norigin = 'Type'\ntext = 'Ma radio'",
+            "tag = 'jingle'\nfields = ['title']",
+        ].iter().map(|s| toml::from_str(s).unwrap()).collect();
+        let b = b.with_metadata_rules(pool.clone(), &rules);
+        let r = b.next().await;
+        assert_eq!(ann(&r.uri, "stationd_metadata_rule").as_deref(), Some("1"));
+        assert_eq!(ann(&r.uri, "stationd_media").as_deref(), Some("music/a.mp3"));
+        sqlx::query("DELETE FROM media_tag").execute(&pool).await.unwrap();
+        let r = b.next().await;
+        assert_eq!(ann(&r.uri, "stationd_metadata_rule").as_deref(), Some("2"));
+        sqlx::query("DELETE FROM media_genre").execute(&pool).await.unwrap();
+        assert_eq!(ann(&b.next().await.uri, "stationd_metadata_rule"), None);
+        // A lookup error clears metadata rather than leaking file tags.
+        pool.close().await;
+        let (_, uri) = b.hand_out("music/a.mp3", None, None, None).await;
+        assert_eq!(ann(&uri, "stationd_metadata_rule").as_deref(), Some("clear"));
     }
 
     /// The value of annotation `key` in a handed-out uri.

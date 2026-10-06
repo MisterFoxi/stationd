@@ -10,6 +10,7 @@ mod ops;
 pub(crate) mod picker;
 mod plugin_tabs;
 mod plugin_config;
+mod metadata_rules;
 pub fn plugin_screen(name: String, tab: stationd_proto::plugin::PluginTab) -> Box<dyn Screen> {
     if tab.kind == "plugin_config" {
         Box::new(plugin_config::ConfigEditor::new(name, tab))

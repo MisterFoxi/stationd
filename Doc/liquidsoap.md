@@ -97,11 +97,15 @@ piste, ou durée restante inconnue (-1) : demande immédiate.
 - **skip** : rien n'est préparé d'avance la plupart du temps → `urgent`
   levé et `pull_raw.fetch()` **avant** `source.skip` (sinon le fichier de
   secours comblerait le trou).
-- **interrupt** (override / `AtClock` hard) : `source.skip(pull)` saute la
-  piste à travers le crossfade et purge sa traîne tamponnée ; `no_cross`
-  interdit de mélanger la chanson coupée à la piste de retour. Le pull
-  redemande pendant l'insert. Le test `python3 tests/liquidsoap_interrupt.py`
-  mesure la sortie audio avec et sans crossfade (Liquidsoap 2.4).
+- **interrupt** (override / `AtClock` hard) : une nouvelle paire
+  `request.dynamic` / `cross` remplace la chaîne coupée. Cela abandonne
+  aussi le tampon interne `before_head` que Liquidsoap garde si le début
+  de la piste suivante n'est pas encore décodé. Les requêtes préparées
+  restantes sont transférées (override préservé ; rotation déjà vidée par
+  `flush`). L'ancienne génération ne fait plus de demandes ni de rapports.
+  Le test `python3 tests/liquidsoap_interrupt.py` mesure le retour audio
+  par un socket temporaire, avec le délai de demande de production (2 s),
+  avec et sans fondu, et au milieu d'un fondu.
 - **stop / override soft** : le `flush` n'a en général plus rien à vider ;
   la demande de fin de piste reçoit `halted` / l'override.
 - Validé contre Liquidsoap **2.2.4** (script généré, adapté à la syntaxe
@@ -539,3 +543,58 @@ Après recompilation de stationd et régénération du script : make check-liq,
 puis make restart-ls. Vérifier côté lecteur (par exemple Second Life) que le
 titre disparaît en pause et revient à la reprise. Les annonces produites
 uniquement par le timer d'un lecteur restent du ressort de ce lecteur.
+
+### Métadonnées publiques selon les tags
+
+Les règles s’éditent depuis le plugin de configuration : cible **Métadonnées Liquidsoap**
+([formulaire et raccourcis](plugin-config.md)). Elles sont enregistrées dans `stationd.toml`. La première règle qui correspond
+s'applique ; sans correspondance, les métadonnées du fichier sont conservées.
+
+Pour un jingle, remplacer l'affichage complet par un texte fixe :
+
+```toml
+[[liquidsoap.metadata_rule]]
+tag = "jingle"
+origin = "Type"
+text = "Ma Radio"
+```
+
+Pour les autres éléments, choisir les champs visibles :
+
+```toml
+[[liquidsoap.metadata_rule]]
+tag = "speech"
+fields = ["title"]
+
+[[liquidsoap.metadata_rule]]
+tag = "no-display"
+fields = []
+```
+
+`fields` accepte `title`, `artist`, `album` et contient les trois par défaut.
+`fields = []` efface tout l'affichage. `text`, lorsqu'il est présent, remplace
+le titre et `song`, et vide l'interprète et l'album, quels que soient les champs.
+Il doit être non vide et sans caractères de contrôle. Aucun texte fixe n'est
+imposé automatiquement aux jingles.
+
+`tag` compare les valeurs après suppression des espaces aux extrémités et
+passage en minuscules Unicode, comme les filtres de genres des playlists.
+Sans `origin`, la valeur est cherchée dans les genres fusionnés de la bibliothèque.
+Avec `origin = ""`, seuls les genres natifs du fichier correspondent.
+Avec `origin = "Type"`, seuls les tags de cette source correspondent (nom exact,
+source déclarée dans le plugin `custom-tags`). Les valeurs viennent de l'index :
+scanner la bibliothèque après un changement de tags effectué hors de stationd.
+
+Les champs masqués sont envoyés vides pour effacer l'affichage précédent.
+`song` est reconstruit à partir des seuls titre et interprète visibles : une
+valeur `song` embarquée dans le fichier ne contourne pas le masquage.
+Ces règles concernent les fichiers résolus par stationd, y compris les inserts
+hard et les rendez-vous horaires ; les flux relais et DJ ne sont pas filtrés.
+Les tags des fichiers, la bibliothèque et l'historique restent intacts.
+En cas d'erreur de lecture de l'index, l'affichage est vidé et l'erreur journalisée.
+
+Le filtre s'applique après `custom_include`, avant le dédoublonnage et les sorties.
+Après modification, redémarrer stationd pour régénérer le script, vérifier avec
+`make check-liq`, puis redémarrer Liquidsoap avec `make restart-ls`.
+Validation de la politique : `cargo test --locked --lib metadata_`, puis
+`cargo test --locked --lib metadata_rules_in_liquidsoap -- --ignored`.

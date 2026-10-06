@@ -174,7 +174,6 @@ pub fn save(
     edits: &[(String, Option<String>)],
     fields: &[Field],
 ) -> Result<String, String> {
-    use std::io::Write;
     let mut doc = std::str::from_utf8(original)
         .map_err(|_| "invalid UTF-8")?
         .parse::<DocumentMut>()
@@ -225,6 +224,12 @@ pub fn save(
         }
     }
     let bytes = doc.to_string().into_bytes();
+    write_atomic(path, original, &bytes)
+}
+
+/// Shared atomic writer for host-owned configuration sections.
+pub(crate) fn write_atomic(path: &Path, original: &[u8], bytes: &[u8]) -> Result<String, String> {
+    use std::io::Write;
     let parent = path.parent().ok_or("configuration has no parent")?;
     let tmp = parent.join(format!(".stationd-config-{}.tmp", uuid::Uuid::new_v4()));
     let metadata = std::fs::metadata(path).map_err(|_| "cannot stat configuration")?;

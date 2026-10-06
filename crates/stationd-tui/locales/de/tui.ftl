@@ -1298,3 +1298,29 @@ help-pl-tree-expand = Gruppe öffnen / schließen
 rf-timezone = Zeitzone
 rf-station = Sender
 rf-utc-times = Uhrzeiten, Wochentage und Daten in UTC
+
+metadata-target = Liquidsoap-Metadaten
+metadata-first-match = Die erste passende Regel gilt. Ohne passende Regel: normale Anzeige.
+metadata-origin-any = Alle Tags
+metadata-origin-native = Natives Genre
+metadata-origin-custom = Benutzerdefinierter Tag
+metadata-hidden = Anzeige verborgen
+metadata-fixed = Fester Text
+metadata-fields = Sichtbare Felder
+metadata-tag = Tag-Wert
+metadata-origin = Tag-Herkunft
+metadata-source = Name des benutzerdefinierten Tags
+metadata-display = Anzeige
+metadata-text = Angezeigter Text
+metadata-show = Anzeigen
+metadata-hide = Verbergen
+metadata-empty = Keine Regeln. Mit a eine Regel hinzufügen.
+metadata-count = { $count } Regeln · Eingabe zum Bearbeiten
+metadata-required = Tag, benutzerdefinierten Quellnamen und gegebenenfalls festen Text eingeben.
+metadata-invalid = Metadatenregeln können nicht gelesen werden.
+metadata-limit = Grenze: 128 Regeln, insgesamt 64 KiB.
+metadata-list-keys = ↑/↓ Regel · a/Einfg hinzufügen · Eingabe bearbeiten · Entf löschen
+    Strg+↑/↓ Priorität ändern · Strg+S Vorschau · Esc abbrechen
+metadata-detail-keys = ↑/↓ Feld · Eingabe bearbeiten oder umschalten · Esc zurück zu den Regeln
+    Strg+S Vorschau · bei Texteingabe: Eingabe bestätigen, Esc abbrechen
+metadata-restart = Nach dem Speichern: stationd und anschließend Liquidsoap neu starten.

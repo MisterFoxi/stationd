@@ -9,7 +9,7 @@ impl Plugin for ConfigPlugin {
         Ok(vec![crate::plugin_ui::UiTab {
             id: "configuration".into(),
             title: "Configuration".into(),
-            description: "Configuration des plugins".into(),
+            description: "Configuration des plugins et des métadonnées de diffusion".into(),
             sql: String::new(),
             kind: "plugin_config".into(),
         }])
@@ -47,11 +47,18 @@ pub(super) fn config_operation(
     slots: &mut [Slot],
     env: &PluginEnv,
     path: Option<&std::path::Path>,
+    metadata_runtime: &[crate::config::MetadataRule],
     req: crate::proto::plugin::PluginConfigUpdateRequest,
     read: bool,
 ) -> Result<crate::proto::plugin::PluginConfigResponse, String> {
     use crate::{plugin_config as cfg, proto::plugin as wire};
     let path = path.ok_or("configuration editing is unavailable in this daemon")?;
+    if req.name == super::metadata_config::TARGET {
+        if !slots.iter().any(|s| s.decl.name == "plugin-config" && matches!(s.state, PluginState::Loaded)) {
+            return Err("the configuration plugin must be loaded".into());
+        }
+        return super::metadata_config::operation(path, metadata_runtime, req, read);
+    }
     let slot = slots
         .iter_mut()
         .find(|s| s.decl.name == req.name)
@@ -179,6 +186,21 @@ mod config_editor_tests {
             ..Default::default()
         };
         (dir, path, config.plugins, env)
+    }
+    #[tokio::test]
+    async fn metadata_editor_target_requires_the_loaded_config_plugin() {
+        let (_dir, path, decls, env) = setup(true);
+        let mut text = std::fs::read_to_string(&path).unwrap();
+        text.push_str("\n[liquidsoap]\nscript_path = 'station.liq'\napi_token = 'test'\n");
+        std::fs::write(&path, text).unwrap();
+        let h = spawn_configured(decls, env, Some(path));
+        let get = || PluginConfigUpdateRequest {
+            name: super::super::metadata_config::TARGET.into(), ..Default::default()
+        };
+        let data = h.config(get(), true).await.unwrap();
+        assert_eq!(data.fields[0].kind, "metadata_rules");
+        h.control("plugin-config", Action::Stop).await.unwrap();
+        assert!(h.config(get(), true).await.unwrap_err().contains("must be loaded"));
     }
     fn edit(
         data: &crate::proto::plugin::PluginConfigResponse,
@@ -369,6 +391,7 @@ mod config_editor_tests {
             &mut slots,
             &env,
             Some(&path),
+            &[],
             PluginConfigUpdateRequest {
                 name: "logger".into(),
                 ..Default::default()
@@ -391,7 +414,7 @@ mod config_editor_tests {
             }],
             ..Default::default()
         };
-        let preview = config_operation(&mut slots, &env, Some(&path), req, false).unwrap();
+        let preview = config_operation(&mut slots, &env, Some(&path), &[], req, false).unwrap();
         assert_eq!(preview.changes, vec!["Token: •••• → ••••"]);
         assert!(preview.values[0].value.is_empty());
         assert_eq!(std::fs::read_to_string(path).unwrap(), text);
@@ -470,6 +493,7 @@ mod config_editor_tests {
             &mut slots,
             &env,
             Some(&path),
+            &[],
             PluginConfigUpdateRequest {
                 name: "stop-when-idle".into(),
                 ..Default::default()
@@ -491,7 +515,7 @@ mod config_editor_tests {
             }],
             mode: 2,
         };
-        let result = config_operation(&mut slots, &unavailable, Some(&path), req, false).unwrap();
+        let result = config_operation(&mut slots, &unavailable, Some(&path), &[], req, false).unwrap();
         assert!(result.saved && !result.applied && result.pending);
         assert!(result.message.contains("échec"));
         assert!(matches!(slots[0].state, PluginState::Failed { .. }));
