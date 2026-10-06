@@ -407,9 +407,17 @@ async fn resolve_leaf(
 
     if let Some(max) = max_duration_ms {
         let had_candidates = !candidates.is_empty();
+        // Best effort for a protected AtClock hard boundary: among all
+        // eligible media that can finish before the mark, keep the longest
+        // duration. That minimizes the residual gap to the rendez-vous. The
+        // playlist's normal order below only breaks ties between equally good
+        // fits, so constraints/plugins remain authoritative.
         candidates.retain(|c| c.duration_ms > 0 && c.duration_ms <= max);
         if had_candidates && candidates.is_empty() {
             return Err(SelectionError::NoFit);
+        }
+        if let Some(best_ms) = candidates.iter().map(|c| c.duration_ms).max() {
+            candidates.retain(|c| c.duration_ms == best_ms);
         }
     }
 
