@@ -397,8 +397,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_hard_rendez_vous_cuts_the_simulated_track() {
-        // 7-minute tracks from 09:10: the 09:15 news cuts the first one.
+    async fn a_hard_rendez_vous_never_cuts_the_simulated_track() {
+        // 7-minute tracks from 09:10: none fits before 09:15, so continuity
+        // wins. The hard rendez-vous airs at the next boundary, 09:17.
         let (_d, path, _pool) = station(420).await;
         let control = StationControl::new_in_memory();
         let out = simulate(SimStart {
@@ -412,11 +413,11 @@ mod tests {
         })
         .await;
         assert_eq!(out.tracks.len(), 3, "notes: {:?}", out.notes);
-        assert_eq!(out.tracks[0].cut_at, Some(at(9, 15)));
+        assert_eq!(out.tracks[0].cut_at, None);
         assert_eq!(out.tracks[1].origin, "AtClockHard");
-        assert_eq!(out.tracks[1].starts_at, Some(at(9, 15)));
+        assert_eq!(out.tracks[1].starts_at, Some(at(9, 17)));
         assert_eq!(out.tracks[1].media, "news/n.mp3");
-        assert_eq!(out.tracks[2].starts_at, Some(Epoch(at(9, 15).0 + 60)), "back to music after the news");
+        assert_eq!(out.tracks[2].starts_at, Some(Epoch(at(9, 17).0 + 60)), "back to music after the news");
     }
 
     #[tokio::test]
@@ -478,9 +479,12 @@ mod tests {
         let hard = out
             .incidents
             .iter()
-            .find(|i| i.kind == crate::station_control::IncidentKind::HardNotCut)
+            .find(|i| {
+                i.kind == crate::station_control::IncidentKind::SourceEmpty
+                    && i.rule_id.as_deref() == Some("news")
+            })
             .expect("predicted");
-        assert_eq!((hard.rule_id.as_deref(), hard.playlist_ref.as_str(), hard.first_at), (Some("news"), "news", at(9, 15)));
+        assert_eq!((hard.rule_id.as_deref(), hard.playlist_ref.as_str(), hard.first_at), (Some("news"), "news", at(9, 17)));
         assert!(control.incidents_since(Epoch(0)).is_empty(), "nothing recorded on the real station");
     }
 
