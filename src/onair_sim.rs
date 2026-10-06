@@ -151,22 +151,17 @@ async fn run(start: &SimStart<'_>, plugins: Option<&PluginHandle>) -> SimOutcome
 
     let mut t = start.at;
     let mut known = start.at_known;
-    // A hard rendez-vous that cut the previous track airs next.
-    let mut forced: Option<ResolvedDecision> = None;
     while out.tracks.len() < start.count {
-        let r = match forced.take() {
-            Some(r) => r,
-            None => match engine.next_media(t).await {
-                Ok(r) => r,
-                Err(EngineError::Selection(SelectionError::PoolEmpty)) => {
-                    out.notes.push(Note::PoolEmpty);
-                    break;
-                }
-                Err(e) => {
-                    out.notes.push(Note::SimulationFailed { reason: e.to_string() });
-                    break;
-                }
-            },
+        let r = match engine.next_media(t).await {
+            Ok(r) => r,
+            Err(EngineError::Selection(SelectionError::PoolEmpty)) => {
+                out.notes.push(Note::PoolEmpty);
+                break;
+            }
+            Err(e) => {
+                out.notes.push(Note::SimulationFailed { reason: e.to_string() });
+                break;
+            }
         };
         if r.halted.is_some() {
             break; // cannot happen on the running copy; never loop on it
@@ -200,17 +195,7 @@ async fn run(start: &SimStart<'_>, plugins: Option<&PluginHandle>) -> SimOutcome
         };
         let end = Epoch(t.0 + (d_ms + 999) / 1000);
 
-        // A hard rendez-vous inside this track cuts it, like the air ticker.
-        let mark = engine
-            .next_hard_mark(Epoch(t.0 + 1))
-            .await
-            .ok()
-            .flatten()
-            .filter(|m| m.0 > t.0 && m.0 < end.0);
-        if let Some(m) = mark {
-            if let Ok(Some(cut_in)) = engine.air_at_clock_hard(m, m).await {
-                tr.cut_at = Some(m);
-                out.tracks.push(tr);
+        out.tracks.push(tr);
                 let _ = engine
                     .track_left(r.log_id, &media, r.leaf_ref.as_deref(), m.0 - t.0, m)
                     .await;
