@@ -389,8 +389,9 @@ async fn cut(ls: &LsControl, uri: &str, prepared_override: bool) -> Result<(), L
 /// The `AtClock` **hard** timer: sleeps until the next hard rendez-vous
 /// (`GridEngine::next_hard_mark`, re-planned at least every
 /// [`TICK_MAX`]: a new grid or a `clock set` is seen within a minute) and
-/// sends [`AirEvent::HardMark`] to the air sync task, which cuts it in if it
-/// still must. Each mark is sent once. Woken on the system clock (to the
+/// sends [`AirEvent::HardMark`] to the air sync task as a boundary notice.
+/// It never interrupts the current media; the engine consumes the hard rule at
+/// the next track boundary. Each mark is sent once. Woken on the system clock (to the
 /// second, sub-second corrected); with a frozen station clock (`clock set`)
 /// a mark equal to the frozen instant fires within a minute.
 pub fn spawn_at_clock_ticker(
@@ -650,7 +651,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_ticker_cuts_a_hard_mark_in_once() {
+    async fn the_ticker_never_cuts_an_at_clock_hard_mark() {
         let dir = tempfile::tempdir().unwrap();
         let (path, seen) = fake_ls(dir.path(), "OK");
         let (_d, eng) = hard_engine().await;
@@ -660,19 +661,12 @@ mod tests {
         control.attach_air(tx.clone());
         spawn_air_sync(rx, LsControl::new(path), bridge, control.state());
         assert_eq!(wait_for(&seen, 1).await, ["stationd.resume"]);
-        // The station clock stands on a hard mark (09:15): cut in now.
+        // The station clock stands on a hard mark (09:15). The ticker may
+        // announce the boundary, but no flush/interrupt is sent to Liquidsoap.
         eng.set_clock(Some(Epoch(9 * 3600 + 15 * 60)));
         let ticker = spawn_at_clock_ticker(eng.clone(), tx);
-        let got = wait_for(&seen, 3).await;
-        assert_eq!(got[1], "stationd.flush", "prepared grid track re-asked after the insert");
-        assert!(
-            got[2].starts_with("stationd.interrupt annotate:stationd_boot=")
-                && got[2].ends_with(":/m/news/n.mp3"),
-            "{got:?}"
-        );
-        // Sent once: the ticker keeps running, nothing more is cut.
-        tokio::time::sleep(Duration::from_millis(1500)).await;
-        assert_eq!(seen.lock().unwrap().len(), 3, "{:?}", seen.lock().unwrap());
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(seen.lock().unwrap().len(), 1, "no flush, no interrupt");
         ticker.abort();
     }
 
