@@ -4,7 +4,7 @@
 //! (`db::memory_copy`) with a detached copy of the station control (pending
 //! overrides included) and the plugins in simulation mode. It pulls track
 //! after track exactly like Liquidsoap would, advancing its clock by each
-//! track's indexed duration; a hard rendez-vous falling inside a track cuts
+//! track's indexed duration; approaching a hard rendez-vous constrains the
 //! it, like the air ticker does. Every side effect (cursors, group state,
 //! holds, `Every` counters, rendez-vous tokens, queue buffers, the broadcast
 //! log that feeds anti-repetition, `unplayed_only` marks) lands in the copy —
@@ -394,6 +394,46 @@ mod tests {
         .await;
         assert_eq!(again.tracks.len(), 3);
         assert_eq!(dump(&pool).await, before);
+    }
+
+    #[tokio::test]
+    async fn hard_boundary_selects_tracks_that_fit_when_available() {
+        let (_d, path, pool) = station(420).await;
+        sqlx::query("UPDATE media SET duration_ms = 240000 WHERE rel_path = 'music/1.mp3'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE media SET duration_ms = 60000 WHERE rel_path = 'music/2.mp3'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let toml = "name = \"music\"\n[selection]\nmode = \"static\"\norder = \"sequential\"\nfiles = [\"music/1.mp3\", \"music/2.mp3\", \"music/3.mp3\", \"music/4.mp3\", \"music/5.mp3\"]\n";
+        let pl = crate::playlist::Playlist::parse(toml).unwrap();
+        crate::store::upsert(&pool, "music", &pl, toml, Some("music"))
+            .await
+            .unwrap();
+
+        let control = StationControl::new_in_memory();
+        let out = simulate(SimStart {
+            live_db: &path,
+            tz: "UTC",
+            control: &control,
+            plugins: None,
+            at: at(9, 10),
+            at_known: true,
+            count: 3,
+        })
+        .await;
+
+        assert_eq!(out.tracks.len(), 3, "notes: {:?}", out.notes);
+        assert_eq!(out.tracks[0].media, "music/1.mp3");
+        assert_eq!(out.tracks[0].starts_at, Some(at(9, 10)));
+        assert_eq!(out.tracks[1].media, "music/2.mp3");
+        assert_eq!(out.tracks[1].starts_at, Some(at(9, 14)));
+        assert_eq!(out.tracks[2].origin, "AtClockHard");
+        assert_eq!(out.tracks[2].media, "news/n.mp3");
+        assert_eq!(out.tracks[2].starts_at, Some(at(9, 15)));
+        assert!(out.tracks.iter().all(|t| t.cut_at.is_none()));
     }
 
     #[tokio::test]
