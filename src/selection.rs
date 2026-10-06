@@ -172,6 +172,32 @@ pub async fn resolve_turn(
     playlist_ref: &str,
     start: TurnStart,
 ) -> Result<Turn, SelectionError> {
+    resolve_turn_limited(pool, plugins, now, playlist_ref, start, None).await
+}
+
+/// Resolve one turn while requiring a local media to fit inside
+/// `max_duration_ms`. Used while approaching an AtClock hard boundary:
+/// normal playlist ordering and constraints remain in force, but candidates
+/// crossing the protected boundary are removed before the draw.
+pub async fn resolve_turn_fitting(
+    pool: &SqlitePool,
+    plugins: Option<&PluginHandle>,
+    now: i64,
+    playlist_ref: &str,
+    start: TurnStart,
+    max_duration_ms: u64,
+) -> Result<Turn, SelectionError> {
+    resolve_turn_limited(pool, plugins, now, playlist_ref, start, Some(max_duration_ms)).await
+}
+
+async fn resolve_turn_limited(
+    pool: &SqlitePool,
+    plugins: Option<&PluginHandle>,
+    now: i64,
+    playlist_ref: &str,
+    start: TurnStart,
+    max_duration_ms: Option<u64>,
+) -> Result<Turn, SelectionError> {
     let continuing = start == TurnStart::Continue;
     let key = crate::playlist::normalize_ref(playlist_ref)
         .map_err(|_| SelectionError::PlaylistNotFound(playlist_ref.to_string()))?;
@@ -188,7 +214,8 @@ pub async fn resolve_turn(
                 // Only a sequence / shuffle group can be held.
                 return Err(SelectionError::CycleComplete);
             }
-            let resolved = resolve_media(pool, plugins, now, &key, &playlist, 0, &[]).await?;
+            let resolved =
+                resolve_media(pool, plugins, now, &key, &playlist, 0, &[], max_duration_ms).await?;
             return Ok(Turn { resolved, holds: false, cycles: false });
         }
     };
@@ -198,7 +225,10 @@ pub async fn resolve_turn(
         crate::group_state::set(pool, &key, &crate::group_state::GroupState::default()).await?;
     }
     let resolved =
-        resolve_group_rotation(pool, plugins, now, &key, sel, shuffle, 0, &scope, continuing).await?;
+        resolve_group_rotation(
+            pool, plugins, now, &key, sel, shuffle, 0, &scope, continuing, max_duration_ms,
+        )
+        .await?;
     let st = crate::group_state::get(pool, &key).await?;
     let holds = st.member_idx != 0 || st.take_count != 0 || st.member_started_at.is_some();
     Ok(Turn { resolved, holds, cycles: true })
@@ -221,7 +251,7 @@ async fn resolve_inner(
         .await?
         .ok_or_else(|| SelectionError::PlaylistNotFound(playlist_ref.to_string()))?;
     let playlist = Playlist::parse(&toml)?;
-    resolve_media(pool, plugins, now, &key, &playlist, 0, &[]).await
+    resolve_media(pool, plugins, now, &key, &playlist, 0, &[], None).await
 }
 
 /// Wall-clock now in epoch seconds, for callers that don't supply an instant.
@@ -249,21 +279,24 @@ async fn resolve_media(
     playlist: &Playlist,
     depth: u32,
     inherited: &[&Constraints],
+    max_duration_ms: Option<u64>,
 ) -> Result<Resolved, SelectionError> {
     let sel = &playlist.selection;
     let mut scope: Vec<&Constraints> = inherited.to_vec();
     scope.extend(playlist.broadcast.as_ref().and_then(|b| b.constraints.as_ref()));
     match sel.mode {
-        Mode::Static | Mode::Dynamic => resolve_leaf(pool, plugins, now, reference, sel, &scope)
-            .await
-            .map(|path| Resolved::File { path, leaf: Some(reference.to_string()) }),
+        Mode::Static | Mode::Dynamic => resolve_leaf(
+            pool, plugins, now, reference, sel, &scope, max_duration_ms,
+        )
+        .await
+        .map(|path| Resolved::File { path, leaf: Some(reference.to_string()) }),
         Mode::Group => match sel.strategy {
             Some(Strategy::Sequence) => {
-                resolve_group_rotation(pool, plugins, now, reference, sel, false, depth, &scope, false)
+                resolve_group_rotation(pool, plugins, now, reference, sel, false, depth, &scope, false, max_duration_ms)
                     .await
             }
             Some(Strategy::Shuffle) => {
-                resolve_group_rotation(pool, plugins, now, reference, sel, true, depth, &scope, false)
+                resolve_group_rotation(pool, plugins, now, reference, sel, true, depth, &scope, false, max_duration_ms)
                     .await
             }
             // Rotate = plain round-robin, one track per member per turn. Its
@@ -275,13 +308,16 @@ async fn resolve_media(
                     .await
             }
             Some(Strategy::Weighted) => {
-                resolve_group_weighted(pool, plugins, now, reference, sel, depth, &scope).await
+                resolve_group_weighted(pool, plugins, now, reference, sel, depth, &scope, max_duration_ms).await
             }
             None => Err(SelectionError::Unsupported("group without strategy".into())),
         },
         // A remote relays an external stream: resolve to its URL, tagged as a
         // stream so the engine never disk-checks it. Liquidsoap does the relay.
         Mode::Remote => {
+            if max_duration_ms.is_some() {
+                return Err(SelectionError::PoolEmpty);
+            }
             let url = sel
                 .url
                 .clone()
@@ -292,7 +328,11 @@ async fn resolve_media(
             // Volatile runtime buffer (requests / DJ injection): pop one entry
             // per turn (FIFO/LIFO), consuming it. Empty → PoolEmpty → fallthrough.
             let lifo = matches!(sel.order, Some(Order::Lifo));
-            match crate::queue_state::pop(pool, reference, lifo).await? {
+            let path = match max_duration_ms {
+                Some(max) => crate::queue_state::pop_fitting(pool, reference, lifo, max).await?,
+                None => crate::queue_state::pop(pool, reference, lifo).await?,
+            };
+            match path {
                 Some(path) => Ok(Resolved::File { path, leaf: Some(reference.to_string()) }),
                 None => Err(SelectionError::PoolEmpty),
             }
@@ -310,6 +350,7 @@ async fn resolve_leaf(
     reference: &str,
     sel: &Selection,
     constraints: &[&Constraints],
+    max_duration_ms: Option<u64>,
 ) -> Result<String, SelectionError> {
     let order = effective_order(sel);
 
@@ -354,6 +395,10 @@ async fn resolve_leaf(
         }
         let played = crate::episode_play::played_matching(pool, reference).await?;
         candidates.retain(|c| !played.contains(&c.rel_path));
+    }
+
+    if let Some(max) = max_duration_ms {
+        candidates.retain(|c| c.duration_ms > 0 && c.duration_ms <= max);
     }
 
     if candidates.is_empty() {
@@ -480,6 +525,7 @@ async fn resolve_group_rotation(
     depth: u32,
     scope: &[&Constraints],
     stop_at_wrap: bool,
+    max_duration_ms: Option<u64>,
 ) -> Result<Resolved, SelectionError> {
     let n = sel.members.len();
     if n == 0 {
@@ -575,7 +621,11 @@ async fn resolve_group_rotation(
             st.random_take = None;
         }
 
-        match resolve_member(pool, plugins, now, &member_key, depth, scope).await {
+        match resolve_member(
+            pool, plugins, now, &member_key, depth, scope, max_duration_ms,
+        )
+        .await
+        {
             Ok(track) => {
                 if member.runtime.is_some() {
                     // Time budget: stamp the slot start on the first track and
@@ -656,6 +706,7 @@ async fn resolve_group_weighted(
     sel: &Selection,
     depth: u32,
     scope: &[&Constraints],
+    max_duration_ms: Option<u64>,
 ) -> Result<Resolved, SelectionError> {
     let policy = sel
         .on_member_unavailable
@@ -682,7 +733,11 @@ async fn resolve_group_weighted(
         let member = &sel.members[member_i];
         let member_key = crate::playlist::resolve_member_ref(group_ref, &member.r#ref)
             .map_err(|_| SelectionError::PlaylistNotFound(member.r#ref.clone()))?;
-        match resolve_member(pool, plugins, now, &member_key, depth, scope).await {
+        match resolve_member(
+            pool, plugins, now, &member_key, depth, scope, max_duration_ms,
+        )
+        .await
+        {
             Ok(track) => return Ok(track),
             // `skip`: drop this empty member and re-draw among the rest.
             Err(SelectionError::PoolEmpty) if policy == MemberUnavailable::Skip => {
@@ -740,6 +795,7 @@ async fn resolve_member(
     member_key: &str,
     depth: u32,
     inherited: &[&Constraints],
+    max_duration_ms: Option<u64>,
 ) -> Result<Resolved, SelectionError> {
     let toml = store::playlist_toml_by_ref(pool, member_key)
         .await?
@@ -749,8 +805,10 @@ async fn resolve_member(
         Mode::Static | Mode::Dynamic => {
             let mut scope: Vec<&Constraints> = inherited.to_vec();
             scope.extend(playlist.broadcast.as_ref().and_then(|b| b.constraints.as_ref()));
-            resolve_leaf(pool, plugins, now, member_key, &playlist.selection, &scope)
-                .await
+            resolve_leaf(
+                pool, plugins, now, member_key, &playlist.selection, &scope, max_duration_ms,
+            )
+            .await
                 .map(|path| Resolved::File { path, leaf: Some(member_key.to_string()) })
         }
         Mode::Group => {
@@ -767,11 +825,15 @@ async fn resolve_member(
                 &playlist,
                 depth + 1,
                 inherited,
+                max_duration_ms,
             ))
             .await
         }
         // A remote member relays its stream (e.g. a night relay inside a group).
         Mode::Remote => {
+            if max_duration_ms.is_some() {
+                return Err(SelectionError::PoolEmpty);
+            }
             let url = playlist.selection.url.clone().ok_or_else(|| {
                 SelectionError::Unsupported(format!("remote member `{member_key}` without url"))
             })?;
@@ -780,7 +842,11 @@ async fn resolve_member(
         // A queue member pops its own runtime buffer, consuming one entry.
         Mode::Queue => {
             let lifo = matches!(playlist.selection.order, Some(Order::Lifo));
-            match crate::queue_state::pop(pool, member_key, lifo).await? {
+            let path = match max_duration_ms {
+                Some(max) => crate::queue_state::pop_fitting(pool, member_key, lifo, max).await?,
+                None => crate::queue_state::pop(pool, member_key, lifo).await?,
+            };
+            match path {
                 Some(path) => Ok(Resolved::File { path, leaf: Some(member_key.to_string()) }),
                 None => Err(SelectionError::PoolEmpty),
             }
