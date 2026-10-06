@@ -4,8 +4,8 @@
 //! (`db::memory_copy`) with a detached copy of the station control (pending
 //! overrides included) and the plugins in simulation mode. It pulls track
 //! after track exactly like Liquidsoap would, advancing its clock by each
-//! track's indexed duration; approaching a hard rendez-vous constrains the
-//! it, like the air ticker does. Every side effect (cursors, group state,
+//! track's indexed duration. Approaching a hard rendez-vous constrains the
+//! next selections so the current track is never cut, like the real air path. Every side effect (cursors, group state,
 //! holds, `Every` counters, rendez-vous tokens, queue buffers, the broadcast
 //! log that feeds anti-repetition, `unplayed_only` marks) lands in the copy —
 //! so the simulation is faithful — and nowhere else.
@@ -60,7 +60,8 @@ pub struct SimTrack {
     pub duration_ms: Option<i64>,
     /// Estimated start; `None` as soon as one duration before it is unknown.
     pub starts_at: Option<Epoch>,
-    /// Cut by a hard rendez-vous at this instant.
+    /// Explicit simulated cut instant. AtClock hard no longer uses this:
+    /// clock rendez-vous are protected boundaries and never cut a media.
     pub cut_at: Option<Epoch>,
     pub playlist_ref: Option<String>,
     pub leaf_ref: Option<String>,
