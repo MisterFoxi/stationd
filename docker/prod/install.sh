@@ -32,7 +32,7 @@ exec 9>/run/lock/stationd-install.lock
 flock -n 9 || die "une installation stationd est déjà en cours"
 docker compose version >/dev/null 2>&1 || die "plugin docker compose absent"
 docker info >/dev/null 2>&1 || die "daemon Docker indisponible"
-for f in VERSION SHA256SUMS compose.yaml stationd.example.toml client.sh scripts/update-geolite2.sh radio/error.mp3 radio/bruit.mp3; do
+for f in VERSION SHA256SUMS compose.yaml stationd.example.toml client.sh configure-paths.sh paths.py scripts/update-geolite2.sh radio/error.mp3 radio/bruit.mp3; do
   [ -s "$here/$f" ] || die "bundle incomplet : $f absent ou vide"
 done
 [ -d "$here/examples" ] || die "bundle incomplet : examples/"
@@ -41,7 +41,7 @@ tag="$(cat "$here/VERSION")"
 [ -s "$here/stationd-$tag.image.tar.gz" ] || die "image du bundle absente"
 (cd "$here" && sha256sum --quiet -c SHA256SUMS) || die "bundle corrompu (SHA256SUMS)"
 # Refuser un mauvais montage avant de changer l'installation.
-if [ ! -f "$dir/.env" ]; then
+if [ ! -f "$dir/.env" ] && [ ! -f "$dir/stationd.toml" ]; then
   case "$media" in /*) ;; *) die "--media doit être un chemin absolu" ;; esac
   [ -d "$media" ] || die "médiathèque $media absente (montage NFS ?) : préciser --media"
 fi
@@ -64,6 +64,7 @@ previous=0
 if [ -f "$dir/.env" ]; then
   previous=1
   cp "$dir/.env" "$tmp/previous.env"
+  [ ! -f "$dir/compose.yaml" ] || cp "$dir/compose.yaml" "$tmp/previous.compose.yaml"
   awk -v tag="$tag" '
     /^STATIOND_VERSION=/ { if (!seen++) print "STATIOND_VERSION=" tag; next }
     { print }
@@ -77,16 +78,17 @@ STATIOND_VERSION=$tag
 STATIOND_UID=$(id -u stationd)
 STATIOND_GID=$(getent group stationd | cut -d: -f3)
 MEDIA_PATH='$media'
-MEDIA_GID=$(stat -c %g "$media")
+MEDIA_GID=$(stat -c %g "$media" 2>/dev/null || getent group stationd | cut -d: -f3)
 TZ='${TZ:-UTC}'
 EOF
 fi
-docker compose --project-directory "$dir" --env-file "$tmp/.env" -f "$here/compose.yaml" config --quiet
-# Valider aussi le montage d'une installation existante sans exécuter .env.
+# Le TOML est la source des chemins ; MEDIA_PATH sert au bootstrap sans TOML.
 media_line="$(docker compose --project-directory "$dir" --env-file "$tmp/.env" -f "$here/compose.yaml" config --environment | sed -n 's/^MEDIA_PATH=//p')"
-[ -n "$media_line" ] && [ -d "$media_line" ] || die "médiathèque configurée absente : $media_line"
+bash "$here/configure-paths.sh" --dir "$dir" --image "stationd:$tag" \
+  --template "$here/compose.yaml" --env-file "$tmp/.env" \
+  --output "$tmp/compose.yaml" --media "${media_line:-$media}"
 install -d -m 2770 -o stationd -g stationd "$dir" "$dir/playlist" "$dir/radio" "$dir/grid"
-install -d -m 0750 -o stationd -g stationd "$dir/data" "$dir/data/geoip"
+install -d -m 2770 -o stationd -g stationd "$dir/data" "$dir/data/geoip"
 install -d -m 0755 "$dir/scripts"
 install -m 0755 "$here/scripts/update-geolite2.sh" "$dir/scripts/update-geolite2.sh"
 cp -r --no-clobber "$here/radio/." "$dir/radio/"
@@ -97,7 +99,10 @@ find "$dir/playlist" "$dir/radio" "$dir/grid" -mindepth 1 -type d -exec chmod 27
 chgrp -R stationd "$dir/playlist" "$dir/radio" "$dir/grid"
 chmod -R g+rwX "$dir/playlist" "$dir/radio" "$dir/grid"
 find "$dir" -maxdepth 1 -name '*.toml' -exec chgrp stationd {} + -exec chmod g+rw {} +
-install -m 0644 "$here/compose.yaml" "$dir/compose.yaml"
+install -m 0644 "$tmp/compose.yaml" "$dir/compose.yaml"
+install -m 0644 "$here/compose.yaml" "$dir/scripts/compose.template.yaml"
+install -m 0755 "$here/configure-paths.sh" "$dir/scripts/configure-paths.sh"
+install -m 0644 "$here/paths.py" "$dir/scripts/paths.py"
 install -m 0660 -o stationd -g stationd "$here/stationd.example.toml" "$dir/stationd.example.toml"
 # Rafraîchir les exemples sans effacer ceux en place avant la copie.
 cp -r "$here/examples" "$tmp/examples"
@@ -132,7 +137,7 @@ echo "Commandes installées : /usr/local/bin/stationctl et /usr/local/bin/statio
 [ -z "$relog" ] || echo "$relog"
 if [ ! -f "$dir/stationd.toml" ]; then
   echo "Installation prête, configuration requise : créer $dir/stationd.toml depuis stationd.example.toml."
-  echo "Puis : cd $dir && docker compose up -d"
+  echo "Puis : sudo bash $dir/scripts/configure-paths.sh && cd $dir && docker compose up -d"
   exit 0
 fi
 dc() { docker compose --project-directory "$dir" -f "$dir/compose.yaml" "$@"; }
@@ -146,6 +151,7 @@ else
   dc logs --tail 80 >&2 || true
   if [ "$previous" = 1 ]; then
     install -m 0640 -o root -g stationd "$tmp/previous.env" "$dir/.env"
+    [ ! -f "$tmp/previous.compose.yaml" ] || install -m 0644 "$tmp/previous.compose.yaml" "$dir/compose.yaml"
     echo "Échec du démarrage : restauration de la version précédente dans .env." >&2
     dc up -d >&2 || true
   fi

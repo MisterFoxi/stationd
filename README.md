@@ -568,8 +568,34 @@ sudo stationd-<tag>/install.sh            # [--dir /opt/stationd] [--media /mnt/
 
 `install.sh` loads the image, creates the system user `stationd` (owner of
 the directory) and, the first time, `.env` (image tag, `stationd` UID/GID,
-media path and its group — applied in the container at start-up). It starts
+a legacy media bootstrap path — used only before stationd.toml exists). It starts
 the station when `stationd.toml` exists; otherwise it stops there.
+
+The installer generates Compose bind mounts from `[media] library_path`,
+`[playlist] path`, `[grid] path`, and the parent directory of `[database] path`
+in `stationd.toml`. Absolute paths outside `/var/lib/stationd` are mounted at
+the **same path** in the container. Relative paths use the installation
+directory already mounted at `/var/lib/stationd`. External host directories
+must exist; Docker is not allowed to silently create them. NFS mounts remain
+the administrator's responsibility. The groups owning these directories are
+added to stationd and Liquidsoap in the container; external permissions are
+never rewritten. A real TOML parser runs in the production image, so no Python
+toolchain is needed on the host. System paths such as `/etc` and `/usr` cannot
+be used as external mounts.
+
+After changing any of these TOML paths, regenerate the volumes and recreate
+the container (a restart alone does not update mounts):
+
+```sh
+cd /opt/stationd
+sudo bash scripts/configure-paths.sh
+sudo docker compose up -d
+```
+
+`compose.yaml` is generated; change `stationd.toml` for paths. Other Compose
+settings are in `scripts/compose.template.yaml` (refreshed with each package).
+`--media` and legacy `MEDIA_PATH` only select the initial mount before a TOML
+configuration exists; the TOML takes precedence once it is present.
 
 Permissions: the account running `sudo` (or `--admin USER` for a root
 installation) joins the groups `stationd` and `docker` (log in again once).
@@ -577,8 +603,7 @@ The Docker group grants root-equivalent control of the host. This allows
 Docker administration without sudo, and `stationd.toml`, `grid/`, `playlist/` and `radio/` are edited
 without `sudo`. The shared directories are `2770 stationd:stationd` (setgid:
 what you create belongs to the group) and stationd writes with `umask 007`,
-so the files it writes stay editable by the group; `data/` is `0750` (the
-group creates and deletes nothing there). `install.sh` re-applies these
+so the files it writes stay editable by the group; `data/` and `data/geoip/` are also `2770`. `install.sh` re-applies these
 permissions on every run. `.env` is root-owned and group-readable (`0640`).
 
 The installer installs `stationctl` and `stationd-tui` in `/usr/local/bin`.
@@ -615,15 +640,15 @@ serializes concurrent installations, preserves existing configuration and
 radio files, copies all missing radio files (including nested/hidden files),
 and finishes after `docker compose up -d`, without a final gRPC check or
 readiness wait. If Compose fails during an update, it restores the previous
-`.env` and attempts to restart the previous image; it reports an error. Database/data migrations are not rolled back.
+`.env` and generated Compose file and attempts to restart the previous image; it reports an error. Database/data migrations are not rolled back.
 A deliberately stopped station (`data/stationd.stopped`) remains stopped.
 
 First install: write `stationd.toml` from `stationd.example.toml` — relative
 paths resolve against the directory (`./playlist`…), `[media] library_path`
-= the `--media` path, WASM plugins at
+= the media path mounted on the host (the TOML is authoritative), WASM plugins at
 WASM plugins found automatically by their declared name (no `wasm` path needed),
 `control_socket = "/run/stationd/liquidsoap.sock"` — then
-`cd /opt/stationd && docker compose up -d`. The fallback and the background
+`cd /opt/stationd && sudo bash scripts/configure-paths.sh && sudo docker compose up -d`. The fallback and the background
 noise ship in the image (`/usr/share/stationd/error.mp3`, `bruit.mp3`, from
 the repository's `radio/`): leave `fallback_path` / `halted_path` out, or
 point them at your own files in `radio/`. The only name to set is

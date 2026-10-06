@@ -9,6 +9,8 @@ mkdir -p "$tmp/mock" "$tmp/node" "$tmp/media" "$tmp/bundle/radio/sub" "$tmp/bund
 export TEST_HOME="$tmp"
 export TEST_LOG="$tmp/log"
 export TEST_MEDIA="$tmp/media"
+export TEST_PATH_HELPER="$root/docker/prod/paths.py"
+export TEST_PYTHON="${TEST_PYTHON:-python3}"
 : > "$TEST_LOG"
 for cmd in chown chgrp flock groupadd useradd; do
   printf '#!/usr/bin/env bash\nexit 0\n' > "$tmp/mock/$cmd"
@@ -56,6 +58,19 @@ printf 'docker' >> "$TEST_LOG"
 printf ' %q' "$@" >> "$TEST_LOG"
 printf '\n' >> "$TEST_LOG"
 if [ "$1" = info ]; then exit "${TEST_INFO_FAIL:-0}"; fi
+if [ "$1" = run ] && [[ " $* " = *" --entrypoint python3 "* ]]; then
+  config=""
+  while [ $# -gt 0 ]; do
+    if [ "$1" = -v ]; then config="${2%:/stationd-config.toml:ro}"; shift 2; else shift; fi
+    if [ "${1:-}" = - ]; then shift; dir="$1"; media="$2"; break; fi
+  done
+  helper="$TEST_PATH_HELPER"
+  if [[ "$OSTYPE" = msys* ]]; then
+    config="$(cygpath -m "$config")"; helper="$(cygpath -m "$helper")"
+  fi
+  MSYS2_ARG_CONV_EXCL='*' "$TEST_PYTHON" -c 'import runpy,sys,tomllib; ns=runpy.run_path(sys.argv[4]); config=tomllib.load(open(sys.argv[1],"rb")); print("\n".join("\t".join(row) for row in ns["plan"](config,sys.argv[2],sys.argv[3])))' "$config" "$dir" "$media" "$helper"
+  exit $?
+fi
 if [ "$1" = save ]; then printf image; exit 0; fi
 if [ "$1" = build ]; then test -x "${@: -1}/bin/update-geolite2.sh" || exit 1; fi
 if [ "$1" = compose ]; then
@@ -96,6 +111,7 @@ sed -e "s|/run/lock/stationd-install.lock|$tmp/install.lock|g" \
     -e "s|/usr/local/bin|$tmp/system/bin|g" \
     "$root/docker/prod/install.sh" > "$tmp/bundle/install.sh"
 cp "$root/docker/prod/client.sh" "$tmp/bundle/client.sh"
+cp "$root/docker/prod/"{configure-paths.sh,paths.py} "$tmp/bundle/"
 cp "$root/scripts/update-geolite2.sh" "$tmp/bundle/scripts/update-geolite2.sh"
 cp "$root/docker/prod/compose.yaml" "$tmp/bundle/compose.yaml"
 printf config > "$tmp/bundle/stationd.example.toml"
@@ -126,7 +142,7 @@ grep -q 'configuration requise' "$tmp/output"
 # Mise à jour : garder config, fichiers personnalisés et montage ; ajouter VERSION si absente.
 printf custom > "$tmp/node/radio/error.mp3"
 printf geodb > "$tmp/node/data/geoip/GeoLite2-City.mmdb"
-printf config > "$tmp/node/stationd.toml"
+printf '[media]\nlibrary_path = "%s"\n[playlist]\npath = "./playlist"\n' "$tmp/media" > "$tmp/node/stationd.toml"
 printf 'MEDIA_PATH=%s\nSTATIOND_UID=982\nSTATIOND_GID=982\nMEDIA_GID=982\n' "$tmp/media" > "$tmp/node/.env"
 cp "$tmp/node/stationd.toml" "$tmp/expected-config"
 bash "$tmp/bundle/install.sh" --dir "$tmp/node" --admin foxi > "$tmp/output"
@@ -136,10 +152,30 @@ test "$(cat "$tmp/node/data/geoip/GeoLite2-City.mmdb")" = geodb
 grep -qx STATIOND_VERSION=v1 "$tmp/node/.env"
 grep -q 'conteneur démarré' "$tmp/output"
 ! grep -q 'stationctl status' "$TEST_LOG"
+# TOML authoritative: external playlist mount, missing directory and invalid TOML.
+mkdir -p "$tmp/shared playlists"
+printf '[media]\nlibrary_path = "%s"\n[playlist]\npath = "%s"\n' "$tmp/media" "$tmp/shared playlists" > "$tmp/node/stationd.toml"
+bash "$tmp/bundle/install.sh" --dir "$tmp/node" --admin foxi > "$tmp/output"
+grep -Fq "\"target\": \"$tmp/shared playlists\"" "$tmp/node/compose.yaml"
+grep -Fq '"create_host_path": false' "$tmp/node/compose.yaml"
+grep -q STATIOND_PATH_GIDS "$tmp/node/compose.yaml"
+cp "$tmp/node/compose.yaml" "$tmp/expected-compose"
+cp "$tmp/node/.env" "$tmp/expected-env"
+printf '[playlist]\npath = "%s"\n' "$tmp/missing-playlists" > "$tmp/node/stationd.toml"
+if bash "$tmp/bundle/install.sh" --dir "$tmp/node" --admin foxi > "$tmp/output" 2>&1; then exit 1; fi
+cmp "$tmp/expected-compose" "$tmp/node/compose.yaml"
+cmp "$tmp/expected-env" "$tmp/node/.env"
+printf 'invalid TOML' > "$tmp/node/stationd.toml"
+if bash "$tmp/bundle/install.sh" --dir "$tmp/node" --admin foxi > "$tmp/output" 2>&1; then exit 1; fi
+cmp "$tmp/expected-compose" "$tmp/node/compose.yaml"
+cp "$tmp/expected-config" "$tmp/node/stationd.toml"
+bash "$tmp/bundle/install.sh" --dir "$tmp/node" --admin foxi > "$tmp/output"
+cp "$tmp/node/compose.yaml" "$tmp/expected-compose"
 # Échec de Compose : restaurer la version précédente et rendre un échec.
 sed -i 's/STATIOND_VERSION=v1/STATIOND_VERSION=old/' "$tmp/node/.env"
 if TEST_UP_FAIL=1 bash "$tmp/bundle/install.sh" --dir "$tmp/node" --admin foxi > "$tmp/output" 2>&1; then exit 1; fi
 grep -qx STATIOND_VERSION=old "$tmp/node/.env"
+cmp "$tmp/expected-compose" "$tmp/node/compose.yaml"
 grep -q 'restauration' "$tmp/output"
 # Arrêt volontaire : ne pas réactiver le daemon, ni attendre un RPC impossible.
 touch "$tmp/node/data/stationd.stopped"
@@ -168,7 +204,7 @@ chmod +x "$tmp/repo/docker/package.sh"
 mkdir -p "$tmp/repo/tools" "$tmp/repo/scripts"
 cp "$root/scripts/update-geolite2.sh" "$tmp/repo/scripts/update-geolite2.sh"
 printf extractor > "$tmp/repo/tools/essentia_analyze.py"
-cp "$root/docker/prod/"{install.sh,client.sh,compose.yaml} "$tmp/repo/docker/prod/"
+cp "$root/docker/prod/"{install.sh,client.sh,compose.yaml,configure-paths.sh,paths.py} "$tmp/repo/docker/prod/"
 cp -r "$tmp/bundle/radio" "$tmp/repo/radio"
 cp -r "$tmp/bundle/examples" "$tmp/repo/examples"
 cp "$tmp/bundle/stationd.example.toml" "$tmp/repo/"
@@ -182,6 +218,8 @@ bundle="$tmp/unpack/stationd-0.1.0-deadbeef"
 (cd "$bundle"; sha256sum --quiet -c SHA256SUMS)
 diff -r "$tmp/repo/radio" "$bundle/radio"
 test -x "$bundle/client.sh"
+test -x "$bundle/configure-paths.sh"
+test -s "$bundle/paths.py"
 test -x "$bundle/scripts/update-geolite2.sh"
 cmp "$tmp/repo/scripts/update-geolite2.sh" "$bundle/scripts/update-geolite2.sh"
 grep -q -- 'cargo build --release --locked --workspace --bins' "$TEST_LOG"
@@ -211,7 +249,12 @@ exit "${TEST_SCP_FAIL:-0}"
 EOF
 chmod +x "$tmp/mock/ssh" "$tmp/mock/scp"
 : > "$TEST_LOG"
-make -C "$tmp/repo" dist VM=foxi@node ARGS=--allow-dirty > "$tmp/output"
+if command -v make >/dev/null; then
+  make -C "$tmp/repo" dist VM=foxi@node ARGS=--allow-dirty > "$tmp/output"
+else
+  echo 'SKIP: cible Make dist (Make absent) ; livraison testée via package.sh' >&2
+  bash "$tmp/repo/docker/package.sh" --vm foxi@node --allow-dirty > "$tmp/output"
+fi
 grep -Fq 'scp -- ' "$TEST_LOG"
 grep -Fq 'foxi@node:/var/tmp/stationd-deploy.abcdefghij/bundle.tar' "$TEST_LOG"
 grep -Fq "ssh -t foxi@node cd '/var/tmp/stationd-deploy.abcdefghij' && tar -xf bundle.tar && sudo './stationd-0.1.0-deadbeef/install.sh'" "$TEST_LOG"

@@ -45,4 +45,20 @@ for existing in 0 1; do
     grep -qx "usermod -aG $group $user" "$TEST_LOG"
   done
 done
+# Exports de playlists/grilles distincts : chaque GID doit rejoindre les lecteurs.
+: > "$TEST_LOG"
+env -u STATIOND_UID -u STATIOND_GID PATH="$tmp/bin:$PATH" \
+  STATIOND_PATH_GIDS='2222 3333' STATIOND_USER=stationd \
+  STATIOND_ROOT="$tmp/root" CARGO_HOME="$tmp/cargo" \
+  sh "$root/docker/rootfs/etc/s6-overlay/scripts/init-perms"
+for gid in 2222 3333; do
+  grep -qx "groupadd -g $gid stationd-path-$gid" "$TEST_LOG"
+  grep -qx "usermod -aG stationd-path-$gid stationd" "$TEST_LOG"
+  grep -qx "usermod -aG stationd-path-$gid liquidsoap" "$TEST_LOG"
+done
+if env -u STATIOND_UID -u STATIOND_GID PATH="$tmp/bin:$PATH" \
+  STATIOND_PATH_GIDS='not-a-gid' sh "$root/docker/rootfs/etc/s6-overlay/scripts/init-perms" \
+  > "$tmp/output" 2>&1; then exit 1; fi
+grep -q 'GID de chemin invalide' "$tmp/output"
+
 echo 'OK: groupe NFS existant/nouveau, accès Liquidsoap + scanner stationd/dev'

@@ -21,10 +21,10 @@ services:
       # Identités appliquées au démarrage par init-perms.
       STATIOND_UID: ${STATIOND_UID:?STATIOND_UID manquant (.env)}
       STATIOND_GID: ${STATIOND_GID:?STATIOND_GID manquant (.env)}
-      MEDIA_GID: ${MEDIA_GID:?MEDIA_GID manquant (.env)}
+      # STATIOND_PATH_GROUPS
     volumes:
       - .:/var/lib/stationd
-      # Même chemin que [media] library_path de stationd.toml.
-      - ${MEDIA_PATH:?MEDIA_PATH manquant (.env)}:${MEDIA_PATH}
+      # Générés depuis les chemins médias/playlists/grilles/base du TOML.
+      # STATIOND_EXTERNAL_VOLUMES
     restart: unless-stopped
     stop_grace_period: 15s
