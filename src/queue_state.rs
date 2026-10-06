@@ -71,10 +71,11 @@ pub async fn pop(
     }
 }
 
-/// Pop the first queued entry, in the queue's normal direction, whose
-/// indexed duration fits inside `max_duration_ms`. Entries that do not fit
+/// Pop the queued entry that best fits inside `max_duration_ms`: the
+/// longest eligible media not exceeding the budget. Entries that do not fit
 /// stay queued. Unknown/zero durations are skipped because they cannot protect
-/// a hard clock boundary.
+/// a hard clock boundary. FIFO/LIFO is only the tie-breaker between entries
+/// with the same best duration.
 ///
 /// The select-then-delete remains safe under stationd's single-writer model.
 pub async fn pop_fitting(
@@ -85,7 +86,7 @@ pub async fn pop_fitting(
 ) -> Result<Option<String>, sqlx::Error> {
     let order = if lifo { "DESC" } else { "ASC" };
     let row: Option<(i64, String)> = sqlx::query_as(&format!(
-        "SELECT q.id, q.rel_path          FROM queue_entry q          JOIN media m ON m.rel_path = q.rel_path          WHERE q.playlist_ref = ?1            AND m.available = 1            AND m.duration_ms > 0            AND m.duration_ms <= ?2          ORDER BY q.id {order} LIMIT 1"
+        "SELECT q.id, q.rel_path          FROM queue_entry q          JOIN media m ON m.rel_path = q.rel_path          WHERE q.playlist_ref = ?1            AND m.available = 1            AND m.duration_ms > 0            AND m.duration_ms <= ?2          ORDER BY m.duration_ms DESC, q.id {order} LIMIT 1"
     ))
     .bind(playlist_ref)
     .bind(max_duration_ms as i64)
