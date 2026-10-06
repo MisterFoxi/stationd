@@ -336,7 +336,14 @@ pub fn spawn_air_sync(
                     cut_in(&ls, &bridge, id).await;
                 }
                 Some(Some(AirEvent::HardMark { at })) => {
-                    cut_in_at_clock(&ls, &bridge, at).await;
+                    // AtClock hard is now a protected boundary, not an
+                    // interrupt. The engine has already constrained selections
+                    // approaching this mark; if a track still overruns, the
+                    // occurrence stays pending and wins the next pull.
+                    tracing::debug!(
+                        mark = at.0,
+                        "AtClock hard boundary reached; current media is never cut"
+                    );
                 }
                 Some(Some(AirEvent::LiveKick)) => {
                     // Not retried: the harbor's disconnection hook reports
@@ -363,23 +370,6 @@ async fn cut_in(ls: &LsControl, bridge: &LsBridge, id: u64) {
             id,
             error = %e,
             "hard override could NOT be cut in (Liquidsoap unreachable): consumed, not aired"
-        ),
-    }
-}
-
-/// `AtClock` hard rendez-vous `at`: resolve it now — the engine decides
-/// whether it must still cut — and cut it in (see [`cut`]).
-async fn cut_in_at_clock(ls: &LsControl, bridge: &LsBridge, at: Epoch) {
-    let prepared_override = bridge.prepared_is_override();
-    let Some(uri) = bridge.at_clock_uri(at).await else {
-        return; // no cut: stays soft-eligible (logged by the engine)
-    };
-    match cut(ls, &uri, prepared_override).await {
-        Ok(()) => tracing::info!(mark = at.0, "AtClock hard cut in"),
-        Err(e) => tracing::error!(
-            mark = at.0,
-            error = %e,
-            "AtClock hard could NOT be cut in (Liquidsoap unreachable): occurrence consumed, not aired"
         ),
     }
 }
