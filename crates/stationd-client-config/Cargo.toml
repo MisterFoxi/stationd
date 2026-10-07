@@ -1,0 +1,14 @@
+# Local client settings shared by stationctl and the TUI, without the daemon.
+[package]
+name = "stationd-client-config"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+toml = "1"
+
+[dev-dependencies]
+tempfile = "3"

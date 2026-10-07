@@ -3,8 +3,7 @@
 
 use clap::{Parser, Subcommand};
 
-#[path = "stationctl/address.rs"]
-mod address;
+use stationd_client_config as address;
 
 #[path = "stationctl/listeners.rs"]
 mod listeners;
