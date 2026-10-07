@@ -7,6 +7,8 @@ use clap::{Parser, Subcommand};
 
 #[path = "stationctl/listeners.rs"]
 mod listeners;
+#[path = "stationctl/remote.rs"]
+mod remote;
 
 use stationd::proto::{broadcast, events, icecast, library, liquidsoap, live, onair, playlist, plugin, schedule, station, stats};
 use events::event_service_client::EventServiceClient;
@@ -55,6 +57,14 @@ struct Args {
 
 #[derive(Subcommand, Debug)]
 enum Command {
+    /// Manage Webmin users and station-scoped roles (trusted operator gRPC)
+    #[command(subcommand)]
+    RemoteUser(remote::UserCommand),
+    /// List or revoke Webmin Web sessions
+    #[command(subcommand)]
+    RemoteSession(remote::SessionCommand),
+    /// Read the last 200 Webmin audit records
+    RemoteAudit,
     /// Show stationd's status (name, uptime, pid)
     Status,
     /// Ask stationd to exit cleanly — its supervisor starts it again (a
@@ -785,6 +795,9 @@ async fn main() -> anyhow::Result<()> {
     let mut client = StationClient::connect(args.addr.clone()).await?;
 
     match args.command {
+        Command::RemoteUser(command) => remote::user(&args.addr, command).await?,
+        Command::RemoteSession(command) => remote::session(&args.addr, command).await?,
+        Command::RemoteAudit => remote::audit(&args.addr).await?,
         Command::Status => {
             let reply = client.status(StatusRequest {}).await?.into_inner();
             println!("station:  {}", reply.station_name);

@@ -285,3 +285,34 @@ level = "info"
 # [[plugin]]
 # name = "plugin-config"
 # enabled = true
+# Remote supervision (Webmin), native plugin: passkeys and station-scoped roles.
+# HTTPS reverse proxy required. Capability db enables identity/session persistence.
+# One gateway can supervise several stations; endpoints are configured server-side.
+# The first screen after login will be a network summary, then station detail.
+# Loopback binding only in tranche A; HTTPS is terminated by the reverse proxy.
+# See Doc/Webmin-implementation.md for limits and scope.
+# [[plugin]]
+# name = "remote-supervision"
+# enabled = false
+# capabilities = ["db"]
+# [plugin.config]
+# bind = "127.0.0.1:8090"
+# public_url = "https://remote.homestone.rp-radio.live"
+# max_requests = 128              # Concurrent handler executions, 1..1024
+# request_timeout_seconds = 5     # Handler deadline, 1..60
+# shutdown_timeout_seconds = 2    # Grace before closing connections, 1..10
+# session_ttl_seconds = 43200     # Absolute Web session lifetime, 60..86400
+# enrollment_ttl_seconds = 900    # One-use enrollment URL lifetime, 60..86400
+# auth_requests_per_minute = 120  # Per peer IP; forwarded headers are ignored
+# password_min_length = 12       # Unicode characters, 1..password_max_length
+# password_max_length = 256      # Unicode characters, password_min_length..256
+# [[plugin.config.stations]]
+# id = "home-stone"               # Stable, unique ID for URLs and future permissions
+# label = "Home Stone"
+# grpc_endpoint = "http://127.0.0.1:50051"
+# [[plugin.config.stations]]
+# id = "second-station"
+# label = "Second Station"
+# grpc_endpoint = "https://second.internal.example:50051"
+# HTTP gRPC is for a trusted internal transport only; never expose it publicly.
+# The catalogue is validated but no gRPC connection is opened in tranche A.

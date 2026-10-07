@@ -1,0 +1,16 @@
+[Unit]
+Description=Relay Traefik to the loopback StationD Webmin plugin
+Requires=stationd-webmin.socket
+After=network.target
+
+[Service]
+ExecStart=/usr/lib/systemd/systemd-socket-proxyd 127.0.0.1:8090
+DynamicUser=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+IPAddressDeny=any
+IPAddressAllow=192.168.1.94/32
+IPAddressAllow=localhost

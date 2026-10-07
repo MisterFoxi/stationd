@@ -2,6 +2,8 @@
 # (devstationd). Tout passe par le conteneur de dev (docker compose, README
 # « Run (Docker) »). `make` ou `make help` liste les cibles.
 #
+#   make webmin                       # StationD avec le plugin natif Webmin
+#   make webmin-test                  # tests ciblés du socle Webmin
 #   make plugins                      # tous les plugins WASM
 #   make plugins P=stop-when-idle-wasm
 #   make ctl A="station state"        # n'importe quelle commande stationctl
@@ -43,7 +45,7 @@ EXEC_ROOT = $(DC) exec $(SVC)
 CTL       = $(EXEC) sh -c '"$$STATIOND_BIN/stationctl" "$$@"' stationctl
 
 .DEFAULT_GOAL := help
-.PHONY: help up down image logs shell build release test clippy fmt plugins \
+.PHONY: help up down image logs shell build release test clippy fmt plugins webmin webmin-test \
         all restart restart-ls restart-icecast restart-air check-liq tui ctl \
         state stop start package dist mrproper
 
@@ -69,9 +71,14 @@ shell: ## Shell dans le conteneur (utilisateur dev)
 > $(DC) exec -it -u dev $(SVC) bash
 
 # --- compilation / tests -----------------------------------------------------
-build: ## cargo build (stationd + stationctl) : release sur main, debug ailleurs (PROFILE=…) ; target/active → ce profil
+build: ## cargo build (stationd + stationctl + plugins natifs, dont Webmin) : release sur main, debug ailleurs (PROFILE=…) ; target/active → ce profil
 > @echo "== profil $(PROFILE) (branche $(or $(BRANCH),?))"
 > $(EXEC) sh -c 'set -e; cargo build $(CARGO_PROFILE); ln -sfn $(PROFILE) /src/target/active'
+
+webmin: build ## Compile Webmin, plugin natif intégré à StationD (sans redémarrage)
+
+webmin-test: ## Tests ciblés Webmin dans le conteneur de dev
+> $(EXEC) cargo test --locked --lib webmin_
 
 release: ## cargo build --release --locked
 > $(EXEC) cargo build --release --locked

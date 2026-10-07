@@ -105,6 +105,12 @@ pub struct ScanEnrichment {
 /// A2 adds the synchronous hooks: `filter_pool` (influences the decision) and
 /// `on_scan` (enriches the library scan).
 pub trait Plugin: Send {
+    /// Background-only plugins can opt out of the musical filter/simulation path.
+    fn filters_pool(&self) -> bool { true }
+    /// Trusted CLI administration through gRPC; never forwarded from a Web request.
+    fn admin_request(&mut self, _payload: &str) -> Result<String, String> {
+        Err("plugin does not support administration requests".into())
+    }
     /// Optional configuration fields discovered before on_load without write access.
     fn config_schema(&mut self) -> Result<Vec<crate::plugin_config::Field>, String> { Ok(Vec::new()) }
     fn validate_config(&mut self, _config: &toml::Table, _host: &Host) -> Result<(), String> { Ok(()) }
@@ -525,6 +531,9 @@ pub fn validate_decls(decls: &[PluginDecl]) -> Result<(), String> {
         if !seen.insert(d.name.as_str()) {
             return Err(format!("plugin `{}` is declared twice", d.name));
         }
+        if d.wasm.is_none() && d.name == "remote-supervision" {
+            remote_supervision::validate_config(&d.config)?;
+        }
         if d.has_db() {
             plugin_db::validate_name(&d.name)?;
             d.db_limits()
@@ -629,6 +638,7 @@ pub enum Action {
 // Slot: a declared plugin plus its live state
 mod config_host;
 mod metadata_config;
+mod remote_supervision;
 use config_host::{ConfigPlugin, config_operation, validate_candidate};
 
 // ---------------------------------------------------------------------------
@@ -844,6 +854,11 @@ fn build_plugin(decl: &PluginDecl, host: &Host) -> Result<Box<dyn Plugin>, Strin
     if decl.wasm.is_none() {
         match decl.name.as_str() {
             "plugin-config" => return Ok(Box::new(ConfigPlugin)),
+            "remote-supervision" => {
+                return Ok(Box::new(remote_supervision::RemoteSupervision::from_config(
+                    &decl.config,
+                )?));
+            }
             "logger" => return Ok(Box::new(LoggerPlugin::from_config(&decl.config))),
             "blacklist" => return Ok(Box::new(BlacklistPlugin::from_config(&decl.config))),
             "stop-when-idle" => return Ok(Box::new(StopWhenIdlePlugin::from_config(&decl.config)?)),
@@ -877,6 +892,7 @@ enum Msg {
         action: Action,
         reply: oneshot::Sender<Result<PluginInfo, String>>,
     },
+    Admin { name: String, payload: String, reply: oneshot::Sender<Result<String, String>> },
     Event(PluginEvent),
     FilterPool {
         candidates: Vec<Candidate>,
@@ -949,6 +965,12 @@ pub struct PluginHandle {
 }
 
 impl PluginHandle {
+    pub async fn admin(&self, name: &str, payload: String) -> Result<String, String> {
+        if self.sim.is_some() || payload.len() > 16384 { return Err("administration request refused".into()); }
+        let (reply, rx) = oneshot::channel();
+        self.tx.send(Msg::Admin { name: name.into(), payload, reply }).await.map_err(|_| "plugin actor unavailable")?;
+        rx.await.map_err(|_| "plugin actor unavailable")?
+    }
     pub async fn config(&self, request: crate::proto::plugin::PluginConfigUpdateRequest, read: bool) -> Result<crate::proto::plugin::PluginConfigResponse, String> {
         let (tx, rx) = oneshot::channel();
         self.tx.send(Msg::Config { request, read, reply: tx }).await.map_err(|_| "plugin actor unavailable")?;
@@ -1171,6 +1193,13 @@ pub fn spawn_configured(mut decls: Vec<PluginDecl>, env: PluginEnv, config_path:
         while let Some(msg) = rx.recv().await {
             match msg {
                 Msg::Config { request, read, reply } => { let _ = reply.send(config_operation(&mut slots, &env, config_path.as_deref(), &metadata_runtime, request, read)); }
+                Msg::Admin { name, payload, reply } => {
+                    let result = slots.iter_mut().find(|s| s.decl.name == name && matches!(s.state, PluginState::Loaded))
+                        .and_then(|s|s.plugin.as_mut()).ok_or_else(|| "plugin is not loaded".to_string())
+                        .and_then(|p|catch(||p.admin_request(&payload)).and_then(|r|r))
+                        .and_then(|value|if value.len() <= 1048576 { Ok(value) } else { Err("administration response too large".into()) });
+                    let _ = reply.send(result);
+                }
                 Msg::Event(event) => dispatch_event(&mut slots, &event),
                 Msg::FilterPool { candidates, simulation, reply } => {
                     let _ = reply.send(run_filters_mode(&mut slots, candidates, simulation));
@@ -1337,6 +1366,7 @@ fn run_filters_mode(
         if !matches!(slot.state, PluginState::Loaded) {
             continue;
         }
+        if slot.plugin.as_ref().is_some_and(|p| !p.filters_pool()) { continue; }
         let before = cur.len();
         if simulation {
             if let Some(h) = &slot.host {
