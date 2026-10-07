@@ -1,3 +1,4 @@
 #!/bin/sh
 # Sonde de disponibilité (s6-notifyoncheck) : stationd répond en gRPC.
+cd "$STATIOND_ROOT" || exit 1
 exec "$STATIOND_BIN/stationctl" status >/dev/null 2>&1
