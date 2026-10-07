@@ -801,9 +801,9 @@ async fn main() -> anyhow::Result<()> {
     let mut client = StationClient::connect(addr.clone()).await?;
 
     match args.command {
-        Command::RemoteUser(command) => remote::user(&args.addr, command).await?,
-        Command::RemoteSession(command) => remote::session(&args.addr, command).await?,
-        Command::RemoteAudit => remote::audit(&args.addr).await?,
+        Command::RemoteUser(command) => remote::user(&addr, command).await?,
+        Command::RemoteSession(command) => remote::session(&addr, command).await?,
+        Command::RemoteAudit => remote::audit(&addr).await?,
         Command::Status => {
             let reply = client.status(StatusRequest {}).await?.into_inner();
             println!("station:  {}", reply.station_name);
