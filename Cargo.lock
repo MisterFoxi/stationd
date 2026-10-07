@@ -4134,6 +4134,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "sqlx",
+ "stationd-client-config",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
@@ -4147,6 +4148,16 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "walkdir",
+]
+
+[[package]]
+name = "stationd-client-config"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "tempfile",
+ "toml 1.1.6+spec-1.1.0",
 ]
 
 [[package]]
@@ -4176,7 +4187,9 @@ dependencies = [
  "ratatui-widgets",
  "regex",
  "serde_json",
+ "stationd-client-config",
  "stationd-proto",
+ "tempfile",
  "tokio",
  "tokio-stream",
  "toml_edit 0.22.27",

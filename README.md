@@ -623,6 +623,9 @@ ancestors of matching members visible. `Enter` edits the selected playlist.
 resolver and connects on the default gRPC port `50051`. `--addr host:6000`,
 `--addr 192.0.2.1`, `--addr [::1]:6000`, and full HTTP URLs also work; an
 explicit port is preserved.
+Without `--addr`, the TUI uses `[server].grpc_bind` from the local
+`stationd.toml` (`$STATIOND_ROOT`, otherwise the current directory), with the
+same wildcard conversion and loopback fallback as stationctl.
 
 The CLI supports pipes; the TUI requires an interactive terminal and forwards
 its terminal type and locale. Until the new groups take effect after SSH

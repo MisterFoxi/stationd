@@ -11,11 +11,12 @@ default-run = "stationd"
 # racine = membre par défaut) ; la TUI se compile avec `-p stationd-tui`.
 # Les plugins WASM (plugins/*) restent des racines autonomes ([workspace] vide).
 [workspace]
-members = [".", "crates/stationd-proto", "crates/stationd-tui"]
+members = [".", "crates/stationd-proto", "crates/stationd-tui", "crates/stationd-client-config"]
 default-members = ["."]
 exclude = ["plugins"]
 
 [dependencies]
+stationd-client-config = { path = "crates/stationd-client-config" }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }

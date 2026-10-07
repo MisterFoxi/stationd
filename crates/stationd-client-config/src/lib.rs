@@ -18,7 +18,7 @@ struct ServerConfig {
     grpc_bind: Option<String>,
 }
 
-pub(super) fn resolve(explicit: Option<&str>, root: &Path) -> anyhow::Result<String> {
+pub fn resolve(explicit: Option<&str>, root: &Path) -> anyhow::Result<String> {
     if let Some(addr) = explicit {
         return Ok(addr.to_owned());
     }
@@ -67,7 +67,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn stationctl_address_uses_configured_lan_and_ipv6_and_normalizes_wildcards() {
+    fn client_address_uses_configured_lan_and_ipv6_and_normalizes_wildcards() {
         let root = tempfile::tempdir().unwrap();
         for (bind, expected) in [
             ("192.168.1.135:50051", "http://192.168.1.135:50051"),
@@ -84,7 +84,7 @@ mod tests {
     }
 
     #[test]
-    fn stationctl_address_explicit_override_ignores_invalid_local_config() {
+    fn client_address_explicit_override_ignores_invalid_local_config() {
         let root = tempfile::tempdir().unwrap();
         std::fs::write(root.path().join("stationd.toml"), "not TOML").unwrap();
         assert_eq!(
@@ -94,7 +94,7 @@ mod tests {
     }
 
     #[test]
-    fn stationctl_address_defaults_when_file_or_key_is_absent_and_reports_invalid_config() {
+    fn client_address_defaults_when_file_or_key_is_absent_and_reports_invalid_config() {
         let root = tempfile::tempdir().unwrap();
         assert_eq!(resolve(None, root.path()).unwrap(), DEFAULT_ADDR);
         for text in ["[station]\nname = 'test'", "[server]\nother = 1"] {
