@@ -1,20 +1,26 @@
 //! HTTP boundary: secure cookies, same-origin mutations, bounded crypto jobs.
-use super::{auth::Auth, Config};
+use super::{auth::Auth, live::Live, Config};
 use axum::{
-    extract::{ConnectInfo, Request, State},
+    extract::{ConnectInfo, Path, Request, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     middleware::{self, Next},
-    response::{Html, IntoResponse, Redirect, Response},
+    response::{
+        sse::{Event, KeepAlive, Sse},
+        Html, IntoResponse, Redirect, Response,
+    },
     routing::{get, post},
     Json, Router,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{
+    convert::Infallible,
     net::SocketAddr,
     sync::{Arc, Mutex},
+    time::Duration,
 };
-use tokio::sync::Semaphore;
+use tokio::sync::{mpsc, Semaphore};
+use tokio_stream::wrappers::ReceiverStream;
 use webauthn_rs::prelude::{PublicKeyCredential, RegisterPublicKeyCredential};
 const SESSION: &str = "__Host-stationd-session";
 const CEREMONY: &str = "__Host-stationd-ceremony";
@@ -22,6 +28,8 @@ const CEREMONY: &str = "__Host-stationd-ceremony";
 #[derive(Clone)]
 pub(super) struct Web {
     auth: Arc<Mutex<Auth>>,
+    pub(super) live: Live,
+    streams: Arc<Semaphore>,
     jobs: Arc<Semaphore>,
     origin: String,
     session_ttl: u64,
@@ -33,6 +41,8 @@ impl Web {
     pub(super) fn new(auth: Arc<Mutex<Auth>>, config: &Config) -> Self {
         Self {
             auth,
+            live: Live::new(config),
+            streams: Arc::new(Semaphore::new(config.max_event_streams)),
             jobs: Arc::new(Semaphore::new(4)),
             origin: webauthn_rs::prelude::Url::parse(&config.public_url)
                 .expect("validated origin")
@@ -99,6 +109,10 @@ pub(super) fn routes(web: Web) -> Router {
         .route("/auth/logout", post(logout))
         .route("/api/session", get(context))
         .route("/api/stations", get(stations))
+        .route("/api/network/events", get(network_events))
+        .route("/station/:id", get(station_page))
+        .route("/api/stations/:id", get(station_detail))
+        .route("/api/stations/:id/events", get(station_events))
         .layer(middleware::from_fn_with_state(web.clone(), security))
         .with_state(web)
 }
@@ -316,10 +330,127 @@ async fn context(State(web): State<Web>, headers: HeaderMap) -> Response {
 }
 async fn stations(State(web): State<Web>, headers: HeaderMap) -> Response {
     let raw = cookie(&headers, SESSION).unwrap_or_default();
-    answer(
-        web.work(move |a| Ok(json!({"stations":a.context(&raw)?["stations"]})))
-            .await,
-    )
+    let context = web.work(move |a| a.context(&raw)).await;
+    answer(context.map(|context| web.live.network(&context["stations"])))
+}
+async fn station_page(
+    State(web): State<Web>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let raw = cookie(&headers, SESSION).unwrap_or_default();
+    let target = id.clone();
+    match web
+        .work(move |a| a.authorize(&raw, &target, "station.read", None))
+        .await
+    {
+        Ok(()) => Html(include_str!("station.html").replace("{{STATION_ID}}", &id)).into_response(),
+        Err(error) => answer(Err(error)),
+    }
+}
+async fn station_detail(
+    State(web): State<Web>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let raw = cookie(&headers, SESSION).unwrap_or_default();
+    let target = id.clone();
+    match web
+        .work(move |a| a.authorize(&raw, &target, "station.read", None))
+        .await
+    {
+        Ok(()) => answer(
+            web.live
+                .view(&id, true)
+                .ok_or_else(|| "permission denied".into()),
+        ),
+        Err(error) => answer(Err(error)),
+    }
+}
+async fn network_events(State(web): State<Web>, headers: HeaderMap) -> Response {
+    open_events(web, headers, None).await
+}
+async fn station_events(
+    State(web): State<Web>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    open_events(web, headers, Some(id)).await
+}
+fn event_data(web: &Web, context: Value, id: Option<&str>) -> Result<String, String> {
+    let value = if let Some(id) = id {
+        if !context["stations"]
+            .as_array()
+            .is_some_and(|stations| stations.iter().any(|s| s["id"] == id))
+        {
+            return Err("permission denied".into());
+        }
+        web.live.view(id, true).ok_or("permission denied")?
+    } else {
+        web.live.network(&context["stations"])
+    };
+    serde_json::to_string(&value).map_err(|_| "identity storage unavailable".into())
+}
+async fn open_events(web: Web, headers: HeaderMap, id: Option<String>) -> Response {
+    let raw = cookie(&headers, SESSION).unwrap_or_default();
+    let token = raw.clone();
+    let initial = match web
+        .work(move |a| a.context(&token))
+        .await
+        .and_then(|context| event_data(&web, context, id.as_deref()))
+    {
+        Ok(data) => data,
+        Err(error) => return answer(Err(error)),
+    };
+    let permit = match web.streams.clone().try_acquire_owned() {
+        Ok(permit) => permit,
+        Err(_) => return answer(Err("busy".into())),
+    };
+    // One pending frame per browser. Slow receivers cannot accumulate history
+    // or block station watchers, and always catch up to the latest snapshot.
+    let (sender, receiver) = mpsc::channel::<Result<Event, Infallible>>(1);
+    let _ = sender.try_send(Ok(Event::default().event("snapshot").data(&initial)));
+    tokio::spawn(async move {
+        let _permit = permit;
+        let mut previous = initial;
+        let mut tick = tokio::time::interval(Duration::from_secs(1));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let expires = tokio::time::Instant::now() + Duration::from_secs(3600);
+        loop {
+            tick.tick().await;
+            if sender.is_closed() || tokio::time::Instant::now() >= expires {
+                break;
+            }
+            // Never wait for a password hash while holding up the HTTP runtime.
+            // Contention skips this tick; no data goes out without rechecking ACL.
+            let context = match web.auth.try_lock() {
+                Ok(auth) => auth.context(&raw),
+                Err(std::sync::TryLockError::WouldBlock) => continue,
+                Err(_) => break,
+            };
+            let data = match context.and_then(|context| event_data(&web, context, id.as_deref())) {
+                Ok(data) => data,
+                Err(_) => {
+                    let _ = sender.try_send(Ok(Event::default().event("session-ended").data("{}")));
+                    break;
+                }
+            };
+            if data != previous {
+                match sender.try_send(Ok(Event::default().event("snapshot").data(&data))) {
+                    Ok(()) => previous = data,
+                    Err(mpsc::error::TrySendError::Full(_)) => {}
+                    Err(mpsc::error::TrySendError::Closed(_)) => break,
+                }
+            }
+        }
+    });
+    let mut response = Sse::new(ReceiverStream::new(receiver))
+        .keep_alive(KeepAlive::new().interval(Duration::from_secs(10)))
+        .into_response();
+    response
+        .headers_mut()
+        .insert("x-accel-buffering", HeaderValue::from_static("no"));
+    response
 }
 async fn logout(State(web): State<Web>, headers: HeaderMap) -> Response {
     let raw = cookie(&headers, SESSION).unwrap_or_default();

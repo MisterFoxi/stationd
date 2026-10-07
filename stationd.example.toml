@@ -288,8 +288,8 @@ level = "info"
 # Remote supervision (Webmin), native plugin: passkeys and station-scoped roles.
 # HTTPS reverse proxy required. Capability db enables identity/session persistence.
 # One gateway can supervise several stations; endpoints are configured server-side.
-# The first screen after login will be a network summary, then station detail.
-# Loopback binding only in tranche A; HTTPS is terminated by the reverse proxy.
+# The first screen after login is the live network summary, then station detail.
+# Loopback binding; HTTPS is terminated by the reverse proxy.
 # See Doc/Webmin-implementation.md for limits and scope.
 # [[plugin]]
 # name = "remote-supervision"
@@ -306,13 +306,17 @@ level = "info"
 # auth_requests_per_minute = 120  # Per peer IP; forwarded headers are ignored
 # password_min_length = 12       # Unicode characters, 1..password_max_length
 # password_max_length = 256      # Unicode characters, password_min_length..256
+# max_event_streams = 64         # Concurrent authenticated SSE streams, 1..256
 # [[plugin.config.stations]]
-# id = "home-stone"               # Stable, unique ID for URLs and future permissions
+# id = "home-stone"               # Stable, unique ID for URLs and station permissions
 # label = "Home Stone"
 # grpc_endpoint = "http://127.0.0.1:50051"
 # [[plugin.config.stations]]
 # id = "second-station"
 # label = "Second Station"
 # grpc_endpoint = "https://second.internal.example:50051"
-# HTTP gRPC is for a trusted internal transport only; never expose it publicly.
-# The catalogue is validated but no gRPC connection is opened in tranche A.
+# HTTP gRPC defaults to loopback; HTTPS verifies the server certificate.
+# For a trusted private LAN, opt in per station without exposing a public port:
+# grpc_endpoint = "http://station.internal:50051"
+# allow_plaintext_grpc = true
+# One shared read-only gRPC watch per configured station; never expose operator gRPC publicly.

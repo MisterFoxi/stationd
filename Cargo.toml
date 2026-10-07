@@ -24,7 +24,7 @@ toml = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time", "net", "io-util"] }
-tonic = "0.12"
+tonic = { version = "0.12", features = ["tls-native-roots"] }
 prost = "0.13"
 prost-types = "0.13"
 tokio-stream = "0.1"   # flux serveur gRPC (OnAirService.Watch) ; déjà dans l'arbre via tonic

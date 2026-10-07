@@ -23,7 +23,9 @@ sont comptés de la même façon dans le navigateur et sur le serveur.
 
 Une fois le mot de passe enregistré, ouvrir la page de connexion,
 saisir le nom exact du compte et le mot de passe. L'accueil liste les
-stations autorisées. Les données en direct attendent la tranche C.
+stations autorisées avec leur état, leur audience et le média en cours.
+Cliquer sur une station ouvre le détail, la suite prévue et les services.
+Voir [le dashboard](Webmin-dashboard.md) pour les états inconnus et périmés.
 
 Le lien expire après 15 minutes et ne fonctionne qu'une seule fois.
 Son secret est placé après `#`, puis retiré de la barre d'adresse par
@@ -56,8 +58,8 @@ make ctl A="remote-user add Bob --role helper --station home-stone --station sec
 ```
 
 Les IDs doivent figurer dans le catalogue du plugin. Chaque station a
-son propre rôle : viewer, helper ou admin. Les actions métier et les
-données en direct ne sont pas encore raccordées dans cette tranche.
+son propre rôle : viewer, helper ou admin. Le dashboard de lecture est disponible. Les commandes de contrôle et la
+console distante seront ajoutées dans les tranches suivantes.
 
 ```sh
 make ctl A="remote-user list"

@@ -2,6 +2,7 @@
 //! A dedicated runtime lets the synchronous plugin unload join the server even
 //! when the plugin actor itself runs on a single-thread Tokio runtime.
 mod auth;
+mod live;
 mod web;
 use super::{Host, Plugin};
 use axum::{
@@ -30,6 +31,8 @@ struct Station {
     id: String,
     label: String,
     grpc_endpoint: String,
+    #[serde(default)]
+    allow_plaintext_grpc: bool,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -55,6 +58,12 @@ struct Config {
     password_min_length: usize,
     #[serde(default = "default_password_max_length")]
     password_max_length: usize,
+    #[serde(default = "default_max_event_streams")]
+    max_event_streams: usize,
+}
+
+fn default_max_event_streams() -> usize {
+    64
 }
 
 fn default_password_min_length() -> usize {
@@ -157,6 +166,23 @@ impl Config {
             }
             origin(&station.grpc_endpoint, &["http", "https"])
                 .map_err(|e| format!("station {}: grpc_endpoint: {e}", station.id))?;
+            let endpoint: Uri = station
+                .grpc_endpoint
+                .parse()
+                .map_err(|_| "invalid station endpoint")?;
+            if endpoint.scheme_str() == Some("http") && !station.allow_plaintext_grpc {
+                let host = endpoint.host().unwrap_or_default().trim_matches(['[', ']']);
+                if host != "localhost"
+                    && !host
+                        .parse::<std::net::IpAddr>()
+                        .is_ok_and(|ip| ip.is_loopback())
+                {
+                    return Err(format!(
+                        "station {}: remote gRPC requires HTTPS, a loopback tunnel, or allow_plaintext_grpc = true for a trusted private network",
+                        station.id
+                    ));
+                }
+            }
         }
         if !(1..=1024).contains(&self.max_requests)
             || !(1..=60).contains(&self.request_timeout_seconds)
@@ -169,6 +195,9 @@ impl Config {
             || !(10..=10000).contains(&self.auth_requests_per_minute)
         {
             return Err("invalid authentication limits".into());
+        }
+        if !(1..=256).contains(&self.max_event_streams) {
+            return Err("max_event_streams must be 1..256".into());
         }
         if self.password_min_length == 0
             || self.password_min_length > self.password_max_length
@@ -262,11 +291,13 @@ impl RemoteSupervision {
             let _entered = runtime.enter();
             tokio::net::TcpListener::from_std(listener).map_err(|e| format!("{NAME}: {e}"))?
         };
-        let app = match &self.auth {
+        let (app, live) = match &self.auth {
             Some(auth) => {
-                probe_router().merge(web::routes(web::Web::new(auth.clone(), &self.config)))
+                let web = web::Web::new(auth.clone(), &self.config);
+                let live = web.live.clone();
+                (probe_router().merge(web::routes(web)), Some(live))
             }
-            None => probe_router(),
+            None => (probe_router(), None),
         };
         let app = bounded_router(&self.config, app);
         let (shutdown, shutdown_rx) = oneshot::channel();
@@ -274,6 +305,7 @@ impl RemoteSupervision {
         let grace = Duration::from_secs(self.config.shutdown_timeout_seconds);
         let server_thread = thread::Builder::new().name(NAME.into()).spawn(move || {
             runtime.block_on(async move {
+                if let Some(live) = live { live.start(); }
                 let serving = axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).with_graceful_shutdown(async move {
                     let _ = shutdown_rx.await;
                     let _ = stopping.send(());
@@ -405,6 +437,32 @@ mod tests {
             value.insert("password_max_length".into(), toml::Value::Integer(max));
             assert_eq!(Config::parse(&value).is_ok(), valid, "{min}..{max}");
         }
+    }
+
+    #[test]
+    fn webmin_live_config_requires_secure_remote_transport_and_bounds_stream_quota() {
+        let mut config = Config::parse(&table()).unwrap();
+        assert!(!config.stations[0].allow_plaintext_grpc);
+        for endpoint in ["http://192.168.1.20:50051", "http://EU-HomeStone.lan:50051"] {
+            config.stations[0].grpc_endpoint = endpoint.into();
+            assert!(config.validate().is_err());
+            config.stations[0].allow_plaintext_grpc = true;
+            assert!(config.validate().is_ok());
+            config.stations[0].allow_plaintext_grpc = false;
+        }
+        let mut value = table();
+        value.get_mut("stations").unwrap().as_array_mut().unwrap()[0]
+            .as_table_mut().unwrap()
+            .insert("allow_plaintext_grpc".into(), toml::Value::Boolean(true));
+        let opted_in = Config::parse(&value).unwrap();
+        assert!(opted_in.stations[0].allow_plaintext_grpc);
+        assert!(!opted_in.stations[1].allow_plaintext_grpc);
+        config.stations[0].grpc_endpoint = "https://station.internal:50051".into();
+        assert!(config.validate().is_ok());
+        config.max_event_streams = 0;
+        assert!(config.validate().is_err());
+        config.max_event_streams = 257;
+        assert!(config.validate().is_err());
     }
 
     #[test]

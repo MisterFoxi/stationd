@@ -345,3 +345,27 @@ le commit. Le nom est libéré et peut être recréé avec un nouvel UUID ; aucu
 ancien lien, challenge ou cookie ne donne accès à ce nouveau compte.
 Le RPC reste exclusivement sur le canal opérateur. Aucun compte réel n'est
 purgé automatiquement lors du développement ou de la mise en service.
+
+## 14. Dashboard multi-stations (tranche C)
+
+L'accueil affiche désormais état, média, audience et alertes par station
+avec mise à jour SSE. Le détail expose le média et sa progression, le
+préchargé, la suite explicitement simulée, les notes, les services et les
+prochaines playlists. Les dernières données d'une station inaccessible
+restent marquées périmées ; l'audience inconnue reste distincte de zéro.
+
+`live.rs` mutualise un Watch gRPC et un poll de santé par station. Les tâches
+appartiennent au runtime dédié du plugin et s'arrêtent avec lui. Les DTO
+sont une projection explicite et bornée, sans endpoint, chemin, erreurs
+brutes ni configuration. HTTPS gRPC valide les certificats via les racines
+natives ; le HTTP distant est refusé au profit de HTTPS ou d'un tunnel.
+
+Les flux SSE revalident la session et les droits chaque seconde, ont une
+trame d'attente et un quota global configurable. Une station en panne et
+un navigateur lent ne bloquent pas les autres. Aucun nouveau compte n'a
+été créé et aucun mot de passe existant n'a été changé pour ces essais.
+
+Validation : 31 tests Webmin passent, plus le smoke test facultatif sur
+la station réelle. Les données du DTO concordent avec stationctl onair et
+icecast status (média, programme, audience). Aperçu navigateur vérifié sur
+ordinateur et à 360 px. La procédure est dans Doc/Webmin-dashboard.md.

@@ -1732,4 +1732,140 @@ mod tests {
         let mut reopened = Auth::open(&auth.config, auth.db.clone()).unwrap();
         add(&mut reopened, "Alice", Role::Viewer);
     }
+    #[tokio::test]
+    async fn webmin_live_routes_enforce_station_acl_and_bound_sse_and_close_on_purge() {
+        use axum::{
+            body::Body,
+            http::{Request, StatusCode},
+        };
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+        let (_dir, mut auth, _) = fixture();
+        let enroll = add(&mut auth, "Alice", Role::Viewer);
+        auth.password_enroll(&enroll, "a long enough password")
+            .unwrap();
+        let (_, session) = auth
+            .password_login("Alice", "a long enough password", None)
+            .unwrap();
+        let mut config = auth.config.clone();
+        config.max_event_streams = 1;
+        let auth = Arc::new(std::sync::Mutex::new(auth));
+        let web = super::super::web::Web::new(auth.clone(), &config);
+        let app = super::super::web::routes(web);
+        let request = |path: &str, cookie: &str| {
+            Request::builder()
+                .uri(path)
+                .header("cookie", cookie)
+                .body(Body::empty())
+                .unwrap()
+        };
+        let cookie = format!("__Host-stationd-session={session}");
+        for path in [
+            "/api/stations",
+            "/api/network/events",
+            "/api/stations/one",
+            "/api/stations/one/events",
+        ] {
+            assert_eq!(
+                app.clone()
+                    .oneshot(request(path, ""))
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::UNAUTHORIZED
+            );
+        }
+        for path in [
+            "/api/stations/two",
+            "/api/stations/two/events",
+            "/station/two",
+        ] {
+            assert_eq!(
+                app.clone()
+                    .oneshot(request(path, &cookie))
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::FORBIDDEN
+            );
+        }
+        let response = app
+            .clone()
+            .oneshot(request("/api/stations", &cookie))
+            .await
+            .unwrap();
+        let data: Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), 65536)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(data["stations"].as_array().unwrap().len(), 1);
+        assert_eq!(data["stations"][0]["id"], "one");
+        assert!(!data.to_string().contains("grpc_endpoint"));
+        let response = app
+            .clone()
+            .oneshot(request("/api/network/events", &cookie))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(response.headers()["content-type"]
+            .to_str()
+            .unwrap()
+            .contains("text/event-stream"));
+        let mut body = response.into_body();
+        // Leave this browser unread: its one-frame buffer must not prevent
+        // other authenticated reads, and the stream quota remains enforced.
+        assert_eq!(
+            app.clone()
+                .oneshot(request("/api/stations/one/events", &cookie))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            app.clone()
+                .oneshot(request("/api/stations/one", &cookie))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        let first = tokio::time::timeout(std::time::Duration::from_secs(2), body.frame())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let first = String::from_utf8(first.into_data().unwrap().to_vec()).unwrap();
+        assert!(first.contains("snapshot"));
+        assert!(!first.contains("Station Two"));
+        auth.lock()
+            .unwrap()
+            .admin(AdminRequest::Purge {
+                name: "Alice".into(),
+            })
+            .unwrap();
+        let ended = tokio::time::timeout(std::time::Duration::from_secs(3), body.frame())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(String::from_utf8(ended.into_data().unwrap().to_vec())
+            .unwrap()
+            .contains("session-ended"));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), body.frame())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            app.oneshot(request("/api/stations/one", &cookie))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
 }
