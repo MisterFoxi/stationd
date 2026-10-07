@@ -1,9 +1,10 @@
-// stationctl — minimal CLI, a direct gRPC client of stationd (no HTTP layer
-// in between, per the architecture doc). For now the address is a hardcoded
-// default; we'll wire up reading stationd.toml later if the need becomes
-// real, rather than doing it ahead of time.
+// stationctl — direct gRPC client of stationd. An explicit --addr wins;
+// otherwise use server.grpc_bind from the local stationd.toml.
 
 use clap::{Parser, Subcommand};
+
+#[path = "stationctl/address.rs"]
+mod address;
 
 #[path = "stationctl/listeners.rs"]
 mod listeners;
@@ -45,9 +46,9 @@ use std::path::PathBuf;
 #[derive(Parser, Debug)]
 #[command(name = "stationctl", version, about = "Minimal CLI to control stationd")]
 struct Args {
-    /// gRPC address of stationd
-    #[arg(long, default_value = "http://127.0.0.1:50051")]
-    addr: String,
+    /// gRPC address (default: local stationd.toml server.grpc_bind, else loopback)
+    #[arg(long)]
+    addr: Option<String>,
 
     #[command(subcommand)]
     command: Command,
@@ -766,15 +767,21 @@ fn print_summary(p: &playlist::PlaylistSummary) {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+    let root = match &args.command {
+        Command::Station(StationCommand::Start { root, .. })
+        | Command::Station(StationCommand::State { root }) => stationd_root(root.as_ref()),
+        _ => stationd_root(None),
+    };
+    let addr = address::resolve(args.addr.as_deref(), &root)?;
     // The two commands that must work while stationd is down.
     match &args.command {
         Command::Station(StationCommand::Start { root, timeout }) => {
-            return station_start(&args.addr, &stationd_root(root.as_ref()), *timeout).await;
+            return station_start(&addr, &stationd_root(root.as_ref()), *timeout).await;
         }
         Command::Station(StationCommand::State { root }) => {
-            let mut bc = match BroadcastServiceClient::connect(args.addr.clone()).await {
+            let mut bc = match BroadcastServiceClient::connect(addr.clone()).await {
                 Ok(bc) => bc,
-                Err(e) => return offline_state(&stationd_root(root.as_ref()), &args.addr, e),
+                Err(e) => return offline_state(&stationd_root(root.as_ref()), &addr, e),
             };
             let s = bc.get_state(GetStateRequest {}).await?.into_inner();
             print_broadcast_status(&s);
@@ -782,7 +789,7 @@ async fn main() -> anyhow::Result<()> {
         }
         _ => {}
     }
-    let mut client = StationClient::connect(args.addr.clone()).await?;
+    let mut client = StationClient::connect(addr.clone()).await?;
 
     match args.command {
         Command::Status => {
@@ -796,9 +803,9 @@ async fn main() -> anyhow::Result<()> {
             client.quit(QuitRequest {}).await?;
             println!("shutdown requested");
         }
-        Command::Playlist(cmd) => playlist_command(&args.addr, cmd).await?,
+        Command::Playlist(cmd) => playlist_command(&addr, cmd).await?,
         Command::Schedule(ScheduleCommand::List { grid }) => {
-            let mut sched = ScheduleServiceClient::connect(args.addr.clone()).await?;
+            let mut sched = ScheduleServiceClient::connect(addr.clone()).await?;
             let reply = sched
                 .list_rules(schedule::ListRulesRequest { grid: grid.unwrap_or_default(), draft_toml: String::new() })
                 .await?
@@ -812,7 +819,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::Schedule(ScheduleCommand::Next { at }) => {
             // The scheduler lives behind its own service on the same server.
-            let mut sched = ScheduleServiceClient::connect(args.addr.clone()).await?;
+            let mut sched = ScheduleServiceClient::connect(addr.clone()).await?;
             let now = at.map(|seconds| ::prost_types::Timestamp { seconds, nanos: 0 });
             let reply = sched
                 .resolve_next(ResolveNextRequest { now })
@@ -842,7 +849,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::Schedule(ScheduleCommand::Validate { path }) => {
             let content = read_grid_toml(&path)?;
-            let mut sched = ScheduleServiceClient::connect(args.addr.clone()).await?;
+            let mut sched = ScheduleServiceClient::connect(addr.clone()).await?;
             let reply = sched
                 .validate_grid(ApplyGridRequest {
                     files: vec![GridFile {
@@ -861,7 +868,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::Schedule(ScheduleCommand::Apply { path }) => {
             let content = read_grid_toml(&path)?;
-            let mut sched = ScheduleServiceClient::connect(args.addr.clone()).await?;
+            let mut sched = ScheduleServiceClient::connect(addr.clone()).await?;
             let reply = sched
                 .apply_grid(ApplyGridRequest {
                     files: vec![GridFile {
@@ -886,7 +893,7 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Command::Schedule(ScheduleCommand::Export { rules, out }) => {
-            let mut sched = ScheduleServiceClient::connect(args.addr.clone()).await?;
+            let mut sched = ScheduleServiceClient::connect(addr.clone()).await?;
             let reply = sched
                 .export_grid(ExportGridRequest { rule_ids: rules })
                 .await?
@@ -909,7 +916,7 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Command::Schedule(ScheduleCommand::Grids) => {
-            let mut sched = ScheduleServiceClient::connect(args.addr.clone()).await?;
+            let mut sched = ScheduleServiceClient::connect(addr.clone()).await?;
             let reply = sched.list_grids(schedule::ListGridsRequest {}).await?.into_inner();
             if reply.grids.is_empty() {
                 println!("(no grid file)");
@@ -932,7 +939,7 @@ async fn main() -> anyhow::Result<()> {
             println!("active: {}", reply.active);
         }
         Command::Schedule(ScheduleCommand::Show { name, file }) => {
-            let mut sched = ScheduleServiceClient::connect(args.addr.clone()).await?;
+            let mut sched = ScheduleServiceClient::connect(addr.clone()).await?;
             let g = sched
                 .get_grid(schedule::GetGridRequest { name: name.unwrap_or_default() })
                 .await?
@@ -959,7 +966,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::Schedule(ScheduleCommand::Save { name, path, revision, force }) => {
             let toml = read_grid_toml(&path)?;
-            let mut sched = ScheduleServiceClient::connect(args.addr.clone()).await?;
+            let mut sched = ScheduleServiceClient::connect(addr.clone()).await?;
             let mut req = schedule::SaveGridRequest {
                 name: name.clone(),
                 toml,
@@ -990,7 +997,7 @@ async fn main() -> anyhow::Result<()> {
             println!("{}", if r.applied { "applied: it is the active grid" } else { "not applied: not the active grid (`schedule activate`)" });
         }
         Command::Schedule(ScheduleCommand::Activate { name }) => {
-            let mut sched = ScheduleServiceClient::connect(args.addr.clone()).await?;
+            let mut sched = ScheduleServiceClient::connect(addr.clone()).await?;
             let r = sched.activate_grid(schedule::ActivateGridRequest { name: name.clone() }).await?.into_inner();
             if !r.ok {
                 println!("refused: {name} has problems; the active grid is still {}", r.name);
@@ -1001,7 +1008,7 @@ async fn main() -> anyhow::Result<()> {
             println!("rules:   {}", r.rules);
         }
         Command::Schedule(ScheduleCommand::Reload) => {
-            let mut sched = ScheduleServiceClient::connect(args.addr.clone()).await?;
+            let mut sched = ScheduleServiceClient::connect(addr.clone()).await?;
             let r = sched.reload_grid(schedule::ReloadGridRequest {}).await?.into_inner();
             if r.missing {
                 println!("no file for the active grid {}: the grid last applied stays on air", r.name);
@@ -1020,7 +1027,7 @@ async fn main() -> anyhow::Result<()> {
                 Some(p) => read_grid_toml(p)?,
                 None => String::new(),
             };
-            let mut sched = ScheduleServiceClient::connect(args.addr.clone()).await?;
+            let mut sched = ScheduleServiceClient::connect(addr.clone()).await?;
             let reply = sched
                 .preview(PreviewRequest {
                     from: at.map(|seconds| ::prost_types::Timestamp { seconds, nanos: 0 }),
@@ -1135,7 +1142,7 @@ async fn main() -> anyhow::Result<()> {
                 Some(p) => read_grid_toml(p)?,
                 None => String::new(),
             };
-            let mut sched = ScheduleServiceClient::connect(args.addr.clone()).await?;
+            let mut sched = ScheduleServiceClient::connect(addr.clone()).await?;
             let reply = sched
                 .check_coverage(CheckCoverageRequest { rule_ids: rules, grid: grid.unwrap_or_default(), draft_toml })
                 .await?
@@ -1200,7 +1207,7 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Command::Queue(QueueCommand::Push { reference, media }) => {
-            let mut sched = ScheduleServiceClient::connect(args.addr.clone()).await?;
+            let mut sched = ScheduleServiceClient::connect(addr.clone()).await?;
             let reply = sched
                 .enqueue(EnqueueRequest {
                     playlist_ref: reference,
@@ -1216,7 +1223,7 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Command::Library(LibraryCommand::Reorganize { dry_run }) => {
-            let mut lib = LibraryServiceClient::connect(args.addr.clone()).await?;
+            let mut lib = LibraryServiceClient::connect(addr.clone()).await?;
             let report = lib.reorganize(library::ReorganizeRequest { dry_run }).await?.into_inner();
             for f in &report.files {
                 println!("{}: {} -> {}{}", f.status, f.from, f.to,
@@ -1227,7 +1234,7 @@ async fn main() -> anyhow::Result<()> {
             anyhow::ensure!(report.failed == 0, "{} media could not be reorganized", report.failed);
         }
         Command::Library(LibraryCommand::Prune { older_than }) => {
-            let mut lib = LibraryServiceClient::connect(args.addr.clone()).await?;
+            let mut lib = LibraryServiceClient::connect(addr.clone()).await?;
             let r = lib
                 .prune(library::PruneRequest { older_than: older_than.unwrap_or_default() })
                 .await?
@@ -1235,14 +1242,14 @@ async fn main() -> anyhow::Result<()> {
             println!("forgotten: {} vanished media", r.removed);
         }
         Command::Library(LibraryCommand::Tags { media }) => {
-            let mut lib = LibraryServiceClient::connect(args.addr.clone()).await?;
+            let mut lib = LibraryServiceClient::connect(addr.clone()).await?;
             let t = lib.get_tags(library::GetTagsRequest { rel_path: media }).await?.into_inner();
             print_tags(&t);
         }
         Command::Library(LibraryCommand::Tag {
             media, title, artist, album, year, genres, no_genre, sources, bpm, tempo, creation, revision,
         }) => {
-            let mut lib = LibraryServiceClient::connect(args.addr.clone()).await?;
+            let mut lib = LibraryServiceClient::connect(addr.clone()).await?;
             let revision = match revision {
                 Some(r) => r,
                 None => lib.get_tags(library::GetTagsRequest { rel_path: media.clone() }).await?.into_inner().revision,
@@ -1290,7 +1297,7 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Command::Library(LibraryCommand::Scan { progress, reanalyze }) => {
-            let mut lib = LibraryServiceClient::connect(args.addr.clone()).await?;
+            let mut lib = LibraryServiceClient::connect(addr.clone()).await?;
             let watcher = if progress {
                 let mut w = lib.clone();
                 Some(tokio::spawn(async move {
@@ -1369,7 +1376,7 @@ async fn main() -> anyhow::Result<()> {
                     Ok(library::search_media_request::BpmFilter { op: op.to_string(), value })
                 })
                 .collect::<anyhow::Result<Vec<_>>>()?;
-            let mut lib = LibraryServiceClient::connect(args.addr.clone()).await?;
+            let mut lib = LibraryServiceClient::connect(addr.clone()).await?;
             let r = lib
                 .search_media(library::SearchMediaRequest {
                     query,
@@ -1398,7 +1405,7 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Command::Library(LibraryCommand::List { all, genres, by_genre }) => {
-            let mut lib = LibraryServiceClient::connect(args.addr.clone()).await?;
+            let mut lib = LibraryServiceClient::connect(addr.clone()).await?;
             let filtered = !genres.is_empty();
             let reply = lib
                 .list_media(ListMediaRequest { only_available: !all, genres })
@@ -1447,7 +1454,7 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Command::Library(LibraryCommand::ScanStatus { follow }) => {
-            let mut lib = LibraryServiceClient::connect(args.addr.clone()).await?;
+            let mut lib = LibraryServiceClient::connect(addr.clone()).await?;
             let mut st = lib.watch_scan(library::WatchScanRequest {}).await?.into_inner();
             while let Some(s) = st.message().await? {
                 println!("{}", scan_line(&s));
@@ -1470,7 +1477,7 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Command::Library(LibraryCommand::Values) => {
-            let mut lib = LibraryServiceClient::connect(args.addr.clone()).await?;
+            let mut lib = LibraryServiceClient::connect(addr.clone()).await?;
             let reply = lib.list_tag_values(library::ListTagValuesRequest {}).await?.into_inner();
             for o in &reply.origins {
                 let name = if o.origin.is_empty() { "genre (file, TCON)".to_string() } else { format!("{} (TXXX source)", o.origin) };
@@ -1488,7 +1495,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::Library(LibraryCommand::Rename { from, to, origin, dry_run }) => {
             use library::rename_tag_value_event::Event;
-            let mut lib = LibraryServiceClient::connect(args.addr.clone()).await?;
+            let mut lib = LibraryServiceClient::connect(addr.clone()).await?;
             let mut st = lib
                 .rename_tag_value(library::RenameTagValueRequest { origin, from, to, dry_run })
                 .await?
@@ -1524,7 +1531,7 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Command::Library(LibraryCommand::Genres { all }) => {
-            let mut lib = LibraryServiceClient::connect(args.addr.clone()).await?;
+            let mut lib = LibraryServiceClient::connect(addr.clone()).await?;
             let reply = lib
                 .list_genres(ListGenresRequest { only_available: !all })
                 .await?
@@ -1556,9 +1563,9 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
-        Command::Listeners(command) => listeners::run(&args.addr, command).await?,
+        Command::Listeners(command) => listeners::run(&addr, command).await?,
         Command::Plugin(PluginCommand::List) => {
-            let mut cli = PluginServiceClient::connect(args.addr.clone()).await?;
+            let mut cli = PluginServiceClient::connect(addr.clone()).await?;
             let reply = cli.list(PluginListRequest {}).await?.into_inner();
             if reply.plugins.is_empty() {
                 println!("(no plugins declared)");
@@ -1590,7 +1597,7 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Command::Plugin(PluginCommand::Db { name, cmd }) => {
-            let mut cli = PluginServiceClient::connect(args.addr.clone()).await?;
+            let mut cli = PluginServiceClient::connect(addr.clone()).await?;
             match cmd {
                 PluginDbCommand::Info => {
                     let i = cli
@@ -1684,7 +1691,7 @@ async fn main() -> anyhow::Result<()> {
                 PluginCommand::Reload { name } => (name, PluginAction::Reload),
                 PluginCommand::List | PluginCommand::Db { .. } => unreachable!("handled above"),
             };
-            let mut cli = PluginServiceClient::connect(args.addr.clone()).await?;
+            let mut cli = PluginServiceClient::connect(addr.clone()).await?;
             let reply = cli
                 .control(PluginControlRequest {
                     name: name.clone(),
@@ -1707,7 +1714,7 @@ async fn main() -> anyhow::Result<()> {
                 ClockCommand::Reset => SetClockRequest { real: true, at: String::new() },
                 ClockCommand::Set { when } => SetClockRequest { real: false, at: when.clone() },
             };
-            let mut sched = ScheduleServiceClient::connect(args.addr.clone()).await?;
+            let mut sched = ScheduleServiceClient::connect(addr.clone()).await?;
             let status = sched.set_clock(req).await?.into_inner();
             let state = if status.frozen { "FROZEN" } else { "real time" };
             println!("clock: {state} \u{2014} {}", status.effective_local);
@@ -1730,7 +1737,7 @@ async fn main() -> anyhow::Result<()> {
             println!("stationd stopped (marker {}): not restarted until `stationctl station start`", r.marker);
         }
         Command::Station(StationCommand::Next) => {
-            let mut bc = BroadcastServiceClient::connect(args.addr.clone()).await?;
+            let mut bc = BroadcastServiceClient::connect(addr.clone()).await?;
             bc.skip(SkipRequest {}).await?;
             println!("skipped: the next track is starting");
         }
@@ -1745,7 +1752,7 @@ async fn main() -> anyhow::Result<()> {
                 | StationCommand::Stop { .. }
                 | StationCommand::Next => unreachable!("handled above"),
             };
-            let mut bc = BroadcastServiceClient::connect(args.addr.clone()).await?;
+            let mut bc = BroadcastServiceClient::connect(addr.clone()).await?;
             // A meaningless transition comes back as failed_precondition → `?`
             // exits non-zero with the reason.
             let r = bc
@@ -1765,7 +1772,7 @@ async fn main() -> anyhow::Result<()> {
                 (None, Some(p)) => Content::PlaylistRef(p),
                 (None, None) => unreachable!("clap requires --media or --playlist"),
             };
-            let mut bc = BroadcastServiceClient::connect(args.addr.clone()).await?;
+            let mut bc = BroadcastServiceClient::connect(addr.clone()).await?;
             let r = bc
                 .push_override(PushOverrideRequest {
                     content: Some(content),
@@ -1781,7 +1788,7 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Command::Override(OverrideCommand::List) => {
-            let mut bc = BroadcastServiceClient::connect(args.addr.clone()).await?;
+            let mut bc = BroadcastServiceClient::connect(addr.clone()).await?;
             let r = bc.list_overrides(ListOverridesRequest {}).await?.into_inner();
             if r.overrides.is_empty() {
                 println!("(no pending override)");
@@ -1806,7 +1813,7 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Command::Override(OverrideCommand::Clear { id }) => {
-            let mut bc = BroadcastServiceClient::connect(args.addr.clone()).await?;
+            let mut bc = BroadcastServiceClient::connect(addr.clone()).await?;
             let r = bc
                 .clear_overrides(ClearOverridesRequest { id: id.unwrap_or(0) })
                 .await?
@@ -1814,43 +1821,43 @@ async fn main() -> anyhow::Result<()> {
             println!("removed: {}", r.removed);
         }
         Command::Ls(LsCommand::Render) => {
-            let mut ls = LiquidsoapServiceClient::connect(args.addr.clone()).await?;
+            let mut ls = LiquidsoapServiceClient::connect(addr.clone()).await?;
             let r = ls.render_script(RenderScriptRequest {}).await?.into_inner();
             eprintln!("# written to {}", r.path);
             print!("{}", r.script);
         }
         Command::Icecast(IcecastCommand::Render) => {
-            let mut ic = IcecastServiceClient::connect(args.addr.clone()).await?;
+            let mut ic = IcecastServiceClient::connect(addr.clone()).await?;
             let r = ic.render_config(IcecastRenderRequest {}).await?.into_inner();
             eprintln!("# written to {} ({}) — Icecast's user must be in this group", r.path, r.access);
             print!("{}", r.xml);
         }
         Command::Live(LiveCommand::Status) => {
-            let mut lv = LiveServiceClient::connect(args.addr.clone()).await?;
+            let mut lv = LiveServiceClient::connect(addr.clone()).await?;
             let s = lv.get_status(LiveStatusRequest {}).await?.into_inner();
             print_live_status(&s);
         }
         Command::Live(LiveCommand::Kick) => {
-            let mut lv = LiveServiceClient::connect(args.addr.clone()).await?;
+            let mut lv = LiveServiceClient::connect(addr.clone()).await?;
             let r = lv.kick(KickRequest {}).await?.into_inner();
             println!("live ended: {} disconnected, its way in closed (see `live status`)", r.dj);
         }
         Command::Live(LiveCommand::Open { dj, duration }) => {
-            let mut lv = LiveServiceClient::connect(args.addr.clone()).await?;
+            let mut lv = LiveServiceClient::connect(addr.clone()).await?;
             let r = lv.open(LiveOpenRequest { dj, duration }).await?.into_inner();
             if let Some(o) = r.opening {
                 println!("opening: {} may connect now; it ends {}", o.dj, left(o.until));
             }
         }
         Command::Live(LiveCommand::Close { dj }) => {
-            let mut lv = LiveServiceClient::connect(args.addr.clone()).await?;
+            let mut lv = LiveServiceClient::connect(addr.clone()).await?;
             let r = lv.close(LiveCloseRequest { dj }).await?.into_inner();
             if let Some(o) = r.opening {
                 println!("opening of {} closed (opened {})", o.dj, ago(o.opened_at));
             }
         }
         Command::Onair { what: Some(OnairCommand::History { before, limit }), .. } => {
-            let mut cli = OnAirServiceClient::connect(args.addr.clone()).await?;
+            let mut cli = OnAirServiceClient::connect(addr.clone()).await?;
             let r = cli
                 .history(onair::HistoryRequest { before, limit })
                 .await?
@@ -1864,7 +1871,7 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Command::Onair { what: None, upcoming, history, playlists, follow } => {
-            let mut cli = OnAirServiceClient::connect(args.addr.clone()).await?;
+            let mut cli = OnAirServiceClient::connect(addr.clone()).await?;
             let mut stream = cli
                 .watch(onair::WatchRequest {
                     upcoming,
@@ -1886,7 +1893,7 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Command::Events { last, follow, level } => {
-            let tz = match StationClient::connect(args.addr.clone()).await {
+            let tz = match StationClient::connect(addr.clone()).await {
                 Ok(mut c) => c.status(StatusRequest {}).await.map(|r| onair_tz(&r.into_inner().timezone)).ok(),
                 Err(_) => None,
             }
@@ -1896,7 +1903,7 @@ async fn main() -> anyhow::Result<()> {
                 Some(EventLevel::Warn) => 2,
                 Some(EventLevel::Error) => 3,
             };
-            let mut cli = EventServiceClient::connect(args.addr.clone()).await?;
+            let mut cli = EventServiceClient::connect(addr.clone()).await?;
             let mut st = cli.watch(events::WatchEventsRequest { backlog: last.max(1), follow }).await?.into_inner();
             while let Some(e) = st.message().await? {
                 if e.level >= min {
@@ -1913,7 +1920,7 @@ async fn main() -> anyhow::Result<()> {
                 StatsBy::Media => PlaysBy::Media,
                 StatsBy::Artist => PlaysBy::Artist,
             };
-            let mut cli = StatsServiceClient::connect(args.addr.clone()).await?;
+            let mut cli = StatsServiceClient::connect(addr.clone()).await?;
             let r = cli
                 .plays(PlaysRequest { since: since.clone(), by: by as i32, limit, key })
                 .await?
@@ -1942,22 +1949,22 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::Dj(DjCommand::Hash) => {
             let password = read_password("DJ password: ")?;
-            let mut lv = LiveServiceClient::connect(args.addr.clone()).await?;
+            let mut lv = LiveServiceClient::connect(addr.clone()).await?;
             let r = lv.hash_password(HashPasswordRequest { password }).await?.into_inner();
             println!("password_hash = \"{}\"", r.hash);
         }
         Command::Icecast(IcecastCommand::Status) => {
-            let mut ic = IcecastServiceClient::connect(args.addr.clone()).await?;
+            let mut ic = IcecastServiceClient::connect(addr.clone()).await?;
             let s = ic.get_status(IcecastStatusRequest {}).await?.into_inner();
             print_icecast_status(&s);
         }
         Command::Ls(LsCommand::Status) => {
-            let mut ls = LiquidsoapServiceClient::connect(args.addr.clone()).await?;
+            let mut ls = LiquidsoapServiceClient::connect(addr.clone()).await?;
             let s = ls.get_status(LsStatusRequest {}).await?.into_inner();
             print_ls_status(&s);
         }
         Command::Debug(DebugCommand::Listeners { count }) => {
-            let mut bc = BroadcastServiceClient::connect(args.addr.clone()).await?;
+            let mut bc = BroadcastServiceClient::connect(addr.clone()).await?;
             let s = bc
                 .sample_listeners(SampleListenersRequest { count })
                 .await?

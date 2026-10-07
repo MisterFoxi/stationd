@@ -717,7 +717,13 @@ stationd-tui
 | `clock set` \| `show` \| `reset` | Freeze the station clock (testing) |
 | `debug listeners <n>` | Inject a listener sample (overwritten by the next Icecast sample) |
 
-`stationctl --addr http://host:port …` targets another daemon.
+`stationctl --addr http://host:port …` targets another daemon and overrides local configuration.
+Without `--addr`, stationctl reads `[server].grpc_bind` from `stationd.toml` in
+`$STATIOND_ROOT` (or the current directory). `station start/state --root DIR`
+use that directory. Wildcard binds (`0.0.0.0`, `::`) become loopback client
+addresses. If the file or key is absent, the default remains `http://127.0.0.1:50051`;
+an unreadable or invalid file is reported as an error. The s6 readiness probe
+uses the same configuration, including when gRPC listens only on a LAN IP.
 
 ---
 
