@@ -365,7 +365,40 @@ impl Antenne {
             ]));
         }
         let room = self.upcoming.saturating_sub(rows.len());
+
+        // The simulated playout may legitimately omit a hard rendez-vous when
+        // its short expiry would already be missed by the projected tracks.
+        // Keep the grid rendez-vous visible nevertheless: it is an important
+        // operator fact, distinct from the simulated promise of what will
+        // actually air. Insert it at its clock position unless the simulation
+        // already contains the AtClockHard track itself.
+        let hard = snap
+            .next_playlists
+            .iter()
+            .find(|p| p.origin.as_str() == "AtClockHard" && p.from.is_some())
+            .filter(|p| {
+                !snap
+                    .upcoming
+                    .iter()
+                    .any(|t| t.origin.as_str() == "AtClockHard" && t.rule_id == p.rule_id)
+            });
+
+        let mut hard_done = false;
         for t in snap.upcoming.iter().take(room) {
+            if let Some(h) = hard
+                && !hard_done
+                && t.estimated_at.is_some_and(|at| at >= h.from.unwrap_or(i64::MAX))
+            {
+                let at = h.from.unwrap();
+                rows.push(Row::new(vec![
+                    Cell::from(Span::styled(format!("! {}", hm(tz, at)), s.warn())),
+                    Cell::from(h.playlist_ref.clone()),
+                    Cell::from(Span::styled("—", s.label())),
+                    Cell::from(Span::styled(origin_label("AtClockHard"), s.warn())),
+                ]));
+                hard_done = true;
+            }
+
             let when = t.estimated_at.map(|e| format!("~ {}", hm(tz, e))).unwrap_or_else(|| "~ —".into());
             let mut from = provenance(t);
             if let Some(c) = t.cut_at {
@@ -376,6 +409,17 @@ impl Antenne {
                 Cell::from(label(t)),
                 Cell::from(Span::styled(mmss(t.duration_ms), s.label())),
                 Cell::from(Span::styled(from, s.muted())),
+            ]));
+        }
+        if let Some(h) = hard.filter(|_| !hard_done)
+            && rows.len() < self.upcoming
+        {
+            let at = h.from.unwrap();
+            rows.push(Row::new(vec![
+                Cell::from(Span::styled(format!("! {}", hm(tz, at)), s.warn())),
+                Cell::from(h.playlist_ref.clone()),
+                Cell::from(Span::styled("—", s.label())),
+                Cell::from(Span::styled(origin_label("AtClockHard"), s.warn())),
             ]));
         }
         if rows.is_empty() {

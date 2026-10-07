@@ -168,11 +168,16 @@ impl OnAirHub {
         let mut sim_for: Option<u64> = None;
         let mut sim = SimPart::default();
         loop {
+            // Clock-driven rules (notably AtClock hard) can change the future
+            // without any air/meta revision changing. Remember a timer wake so
+            // the cached "upcoming" simulation is refreshed as the rendez-vous
+            // enters its protection window.
+            let mut clock_tick = false;
             tokio::select! {
                 r = air.changed() => if r.is_err() { return },
                 r = meta.changed() => if r.is_err() { return },
                 _ = self.wake.notified() => {},
-                _ = tokio::time::sleep(TICK) => {},
+                _ = tokio::time::sleep(TICK) => { clock_tick = true; },
             }
             // A burst of changes (a track start = several) → one snapshot.
             tokio::time::sleep(DEBOUNCE).await;
@@ -184,7 +189,7 @@ impl OnAirHub {
             }
             let now = self.sources.engine.effective_now(None);
             let mut snap = observe(&self.sources, now).await;
-            if sim_for != Some(air_rev) {
+            if clock_tick || sim_for != Some(air_rev) {
                 sim = simulate_part(&self.sources, &snap, now).await;
                 sim_for = Some(air_rev);
             }

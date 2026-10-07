@@ -71,6 +71,39 @@ pub async fn pop(
     }
 }
 
+/// Pop the queued entry that best fits inside `max_duration_ms`: the
+/// longest eligible media not exceeding the budget. Entries that do not fit
+/// stay queued. Unknown/zero durations are skipped because they cannot protect
+/// a hard clock boundary. FIFO/LIFO is only the tie-breaker between entries
+/// with the same best duration.
+///
+/// The select-then-delete remains safe under stationd's single-writer model.
+pub async fn pop_fitting(
+    pool: &SqlitePool,
+    playlist_ref: &str,
+    lifo: bool,
+    max_duration_ms: u64,
+) -> Result<Option<String>, sqlx::Error> {
+    let order = if lifo { "DESC" } else { "ASC" };
+    let row: Option<(i64, String)> = sqlx::query_as(&format!(
+        "SELECT q.id, q.rel_path          FROM queue_entry q          JOIN media m ON m.rel_path = q.rel_path          WHERE q.playlist_ref = ?1            AND m.available = 1            AND m.duration_ms > 0            AND m.duration_ms <= ?2          ORDER BY m.duration_ms DESC, q.id {order} LIMIT 1"
+    ))
+    .bind(playlist_ref)
+    .bind(max_duration_ms as i64)
+    .fetch_optional(pool)
+    .await?;
+    match row {
+        Some((id, rel_path)) => {
+            sqlx::query("DELETE FROM queue_entry WHERE id = ?1")
+                .bind(id)
+                .execute(pool)
+                .await?;
+            Ok(Some(rel_path))
+        }
+        None => Ok(None),
+    }
+}
+
 /// Current buffer length for `playlist_ref`.
 pub async fn count(pool: &SqlitePool, playlist_ref: &str) -> Result<u64, sqlx::Error> {
     let (n,): (i64,) =

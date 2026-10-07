@@ -238,7 +238,8 @@ async fn main() -> anyhow::Result<()> {
             for w in ls_cfg.check_air_files().map_err(anyhow::Error::msg)? {
                 warn!("{w}");
             }
-            let bridge = stationd::ls_bridge::LsBridge::new(engine.clone(), &cfg.media.library_path)?;
+            let bridge = stationd::ls_bridge::LsBridge::new(engine.clone(), &cfg.media.library_path)?
+                .with_metadata_rules(db_pool.clone(), &ls_cfg.metadata_rules);
             onair_bridge = Some(bridge.clone());
             // Control socket: pause/resume follow the broadcast state machine
             // (whoever changes it); skip is a direct RPC.

@@ -151,6 +151,20 @@ level = "info"
 # genre    = ""
 # public   = false
 
+# Public metadata: first matching tag wins. No match = file metadata unchanged.
+# Without origin, tag matches any merged library genre (including custom-tags).
+# With origin, "" means native genre, "Type" means that configured TXXX source.
+# [[liquidsoap.metadata_rule]]
+# tag = "jingle"
+# origin = "Type"
+# text = "Ma Radio"                         # replaces title/song; clears artist/album
+#
+# [[liquidsoap.metadata_rule]]
+# tag = "speech"
+# fields = ["title"]                        # hide artist and album; [] hides everything
+# Allowed fields: title, artist, album. Default: all three. text takes precedence.
+# Restart stationd and Liquidsoap after changing these rules.
+#
 # Live DJ (optional, requires [liquidsoap]): a harbor input in the generated
 # script. Who may connect: the DJ file (kept apart, it holds argon2 hashes —
 # `stationctl dj hash`; re-read at every login). When: the grid's `live`

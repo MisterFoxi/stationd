@@ -158,6 +158,8 @@ cp -r examples "$out/examples"
 cp -r radio "$out/radio"
 install -m 0755 docker/prod/install.sh "$out/install.sh"
 install -m 0755 docker/prod/client.sh "$out/client.sh"
+install -m 0755 docker/prod/configure-paths.sh "$out/configure-paths.sh"
+install -m 0644 docker/prod/paths.py "$out/paths.py"
 echo "$tag" > "$out/VERSION"
 (cd "$out" && find . -type f -printf '%P\0' | sort -z | xargs -0 sha256sum -- > "$root/dist/SHA256SUMS.tmp")
 mv "$root/dist/SHA256SUMS.tmp" "$out/SHA256SUMS"

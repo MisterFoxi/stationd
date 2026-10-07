@@ -438,12 +438,62 @@ pub struct LiquidsoapConfig {
     /// air source as `radio` and may reassign it (metadata.map, …).
     #[serde(default)]
     pub custom_include: Option<PathBuf>,
+    /// First matching tag rule controls public track metadata.
+    #[serde(default, rename = "metadata_rule")]
+    pub metadata_rules: Vec<MetadataRule>,
     /// Liquidsoap log level (1 = critical … 5 = debug).
     #[serde(default = "default_ls_log_level")]
     pub log_level: u8,
     /// Icecast outputs (at least one). TOML key `[[liquidsoap.output]]`.
     #[serde(default, rename = "output")]
     pub outputs: Vec<IcecastOutput>,
+}
+
+/// Public metadata policy. An absent origin matches merged library genres;
+/// an explicit origin matches that source ("" = native genre, "Type" = TXXX).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MetadataRule {
+    pub tag: String,
+    #[serde(default)]
+    pub origin: Option<String>,
+    #[serde(default = "default_metadata_fields")]
+    pub fields: Vec<MetadataField>,
+    /// Replaces the complete public display, with artist and album cleared.
+    #[serde(default)]
+    pub text: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MetadataField {
+    Title,
+    Artist,
+    Album,
+}
+
+pub fn validate_metadata_rules(rules: &[MetadataRule]) -> Result<(), String> {
+    if rules.len() > 128 {
+        return Err("metadata_rule: at most 128 rules".into());
+    }
+    for (i, rule) in rules.iter().enumerate() {
+        if rule.tag.trim().is_empty() {
+            return Err(format!("metadata_rule #{}: tag is empty", i + 1));
+        }
+        for value in [Some(&rule.tag), rule.origin.as_ref(), rule.text.as_ref()].into_iter().flatten() {
+            if value.len() > 4096 || value.contains(char::is_control) {
+                return Err(format!("metadata_rule #{}: values must fit 4096 bytes without control characters", i + 1));
+            }
+        }
+        if rule.text.as_ref().is_some_and(|t| t.trim().is_empty()) {
+            return Err(format!("metadata_rule #{}: text must be non-empty", i + 1));
+        }
+    }
+    Ok(())
+}
+
+fn default_metadata_fields() -> Vec<MetadataField> {
+    vec![MetadataField::Title, MetadataField::Artist, MetadataField::Album]
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -579,6 +629,7 @@ impl LiquidsoapConfig {
         if !(1..=5).contains(&self.log_level) {
             return Err(format!("log_level {} out of 1..=5", self.log_level));
         }
+        validate_metadata_rules(&self.metadata_rules)?;
         let cf = &self.crossfade;
         if !(cf.fade.is_finite() && cf.fade >= 0.0 && cf.duration.is_finite() && cf.duration >= 0.0) {
             return Err("crossfade.fade / crossfade.duration must be finite and >= 0".into());

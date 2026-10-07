@@ -1294,3 +1294,29 @@ help-pl-tree-expand = Expand / collapse group
 rf-timezone = Timezone
 rf-station = Station
 rf-utc-times = times, weekdays and dates in UTC
+
+metadata-target = Liquidsoap metadata
+metadata-first-match = The first matching rule applies. No match: normal display.
+metadata-origin-any = All tags
+metadata-origin-native = Native genre
+metadata-origin-custom = Custom tag
+metadata-hidden = Display hidden
+metadata-fixed = Fixed text
+metadata-fields = Visible fields
+metadata-tag = Tag value
+metadata-origin = Tag origin
+metadata-source = Custom tag name
+metadata-display = Display
+metadata-text = Displayed text
+metadata-show = Show
+metadata-hide = Hide
+metadata-empty = No rules. Press a to add one.
+metadata-count = { $count } rules · Enter to edit
+metadata-required = Enter a tag, a custom source name and fixed text when enabled.
+metadata-invalid = Cannot read metadata rules.
+metadata-limit = Limit: 128 rules, 64 KiB total.
+metadata-list-keys = ↑/↓ rule · a/Insert add · Enter edit · Delete remove
+    Ctrl+↑/↓ change priority · Ctrl+S preview · Esc cancel
+metadata-detail-keys = ↑/↓ field · Enter edit or toggle · Esc back to rules
+    Ctrl+S preview · while typing: Enter accept, Esc cancel
+metadata-restart = After saving: restart stationd, then Liquidsoap.

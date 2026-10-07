@@ -41,7 +41,8 @@ Premier formulaire : **stop-when-idle**, natif ou WASM reconstruit :
 Les plugins sans schéma restent sélectionnables avec une explication.
 Un plugin WASM doit avoir été chargé au moins une fois pour découvrir son
 schéma ; celui-ci reste disponible après son arrêt. Les paramètres imbriqués,
-listes et tables ne sont pas éditables dans cette première version.
+listes et tables des plugins ne sont pas éditables. Les métadonnées Liquidsoap
+disposent du formulaire spécifique décrit plus bas.
 
 ## Contrat pour les plugins
 
@@ -117,3 +118,32 @@ recharger le plugin ; une modification concurrente est signalée comme conflit. 
 inline sont explicitement refusées. Le chemin de configuration est résolu
 au démarrage. Ajouter/supprimer des déclarations, modifier leurs capacités
 ou leur activation dans le fichier nécessite toujours un redémarrage du daemon.
+
+## Métadonnées Liquidsoap
+
+Le même onglet propose la cible **Métadonnées Liquidsoap**, accessible avec
+←/→ parmi les plugins. La section Liquidsoap doit être configurée dans la station.
+Entrée sur **Règles de métadonnées** ouvre le formulaire :
+
+- a / Inser ajoute une règle ; Entrée modifie la règle sélectionnée ;
+- Suppr supprime une règle ; Ctrl+↑/↓ change sa priorité ;
+- dans une règle, ↑/↓ sélectionne le champ et Entrée modifie ou bascule sa valeur ;
+- choisir l’origine : tous les tags, genre natif ou tag personnalisé (par exemple Type) ;
+- choisir **Champs visibles** et afficher/masquer titre, interprète et album,
+  ou **Texte fixe** et saisir le texte à afficher pour les jingles ;
+- Esc revient à la liste ; depuis la liste, Esc annule le formulaire ;
+- Ctrl+S valide le formulaire et ouvre la prévisualisation ; choisir **Enregistrer**.
+
+La première règle correspondante s’applique. Sans correspondance, les métadonnées
+habituelles sont conservées. Masquer les trois champs efface l’affichage.
+Maximum : 128 règles, 4096 octets par valeur, 64 Kio pour l’ensemble du formulaire.
+
+Cette cible modifie seulement les règles de la section Liquidsoap, avec les
+mêmes contrôles de révision et l’écriture atomique que les formulaires de plugins.
+Les autres sections et paramètres sont conservés. Les commentaires des champs
+d’une règle sont conservés lorsqu’elle est retrouvée par tag et origine.
+
+Les règles enregistrées restent **à appliquer** jusqu’au redémarrage du daemon.
+Redémarrer stationd pour régénérer le script, puis vérifier celui-ci et redémarrer
+Liquidsoap. Le formulaire ne propose pas « Enregistrer et recharger » pour cette
+cible : recharger un plugin ne redémarre pas ces deux services.

@@ -33,6 +33,16 @@ if [ -n "${MEDIA_GID:-}" ]; then
   usermod -aG "$g" "${STATIOND_USER:-stationd}"
 fi
 
+# Groupes des chemins configurés : playlists, grilles, base et médias peuvent
+# provenir d'exports différents. Ne change aucune permission sur ces exports.
+for gid in ${STATIOND_PATH_GIDS:-}; do
+  case "$gid" in ''|*[!0-9]*) fail "GID de chemin invalide : $gid";; esac
+  g="$(getent group "$gid" | cut -d: -f1)"
+  [ -n "$g" ] || { g="stationd-path-$gid"; groupadd -g "$gid" "$g"; }
+  usermod -aG "$g" liquidsoap
+  usermod -aG "$g" "${STATIOND_USER:-stationd}"
+done
+
 # --- Dev : volumes nommés -----------------------------------------------------
 # Un volume neuf peut arriver vide et possédé par root : on le rend à `dev`
 # (target/ et registre cargo).

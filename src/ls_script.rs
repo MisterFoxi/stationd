@@ -220,6 +220,7 @@ let stationd.relay_off = ref(fun () -> ())
 # without a crossfade (else its buffered tail would be mixed into the return
 # track). Consumed by the next crossfade transition.
 let stationd.no_cross = ref(false)
+let stationd.pull_generation = ref(0)
 
 def stationd.post(endpoint, payload) =
   try
@@ -360,27 +361,36 @@ end
         lead = liq_float(pull_lead_s(ls)),
     ));
 
-    // ── sources ───────────────────────────────────────────────────────────
+    // Each hard cut replaces the request/cross pair. Liquidsoap's cross.skip
+    // preserves an implicit before_head when the next decoder is not ready;
+    // that buffer is not exposed to the transition callback.
     o.push_str(&format!(
-        "# ─── air chain ─────────────────────────────────────────────────────────\n\
-         pull = request.dynamic(id=\"stationd_pull\", retry_delay={retry}, timeout={rto}, stationd.next)\n\
-         # One of our tracks starts: a relay it replaces is over.\n\
-         def stationd.pull_started(m) =\n  \
-           relay_off = stationd.relay_off()\n  \
-           relay_off()\n  \
-           stationd.air_elapsed := fun () -> pull.elapsed()\n  \
-           stationd.report(m, \"\")\n\
-         end\n\
-         source.methods(pull).on_track(synchronous=false, stationd.pull_started)\n\
-         # Skip target: the track source itself, before the crossfade.\n\
-         pull_raw = pull\n\
-         stationd.remaining := fun () -> pull_raw.remaining()\n",
+        r##"# ─── air chain ─────────────────────────────────────────────────────────
+def stationd.make_raw() =
+  generation = stationd.pull_generation()
+  def next() =
+    if generation == stationd.pull_generation() then stationd.next() else null end
+  end
+  pull_raw = request.dynamic(id="stationd_pull", retry_delay={retry}, timeout={rto}, next)
+  def started(m) =
+    if generation == stationd.pull_generation() then
+      relay_off = stationd.relay_off()
+      relay_off()
+      stationd.air_elapsed := fun () -> pull_raw.elapsed()
+      stationd.report(m, "")
+    end
+  end
+  source.methods(pull_raw).on_track(synchronous=false, started)
+  stationd.remaining := fun () -> pull_raw.remaining()
+  pull_raw
+end
+let stationd.raw_pull = ref(stationd.make_raw())
+"##,
         retry = liq_float(PULL_RETRY_S),
         rto = liq_float(REQUEST_TIMEOUT_S),
     ));
-
     match ls.crossfade.mode {
-        CrossfadeMode::None => o.push_str("# crossfade: none (hard cut)\n"),
+        CrossfadeMode::None => o.push_str("# crossfade: none (hard cut)\ndef stationd.make_chain(pull_raw) = pull_raw end\n"),
         CrossfadeMode::Simple => o.push_str(&format!(
             "def stationd.transition(a, b) =\n  \
                if stationd.no_cross() then\n    \
@@ -390,12 +400,39 @@ end
                  cross.simple(a.source, b.source, fade_in={fade}, fade_out={fade})\n  \
                end\n\
              end\n\
-             pull = cross(id=\"stationd_cross\", duration={dur}, stationd.transition, pull)\n",
+             def stationd.make_chain(pull_raw) =\n  \
+               cross(id=\"stationd_cross\", duration={dur}, stationd.transition, pull_raw)\n\
+             end\n",
             fade = liq_float(ls.crossfade.fade),
             dur = liq_float(ls.crossfade.duration),
         )),
     }
 
+    o.push_str(
+        r##"
+let stationd.pull_chain = ref(stationd.make_chain(stationd.raw_pull()))
+pull = source.dynamic(id="stationd_pull_air", {stationd.pull_chain()})
+
+def stationd.reset_pull() =
+  old = stationd.raw_pull()
+  log.important(label="stationd", "hard cut: #{list.length(old.queue())} prepared request(s) retained")
+  queued = old.queue()
+  pending = list.map(fun (r) -> request.create(request.uri(r)), queued)
+  old.set_queue([])
+  list.iter(fun (r) -> request.destroy(r), queued)
+  stationd.pull_generation := stationd.pull_generation() + 1
+  stationd.urgent := true
+  stationd.next_not_before := 0.
+  stationd.no_cross := false
+  fresh = stationd.make_raw()
+  fresh.set_queue(pending)
+  stationd.raw_pull := fresh
+  chain = stationd.make_chain(fresh)
+  pull.prepare(chain)
+  stationd.pull_chain := chain
+end
+"##,
+    );
     o.push_str(&format!(
         "\n# Liquidsoap's own sources. Plain `single` on a local file (no annotate:)\n\
          # stays infallible.\n\
@@ -428,11 +465,12 @@ end
          # While relaying, keep asking stationd (the pull is not read then, so\n\
          # request.dynamic stops polling on its own): a `file` / `halted` /\n\
          # `none` answer ends the relay.\n\
-         thread.run(fast=false, every={retry}, fun () ->\n  \
+         thread.run(fast=false, every={retry}, fun () -> begin\n  \
+           pull_raw = stationd.raw_pull()\n  \
            if stationd.relaying() and list.length(pull_raw.queue()) == 0 then\n    \
              ignore(pull_raw.fetch())\n  \
            end\n\
-         )\n\n\
+         end)\n\n\
          # Report Liquidsoap's own sources on every SWITCH to them, not on a track\n\
          # start: a noise loop left mid-way is resumed (no new track), a later stop\n\
          # would go unreported. Off the streaming thread (HTTP call).\n\
@@ -507,6 +545,7 @@ end
 # The next track is normally asked for only near the end of the current one:
 # fetch it NOW (urgent) before skipping, or the safety file would fill the gap.
 def stationd.cmd_skip(_) =
+  pull_raw = stationd.raw_pull()
   if list.length(pull_raw.queue()) == 0 then
     stationd.urgent := true
     stationd.next_not_before := 0.
@@ -521,6 +560,7 @@ end
 # again: a stop then takes effect at the end of the CURRENT track. A track the
 # crossfade already started mixing can no longer be dropped.
 def stationd.cmd_flush(_) =
+  pull_raw = stationd.raw_pull()
   pull_raw.set_queue([])
   stationd.next_not_before := 0.
   log.important(label="stationd", "flush: prepared track dropped")
@@ -532,10 +572,7 @@ end
 # re-asked — never when it is itself an override).
 def stationd.cmd_interrupt(uri) =
   interrupt.push(request.create(uri))
-  # Skip through the crossfade so its buffered tail is discarded too.
-  # The return track must not be mixed with audio from the interrupted song.
-  stationd.no_cross := true
-  source.skip(pull)
+  stationd.reset_pull()
   log.important(label="stationd", "interrupt: hard override cut in")
   "OK"
 end
@@ -598,6 +635,8 @@ server.register(namespace="stationd", usage="on_air", description="What is on ai
         ));
     }
 
+    o.push_str(&render_metadata_rules(&ls.metadata_rules));
+
     // The idle file loops, emitting the same empty metadata each time. Filter
     // repeated chunks only at the output boundary, after custom processing;
     // track reports upstream still run normally, including repeated songs.
@@ -609,6 +648,46 @@ server.register(namespace="stationd", usage="on_air", description="What is on ai
     for (i, out) in ls.outputs.iter().enumerate() {
         o.push_str(&render_output(i + 1, out, station_name));
     }
+    o
+}
+
+/// Apply public metadata at the output boundary, after callbacks and custom
+/// processing. Rebuild song too: a file-provided song must not leak hidden fields.
+fn render_metadata_rules(rules: &[crate::config::MetadataRule]) -> String {
+    use crate::config::MetadataField;
+    if rules.is_empty() {
+        return String::new();
+    }
+    let mut o = String::from(
+        "\n# Public metadata rules, selected by stationd from indexed tags.\n\
+         def stationd.public_metadata(m) =\n\
+           policy = m[\"stationd_metadata_rule\"]\n\
+           if policy == \"clear\" then\n\
+             list.append(list.filter(fun (kv) -> not list.mem(fst(kv), [\"title\", \"artist\", \"album\", \"song\"]), m), stationd.idle_metadata())\n",
+    );
+    for (i, rule) in rules.iter().enumerate() {
+        o.push_str(&format!("  elsif policy == {} then\n", liq_string(&i.to_string())));
+        let value = |field, key: &str| {
+            if rule.text.is_none() && rule.fields.contains(&field) {
+                format!("m[{}]", liq_string(key))
+            } else {
+                liq_string("")
+            }
+        };
+        let title = rule.text.as_ref().map(|s| liq_string(s))
+            .unwrap_or_else(|| value(MetadataField::Title, "title"));
+        o.push_str(&format!(
+            "    title = {title}\n    artist = {artist}\n    album = {album}\n\
+             \x20   song = if artist == \"\" then title elsif title == \"\" then artist else artist ^ \" - \" ^ title end\n\
+             \x20   list.append(list.filter(fun (kv) -> not list.mem(fst(kv), [\"title\", \"artist\", \"album\", \"song\"]), m), [(\"title\", title), (\"artist\", artist), (\"album\", album), (\"song\", song)])\n",
+            artist = value(MetadataField::Artist, "artist"),
+            album = value(MetadataField::Album, "album"),
+        ));
+    }
+    o.push_str(
+        "  else\n    m\n  end\nend\n\
+         radio = metadata.map(update=false, strip=false, stationd.public_metadata, radio)\n",
+    );
     o
 }
 
@@ -684,6 +763,7 @@ def stationd.live_return() =
       else
         true
       end
+    pull_raw = stationd.raw_pull()
     if flush then pull_raw.set_queue([]) end
     if not stationd.paused() then
       # the frozen track (if any) goes without a crossfade
@@ -822,6 +902,7 @@ mod tests {
             crossfade: CrossfadeConfig::default(),
             normalize: false,
             custom_include: None,
+            metadata_rules: vec![],
             log_level: 3,
             outputs: vec![IcecastOutput {
                 host: "127.0.0.1".into(),
@@ -895,7 +976,7 @@ mod tests {
         let safety = s.find("    safety\n").unwrap();
         assert!(pull < halted && halted < safety);
         // Track starts observed on the pull BEFORE the crossfade.
-        let report = s.find("source.methods(pull).on_track(synchronous=false, stationd.pull_started)").unwrap();
+        let report = s.find("source.methods(pull_raw).on_track(synchronous=false, started)").unwrap();
         assert!(report < s.find("cross(id=").unwrap());
         assert!(s.contains("b=\"192k\""));
         assert!(s.contains("password=\"hack\\\"me\""));
@@ -923,7 +1004,7 @@ mod tests {
         assert!(gate < ask);
         assert!(s[gate..ask].contains("stationd.urgent := false"));
         // The remaining time comes from the pull source once it exists.
-        let pull = s.find("pull = request.dynamic(").unwrap();
+        let pull = s.find("pull_raw = request.dynamic(").unwrap();
         let wired = s.find("stationd.remaining := fun () -> pull_raw.remaining()").unwrap();
         assert!(pull < wired);
         // A skip fetches the next track (urgent) BEFORE skipping.
@@ -957,7 +1038,7 @@ mod tests {
         assert!(s[relay_branch..halted_branch].contains("null"));
         let tail = &s[halted_branch..s[halted_branch..].find("catch err do").unwrap() + halted_branch];
         assert_eq!(tail.matches("relay_off = stationd.relay_off()").count(), 2, "halted and none");
-        let started = s.find("def stationd.pull_started(m) =").unwrap();
+        let started = s.find("def started(m) =").unwrap();
         assert!(s[started..started + 200].contains("relay_off()"));
         // While relaying, the script keeps asking stationd itself.
         assert!(s.contains("thread.run(fast=false, every=2., fun () ->"));
@@ -1042,6 +1123,79 @@ mod tests {
         hard.fade = 0.0;
         let h = render(&cfg(), Some(&hard), "R");
         assert!(h.contains("def stationd.fade_switch(_, b) = b end") && !h.contains("fade.in("));
+    }
+
+    fn metadata_cfg() -> LiquidsoapConfig {
+        let mut c = cfg();
+        c.metadata_rules = [
+            "tag = 'jingle'\norigin = 'Type'\ntext = 'Radio \"Été\" #{direct}'",
+            "tag = 'speech'\nfields = ['title']",
+            "tag = 'hidden'\nfields = []",
+            "tag = 'artist-only'\nfields = ['artist', 'album']",
+        ].iter().map(|s| toml::from_str(s).unwrap()).collect();
+        c
+    }
+
+    #[test]
+    fn metadata_rules_validate_and_follow_custom_processing() {
+        let mut c = metadata_cfg();
+        assert!(c.validate().is_ok());
+        c.custom_include = Some("/tmp/custom.liq".into());
+        let s = render(&c, None, "Radio");
+        let mapper = s.find("radio = metadata.map(update=false, strip=false, stationd.public_metadata").unwrap();
+        assert!(mapper > s.find("%include").unwrap());
+        assert!(mapper < s.find("radio = metadata.deduplicate").unwrap());
+        assert!(!render(&cfg(), None, "Radio").contains("stationd.public_metadata"));
+        c.metadata_rules[0].tag = " ".into();
+        assert!(c.validate().unwrap_err().contains("tag is empty"));
+        c.metadata_rules[0].tag = "jingle".into();
+        c.metadata_rules[0].text = Some("bad\ntext".into());
+        assert!(c.validate().is_err());
+        c.metadata_rules[0].text = Some(" ".into());
+        assert!(c.validate().is_err());
+        assert!(toml::from_str::<crate::config::MetadataRule>("tag = 'x'\nfields = ['song']").is_err());
+    }
+
+    /// Runs the actual Liquidsoap mapper, including explicit empty values,
+    /// song rebuilding, text escaping, pass-through and private annotations.
+    #[test]
+    #[ignore = "requires Liquidsoap installed"]
+    fn metadata_rules_in_liquidsoap() {
+        let c = metadata_cfg();
+        let dir = tempfile::tempdir().unwrap();
+        let full = dir.path().join("full.liq");
+        for live in [None, Some(live_cfg())] {
+            std::fs::write(&full, render(&c, live.as_ref(), "Radio")).unwrap();
+            let check = std::process::Command::new("liquidsoap").arg("--check").arg(&full).output().unwrap();
+            assert!(check.status.success(), "{}\n{}", String::from_utf8_lossy(&check.stdout), String::from_utf8_lossy(&check.stderr));
+        }
+        let mapper = render_metadata_rules(&c.metadata_rules);
+        let mapper = mapper.split("\nradio = metadata.map").next().unwrap();
+        let mut script = format!(
+            "stationd = ()\ndef stationd.idle_metadata() = [(\"title\", \"\"), (\"artist\", \"\"), (\"album\", \"\"), (\"song\", \"\")] end\n{mapper}\n"
+        );
+        for (policy, title, artist, album, song) in [
+            ("0", "Radio \"Été\" #{direct}", "", "", "Radio \"Été\" #{direct}"),
+            ("1", "Original title", "", "", "Original title"),
+            ("2", "", "", "", ""),
+            ("3", "", "Original artist", "Original album", "Original artist"),
+            ("clear", "", "", "", ""),
+            ("", "Original title", "Original artist", "Original album", "File song"),
+        ] {
+            script.push_str(&format!(
+                "m = stationd.public_metadata([(\"stationd_metadata_rule\", {}), (\"title\", \"Original title\"), (\"artist\", \"Original artist\"), (\"album\", \"Original album\"), (\"song\", \"File song\"), (\"stationd_media\", \"private-path\")])\n",
+                liq_string(policy),
+            ));
+            for (key, expected) in [("title", title), ("artist", artist), ("album", album), ("song", song), ("stationd_media", "private-path")] {
+                script.push_str(&format!("assert(m[{}] == {})\n", liq_string(key), liq_string(expected)));
+            }
+            script.push_str("assert(list.length(list.filter(fun (kv) -> fst(kv) == \"title\", m)) == 1)\n");
+        }
+        script.push_str("exit(0)\n");
+        let path = dir.path().join("mapper.liq");
+        std::fs::write(&path, script).unwrap();
+        let result = std::process::Command::new("liquidsoap").arg(&path).output().unwrap();
+        assert!(result.status.success(), "{}\n{}", String::from_utf8_lossy(&result.stdout), String::from_utf8_lossy(&result.stderr));
     }
 
     #[test]

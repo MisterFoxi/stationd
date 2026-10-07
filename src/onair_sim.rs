@@ -4,8 +4,8 @@
 //! (`db::memory_copy`) with a detached copy of the station control (pending
 //! overrides included) and the plugins in simulation mode. It pulls track
 //! after track exactly like Liquidsoap would, advancing its clock by each
-//! track's indexed duration; a hard rendez-vous falling inside a track cuts
-//! it, like the air ticker does. Every side effect (cursors, group state,
+//! track's indexed duration. Approaching a hard rendez-vous constrains the
+//! next selections so the current track is never cut, like the real air path. Every side effect (cursors, group state,
 //! holds, `Every` counters, rendez-vous tokens, queue buffers, the broadcast
 //! log that feeds anti-repetition, `unplayed_only` marks) lands in the copy —
 //! so the simulation is faithful — and nowhere else.
@@ -60,7 +60,8 @@ pub struct SimTrack {
     pub duration_ms: Option<i64>,
     /// Estimated start; `None` as soon as one duration before it is unknown.
     pub starts_at: Option<Epoch>,
-    /// Cut by a hard rendez-vous at this instant.
+    /// Explicit simulated cut instant. AtClock hard no longer uses this:
+    /// clock rendez-vous are protected boundaries and never cut a media.
     pub cut_at: Option<Epoch>,
     pub playlist_ref: Option<String>,
     pub leaf_ref: Option<String>,
@@ -151,22 +152,17 @@ async fn run(start: &SimStart<'_>, plugins: Option<&PluginHandle>) -> SimOutcome
 
     let mut t = start.at;
     let mut known = start.at_known;
-    // A hard rendez-vous that cut the previous track airs next.
-    let mut forced: Option<ResolvedDecision> = None;
     while out.tracks.len() < start.count {
-        let r = match forced.take() {
-            Some(r) => r,
-            None => match engine.next_media(t).await {
-                Ok(r) => r,
-                Err(EngineError::Selection(SelectionError::PoolEmpty)) => {
-                    out.notes.push(Note::PoolEmpty);
-                    break;
-                }
-                Err(e) => {
-                    out.notes.push(Note::SimulationFailed { reason: e.to_string() });
-                    break;
-                }
-            },
+        let r = match engine.next_media(t).await {
+            Ok(r) => r,
+            Err(EngineError::Selection(SelectionError::PoolEmpty)) => {
+                out.notes.push(Note::PoolEmpty);
+                break;
+            }
+            Err(e) => {
+                out.notes.push(Note::SimulationFailed { reason: e.to_string() });
+                break;
+            }
         };
         if r.halted.is_some() {
             break; // cannot happen on the running copy; never loop on it
@@ -181,7 +177,7 @@ async fn run(start: &SimStart<'_>, plugins: Option<&PluginHandle>) -> SimOutcome
         } else {
             crate::media_index::brief(&pool, &media).await.ok().flatten()
         };
-        let mut tr = track(&r, media.clone(), brief, known.then_some(t));
+        let tr = track(&r, media.clone(), brief, known.then_some(t));
         // A track starting: the `Every` track counters move, as on the air.
         let _ = engine.on_track_completed().await;
 
@@ -200,25 +196,6 @@ async fn run(start: &SimStart<'_>, plugins: Option<&PluginHandle>) -> SimOutcome
         };
         let end = Epoch(t.0 + (d_ms + 999) / 1000);
 
-        // A hard rendez-vous inside this track cuts it, like the air ticker.
-        let mark = engine
-            .next_hard_mark(Epoch(t.0 + 1))
-            .await
-            .ok()
-            .flatten()
-            .filter(|m| m.0 > t.0 && m.0 < end.0);
-        if let Some(m) = mark {
-            if let Ok(Some(cut_in)) = engine.air_at_clock_hard(m, m).await {
-                tr.cut_at = Some(m);
-                out.tracks.push(tr);
-                let _ = engine
-                    .track_left(r.log_id, &media, r.leaf_ref.as_deref(), m.0 - t.0, m)
-                    .await;
-                forced = Some(cut_in);
-                t = m;
-                continue;
-            }
-        }
         out.tracks.push(tr);
         let _ = engine
             .track_left(r.log_id, &media, r.leaf_ref.as_deref(), end.0 - t.0, end)
@@ -421,8 +398,56 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_hard_rendez_vous_cuts_the_simulated_track() {
-        // 7-minute tracks from 09:10: the 09:15 news cuts the first one.
+    async fn hard_boundary_chooses_the_best_fitting_tracks() {
+        let (_d, path, pool) = station(420).await;
+        // Deliberately put a shorter sequential candidate first: best-effort
+        // must prefer the longest media that still fits the protected mark,
+        // not merely the first media that fits.
+        sqlx::query("UPDATE media SET duration_ms = 120000 WHERE rel_path = 'music/1.mp3'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE media SET duration_ms = 240000 WHERE rel_path = 'music/2.mp3'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE media SET duration_ms = 60000 WHERE rel_path = 'music/3.mp3'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let toml = "name = \"music\"\n[selection]\nmode = \"static\"\norder = \"sequential\"\nfiles = [\"music/1.mp3\", \"music/2.mp3\", \"music/3.mp3\", \"music/4.mp3\", \"music/5.mp3\"]\n";
+        let pl = crate::playlist::Playlist::parse(toml).unwrap();
+        crate::store::upsert(&pool, "music", &pl, toml, Some("music"))
+            .await
+            .unwrap();
+
+        let control = StationControl::new_in_memory();
+        let out = simulate(SimStart {
+            live_db: &path,
+            tz: "UTC",
+            control: &control,
+            plugins: None,
+            at: at(9, 10),
+            at_known: true,
+            count: 3,
+        })
+        .await;
+
+        assert_eq!(out.tracks.len(), 3, "notes: {:?}", out.notes);
+        assert_eq!(out.tracks[0].media, "music/2.mp3", "4 min is the closest fit to 09:15");
+        assert_eq!(out.tracks[0].starts_at, Some(at(9, 10)));
+        assert_eq!(out.tracks[1].media, "music/3.mp3", "1 min closes the remaining gap");
+        assert_eq!(out.tracks[1].starts_at, Some(at(9, 14)));
+        assert_eq!(out.tracks[2].origin, "AtClockHard");
+        assert_eq!(out.tracks[2].media, "news/n.mp3");
+        assert_eq!(out.tracks[2].starts_at, Some(at(9, 15)));
+        assert!(out.tracks.iter().all(|t| t.cut_at.is_none()));
+    }
+
+    #[tokio::test]
+    async fn a_hard_rendez_vous_never_cuts_the_simulated_track() {
+        // 7-minute tracks from 09:10: none fits before 09:15, so continuity
+        // wins. The hard rendez-vous airs at the next boundary, 09:17.
         let (_d, path, _pool) = station(420).await;
         let control = StationControl::new_in_memory();
         let out = simulate(SimStart {
@@ -436,11 +461,11 @@ mod tests {
         })
         .await;
         assert_eq!(out.tracks.len(), 3, "notes: {:?}", out.notes);
-        assert_eq!(out.tracks[0].cut_at, Some(at(9, 15)));
+        assert_eq!(out.tracks[0].cut_at, None);
         assert_eq!(out.tracks[1].origin, "AtClockHard");
-        assert_eq!(out.tracks[1].starts_at, Some(at(9, 15)));
+        assert_eq!(out.tracks[1].starts_at, Some(at(9, 17)));
         assert_eq!(out.tracks[1].media, "news/n.mp3");
-        assert_eq!(out.tracks[2].starts_at, Some(Epoch(at(9, 15).0 + 60)), "back to music after the news");
+        assert_eq!(out.tracks[2].starts_at, Some(Epoch(at(9, 17).0 + 60)), "back to music after the news");
     }
 
     #[tokio::test]
@@ -502,9 +527,12 @@ mod tests {
         let hard = out
             .incidents
             .iter()
-            .find(|i| i.kind == crate::station_control::IncidentKind::HardNotCut)
+            .find(|i| {
+                i.kind == crate::station_control::IncidentKind::SourceEmpty
+                    && i.rule_id.as_deref() == Some("news")
+            })
             .expect("predicted");
-        assert_eq!((hard.rule_id.as_deref(), hard.playlist_ref.as_str(), hard.first_at), (Some("news"), "news", at(9, 15)));
+        assert_eq!((hard.rule_id.as_deref(), hard.playlist_ref.as_str(), hard.first_at), (Some("news"), "news", at(9, 17)));
         assert!(control.incidents_since(Epoch(0)).is_empty(), "nothing recorded on the real station");
     }
 
