@@ -201,6 +201,14 @@ fn note(n: &Note) -> proto::Note {
             p.reason = reason.clone();
             C::HistoryUnreadable
         }
+        Note::BoundaryNoFit { rule, playlist, at } => {
+            (p.rule, p.playlist, p.at) = (rule.clone(), playlist.clone(), Some(*at));
+            C::BoundaryNoFit
+        }
+        Note::BoundaryMissed { rule, playlist, at } => {
+            (p.rule, p.playlist, p.at) = (rule.clone(), playlist.clone(), Some(*at));
+            C::BoundaryMissed
+        }
         Note::RendezvousWillNotCut { rule, playlist, at } => {
             (p.rule, p.playlist, p.at) = (rule.clone(), playlist.clone(), Some(*at));
             C::RendezvousWillNotCut
@@ -230,6 +238,18 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn boundary_warnings_are_encoded_with_the_rendezvous_identity() {
+        for (warning, code) in [
+            (Note::BoundaryNoFit { rule:"TOPH".into(), playlist:"toph".into(), at:3600 }, proto::note::Code::BoundaryNoFit),
+            (Note::BoundaryMissed { rule:"TOPH".into(), playlist:"toph".into(), at:7200 }, proto::note::Code::BoundaryMissed),
+        ] {
+            let wire = note(&warning);
+            assert_eq!(wire.code, code as i32);
+            assert_eq!((wire.rule.as_str(), wire.playlist.as_str()), ("TOPH", "toph"));
+            assert!(wire.at.is_some());
+        }
+    }
     #[tokio::test]
     async fn a_watch_stream_ends_when_the_daemon_shuts_down() {
         let (_d, hub, _control) = crate::onair::tests::hub().await;

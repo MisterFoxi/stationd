@@ -598,3 +598,17 @@ Après modification, redémarrer stationd pour régénérer le script, vérifier
 `make check-liq`, puis redémarrer Liquidsoap avec `make restart-ls`.
 Validation de la politique : `cargo test --locked --lib metadata_`, puis
 `cargo test --locked --lib metadata_rules_in_liquidsoap -- --ignored`.
+
+### Média de pause
+
+Dans la section [liquidsoap], pause_path permet de choisir un fichier audio
+diffusé en boucle pendant la pause, indépendamment du média de veille/arrêt.
+Exemple : pause_path = "/mnt/nfs/radio/Jingles/pause.mp3".
+
+Sans pause_path, halted_path reste utilisé. Les chemins relatifs sont résolus
+depuis le répertoire de lancement. Le fichier doit être lisible par stationd et
+Liquidsoap ; les contrôles au démarrage sont identiques à ceux de halted_path.
+
+La pause conserve le morceau courant et la reprise continue ce morceau.
+Le média de pause ne consomme aucun titre du sac. La configuration est intégrée
+au script Liquidsoap généré et prend effet au prochain chargement de ce script.

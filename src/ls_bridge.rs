@@ -609,6 +609,17 @@ impl LsBridge {
         }
     }
 
+    /// Liquidsoap explicitly dropped a prepared request (not the on-air one).
+    pub async fn track_discarded(&self, ev: &TrackEvent) -> Result<(), EngineError> {
+        let Some(id) = ev.log.parse::<i64>().ok() else { return Ok(()); };
+        self.engine.cancel_prepared(id).await?;
+        let mut st = self.lock();
+        st.pending.retain(|p| p.log_id != Some(id));
+        if st.status.next.as_ref().is_some_and(|n| n.log_id == Some(id)) {
+            st.status.next = None;
+        }
+        Ok(())
+    }
     /// Liquidsoap reports a track starting on air. Whatever was on air before
     /// leaves it (except a track frozen by a pause, which waits for its
     /// resume): each of our tracks that leaves is judged by the engine
@@ -908,6 +919,18 @@ async fn next_handler(
     Ok(Json(state.bridge.next().await))
 }
 
+async fn discard_handler(
+    State(state): State<AppState>, headers: HeaderMap, Json(ev): Json<TrackEvent>,
+) -> StatusCode {
+    if !authorized(&state, &headers) { return StatusCode::UNAUTHORIZED; }
+    match state.bridge.track_discarded(&ev).await {
+        Ok(()) => StatusCode::OK,
+        Err(e) => {
+            tracing::error!(error = %e, "could not return discarded track to shuffle bag");
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+    }
+}
 async fn track_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1001,6 +1024,7 @@ pub fn router(bridge: LsBridge, token: &str, live: Option<crate::live::LiveHub>)
     Router::new()
         .route("/ls/v1/next", post(next_handler))
         .route("/ls/v1/track", post(track_handler))
+        .route("/ls/v1/discard", post(discard_handler))
         .route("/ls/v1/live/auth", post(live_auth_handler))
         .route("/ls/v1/live/connect", post(live_connect_handler))
         .route("/ls/v1/live/disconnect", post(live_disconnect_handler))
@@ -1054,12 +1078,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn explicit_discard_returns_prepared_shuffle_member_and_requires_auth() {
+        let (_dir, b) = bridge().await;
+        let pool = b.engine.pool_for_tests();
+        let reply = b.next().await;
+        let ev = echo(&reply.uri);
+        let app = router(b.clone(), "tok", None);
+        let request = |authorized: bool| {
+            let mut req = Request::post("/ls/v1/discard").header("content-type", "application/json");
+            if authorized { req = req.header(TOKEN_HEADER, "tok"); }
+            req.body(Body::from(serde_json::to_vec(&ev).unwrap())).unwrap()
+        };
+        assert_eq!(app.clone().oneshot(request(false)).await.unwrap().status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(app.oneshot(request(true)).await.unwrap().status(), StatusCode::OK);
+        assert!(b.status().next.is_none());
+        assert_eq!(sqlx::query_scalar::<_, bool>("SELECT used FROM shuffle_member WHERE playlist_ref = 'music'")
+            .fetch_one(&pool).await.unwrap(), false);
+        let next = b.next().await;
+        let aired = echo(&next.uri);
+        b.track_started(&aired).await;
+        b.track_discarded(&aired).await.unwrap();
+        assert_eq!(sqlx::query_scalar::<_, bool>("SELECT used FROM shuffle_member WHERE playlist_ref = 'music'")
+            .fetch_one(&pool).await.unwrap(), true);
+    }
+    #[tokio::test]
     async fn metadata_policy_matches_tags_and_origins_in_order() {
         let (_dir, b) = bridge().await;
         let pool = b.engine.pool_for_tests();
-        sqlx::query("INSERT INTO media_genre VALUES ('music/a.mp3', 'JINGLE', 'jingle')")
+        sqlx::query("INSERT INTO media_genre (rel_path, genre, genre_key) VALUES ('music/a.mp3', 'JINGLE', 'jingle')")
             .execute(&pool).await.unwrap();
-        sqlx::query("INSERT INTO media_tag VALUES ('music/a.mp3', 'Type', 'JINGLE', 'jingle')")
+        sqlx::query("INSERT INTO media_tag (rel_path, origin, value, value_key) VALUES ('music/a.mp3', 'Type', 'JINGLE', 'jingle')")
             .execute(&pool).await.unwrap();
         let rules: Vec<crate::config::MetadataRule> = [
             "tag = 'jingle'\norigin = ''\nfields = []",

@@ -118,7 +118,7 @@ pub async fn memory_copy(src: &Path) -> Result<SqlitePool, DbError> {
     let tables: Vec<(String,)> = sqlx::query_as(
         "SELECT name FROM main.sqlite_master
          WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name <> '_sqlx_migrations'
-         ORDER BY rowid",
+         ORDER BY CASE name WHEN 'media_identity' THEN 0 ELSE 1 END, rowid",
     )
     .fetch_all(&mut *conn)
     .await

@@ -6,6 +6,8 @@
 //!
 //! Keyed by the group's ref (the view's `rel_path`). The stored state is:
 //!
+//! - `boundary_borrowed` — a fitting track temporarily borrowed from another member;
+//!   the current passage is still active even before its first own track.
 //! - `member_idx` — position in the current traversal. For `sequence` it
 //!   indexes `members` directly; for `shuffle` it indexes the persisted
 //!   `permutation`.
@@ -27,6 +29,8 @@ use sqlx::SqlitePool;
 /// Durable traversal state of one group activation.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct GroupState {
+    /// A fitting track was borrowed without consuming the current member quota.
+    pub boundary_borrowed: bool,
     pub member_idx: usize,
     pub take_count: u32,
     /// Random track quota for the current passage; cleared on member change.
@@ -39,15 +43,16 @@ pub struct GroupState {
 
 /// Current state for a group, or the default `(0, 0, None, None, None)` if unset.
 pub async fn get(pool: &SqlitePool, group_ref: &str) -> Result<GroupState, sqlx::Error> {
-    let row: Option<(i64, i64, Option<i64>, Option<String>, Option<i64>)> = sqlx::query_as(
-        "SELECT member_idx, take_count, member_started_at, permutation, random_take \
+    let row: Option<(i64, i64, Option<i64>, Option<String>, Option<i64>, bool)> = sqlx::query_as(
+        "SELECT member_idx, take_count, member_started_at, permutation, random_take, boundary_borrowed \
          FROM group_state WHERE group_ref = ?1",
     )
     .bind(group_ref)
     .fetch_optional(pool)
     .await?;
     Ok(row
-        .map(|(idx, count, started, perm, random_take)| GroupState {
+        .map(|(idx, count, started, perm, random_take, boundary_borrowed)| GroupState {
+            boundary_borrowed,
             member_idx: idx as usize,
             take_count: count as u32,
             random_take: random_take.map(|n| n as u32),
@@ -66,15 +71,16 @@ pub async fn set(
     let now = now_epoch_seconds();
     let perm = state.permutation.as_deref().map(fmt_perm);
     sqlx::query(
-        "INSERT INTO group_state (group_ref, member_idx, take_count, member_started_at, permutation, random_take, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+        "INSERT INTO group_state (group_ref, member_idx, take_count, member_started_at, permutation, random_take, updated_at, boundary_borrowed)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
          ON CONFLICT(group_ref) DO UPDATE SET
              member_idx        = ?2,
              take_count        = ?3,
              member_started_at = ?4,
              permutation       = ?5,
              random_take       = ?6,
-             updated_at        = ?7",
+             updated_at        = ?7,
+             boundary_borrowed = ?8",
     )
     .bind(group_ref)
     .bind(state.member_idx as i64)
@@ -83,6 +89,7 @@ pub async fn set(
     .bind(perm)
     .bind(state.random_take.map(i64::from))
     .bind(now)
+    .bind(state.boundary_borrowed)
     .execute(pool)
     .await?;
     Ok(())
@@ -127,6 +134,7 @@ mod tests {
         assert_eq!(get(&pool, "show").await.unwrap(), GroupState::default());
 
         let st = GroupState {
+            boundary_borrowed: true,
             member_idx: 1,
             take_count: 2,
             random_take: Some(4),
@@ -146,6 +154,7 @@ mod tests {
         let pool = db::init(&dir.path().join("t.db")).await.unwrap();
 
         let st = GroupState {
+            boundary_borrowed: false,
             member_idx: 2,
             take_count: 0,
             random_take: None,

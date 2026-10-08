@@ -38,6 +38,8 @@ pub enum LibraryError {
     Join(String),
     #[error("library actor is no longer running")]
     ActorGone,
+    #[error("media library is read-only; run this operation on the master")]
+    ReadOnly,
     #[error("invalid filter: {0}")]
     BadFilter(String),
     #[error(transparent)]
@@ -389,6 +391,17 @@ pub fn spawn_with_analysis(
     plugins: Option<PluginHandle>,
     analysis: crate::config::AnalysisConfig,
 ) -> LibraryHandle {
+    spawn_with_policy(pool, root, plugins, analysis, false)
+}
+
+/// The master writes the library; replicas only rebuild their local index.
+pub fn spawn_with_policy(
+    pool: SqlitePool,
+    root: PathBuf,
+    plugins: Option<PluginHandle>,
+    analysis: crate::config::AnalysisConfig,
+    read_only: bool,
+) -> LibraryHandle {
     let (tx, mut rx) = mpsc::channel::<Command>(32);
     let (status_tx, status) = watch::channel(ScanStatus::default());
     let status_tx = std::sync::Arc::new(status_tx);
@@ -396,13 +409,13 @@ pub fn spawn_with_analysis(
         while let Some(cmd) = rx.recv().await {
             match cmd {
                 Command::Reorganize { dry_run, reply } => {
-                    let _ = reply.send(crate::library_reorganize::run(&pool, &root, dry_run).await);
+                    let _ = reply.send(if read_only && !dry_run { Err(LibraryError::ReadOnly) } else { crate::library_reorganize::run(&pool, &root, dry_run).await });
                 }
                 Command::Folders { include_unavailable, after, limit, reply } => {
                     let _ = reply.send(media_index::folders(&pool, include_unavailable, &after, limit).await.map_err(LibraryError::from));
                 }
                 Command::Scan { reanalyze, reply } => {
-                    let _ = reply.send(scan_journaled(&pool, &root, plugins.as_ref(), &status_tx, &analysis, reanalyze).await);
+                    let _ = reply.send(scan_journaled(&pool, &root, plugins.as_ref(), &status_tx, &analysis, reanalyze, read_only).await);
                 }
                 Command::TagInventory { reply } => {
                     let _ = reply.send(tag_inventory(&pool, plugins.as_ref()).await);
@@ -411,7 +424,7 @@ pub fn spawn_with_analysis(
                     let _ = reply.send(rename_preview(&pool, &origin, &from, &to).await);
                 }
                 Command::Rename { origin, from, to, steps, reply } => {
-                    let _ = reply.send(rename(&pool, &root, plugins.as_ref(), &origin, &from, &to, &steps).await);
+                    let _ = reply.send(if read_only { Err(LibraryError::ReadOnly) } else { rename(&pool, &root, plugins.as_ref(), &origin, &from, &to, &steps).await });
                 }
                 Command::List { only_available, genres, reply } => {
                     let out = media_index::list(&pool, only_available, &genres)
@@ -437,7 +450,7 @@ pub fn spawn_with_analysis(
                     let _ = reply.send(get_tags(&pool, &root, plugins.as_ref(), rel_path).await);
                 }
                 Command::SetTags { rel_path, revision, edit, reply } => {
-                    let _ = reply.send(set_tags(&pool, &root, plugins.as_ref(), rel_path, revision, edit).await);
+                    let _ = reply.send(if read_only { Err(LibraryError::ReadOnly) } else { set_tags(&pool, &root, plugins.as_ref(), rel_path, revision, edit).await });
                 }
             }
         }
@@ -468,6 +481,7 @@ async fn scan_journaled(
     status: &StatusTx,
     analysis: &crate::config::AnalysisConfig,
     reanalyze: bool,
+    read_only: bool,
 ) -> Result<ScanOutcome, LibraryError> {
     use crate::events::{record, Code, Component, Level};
     status.send_modify(|s| {
@@ -477,7 +491,7 @@ async fn scan_journaled(
         s.started_at = now_epoch_seconds();
     });
     record(Level::Info, Component::Library, Code::ScanStarted, std::iter::empty::<(&str, &str)>());
-    let out = do_scan(pool, root, plugins, Some(status), analysis, reanalyze).await;
+    let out = do_scan(pool, root, plugins, Some(status), analysis, reanalyze, read_only).await;
     let result = match &out {
         Ok(o) => {
             let c = ScanCounts {
@@ -762,8 +776,11 @@ async fn get_tags(
     let rel = rel_path.clone();
     let mut read = tokio::task::spawn_blocking(move || -> Result<TagsRead, LibraryError> {
         let full = media_tags::resolve(&root, &rel)?;
-        let (tags, size) = media_tags::read(&full)?;
-        Ok(TagsRead { revision: media_tags::revision(&tags, size), tags, ..TagsRead::default() })
+        let (mut tags, size) = media_tags::read(&full)?;
+        let revision = media_tags::revision(&tags, size);
+        // Core identity is protected and kept out of user-editable tag fields.
+        tags.user.retain(|name, _| !name.trim().eq_ignore_ascii_case(crate::media_identity::UUID_TAG));
+        Ok(TagsRead { revision, tags, ..TagsRead::default() })
     })
     .await
     .map_err(|e| LibraryError::Join(e.to_string()))??;
@@ -793,14 +810,20 @@ async fn refresh_file(
     root: &Path,
     plugins: Option<&PluginHandle>,
     mut report: ScanReport,
+    shared_lock: &std::sync::Arc<crate::library_lock::LibraryLock>,
 ) -> Result<Option<MediaRow>, LibraryError> {
+    let identity_originals = crate::media_identity::prepare_locked(pool, root, &mut report, shared_lock).await?;
     let values = tag_values(&report, &file_genres(&report), &sources_of(plugins).await);
     if let Some(plugins) = plugins {
         enrich(&mut report, plugins).await;
     }
     apply_manual(&mut report);
     let write_root = root.to_path_buf();
+    // refresh_one_with adjusts the existing episode guard after tag growth.
+    drop(identity_originals);
+    let task_lock = shared_lock.clone();
     let report = tokio::task::spawn_blocking(move || {
+        let _lock = task_lock;
         crate::scan_writeback::apply(&write_root, &mut report)?;
         Ok::<_, TagError>(report)
     })
@@ -821,10 +844,13 @@ async fn set_tags(
     revision: String,
     edit: TagEdit,
 ) -> Result<TagsWritten, LibraryError> {
+    let _shared_lock = crate::library_lock::acquire(root).await?;
     let root_buf = root.to_path_buf();
     let rel = rel_path.clone();
     // Write + read back + re-read the file as a scan would, off the runtime.
+    let task_lock = _shared_lock.clone();
     let written = tokio::task::spawn_blocking(move || -> Result<Result<(TagsRead, ScanReport), TagsRead>, LibraryError> {
+        let _lock = task_lock;
         let full = media_tags::resolve(&root_buf, &rel)?;
         match media_tags::write(&full, &rel, &revision, &edit) {
             Ok((tags, revision)) => {
@@ -847,7 +873,7 @@ async fn set_tags(
     .map_err(|e| LibraryError::Join(e.to_string()))?;
     let written = match written {
         Err(LibraryError::Touched(e, Some(report))) => {
-            refresh_file(pool, root, plugins, report).await?;
+            refresh_file(pool, root, plugins, report, &_shared_lock).await?;
             return Err(LibraryError::Tags(e));
         }
         Err(LibraryError::Touched(e, None)) => return Err(LibraryError::Tags(e)),
@@ -857,7 +883,7 @@ async fn set_tags(
         Ok(x) => x,
         Err(current) => return Ok(TagsWritten { conflict: true, tags: current, row: None }),
     };
-    let row = refresh_file(pool, root, plugins, report).await?;
+    let row = refresh_file(pool, root, plugins, report, &_shared_lock).await?;
     tracing::info!(media = %rel_path, "media tags written");
     crate::events::record(
         crate::events::Level::Info,
@@ -880,7 +906,10 @@ async fn do_scan(
     status: Option<&StatusTx>,
     analysis: &crate::config::AnalysisConfig,
     reanalyze: bool,
+    read_only: bool,
 ) -> Result<ScanOutcome, LibraryError> {
+    if read_only && reanalyze { return Err(LibraryError::ReadOnly); }
+    let shared_lock = if read_only { None } else { Some(crate::library_lock::acquire(root).await?) };
     let write_root = root.to_path_buf();
     let root = root.to_path_buf();
     let progress_tx = status.cloned();
@@ -897,6 +926,10 @@ async fn do_scan(
     })
     .await
     .map_err(|e| LibraryError::Join(e.to_string()))??;
+    let identity_originals = match &shared_lock {
+        Some(lock) => crate::media_identity::prepare_locked(pool, &write_root, &mut report, lock).await?,
+        None => crate::media_identity::prepare_readonly(pool, &write_root, &mut report).await?,
+    };
     let values = tag_values(&report, &file_genres(&report), &sources_of(plugins).await);
     if let Some(plugins) = plugins {
         phase(status, ScanPhase::Plugins);
@@ -905,7 +938,7 @@ async fn do_scan(
     // Analyse média offline (Essentia) — cœur, indépendante des plugins. Opt-in
     // (STATIOND_ANALYSIS). Remplit report.metadata pour les fichiers non encore
     // marqués ; scan_writeback écrira les frames, la table typée suivra.
-    if analysis.enabled || reanalyze {
+    if !read_only && (analysis.enabled || reanalyze) {
         phase(status, ScanPhase::Analyzing);
         let analyzer = crate::media_analysis::EssentiaExtractor {
             exe: analysis
@@ -945,8 +978,13 @@ async fn do_scan(
     apply_manual(&mut report);
     phase(status, ScanPhase::Writing);
     // Host-owned MP3 writes run off the async runtime, after enrichment.
+    let task_lock = shared_lock.clone();
     let (report, originals) = tokio::task::spawn_blocking(move || {
-        let originals = crate::scan_writeback::apply(&write_root, &mut report)?;
+        let _lock = task_lock;
+        let mut originals = identity_originals;
+        for (uri, guard) in if read_only { Default::default() } else { crate::scan_writeback::apply(&write_root, &mut report)? } {
+            originals.entry(uri).or_insert(guard);
+        }
         Ok::<_, TagError>((report, originals))
     }).await.map_err(|e| LibraryError::Join(e.to_string()))??;
     phase(status, ScanPhase::Indexing);

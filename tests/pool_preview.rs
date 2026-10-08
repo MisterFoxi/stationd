@@ -360,6 +360,7 @@ members = [{ ref = "jazz", runtime = "20m" }, { ref = "remote", runtime = "5m" }
         .await
         .unwrap();
     let state = group_state::GroupState {
+        boundary_borrowed: false,
         member_idx: 1,
         take_count: 2,
         random_take: Some(4),
@@ -380,6 +381,7 @@ members = [{ ref = "jazz", runtime = "20m" }, { ref = "remote", runtime = "5m" }
     assert!(
         handle
             .filter_pool(vec![plugin::Candidate {
+                media_uuid: String::new(),
                 rel_path: "jazz/a.mp3".into(),
                 artist: None,
                 title: None,

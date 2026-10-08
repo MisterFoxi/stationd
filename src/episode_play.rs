@@ -6,12 +6,12 @@
 //! at the END of a full playout by the grid engine (`on_episode_finished`) —
 //! never on start, so an interrupted episode stays eligible.
 //!
-//! Episode identity = path + a (size_bytes, mtime_ns) guard. `played_matching`
+//! Episode identity = UUID + a (size_bytes, mtime_ns) revision guard. `played_matching`
 //! joins `media` and keeps only marks whose guard STILL matches the current
 //! file: a changed file (size/mtime diverged) makes its mark stale and the
 //! episode eligible again — the NFS-safe compromise from the docs.
 //!
-//! Durability contract (family B): keyed by (canonical playlist_ref, rel_path),
+//! Durability contract (family B): keyed by (canonical playlist_ref, media_uuid),
 //! no FK, never reset by a scan or an apply.
 
 use std::collections::HashSet;
@@ -32,17 +32,19 @@ pub async fn mark(
     mtime_ns: i64,
     played_at: Epoch,
 ) -> Result<(), sqlx::Error> {
+    let id = crate::media_identity::ensure(pool, rel_path).await?;
     sqlx::query(
-        "INSERT INTO episode_play (playlist_ref, rel_path, size_bytes, mtime_ns, played_at)
-         VALUES (?1, ?2, ?3, ?4, ?5)
-         ON CONFLICT(playlist_ref, rel_path) DO UPDATE SET
-             size_bytes = ?3, mtime_ns = ?4, played_at = ?5",
+        "INSERT INTO episode_play (playlist_ref, rel_path, size_bytes, mtime_ns, played_at, media_uuid)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(playlist_ref, media_uuid) DO UPDATE SET
+             rel_path = ?2, size_bytes = ?3, mtime_ns = ?4, played_at = ?5",
     )
     .bind(playlist_ref)
     .bind(rel_path)
     .bind(size_bytes)
     .bind(mtime_ns)
     .bind(played_at.0)
+    .bind(id)
     .execute(pool)
     .await?;
     Ok(())
@@ -57,9 +59,9 @@ pub async fn played_matching(
     playlist_ref: &str,
 ) -> Result<HashSet<String>, sqlx::Error> {
     let rows: Vec<(String,)> = sqlx::query_as(
-        "SELECT ep.rel_path
+        "SELECT m.rel_path
          FROM episode_play ep
-         JOIN media m ON m.rel_path = ep.rel_path
+         JOIN media m ON m.media_uuid = ep.media_uuid
          WHERE ep.playlist_ref = ?1
            AND ep.size_bytes = m.size_bytes
            AND ep.mtime_ns = m.mtime_ns",

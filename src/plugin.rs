@@ -60,6 +60,9 @@ const WINDOW: Duration = Duration::from_secs(60);
 /// reordering/weighting comes later).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Candidate {
+    /// Core media identity; older WASM plugins may omit it on return.
+    #[serde(default)]
+    pub media_uuid: String,
     pub rel_path: String,
     pub artist: Option<String>,
     pub title: Option<String>,
@@ -2687,6 +2690,7 @@ mod tests {
 
     fn cand(rel: &str) -> Candidate {
         Candidate {
+            media_uuid: String::new(),
             rel_path: rel.into(),
             artist: None,
             title: None,

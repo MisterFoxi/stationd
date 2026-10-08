@@ -100,6 +100,8 @@ message Note {
 
   enum Code {
     CODE_UNSPECIFIED = 0;
+    BOUNDARY_NO_FIT = 20;        // aucun titre compatible : rendez-vous retardé sans coupure
+    BOUNDARY_MISSED = 21;        // aucun titre compatible : rendez-vous expiré avant la fin du titre
     STATION_PAUSED = 1;          // en pause : rien ne suit avant la reprise
     STATION_SLEEPING = 2;        // en veille : rien ne suit avant le réveil
     SLEEP_AT_TRACK_END = 3;      // veille à la fin du morceau (0 auditeur)

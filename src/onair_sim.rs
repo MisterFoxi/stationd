@@ -76,6 +76,8 @@ pub struct SimTrack {
 /// language (`onair_v1.proto`, `Note.Code`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Note {
+    BoundaryNoFit { rule: String, playlist: String, at: i64 },
+    BoundaryMissed { rule: String, playlist: String, at: i64 },
     StationPaused,
     StationSleeping,
     SleepAtTrackEnd,
@@ -115,9 +117,13 @@ pub struct SimOutcome {
 
 /// Run the simulation. Never fails: whatever prevents it is a note.
 pub async fn simulate(start: SimStart<'_>) -> SimOutcome {
+    simulate_after_prepared(start, None).await
+}
+
+pub(crate) async fn simulate_after_prepared(start: SimStart<'_>, prepared: Option<(i64, Epoch)>) -> SimOutcome {
     let silent = tracing::subscriber::NoSubscriber::default();
     let plugins = start.plugins.map(PluginHandle::simulation);
-    let mut out = run(&start, plugins.as_ref()).with_subscriber(silent).await;
+    let mut out = run(&start, plugins.as_ref(), prepared).with_subscriber(silent).await;
     if let Some(p) = &plugins {
         out.notes
             .extend(p.simulation_notes().into_iter().map(|(plugin, reason)| Note::PluginFilterFailed { plugin, reason }));
@@ -125,7 +131,7 @@ pub async fn simulate(start: SimStart<'_>) -> SimOutcome {
     out
 }
 
-async fn run(start: &SimStart<'_>, plugins: Option<&PluginHandle>) -> SimOutcome {
+async fn run(start: &SimStart<'_>, plugins: Option<&PluginHandle>, prepared: Option<(i64, Epoch)>) -> SimOutcome {
     let mut out = SimOutcome::default();
     if start.count == 0 {
         return out;
@@ -150,6 +156,24 @@ async fn run(start: &SimStart<'_>, plugins: Option<&PluginHandle>) -> SimOutcome
         engine = engine.with_plugins(p.clone());
     }
 
+    // The on-air view starts AFTER its already selected prefetch. Account for
+    // that track's air start/completion in the copy before opening the next bag
+    // cycle; otherwise a new title remains falsely "never aired" and can be
+    // predicted twice in succession while the real station prioritizes others.
+    if let Some((id, at)) = prepared {
+        if let Ok(Some(row)) = crate::broadcast_log::row(&pool, id).await {
+            if row.aired_at.is_none() {
+                let _ = engine.mark_aired(id, at).await;
+                let _ = engine.on_track_completed().await;
+            }
+            if start.at_known {
+                if let Some(ms) = row.duration_ms.filter(|ms| *ms > 0) {
+                    let _ = engine.track_left(Some(id), &row.rel_path, row.leaf_ref.as_deref(),
+                        (ms + 999) / 1000, start.at).await;
+                }
+            }
+        }
+    }
     let mut t = start.at;
     let mut known = start.at_known;
     while out.tracks.len() < start.count {
@@ -178,6 +202,9 @@ async fn run(start: &SimStart<'_>, plugins: Option<&PluginHandle>) -> SimOutcome
             crate::media_index::brief(&pool, &media).await.ok().flatten()
         };
         let tr = track(&r, media.clone(), brief, known.then_some(t));
+        if let Some(id) = r.log_id {
+            let _ = engine.mark_aired(id, t).await;
+        }
         // A track starting: the `Every` track counters move, as on the air.
         let _ = engine.on_track_completed().await;
 
@@ -398,6 +425,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn boundary_borrowing_in_a_group_matches_the_real_air_and_keeps_the_quota() {
+        let (_d, path, pool) = station_with(300, "mix", &[
+            ("mix", "name=\"mix\"\n[selection]\nmode=\"group\"\nstrategy=\"sequence\"\nmembers=[{ref=\"music\",take=3},{ref=\"news\"}]\n"),
+        ]).await;
+        sqlx::query("UPDATE media SET duration_ms=60000 WHERE rel_path='news/n.mp3'")
+            .execute(&pool).await.unwrap();
+        let sim = simulated(&path, at(9,59), 4).await;
+        assert_eq!(sim[0], "news/n.mp3", "short member borrowed");
+        assert_eq!(sim[1], "news/n.mp3", "clock rendezvous kept");
+        assert_eq!(airs(&pool, at(9,59), 4).await, sim);
+        let st = crate::group_state::get(&pool, "mix").await.unwrap();
+        assert_eq!((st.member_idx, st.take_count), (0,2));
+        assert!(!st.boundary_borrowed);
+    }
+    #[tokio::test]
+    async fn boundary_warning_is_specific_in_the_preview_and_does_not_change_live_state() {
+        let (_d, path, pool) = station(300).await;
+        sqlx::query("UPDATE grid_at_clock SET every_minutes=NULL, at_minute=0, expiry_secs=60 WHERE rule_id='news'")
+            .execute(&pool).await.unwrap();
+        let before = dump(&pool).await;
+        let control = StationControl::new_in_memory();
+        let out = simulate(SimStart { live_db: &path, tz: "UTC", control: &control,
+            plugins: None, at: at(9,59), at_known: true, count: 3 }).await;
+        assert_eq!(out.tracks.len(), 3, "{:?}", out.notes);
+        assert!(out.tracks.iter().all(|t| t.cut_at.is_none()));
+        let warning = out.incidents.iter().find(|i| i.first_at == at(10,0)).unwrap();
+        assert_eq!(warning.kind, crate::station_control::IncidentKind::BoundaryMissed);
+        assert_eq!(warning.rule_id.as_deref(), Some("news"));
+        assert!(!out.tracks.iter().any(|t| t.media == "news/n.mp3"));
+        assert_eq!(dump(&pool).await, before);
+        assert!(control.incidents_since(Epoch(0)).is_empty());
+    }
+    #[tokio::test]
+    async fn hour_toph_fits_remaining_bag_and_resumes_without_replaying() {
+        let (_d, path, pool) = station(420).await;
+        for (path, ms) in [("music/1.mp3", 300_000), ("music/2.mp3", 240_000), ("music/3.mp3", 60_000)] {
+            sqlx::query("UPDATE media SET duration_ms = ? WHERE rel_path = ?")
+                .bind(ms).bind(path).execute(&pool).await.unwrap();
+        }
+        // The five-minute title was already chosen before the hourly boundary.
+        let previous = crate::selection::resolve_turn_fitting(&pool, None, at(9, 40).0, "music",
+            crate::selection::TurnStart::Fresh, 300_000).await.unwrap().resolved.into_token();
+        assert_eq!(previous, "music/1.mp3");
+        let id = crate::broadcast_log::record(&pool, &previous, None, at(9, 40),
+            crate::broadcast_log::Provenance { leaf_ref: Some("music"), ..Default::default() }).await.unwrap();
+        crate::broadcast_log::mark_aired(&pool, id, at(9, 40)).await.unwrap();
+        let before = dump(&pool).await;
+        let control = StationControl::new_in_memory();
+        let out = simulate(SimStart { live_db: &path, tz: "UTC", control: &control,
+            plugins: None, at: at(9, 55), at_known: true, count: 4 }).await;
+        assert_eq!(out.tracks.len(), 4, "{:?}", out.notes);
+        assert_eq!(out.tracks[0].media, "music/2.mp3");
+        assert_eq!(out.tracks[1].media, "music/3.mp3");
+        assert_eq!(out.tracks[2].media, "news/n.mp3");
+        assert_eq!(out.tracks[2].starts_at, Some(at(10, 0)));
+        assert!(["music/4.mp3", "music/5.mp3"].contains(&out.tracks[3].media.as_str()));
+        assert!(out.tracks.iter().all(|t| t.cut_at.is_none()));
+        assert_eq!(dump(&pool).await, before);
+        assert_eq!(airs(&pool, at(9, 55), 4).await,
+            out.tracks.into_iter().map(|t| t.media).collect::<Vec<_>>());
+    }
+    #[tokio::test]
     async fn hard_boundary_chooses_the_best_fitting_tracks() {
         let (_d, path, pool) = station(420).await;
         // Deliberately put a shorter sequential candidate first: best-effort
@@ -545,6 +634,9 @@ mod tests {
         for _ in 0..count {
             let r = engine.next_media(t).await.unwrap();
             let media = r.media_path.clone().unwrap();
+            if let Some(id) = r.log_id {
+                engine.mark_aired(id, t).await.unwrap();
+            }
             engine.on_track_completed().await.unwrap();
             let (_, _, _, d) = crate::media_index::brief(pool, &media).await.unwrap().unwrap();
             let end = Epoch(t.0 + (d + 999) / 1000);

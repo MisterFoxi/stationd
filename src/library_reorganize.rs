@@ -109,6 +109,7 @@ pub(crate) async fn run(
     if !root.is_dir() {
         return Err(LibraryError::BadRoot(root));
     }
+    let _shared_lock = if dry_run { None } else { Some(crate::library_lock::acquire(&root).await?) };
     let rows: Vec<(String, Option<String>, i64, i64)> = sqlx::query_as(
         "SELECT m.rel_path, a.genre_top, m.size_bytes, m.mtime_ns FROM media m
          LEFT JOIN media_analysis a ON a.rel_path = m.rel_path WHERE m.available = 1 ORDER BY m.rel_path"
@@ -179,7 +180,7 @@ pub(crate) async fn run(
             } else if dry_run {
                 result.status = "planned";
             } else {
-                match move_one(pool, &root, &result.from, &result.to, size, mtime).await {
+                match move_one(pool, &root, &result.from, &result.to, size, mtime, _shared_lock.clone()).await {
                     Ok(()) => result.status = "moved",
                     Err(e) => {
                         result.status = "failed";
@@ -200,6 +201,7 @@ async fn move_one(
     to: &str,
     size: i64,
     mtime: i64,
+    shared_lock: Option<std::sync::Arc<crate::library_lock::LibraryLock>>,
 ) -> Result<(), String> {
     // Prepare every SQL update before touching the disk. FK validation is
     // deferred until commit because child keys have no ON UPDATE CASCADE.
@@ -236,7 +238,9 @@ async fn move_one(
     let task_root = root.to_path_buf();
     let task_from = from.to_string();
     let task_to = to.to_string();
+    let task_lock = shared_lock.clone();
     tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let _lock = task_lock;
         inspect(&task_root, &task_from, &task_to, size, mtime)?;
         let source = checked_path(&task_root, &task_from, false)?;
         let target = checked_path(&task_root, &task_to, true)?;
@@ -260,7 +264,9 @@ async fn move_one(
     if let Err(e) = tx.commit().await {
         let source = root.join(from);
         let target = root.join(to);
+        let task_lock = shared_lock.clone();
         let recovery = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+            let _lock = task_lock;
             std::fs::hard_link(&target, &source)?;
             std::fs::remove_file(&target)
         })
@@ -329,22 +335,22 @@ mod tests {
         std::fs::create_dir(&root).unwrap();
         let pool = db::init(&dir.path().join("test.db")).await.unwrap();
         index_file(&pool, &root, "old/song.mp3", Some("Electronic---House")).await;
-        sqlx::query("INSERT INTO media_meta VALUES ('old/song.mp3', 'tempo', 'fast')")
+        sqlx::query("INSERT INTO media_meta (rel_path, key, value) VALUES ('old/song.mp3', 'tempo', 'fast')")
             .execute(&pool)
             .await
             .unwrap();
         sqlx::query(
-            "INSERT INTO media_tag VALUES ('old/song.mp3', '', 'original genre', 'original genre')",
+            "INSERT INTO media_tag (rel_path, origin, value, value_key) VALUES ('old/song.mp3', '', 'original genre', 'original genre')",
         )
         .execute(&pool)
         .await
         .unwrap();
         sqlx::query("INSERT INTO queue_entry (playlist_ref, rel_path, enqueued_at) VALUES ('q', 'old/song.mp3', 1)").execute(&pool).await.unwrap();
-        sqlx::query("INSERT INTO playlist_cursor VALUES ('p', 'old/song.mp3', 1)")
+        sqlx::query("INSERT INTO playlist_cursor (playlist_ref, last_rel_path, updated_at) VALUES ('p', 'old/song.mp3', 1)")
             .execute(&pool)
             .await
             .unwrap();
-        sqlx::query("INSERT INTO episode_play VALUES ('p', 'old/song.mp3', 11, 1, 1)")
+        sqlx::query("INSERT INTO episode_play (playlist_ref, rel_path, size_bytes, mtime_ns, played_at) VALUES ('p', 'old/song.mp3', 11, 1, 1)")
             .execute(&pool)
             .await
             .unwrap();
@@ -472,7 +478,7 @@ mod rollback_tests {
         sqlx::query("INSERT INTO media (rel_path, duration_ms, size_bytes, mtime_ns, available, scanned_at) VALUES ('song.mp3', 1000, 5, ?, 1, 1)")
             .bind(mtime).execute(&pool).await.unwrap();
         // A deferred FK violation fails at commit, after the disk move.
-        sqlx::query("CREATE TRIGGER fail_move AFTER UPDATE OF rel_path ON media BEGIN INSERT INTO media_meta VALUES ('missing.mp3', 'test', 'bad'); END")
+        sqlx::query("CREATE TRIGGER fail_move AFTER UPDATE OF rel_path ON media BEGIN INSERT INTO media_meta (rel_path, key, value) VALUES ('missing.mp3', 'test', 'bad'); END")
             .execute(&pool).await.unwrap();
         let error = move_one(
             &pool,
@@ -481,6 +487,7 @@ mod rollback_tests {
             "Electronic/House/song.mp3",
             5,
             mtime,
+            None,
         )
         .await
         .unwrap_err();
