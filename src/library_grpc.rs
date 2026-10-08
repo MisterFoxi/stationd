@@ -137,6 +137,7 @@ fn map_error(e: LibraryError) -> Status {
         LibraryError::BadRoot(p) => {
             Status::failed_precondition(format!("media root unavailable: {}", p.display()))
         }
+        LibraryError::ReadOnly => Status::failed_precondition("media library is read-only; run this operation on the master"),
         LibraryError::BadFilter(m) => Status::invalid_argument(m),
         LibraryError::Tags(t) => match t {
             TagError::NotFound(_) => Status::not_found(t.to_string()),

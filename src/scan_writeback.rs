@@ -17,7 +17,7 @@ pub type Originals = BTreeMap<String, (u64, i64)>;
 
 fn io(error: impl std::fmt::Display) -> TagError { TagError::Io(error.to_string()) }
 fn identity(path: &Path) -> Result<(u64, i64), TagError> {
-    let m = std::fs::metadata(path).map_err(io)?;
+    let m = std::fs::File::open(path).and_then(|f| f.metadata()).map_err(io)?;
     let ns = m.modified().map_err(io)?.duration_since(std::time::UNIX_EPOCH)
         .map_err(io)?.as_nanos() as i64;
     Ok((m.len(), ns))
@@ -50,7 +50,8 @@ pub fn write(root: &Path, rel: &str, expected: (u64, i64), values: &BTreeMap<Str
         || std::fs::symlink_metadata(&full).map_err(io)?.file_type().is_symlink() {
         return Err(io(format!("refusing metadata write outside root or through symlink: {rel}")));
     }
-    if identity(&full)? != expected { return Err(io(format!("file changed during scan: {rel}"))); }
+    let actual = identity(&full)?;
+    if actual != expected { return Err(io(format!("file changed during scan: {rel}; expected size/mtime {expected:?}, observed {actual:?}"))); }
     let before = std::fs::metadata(&full).map_err(io)?;
     // Seed missing ID3v2 from ID3v1, using the standard editor's preservation policy.
     let (mut tag, version) = crate::media_tags::id3v2_of(&full, lofty::file::FileType::Mpeg)?;
@@ -105,7 +106,7 @@ pub fn write(root: &Path, rel: &str, expected: (u64, i64), values: &BTreeMap<Str
             return Err(io(format!("metadata readback failed for {rel}: {key}")));
         }
     }
-    std::fs::set_permissions(&stage.0, before.permissions()).map_err(io)?;
+    crate::library_lock::preserve_access(&full, &stage.0)?;
     let staged_file = std::fs::OpenOptions::new().write(true).open(&stage.0).map_err(io)?;
     staged_file.set_modified(before.modified().map_err(io)?).map_err(io)?;
     staged_file.sync_all().map_err(io)?;
@@ -164,6 +165,25 @@ pub fn apply(root: &Path, report: &mut ScanReport) -> Result<Originals, TagError
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn external_size_or_mtime_changes_are_rejected_without_overwriting() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.mp3");
+        fixture(&path, false);
+        let values = BTreeMap::from([("creation".into(), "2020-01-01T00:00:00Z".into())]);
+        let expected = identity(&path).unwrap();
+        std::fs::OpenOptions::new().append(true).open(&path).unwrap().write_all(b"external change").unwrap();
+        let modified = std::fs::read(&path).unwrap();
+        assert!(write(dir.path(), "test.mp3", expected, &values).unwrap_err().to_string().contains("observed"));
+        assert_eq!(std::fs::read(&path).unwrap(), modified);
+        let expected = identity(&path).unwrap();
+        std::fs::OpenOptions::new().write(true).open(&path).unwrap()
+            .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(123)).unwrap();
+        assert!(write(dir.path(), "test.mp3", expected, &values).is_err());
+        assert_eq!(std::fs::read(path).unwrap(), modified);
+    }
+
     #[test]
     fn missing_creation_is_written_once_and_survives_later_scans() {
         for v3 in [false, true] {

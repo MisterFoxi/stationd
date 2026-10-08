@@ -8,7 +8,7 @@
 //! an anti-repetition window (`no_same_track_within` / `no_same_artist_within`).
 //!
 //! Durability contract (family B): append-only, no FK, addressed by identity
-//! (rel_path / artist), never reset by a scan or an apply. Epoch UTC.
+//! (media UUID / artist); rel_path remains the historical locator. Never reset by a scan or apply. Epoch UTC.
 //! Like the other family-B modules, each function does one thing, holds no
 //! business logic, and knows nothing of the proto.
 
@@ -40,9 +40,26 @@ pub async fn record(
     played_at: Epoch,
     from: Provenance<'_>,
 ) -> Result<i64, sqlx::Error> {
+    record_pick(pool, rel_path, artist, played_at, from, None).await
+}
+
+/// Record the exact shuffle reservation carried by selection. The persisted
+/// UUID survives a relocation between selection and logging.
+pub(crate) async fn record_pick(
+    pool: &SqlitePool, rel_path: &str, artist: Option<&str>, played_at: Epoch,
+    from: Provenance<'_>, reservation: Option<i64>,
+) -> Result<i64, sqlx::Error> {
+    let id = if let Some(pick) = reservation {
+        sqlx::query_scalar::<_, String>("SELECT media_uuid FROM shuffle_pick WHERE id = ?")
+            .bind(pick).fetch_one(pool).await?
+    } else {
+        crate::media_identity::ensure(pool, rel_path).await?
+    };
+
+    let mut tx = pool.begin().await?;
     let r = sqlx::query(
-        "INSERT INTO broadcast_log (rel_path, artist, played_at, rule_id, origin, playlist_ref, leaf_ref)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        "INSERT INTO broadcast_log (rel_path, artist, played_at, rule_id, origin, playlist_ref, leaf_ref, media_uuid)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
     )
     .bind(rel_path)
     .bind(artist)
@@ -51,9 +68,17 @@ pub async fn record(
     .bind(from.origin)
     .bind(from.playlist_ref)
     .bind(from.leaf_ref)
-    .execute(pool)
+    .bind(&id)
+    .execute(&mut *tx)
     .await?;
-    Ok(r.last_insert_rowid())
+    let log_id = r.last_insert_rowid();
+    if let Some(pick) = reservation {
+        let changed = sqlx::query("UPDATE shuffle_pick SET log_id = ? WHERE id = ? AND log_id IS NULL AND settled = 0")
+            .bind(log_id).bind(pick).execute(&mut *tx).await?.rows_affected();
+        if changed != 1 { return Err(sqlx::Error::RowNotFound); }
+    }
+    tx.commit().await?;
+    Ok(log_id)
 }
 
 /// Song keys (`media_index::song_keys`) of everything chosen at or after
@@ -62,8 +87,9 @@ pub async fn record(
 /// key).
 pub async fn song_keys_since(pool: &SqlitePool, cutoff: i64) -> Result<HashSet<String>, sqlx::Error> {
     let rows: Vec<(String, Option<String>)> = sqlx::query_as(
-        "SELECT DISTINCT b.rel_path, m.title FROM broadcast_log b
-         LEFT JOIN media m ON m.rel_path = b.rel_path
+        "SELECT DISTINCT coalesce(i.uri, b.rel_path), m.title FROM broadcast_log b
+         LEFT JOIN media m ON m.media_uuid = b.media_uuid
+         LEFT JOIN media_identity i ON i.uuid = b.media_uuid
          WHERE b.played_at >= ?1",
     )
     .bind(cutoff)
@@ -77,11 +103,15 @@ pub async fn song_keys_since(pool: &SqlitePool, cutoff: i64) -> Result<HashSet<S
 
 /// Liquidsoap really started the track logged as `id` at `at`.
 pub async fn mark_aired(pool: &SqlitePool, id: i64, at: Epoch) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
     sqlx::query("UPDATE broadcast_log SET aired_at = ?2 WHERE id = ?1 AND aired_at IS NULL")
         .bind(id)
         .bind(at.0)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
+    sqlx::query("UPDATE shuffle_pick SET settled = 1 WHERE log_id = ?")
+        .bind(id).execute(&mut *tx).await?;
+    tx.commit().await?;
     Ok(())
 }
 
@@ -127,7 +157,7 @@ pub struct LogRow {
 const LOG_ROW_SELECT: &str = "SELECT b.id, b.rel_path, b.played_at, b.aired_at, b.left_at, b.played_to_end,
             b.rule_id, b.origin, b.playlist_ref, b.leaf_ref,
             m.title, coalesce(m.artist, b.artist) AS artist, m.album, m.duration_ms
-     FROM broadcast_log b LEFT JOIN media m ON m.rel_path = b.rel_path";
+     FROM broadcast_log b LEFT JOIN media m ON m.media_uuid = b.media_uuid";
 
 /// The logged track `id`, if any.
 pub async fn row(pool: &SqlitePool, id: i64) -> Result<Option<LogRow>, sqlx::Error> {
@@ -199,12 +229,17 @@ pub async fn plays(
     limit: u32,
 ) -> Result<Vec<PlaysRow>, sqlx::Error> {
     let col = by.column();
+    let (key, group, source) = if matches!(by, PlaysBy::Media) {
+        ("i.uri", "b.media_uuid", "broadcast_log b JOIN media_identity i ON i.uuid = b.media_uuid")
+    } else {
+        (col, col, "broadcast_log")
+    };
     let limit = if limit == 0 { -1 } else { i64::from(limit) };
     let rows: Vec<(Option<String>, i64, i64, i64)> = sqlx::query_as(&format!(
-        "SELECT {col}, count(*), count(aired_at), max(played_at)
-         FROM broadcast_log WHERE played_at >= ?1
-         GROUP BY {col}
-         ORDER BY count(aired_at) DESC, count(*) DESC, {col}
+        "SELECT {key}, count(*), count(aired_at), max(played_at)
+         FROM {source} WHERE played_at >= ?1
+         GROUP BY {group}
+         ORDER BY count(aired_at) DESC, count(*) DESC, {key}
          LIMIT ?2"
     ))
     .bind(cutoff)
@@ -231,9 +266,14 @@ pub async fn plays_of(
     key: &str,
 ) -> Result<Option<PlaysRow>, sqlx::Error> {
     let col = by.column();
+    let predicate = if matches!(by, PlaysBy::Media) {
+        "media_uuid = (SELECT uuid FROM media_identity WHERE uri = ?2 OR uuid = ?2)".to_string()
+    } else {
+        format!("{col} = ?2")
+    };
     let row: (i64, i64, Option<i64>) = sqlx::query_as(&format!(
         "SELECT count(*), count(aired_at), max(played_at)
-         FROM broadcast_log WHERE played_at >= ?1 AND {col} = ?2"
+         FROM broadcast_log WHERE played_at >= ?1 AND {predicate}"
     ))
     .bind(cutoff)
     .bind(key)
@@ -254,7 +294,7 @@ pub async fn plays_of(
 /// to exclude for a `no_same_track_within` window (`cutoff = now - window`).
 pub async fn tracks_since(pool: &SqlitePool, cutoff: i64) -> Result<HashSet<String>, sqlx::Error> {
     let rows: Vec<(String,)> =
-        sqlx::query_as("SELECT DISTINCT rel_path FROM broadcast_log WHERE played_at >= ?1")
+        sqlx::query_as("SELECT DISTINCT i.uri FROM broadcast_log b JOIN media_identity i ON i.uuid = b.media_uuid WHERE b.played_at >= ?1")
             .bind(cutoff)
             .fetch_all(pool)
             .await?;
@@ -383,4 +423,9 @@ mod tests {
         assert_eq!(aired_before(&pool, 201, 10).await.unwrap().len(), 1, "strictly before");
         assert_eq!(row(&pool, b).await.unwrap().unwrap().aired_at, Some(201));
     }
+}
+/// Current locator of a logged UUID (historical rel_path remains untouched).
+pub async fn current_uri(pool: &SqlitePool, id: i64) -> Result<Option<String>, sqlx::Error> {
+    sqlx::query_scalar("SELECT i.uri FROM broadcast_log b JOIN media_identity i ON i.uuid = b.media_uuid WHERE b.id = ?1")
+        .bind(id).fetch_optional(pool).await
 }

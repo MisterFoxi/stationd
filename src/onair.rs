@@ -51,6 +51,8 @@ pub enum Outcome {
 /// One track of the view (on air, prepared, simulated or played).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Track {
+    /// Durable request identity used when simulating after the prefetch.
+    pub log_id: Option<i64>,
     pub rel_path: String,
     pub title: Option<String>,
     pub artist: Option<String>,
@@ -303,6 +305,7 @@ async fn described(src: &Sources, media: String, log_id: Option<i64>) -> Track {
             t.duration_ms = t.duration_ms.or(Some(d));
         }
     }
+    t.log_id = log_id;
     t.started_at = None;
     t
 }
@@ -315,6 +318,7 @@ fn history_track(r: LogRow) -> Track {
     };
     let origin = r.origin.clone();
     Track {
+        log_id: Some(r.id),
         rel_path: r.rel_path,
         title: r.title,
         artist: r.artist,
@@ -401,7 +405,11 @@ async fn simulate_part(src: &Sources, snap: &Snapshot, now: Epoch) -> SimPart {
         part.notes.push(Note::NoLiquidsoap);
     }
     let want = UPCOMING_MAX.saturating_sub(usize::from(snap.prefetched.is_some()));
-    let out = onair_sim::simulate(SimStart {
+    let prepared = snap.prefetched.as_ref().and_then(|p| p.log_id.map(|id| {
+        let duration_s = p.duration_ms.filter(|d| *d > 0).map(|d| (d + 999) / 1000).unwrap_or(0);
+        (id, Epoch(at.0.saturating_sub(duration_s)))
+    }));
+    let out = onair_sim::simulate_after_prepared(SimStart {
         live_db: &src.db_path,
         tz: &src.tz,
         control: &src.control,
@@ -409,7 +417,7 @@ async fn simulate_part(src: &Sources, snap: &Snapshot, now: Epoch) -> SimPart {
         at,
         at_known: known,
         count: want,
-    })
+    }, prepared)
     .await;
     part.upcoming = out.tracks.into_iter().map(sim_track).collect();
     mark_faulty_slots(&mut part.next_playlists, &out.incidents);
@@ -427,7 +435,7 @@ fn dedup_incidents(incidents: &[Incident]) -> Vec<&Incident> {
     incidents
         .iter()
         .filter(|i| {
-            i.kind == IncidentKind::HardNotCut
+            i.kind != IncidentKind::SourceEmpty
                 || !incidents
                     .iter()
                     .any(|h| h.kind == IncidentKind::HardNotCut && h.rule_id == i.rule_id && h.playlist_ref == i.playlist_ref)
@@ -442,6 +450,8 @@ fn predicted_notes(incidents: &[Incident]) -> Vec<Note> {
         .map(|i| {
             let (rule, playlist, at) = (i.rule_id.clone().unwrap_or_default(), i.playlist_ref.clone(), i.first_at.0);
             match i.kind {
+                IncidentKind::BoundaryNoFit => Note::BoundaryNoFit { rule, playlist, at },
+                IncidentKind::BoundaryMissed => Note::BoundaryMissed { rule, playlist, at },
                 IncidentKind::HardNotCut => Note::RendezvousWillNotCut { rule, playlist, at },
                 IncidentKind::SourceEmpty => Note::SourceWillBeEmpty { rule, playlist, at },
             }
@@ -457,6 +467,8 @@ fn seen_notes(incidents: &[Incident]) -> Vec<Note> {
             let (rule, playlist, at, count) =
                 (i.rule_id.clone().unwrap_or_default(), i.playlist_ref.clone(), i.at.0, i.count);
             match i.kind {
+                IncidentKind::BoundaryNoFit => Note::BoundaryNoFit { rule, playlist, at },
+                IncidentKind::BoundaryMissed => Note::BoundaryMissed { rule, playlist, at },
                 IncidentKind::HardNotCut => Note::RendezvousNotCut { rule, playlist, at, count },
                 IncidentKind::SourceEmpty => Note::SourceWasEmpty { rule, playlist, at, count },
             }
@@ -476,7 +488,7 @@ fn mark_faulty_slots(slots: &mut [Slot], incidents: &[Incident]) {
         }
         let (Some(rule), Some(from)) = (slot.rule_id.as_deref(), from) else { continue };
         let hit = incidents.iter().any(|i| {
-            i.rule_id.as_deref() == Some(rule)
+            i.kind != IncidentKind::BoundaryNoFit && i.rule_id.as_deref() == Some(rule)
                 && i.playlist_ref == slot.playlist_ref
                 && i.at.0 >= from
                 && until.is_none_or(|u| i.first_at.0 < u)
@@ -677,6 +689,18 @@ pub(crate) mod tests {
         assert_eq!(second.upcoming, first.upcoming, "same simulation reused");
     }
 
+    #[test]
+    fn boundary_incidents_have_specific_preview_notes() {
+        let inc = [
+            incident(IncidentKind::BoundaryNoFit, "TOPH", "toph", 1000, 1000),
+            incident(IncidentKind::BoundaryMissed, "TOPH", "toph", 4600, 4600),
+        ];
+        assert_eq!(predicted_notes(&inc), [
+            Note::BoundaryNoFit { rule: "TOPH".into(), playlist: "toph".into(), at: 1000 },
+            Note::BoundaryMissed { rule: "TOPH".into(), playlist: "toph".into(), at: 4600 },
+        ]);
+        assert_eq!(seen_notes(&inc), predicted_notes(&inc));
+    }
     fn incident(kind: IncidentKind, rule: &str, playlist: &str, first: i64, last: i64) -> Incident {
         Incident {
             kind,

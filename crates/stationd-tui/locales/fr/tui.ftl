@@ -1330,3 +1330,6 @@ metadata-list-keys = ↑/↓ règle · a/Inser ajouter · Entrée modifier · Su
 metadata-detail-keys = ↑/↓ champ · Entrée modifier ou basculer · Esc revenir aux règles
     Ctrl+S prévisualiser · pendant la saisie : Entrée valider, Esc annuler
 metadata-restart = Après enregistrement : redémarrer stationd, puis Liquidsoap.
+
+note-boundary-no-fit = rendez-vous { $rule } de { $time } retardé : aucun titre admissible ne tient avant l'heure ; le morceau sera joué jusqu'au bout
+note-boundary-missed = rendez-vous { $rule } de { $time } manqué : aucun titre admissible ne tient avant l'heure et le morceau finit après son expiration ; aucune coupure

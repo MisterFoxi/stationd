@@ -1320,3 +1320,6 @@ metadata-list-keys = ↑/↓ rule · a/Insert add · Enter edit · Delete remove
 metadata-detail-keys = ↑/↓ field · Enter edit or toggle · Esc back to rules
     Ctrl+S preview · while typing: Enter accept, Esc cancel
 metadata-restart = After saving: restart stationd, then Liquidsoap.
+
+note-boundary-no-fit = rendezvous { $rule } at { $time } delayed: no eligible track fits; the track will play to the end
+note-boundary-missed = rendezvous { $rule } at { $time } missed: no eligible track fits and the track ends after its expiry; no track is cut

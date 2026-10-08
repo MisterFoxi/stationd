@@ -233,6 +233,10 @@ pub const MAX_INCIDENTS: usize = 64;
 /// What went wrong in the grid, as the engine saw it (never a sentence).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IncidentKind {
+    /// No eligible track fits; continuity will delay the rendezvous.
+    BoundaryNoFit,
+    /// The selected uninterrupted track extends past the rendezvous expiry.
+    BoundaryMissed,
     /// A hard rendez-vous was due but its source produced nothing: no cut.
     HardNotCut,
     /// A grid source was due but produced nothing: the engine fell through
@@ -436,7 +440,7 @@ impl StationControl {
                 crate::events::Component::Grid,
                 crate::events::Code::GridIncident,
                 [
-                    ("kind", match kind { IncidentKind::HardNotCut => "hard_not_cut", IncidentKind::SourceEmpty => "source_empty" }.to_string()),
+                    ("kind", match kind { IncidentKind::BoundaryNoFit => "boundary_no_fit", IncidentKind::BoundaryMissed => "boundary_missed", IncidentKind::HardNotCut => "hard_not_cut", IncidentKind::SourceEmpty => "source_empty" }.to_string()),
                     ("rule", rule_id.unwrap_or_default().to_string()),
                     ("playlist", playlist_ref.to_string()),
                 ],

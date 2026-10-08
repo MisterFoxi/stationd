@@ -1,0 +1,1 @@
+ALTER TABLE group_state ADD COLUMN boundary_borrowed INTEGER NOT NULL DEFAULT 0;

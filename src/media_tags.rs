@@ -277,6 +277,9 @@ fn check(edit: &TagEdit) -> Result<(), TagError> {
         }
     }
     for name in edit.user.keys() {
+        if name.trim().eq_ignore_ascii_case(crate::media_identity::UUID_TAG) {
+            return Err(TagError::BadValue("STATIOND_UUID is a reserved, immutable media identity".into()));
+        }
         if name.trim().is_empty() {
             return Err(TagError::BadValue("a user frame needs a name".into()));
         }

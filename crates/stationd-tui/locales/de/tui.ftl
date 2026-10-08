@@ -1324,3 +1324,6 @@ metadata-list-keys = ↑/↓ Regel · a/Einfg hinzufügen · Eingabe bearbeiten 
 metadata-detail-keys = ↑/↓ Feld · Eingabe bearbeiten oder umschalten · Esc zurück zu den Regeln
     Strg+S Vorschau · bei Texteingabe: Eingabe bestätigen, Esc abbrechen
 metadata-restart = Nach dem Speichern: stationd und anschließend Liquidsoap neu starten.
+
+note-boundary-no-fit = Termin { $rule } um { $time } verspätet: kein zulässiger Titel passt; der Titel wird vollständig gespielt
+note-boundary-missed = Termin { $rule } um { $time } verpasst: kein zulässiger Titel passt und der Titel endet nach Ablauf des Termins; kein Titel wird abgeschnitten

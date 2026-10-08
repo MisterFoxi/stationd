@@ -21,6 +21,7 @@ use crate::media::ScannedMedia;
 /// One row of the media view, as returned by [`list`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MediaRow {
+    pub media_uuid: String,
     pub rel_path: String,
     pub title: Option<String>,
     pub artist: Option<String>,
@@ -316,18 +317,18 @@ pub async fn meta_values(pool: &SqlitePool, key: &str) -> Result<Vec<String>, sq
 }
 
 /// Columns of a media row as read by [`row`].
-type RowColumns = (String, Option<String>, Option<String>, Option<String>, Option<i64>, i64, i64, i64);
+type RowColumns = (String, Option<String>, Option<String>, Option<String>, Option<i64>, i64, i64, i64, String);
 
 /// One media row (available or not), `None` if the index does not know it.
 pub async fn row(pool: &SqlitePool, rel_path: &str) -> Result<Option<MediaRow>, sqlx::Error> {
     let r: Option<RowColumns> = sqlx::query_as(
-        "SELECT rel_path, title, artist, album, year, duration_ms, size_bytes, available
+        "SELECT rel_path, title, artist, album, year, duration_ms, size_bytes, available, media_uuid
          FROM media WHERE rel_path = ?1",
     )
     .bind(rel_path)
     .fetch_optional(pool)
     .await?;
-    let Some((rel_path, title, artist, album, year, duration_ms, size_bytes, available)) = r else {
+    let Some((rel_path, title, artist, album, year, duration_ms, size_bytes, available, media_uuid)) = r else {
         return Ok(None);
     };
     let genres: Vec<String> =
@@ -338,7 +339,7 @@ pub async fn row(pool: &SqlitePool, rel_path: &str) -> Result<Option<MediaRow>, 
             .into_iter()
             .map(|(g,)| g)
             .collect();
-    Ok(Some(MediaRow { rel_path, title, artist, album, year, duration_ms, size_bytes, available: available != 0, genres, bpm: None, genre_ai: None, mood: None }))
+    Ok(Some(MediaRow { media_uuid, rel_path, title, artist, album, year, duration_ms, size_bytes, available: available != 0, genres, bpm: None, genre_ai: None, mood: None }))
 }
 
 /// Forget the media that vanished from disk (`available = 0`): their rows
@@ -434,10 +435,10 @@ pub async fn list(
     genres: &[String],
 ) -> Result<Vec<MediaRow>, sqlx::Error> {
     let sql = if only_available {
-        "SELECT rel_path, title, artist, album, year, duration_ms, size_bytes, available
+        "SELECT rel_path, title, artist, album, year, duration_ms, size_bytes, available, media_uuid
          FROM media WHERE available = 1 ORDER BY rel_path"
     } else {
-        "SELECT rel_path, title, artist, album, year, duration_ms, size_bytes, available
+        "SELECT rel_path, title, artist, album, year, duration_ms, size_bytes, available, media_uuid
          FROM media ORDER BY rel_path"
     };
 
@@ -452,10 +453,11 @@ pub async fn list(
         i64,
         i64,
         i64,
+        String,
     )> = sqlx::query_as(sql).fetch_all(pool).await?;
 
     let mut out = Vec::with_capacity(rows.len());
-    for (rel_path, title, artist, album, year, duration_ms, size_bytes, available) in rows {
+    for (rel_path, title, artist, album, year, duration_ms, size_bytes, available, media_uuid) in rows {
         let genres: Vec<String> =
             sqlx::query_as::<_, (String,)>("SELECT genre FROM media_genre WHERE rel_path = ?1 ORDER BY genre")
                 .bind(&rel_path)
@@ -470,6 +472,7 @@ pub async fn list(
         }
 
         out.push(MediaRow {
+            media_uuid,
             rel_path,
             title,
             artist,
@@ -571,7 +574,7 @@ pub struct SearchPage {
 
 /// rel_path, title, artist, album, year, duration_ms, size_bytes,
 /// available, genres (joined by U+001F).
-type SearchRow = (String, Option<String>, Option<String>, Option<String>, Option<i64>, i64, i64, i64, Option<String>, Option<String>, Option<f64>, Option<String>, Option<String>);
+type SearchRow = (String, Option<String>, Option<String>, Option<String>, Option<i64>, i64, i64, i64, Option<String>, Option<String>, Option<f64>, Option<String>, Option<String>, String);
 
 pub const SEARCH_LIMIT_DEFAULT: usize = 50;
 pub const SEARCH_LIMIT_MAX: usize = 500;
@@ -602,11 +605,11 @@ pub async fn search(pool: &SqlitePool, q: &SearchQuery) -> Result<SearchPage, sq
         sqlx::query_as(
             "SELECT m.rel_path, m.title, m.artist, m.album, m.year, m.duration_ms, m.size_bytes, m.available,
                     GROUP_CONCAT(g.genre, char(31)),
-                    (SELECT d.value FROM media_meta d WHERE d.rel_path = m.rel_path AND d.key = 'creation'),
-                    a.bpm, a.genre_top, a.mood
+                    (SELECT d.value FROM media_meta d WHERE d.media_uuid = m.media_uuid AND d.key = 'creation'),
+                    a.bpm, a.genre_top, a.mood, m.media_uuid
              FROM media m
-                  LEFT JOIN media_genre g ON g.rel_path = m.rel_path
-                  LEFT JOIN media_analysis a ON a.rel_path = m.rel_path
+                  LEFT JOIN media_genre g ON g.media_uuid = m.media_uuid
+                  LEFT JOIN media_analysis a ON a.media_uuid = m.media_uuid
              GROUP BY m.rel_path",
         )
         .fetch_all(pool)
@@ -649,11 +652,12 @@ pub async fn search(pool: &SqlitePool, q: &SearchQuery) -> Result<SearchPage, sq
     let mut hits: Vec<MediaRow> = rows
         .into_iter()
         .filter(|row| created(&row.9))
-        .map(|(rel_path, title, artist, album, year, duration_ms, size_bytes, available, genres, _creation, bpm, genre_ai, mood)| {
+        .map(|(rel_path, title, artist, album, year, duration_ms, size_bytes, available, genres, _creation, bpm, genre_ai, mood, media_uuid)| {
             let mut genres: Vec<String> =
                 genres.map(|g| g.split('\u{1f}').map(str::to_string).collect()).unwrap_or_default();
             genres.sort();
             MediaRow {
+                media_uuid,
                 rel_path,
                 title,
                 artist,
@@ -783,16 +787,16 @@ pub async fn genres(pool: &SqlitePool, only_available: bool) -> Result<GenreInve
     let (pairs_sql, untagged_sql) = if only_available {
         (
             "SELECT g.genre, g.rel_path FROM media_genre g
-             JOIN media m ON m.rel_path = g.rel_path WHERE m.available = 1",
+             JOIN media m ON m.media_uuid = g.media_uuid WHERE m.available = 1",
             "SELECT count(*) FROM media m WHERE m.available = 1
-             AND NOT EXISTS (SELECT 1 FROM media_genre g WHERE g.rel_path = m.rel_path)",
+             AND NOT EXISTS (SELECT 1 FROM media_genre g WHERE g.media_uuid = m.media_uuid)",
         )
     } else {
         (
             "SELECT g.genre, g.rel_path FROM media_genre g
-             JOIN media m ON m.rel_path = g.rel_path",
+             JOIN media m ON m.media_uuid = g.media_uuid",
             "SELECT count(*) FROM media m
-             WHERE NOT EXISTS (SELECT 1 FROM media_genre g WHERE g.rel_path = m.rel_path)",
+             WHERE NOT EXISTS (SELECT 1 FROM media_genre g WHERE g.media_uuid = m.media_uuid)",
         )
     };
 
@@ -835,7 +839,7 @@ async fn analysis_inventory(
     use std::collections::BTreeMap;
     let sql = if only_available {
         "SELECT a.genre_top, a.mood FROM media_analysis a
-         JOIN media m ON m.rel_path = a.rel_path WHERE m.available = 1"
+         JOIN media m ON m.media_uuid = a.media_uuid WHERE m.available = 1"
     } else {
         "SELECT a.genre_top, a.mood FROM media_analysis a"
     };
@@ -930,7 +934,7 @@ pub async fn tag_inventory(pool: &SqlitePool, origins: &[String]) -> Result<Vec<
     let mut out = Vec::with_capacity(all.len());
     for origin in all {
         let pairs: Vec<(String, String)> = sqlx::query_as(
-            "SELECT t.value, t.rel_path FROM media_tag t JOIN media m ON m.rel_path = t.rel_path
+            "SELECT t.value, t.rel_path FROM media_tag t JOIN media m ON m.media_uuid = t.media_uuid
              WHERE m.available = 1 AND t.origin = ?1 COLLATE NOCASE",
         )
         .bind(&origin)
@@ -970,7 +974,7 @@ pub async fn tag_inventory(pool: &SqlitePool, origins: &[String]) -> Result<Vec<
 /// Available media carrying `value` (case folded) from `origin`.
 pub async fn files_with_value(pool: &SqlitePool, origin: &str, value: &str) -> Result<Vec<String>, sqlx::Error> {
     let rows: Vec<(String,)> = sqlx::query_as(
-        "SELECT DISTINCT t.rel_path FROM media_tag t JOIN media m ON m.rel_path = t.rel_path
+        "SELECT DISTINCT t.rel_path FROM media_tag t JOIN media m ON m.media_uuid = t.media_uuid
          WHERE m.available = 1 AND t.origin = ?1 COLLATE NOCASE AND t.value_key = ?2 ORDER BY t.rel_path",
     )
     .bind(origin)

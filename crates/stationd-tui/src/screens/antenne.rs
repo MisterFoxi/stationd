@@ -129,6 +129,8 @@ fn note_text(n: &Note, tz: Option<&TimeZone>) -> String {
         return tr!("note-unknown", code = n.code);
     };
     match code {
+        C::BoundaryNoFit => tr!("note-boundary-no-fit", rule = n.rule.clone(), time = at()),
+        C::BoundaryMissed => tr!("note-boundary-missed", rule = n.rule.clone(), time = at()),
         C::StationPaused => tr!("note-station-paused"),
         C::StationSleeping => tr!("note-station-sleeping"),
         C::SleepAtTrackEnd => tr!("note-sleep-at-track-end"),
@@ -181,7 +183,7 @@ fn is_incident(n: &Note) -> bool {
     use note::Code as C;
     matches!(
         C::try_from(n.code),
-        Ok(C::RendezvousWillNotCut | C::SourceWillBeEmpty | C::RendezvousNotCut | C::SourceWasEmpty)
+        Ok(C::BoundaryNoFit | C::BoundaryMissed | C::RendezvousWillNotCut | C::SourceWillBeEmpty | C::RendezvousNotCut | C::SourceWasEmpty)
     )
 }
 

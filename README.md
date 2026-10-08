@@ -373,6 +373,7 @@ api_token      = "change-me"                 # ASCII shared secret
 control_socket = "/run/stationd/liquidsoap.sock"  # created by the image
 fallback_path  = "./radio/error.mp3"         # safety net (default: the production image's)
 halted_path    = "./radio/bruit.mp3"         # looped while paused/sleeping/stopped (idem)
+# pause_path   = "/path/to/pause-jingle.mp3" # optional pause-only loop; absent uses halted_path
 
 [[liquidsoap.output]]
 host     = "127.0.0.1"
@@ -623,6 +624,9 @@ ancestors of matching members visible. `Enter` edits the selected playlist.
 resolver and connects on the default gRPC port `50051`. `--addr host:6000`,
 `--addr 192.0.2.1`, `--addr [::1]:6000`, and full HTTP URLs also work; an
 explicit port is preserved.
+Without `--addr`, the TUI uses `[server].grpc_bind` from the local
+`stationd.toml` (`$STATIOND_ROOT`, otherwise the current directory), with the
+same wildcard conversion and loopback fallback as stationctl.
 
 The CLI supports pipes; the TUI requires an interactive terminal and forwards
 its terminal type and locale. Until the new groups take effect after SSH
@@ -717,7 +721,13 @@ stationd-tui
 | `clock set` \| `show` \| `reset` | Freeze the station clock (testing) |
 | `debug listeners <n>` | Inject a listener sample (overwritten by the next Icecast sample) |
 
-`stationctl --addr http://host:port …` targets another daemon.
+`stationctl --addr http://host:port …` targets another daemon and overrides local configuration.
+Without `--addr`, stationctl reads `[server].grpc_bind` from `stationd.toml` in
+`$STATIOND_ROOT` (or the current directory). `station start/state --root DIR`
+use that directory. Wildcard binds (`0.0.0.0`, `::`) become loopback client
+addresses. If the file or key is absent, the default remains `http://127.0.0.1:50051`;
+an unreadable or invalid file is reported as an error. The s6 readiness probe
+uses the same configuration, including when gRPC listens only on a LAN IP.
 
 ---
 
