@@ -191,8 +191,13 @@ let stationd.api_token = {token}
 # Lowered only by a reply other than `halted`: stationd unreachable keeps it.
 let stationd.halted = ref(false)
 # True while paused through the control socket: immediate, the current track
-# is frozen (not read) and resumes where it stopped.
+# is frozen (not read), then abandoned when fresh playback resumes.
 let stationd.paused = ref(false)
+# Hold the idle source until its current loop ends and fresh audio is ready.
+let stationd.resume_pending = ref(false)
+let stationd.idle_is_pause = ref(false)
+let stationd.idle_remaining = ref(fun () -> -1.)
+let stationd.idle_on_air = ref(false)
 # True until stationd answered once (start-up: silence, not the fallback file).
 let stationd.loading = ref(true)
 # Last reply kind, to log transitions only (the pull polls while idle).
@@ -255,7 +260,13 @@ end
 
 # Pull: stationd resolves the next track (grid, overrides, broadcast gate).
 def stationd.fetch_next() =
-  resp = stationd.post("next", "{{}}")
+  if not stationd.paused() and stationd.idle_on_air() then
+    stationd.resume_pending := true
+  end
+  j = json()
+  idle_left = stationd.idle_remaining()
+  j.add("idle_remaining", if stationd.resume_pending() then idle_left() else -1. end)
+  resp = stationd.post("next", json.stringify(compact=true, j))
   stationd.loading := false
   if null.defined(resp) then
     try
@@ -264,6 +275,7 @@ def stationd.fetch_next() =
       }}) = null.get(resp)
       if kind == "file" then
         # A running relay yields once this track is ready, stops when it starts.
+
         stationd.halted := false
         stationd.transition_log(kind, "")
         request.create(uri)
@@ -341,6 +353,7 @@ end
 # or one of Liquidsoap's own sources (m = [], kind = halted | fallback |
 # relay | live).
 def stationd.report(m, kind) =
+  stationd.idle_on_air := kind == "halted"
   if kind == "" then
     stationd.air_track := m
     stationd.air_kind := "track"
@@ -401,7 +414,11 @@ let stationd.raw_pull = ref(stationd.make_raw())
                end\n\
              end\n\
              def stationd.make_chain(pull_raw) =\n  \
-               cross(id=\"stationd_cross\", duration={dur}, stationd.transition, pull_raw)\n\
+               chain = cross(id=\"stationd_cross\", duration={dur}, stationd.transition, pull_raw)\n  \
+               # A dynamically created cross has a stopped private clock.\n  \
+               # Start it before the live parent clock can tick it.\n  \
+               if stationd.pull_generation() > 0 then clock(source.methods(pull_raw).clock).start() end\n  \
+               chain\n\
              end\n",
             fade = liq_float(ls.crossfade.fade),
             dur = liq_float(ls.crossfade.duration),
@@ -415,7 +432,7 @@ pull = source.dynamic(id="stationd_pull_air", {stationd.pull_chain()})
 
 def stationd.reset_pull() =
   old = stationd.raw_pull()
-  log.important(label="stationd", "hard cut: #{list.length(old.queue())} prepared request(s) retained")
+  log.important(label="stationd", "pull rebuilt: #{list.length(old.queue())} prepared request(s) retained")
   queued = old.queue()
   pending = list.map(fun (r) -> request.create(request.uri(r)), queued)
   old.set_queue([])
@@ -433,15 +450,26 @@ def stationd.reset_pull() =
 end
 "##,
     );
+    o.push_str(r##"
+def stationd.idle_ended(_, _) =
+  if stationd.resume_pending() and not stationd.paused() then
+    if stationd.raw_pull().is_ready() or stationd.relaying() then
+      stationd.resume_pending := false
+      stationd.idle_is_pause := false
+      stationd.idle_on_air := false
+    end
+  end
+end
+"##);
     // A dedicated pause loop takes precedence over the ordinary halted source.
     // Keep the original chain when the optional setting is absent.
     let (pause_source, pause_transition, pause_available, pause_metadata) =
         if let Some(path) = &ls.pause_path {
             (
-                format!("pause_media = single(id=\"stationd_pause\", {})\npause_media = metadata.map(update=false, strip=false, insert_missing=true, fun (_) -> stationd.idle_metadata(), pause_media)\n", liq_path(&absolute(path))),
+                format!("pause_media = single(id=\"stationd_pause\", {})\npause_media = metadata.map(update=false, strip=false, insert_missing=true, fun (_) -> stationd.idle_metadata(), pause_media)\nsource.methods(pause_media).on_position(position=0., remaining=true, allow_partial=true, synchronous=true, stationd.idle_ended)\n", liq_path(&absolute(path))),
                 "fun (_, b) -> stationd.switched_to(\"halted\", b),\n    ",
-                "source.available(pause_media, {stationd.paused()}),\n    ",
-                "source.methods(pause_media).insert_metadata(new_track=false, stationd.idle_metadata())\n    ",
+                "source.available(pause_media, {stationd.paused() or (stationd.resume_pending() and stationd.idle_is_pause())}),\n    ",
+                "if stationd.paused() then stationd.idle_remaining := fun () -> source.methods(pause_media).remaining() end\n    source.methods(pause_media).insert_metadata(new_track=false, stationd.idle_metadata())\n    ",
             )
         } else {
             (String::new(), "", "", "")
@@ -453,6 +481,7 @@ end
          # The idle loop must never keep the previous song's ICY title.\n\
          halted_noise = metadata.map(update=false, strip=false, insert_missing=true,\n  \
            fun (_) -> stationd.idle_metadata(), halted_noise)\n\
+         source.methods(halted_noise).on_position(position=0., remaining=true, allow_partial=true, synchronous=true, stationd.idle_ended)\n\
          {pause_source}safety = single(id=\"stationd_fallback\", {fallback})\n\
          startup = blank(id=\"stationd_startup\")\n\n\
          # Relay of a `remote` playlist: idle until stationd answers `relay`.\n\
@@ -489,6 +518,8 @@ end
          # would go unreported. Off the streaming thread (HTTP call).\n\
          def stationd.switched_to(kind, b) =\n  \
            if kind == \"halted\" then\n    \
+             stationd.idle_on_air := true\n    \
+             stationd.idle_remaining := fun () -> source.methods(halted_noise).remaining()\n    \
              source.methods(halted_noise).insert_metadata(new_track=false, stationd.idle_metadata())\n    \
              {pause_metadata}end\n  \
            thread.run(fast=false, {{stationd.report([], kind)}})\n  \
@@ -507,9 +538,9 @@ end
            [\n    \
              # soft entry: only once the pull — crossfade tail included — is\n    \
              # done (else the tail would be cut, then replayed at the exit)\n    \
-             source.available(relay, {{stationd.relaying() and not stationd.paused() and not pull.is_ready()}}),\n    \
-             source.available(pull, {{not stationd.paused()}}),\n    \
-             {pause_available}source.available(halted_noise, {{stationd.halted() or stationd.paused()}}),\n    \
+             source.available(relay, {{stationd.relaying() and not stationd.paused() and not stationd.resume_pending() and not pull.is_ready()}}),\n    \
+             source.available(pull, {{not stationd.paused() and not stationd.resume_pending()}}),\n    \
+             {pause_available}source.available(halted_noise, {{stationd.halted() or stationd.paused() or stationd.resume_pending()}}),\n    \
              source.available(startup, {{stationd.loading()}}),\n    \
              safety\n  \
            ]\n\
@@ -535,23 +566,10 @@ end
         r##"
 # ─── control commands (socket, namespace `stationd`) ──────────────────────
 def stationd.cmd_pause(_) =
+  stationd.idle_is_pause := true
+  stationd.resume_pending := false
   stationd.paused := true
   log.important(label="stationd", "pause: idle media on air, current track frozen")
-  "OK"
-end
-
-def stationd.cmd_resume(_) =
-  if stationd.paused() then
-    # The frozen track resumes without an on_track callback. Restore its
-    # cached metadata without creating a new track or another bridge report.
-    m = source.methods(pull).last_metadata()
-    if null.defined(m) then
-      source.methods(pull).insert_metadata(new_track=false, null.get(m))
-    end
-  end
-  stationd.paused := false
-  stationd.next_not_before := 0.
-  log.important(label="stationd", "resume")
   "OK"
 end
 
@@ -591,6 +609,22 @@ def stationd.cmd_flush(_) =
   "OK"
 end
 
+# A pause/wake starts fresh; the interrupted pull and its crossfade buffers
+# must never be read again. Keep the current idle loop until its natural end.
+def stationd.cmd_resume(_) =
+  if stationd.paused() or stationd.resume_pending() or stationd.idle_on_air() then
+    if not stationd.resume_pending() then
+      stationd.resume_pending := true
+      stationd.discard_queue(stationd.raw_pull())
+      stationd.reset_pull()
+      ignore(stationd.raw_pull().fetch())
+    end
+  end
+  stationd.paused := false
+  stationd.next_not_before := 0.
+  log.important(label="stationd", "resume: finish idle loop, then fresh selection")
+  "OK"
+end
 # Hard override: cut in now. The cut track is skipped: after the insert the
 # prepared track plays (stationd flushes it beforehand when it should be
 # re-asked — never when it is itself an override).
@@ -628,7 +662,7 @@ def stationd.cmd_on_air(_) =
 end
 
 server.register(namespace="stationd", usage="pause", description="Pause now (noise on air, track frozen).", "pause", stationd.cmd_pause)
-server.register(namespace="stationd", usage="resume", description="Resume the frozen track.", "resume", stationd.cmd_resume)
+server.register(namespace="stationd", usage="resume", description="Finish idle loop, then start fresh.", "resume", stationd.cmd_resume)
 server.register(namespace="stationd", usage="skip", description="Skip the current track.", "skip", stationd.cmd_skip)
 server.register(namespace="stationd", usage="flush", description="Drop the prepared track (re-ask stationd).", "flush", stationd.cmd_flush)
 server.register(namespace="stationd", usage="interrupt <uri>", description="Hard override: cut in now.", "interrupt", stationd.cmd_interrupt)
@@ -968,7 +1002,7 @@ mod tests {
         assert!(s.contains("stationd.next_not_before := time() + 2."));
         assert!(s.contains("settings.server.socket.path := \"/tmp/ls.sock\""));
         assert!(s.contains("settings.server.socket.permissions := 0o660"));
-        assert!(s.contains("source.available(halted_noise, {stationd.halted() or stationd.paused()})"));
+        assert!(s.contains("source.available(halted_noise, {stationd.halted() or stationd.paused() or stationd.resume_pending()})"));
         assert!(s.contains("pull_raw.set_queue([])"));
         assert!(s.contains("interrupt = request.queue(id=\"stationd_interrupt\")"));
         assert!(s.contains("fallback(id=\"stationd_cut\", track_sensitive=false, [interrupt, radio])"));
@@ -996,7 +1030,7 @@ mod tests {
         assert_eq!(s[tr..members].matches("fun (_, b)").count(), 5);
         assert!(!s.contains("\"annotate:"), "annotate: makes single() fallible");
         // pull first, halted noise before the safety fallback.
-        let pull = s.find("source.available(pull, {not stationd.paused()})").unwrap();
+        let pull = s.find("source.available(pull, {not stationd.paused() and not stationd.resume_pending()})").unwrap();
         let halted = s.find("source.available(halted_noise").unwrap();
         let safety = s.find("    safety\n").unwrap();
         assert!(pull < halted && halted < safety);
@@ -1050,8 +1084,8 @@ mod tests {
         ));
         // First in the air chain, but only once the (crossfaded) pull is done:
         // a soft entry, and no crossfade tail cut then replayed.
-        let relay = s.find("source.available(relay, {stationd.relaying() and not stationd.paused() and not pull.is_ready()})").unwrap();
-        let pull = s.find("source.available(pull, {not stationd.paused()})").unwrap();
+        let relay = s.find("source.available(relay, {stationd.relaying() and not stationd.paused() and not stationd.resume_pending() and not pull.is_ready()})").unwrap();
+        let pull = s.find("source.available(pull, {not stationd.paused() and not stationd.resume_pending()})").unwrap();
         assert!(relay < pull);
         assert!(s.contains("fun (_, b) -> stationd.switched_to(\"relay\", b)"));
         // Replies: `relay` starts it and queues nothing; `halted` / `none`
@@ -1227,6 +1261,170 @@ mod tests {
         assert!(result.status.success(), "{}\n{}", String::from_utf8_lossy(&result.stdout), String::from_utf8_lossy(&result.stderr));
     }
 
+    /// Exercise the generated resume and boundary callback on real audio frames.
+    #[test]
+    #[ignore = "requires Liquidsoap installed"]
+    fn resume_waits_for_idle_end_in_liquidsoap() {
+        let generated = render(&cfg(), None, "Test");
+        let block = |name: &str| {
+            let tail = &generated[generated.find(name).unwrap()..];
+            &tail[..tail.find("\nend\n").unwrap() + 5]
+        };
+        let resume = block("def stationd.cmd_resume(_)");
+        let ended = block("def stationd.idle_ended(_, _)");
+        let dir = tempfile::tempdir().unwrap();
+        for ready_after in [0, 1] {
+            let script = format!(r#"
+set("log.stdout", true)
+stationd = ()
+let stationd.paused = ref(true)
+let stationd.resume_pending = ref(false)
+let stationd.idle_is_pause = ref(true)
+let stationd.idle_on_air = ref(true)
+let stationd.next_not_before = ref(0.)
+let stationd.air_kind = ref("halted")
+let stationd.relaying = ref(false)
+let ready = ref(false)
+let resets = ref(0)
+let discards = ref(0)
+let fetches = ref(0)
+let loops = ref(0)
+let started = ref(false)
+let requested = ref(false)
+def stationd.raw_pull() =
+  {{is_ready=fun () -> ready(), fetch=fun () -> begin fetches := fetches() + 1; ready := {initial_ready}; true end}}
+end
+def stationd.discard_queue(_) = discards := discards() + 1 end
+def stationd.reset_pull() = resets := resets() + 1 end
+{ended}
+{resume}
+idle = blank(id="idle", duration=2.)
+fresh = blank(id="fresh", duration=4.)
+source.methods(idle).on_frame(synchronous=true, fun () -> begin
+  if idle.elapsed() >= 0.5 and not requested() then
+    requested := true
+    ignore(stationd.cmd_resume(""))
+    ignore(stationd.cmd_resume(""))
+    assert(stationd.resume_pending())
+    assert(resets() == 1 and discards() == 1 and fetches() == 1)
+  end
+end)
+source.methods(idle).on_position(position=0., remaining=true, allow_partial=true, synchronous=true, fun (p,m) -> begin
+  loops := loops() + 1
+  stationd.idle_ended(p,m)
+  if loops() == 1 and {delayed} then
+    assert(stationd.resume_pending())
+    ready := true
+  end
+end)
+radio = fallback(track_sensitive=false, [source.available(fresh, {{not stationd.paused() and not stationd.resume_pending()}}), idle])
+source.methods(fresh).on_track(synchronous=true, fun (_) -> begin
+  started := true
+  assert(loops() == {expected_loops})
+  assert(not stationd.resume_pending())
+end)
+source.methods(fresh).on_frame(synchronous=true, fun () -> begin
+  if fresh.elapsed() > 0.2 then assert(started()); exit(0) end
+end)
+clock.assign_new(sync="none", [radio])
+output.dummy(radio)
+thread.run(delay=10., fun () -> exit(1))
+"#, initial_ready=if ready_after == 0 { "true" } else { "false" },
+                delayed=if ready_after == 0 { "false" } else { "true" }, expected_loops=ready_after + 1);
+            let path = dir.path().join("resume.liq");
+            std::fs::write(&path, script).unwrap();
+            let result = std::process::Command::new("liquidsoap").arg(&path).output().unwrap();
+            assert!(result.status.success(), "{}\n{}", String::from_utf8_lossy(&result.stdout), String::from_utf8_lossy(&result.stderr));
+        }
+    }
+    #[test]
+    #[ignore = "requires Liquidsoap installed"]
+    fn real_pull_resume_does_not_replay_interrupted_audio() {
+        let dir = tempfile::tempdir().unwrap();
+        let wav = |name: &str, seconds: u32, sample: i16| {
+            let path = dir.path().join(name);
+            let bytes = seconds * 48000 * 2;
+            let mut data = Vec::new();
+            data.extend_from_slice(b"RIFF"); data.extend((36 + bytes).to_le_bytes());
+            data.extend_from_slice(b"WAVEfmt "); data.extend(16u32.to_le_bytes());
+            data.extend(1u16.to_le_bytes()); data.extend(1u16.to_le_bytes());
+            data.extend(48000u32.to_le_bytes()); data.extend(96000u32.to_le_bytes());
+            data.extend(2u16.to_le_bytes()); data.extend(16u16.to_le_bytes());
+            data.extend_from_slice(b"data"); data.extend(bytes.to_le_bytes());
+            for _ in 0..(bytes / 2) { data.extend(sample.to_le_bytes()); }
+            std::fs::write(&path, data).unwrap(); path
+        };
+        let old = wav("old.wav", 20, 3277);
+        let fresh = wav("fresh.wav", 20, 22937);
+        let idle = wav("idle.wav", 2, 9830);
+        for mode in [CrossfadeMode::None, CrossfadeMode::Simple] {
+            let mut c = cfg();
+            c.outputs.clear(); c.control_socket = dir.path().join("test.sock");
+            c.crossfade.mode = mode; c.pause_path = Some(idle.clone());
+            c.halted_path = idle.clone(); c.fallback_path = idle.clone();
+            let mut script = render(&c, None, "Test");
+            let reply = |path: &Path, media: &str| {
+                let uri = format!("annotate:stationd_rid=\"1\",stationd_boot=\"test\",stationd_media=\"{media}\":{}", path.display());
+                liq_string(&serde_json::json!({"kind":"file","uri":uri,"state":"","reason":""}).to_string())
+            };
+            let start = script.find("def stationd.post(").unwrap();
+            let end = start + script[start..].find("def stationd.transition_log(").unwrap();
+            let fake = format!(r#"
+let test_fresh = ref(false)
+let test_finished = ref(false)
+def stationd.post(endpoint, _) =
+  if endpoint == "next" then
+    if test_fresh() then {fresh} else {old} end
+  else "{{}}" end
+end
+
+"#, fresh=reply(&fresh,"fresh"), old=reply(&old,"old"));
+            script.replace_range(start..end, &fake);
+            script = script.replace("      stationd.resume_pending := false", "      test_finished := true\n      stationd.resume_pending := false");
+            script.push_str(r#"
+radio = rms(duration=0.02, radio)
+let test_paused = ref(false)
+let test_resumed = ref(false)
+let test_heard_fresh = ref(false)
+source.methods(radio).on_track(synchronous=true, fun (m) -> begin
+  if m["stationd_media"] == "fresh" then
+    assert(test_finished())
+    test_heard_fresh := true
+  elsif m["stationd_media"] == "old" and test_resumed() then
+    assert(false)
+  end
+end)
+source.methods(radio).on_frame(synchronous=true, fun () -> begin
+  if test_resumed() and test_finished() then
+    assert(radio.rms() > 0.2)
+  end
+  elapsed = stationd.air_elapsed()
+  if not test_paused() and stationd.air_kind() == "track" and elapsed() > 1. then
+    test_paused := true
+    ignore(stationd.cmd_pause(""))
+  elsif test_paused() and not test_resumed() and stationd.air_kind() == "halted" then
+    remaining = stationd.idle_remaining()
+    if remaining() < 1.5 then
+      test_fresh := true
+      test_resumed := true
+      thread.run(fast=false, fun () -> begin
+        ignore(stationd.cmd_resume(""))
+        assert(stationd.resume_pending())
+      end)
+    end
+  elsif test_heard_fresh() and elapsed() > 0.3 then
+    exit(0)
+  end
+end)
+output.dummy(radio)
+thread.run(delay=15., fun () -> exit(1))
+"#);
+            let path = dir.path().join("real-resume.liq");
+            std::fs::write(&path, script).unwrap();
+            let result = std::process::Command::new("liquidsoap").arg(&path).output().unwrap();
+            assert!(result.status.success(), "{}\n{}", String::from_utf8_lossy(&result.stdout), String::from_utf8_lossy(&result.stderr));
+        }
+    }
     #[test]
     fn dedicated_pause_media_is_optional_and_precedes_the_halted_loop() {
         let mut c = cfg();
@@ -1234,10 +1432,10 @@ mod tests {
         c.pause_path = Some(PathBuf::from("/srv/pause jingle.mp3"));
         let script = render(&c, None, "Radio");
         assert!(script.contains("pause_media = single(id=\"stationd_pause\", \"/srv/pause jingle.mp3\")"));
-        let pause = script.find("source.available(pause_media, {stationd.paused()})").unwrap();
+        let pause = script.find("source.available(pause_media, {stationd.paused() or (stationd.resume_pending() and stationd.idle_is_pause())})").unwrap();
         let halted = script.find("source.available(halted_noise,").unwrap();
         assert!(pause < halted);
-        assert!(script.contains("source.available(pull, {not stationd.paused()})"));
+        assert!(script.contains("source.available(pull, {not stationd.paused() and not stationd.resume_pending()})"));
         assert!(script.contains("source.methods(pause_media).insert_metadata(new_track=false, stationd.idle_metadata())"));
     }
     #[test]

@@ -42,7 +42,7 @@
 //! track leaves the air when something else starts (next track, halted
 //! noise after a stop, fallback, unknown). The bridge counts the time each of
 //! our tracks really spent on air — a pause freezes the count, a resume
-//! restarts it — and hands it to the engine when the track leaves
+//! abandons the interrupted track — and hands it to the engine when it leaves
 //! (`GridEngine::on_track_left`: played to the end → `unplayed_only` mark of
 //! its leaf playlist). A skip, a hard override or a Liquidsoap restart leave
 //! a short count: never marked.
@@ -442,8 +442,22 @@ impl LsBridge {
     /// The pull: resolve at the estimated natural start boundary of the file
     /// being prefetched, then translate the decision for Liquidsoap.
     pub async fn next(&self) -> NextReply {
+        self.next_after_idle(None).await
+    }
+
+    async fn next_after_idle(&self, remaining: Option<f64>) -> NextReply {
         let now = self.engine.effective_now(None);
-        let resolve_at = self.next_boundary(now).await;
+        let idle = self.lock().status.on_air.as_ref().is_some_and(|a| a.kind == OnAirKind::Halted);
+        let remaining = remaining.filter(|s| s.is_finite() && *s >= 0. && *s <= 86_400.);
+        let resolve_at = if let Some(s) = remaining.filter(|_| idle) {
+            // Wake drops marks missed before NOW, not ones reached while the
+            // idle loop finishes. Otherwise a forthcoming TOPh is consumed.
+            if let Err(e) = self.engine.reconcile_wake(now).await {
+                tracing::error!(error = %e, "could not reconcile wake before idle-end prefetch");
+                return NextReply::none("error");
+            }
+            crate::resolver::Epoch(now.0.saturating_add(s.ceil() as i64))
+        } else { self.next_boundary(now).await };
         if resolve_at != now {
             tracing::debug!(
                 pull_at = now.0,
@@ -739,7 +753,7 @@ impl LsBridge {
             let mut st = self.lock();
             if let Some(track) = st.status.on_air.clone().filter(|a| a.kind == OnAirKind::Track) {
                 if kind == OnAirKind::Halted && paused {
-                    // A pause freezes the track (a resume continues it): stop
+                    // A pause freezes the airing count until it is abandoned: stop
                     // counting, keep it aside.
                     st.before_halt = Some(OnAir {
                         aired_s: track.aired_at(now),
@@ -808,7 +822,7 @@ impl LsBridge {
                 None => OnAir::source(OnAirKind::Unknown, now),
             },
             "halted" => {
-                // Paused: the track is frozen, a resume continues it.
+                // Paused: preserve the partial airing until resume abandons it.
                 if snap.paused {
                     st.before_halt = track.map(|t| OnAir { counting_since: None, ..t });
                 }
@@ -831,23 +845,22 @@ impl LsBridge {
         true
     }
 
-    /// Liquidsoap acknowledged a resume from pause: the frozen track plays on
-    /// (no new track start will be reported for it) — put it back on air.
-    pub fn resumed_from_pause(&self) {
-        let now = self.engine.effective_now(None).0;
-        let mut st = self.lock();
-        let halted = st.status.on_air.as_ref().is_some_and(|a| a.kind == OnAirKind::Halted);
-        if halted {
-            if let Some(mut track) = st.before_halt.take() {
-                tracing::info!(media = track.media_path.as_deref().unwrap_or("-"), "resumed: back on air");
-                track.counting_since = Some(now); // on-air time counts again
-                st.status.on_air = Some(track);
+    /// Liquidsoap acknowledged a resume from pause: its old pull is discarded.
+    /// Finish the interrupted airing; fresh playback waits for a real start report.
+    pub async fn resumed_from_pause(&self) {
+        let leaving = {
+            let mut st = self.lock();
+            st.before_halt.take().as_ref().and_then(|a| Left::of(a, self.engine.effective_now(None).0))
+        };
+        if let Some(left) = leaving {
+            if let Err(e) = self.engine.track_left(left.log_id, &left.media,
+                left.leaf.as_deref(), left.aired_s, self.engine.effective_now(None)).await {
+                tracing::error!(error = %e, "could not record the interrupted track at resume");
             }
         }
-        drop(st);
+        // The idle loop is still on air until Liquidsoap reports the fresh track.
         self.engine.control().bump_air();
     }
-
     /// What the air is doing, from the broadcast state and what Liquidsoap
     /// last reported: `playing`, `paused`, `sleep armed` (stop-when-idle),
     /// `falling asleep` (asleep, the current track plays to its end) or
@@ -908,15 +921,21 @@ fn authorized(state: &AppState, headers: &HeaderMap) -> bool {
         .is_some_and(|v| v == &*state.token)
 }
 
+#[derive(Default, Deserialize)]
+struct NextRequest {
+    idle_remaining: Option<f64>,
+}
+
 async fn next_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
+    body: Option<Json<NextRequest>>,
 ) -> Result<Json<NextReply>, StatusCode> {
     if !authorized(&state, &headers) {
         tracing::warn!("Liquidsoap bridge: /next refused (bad or missing token)");
         return Err(StatusCode::UNAUTHORIZED);
     }
-    Ok(Json(state.bridge.next().await))
+    Ok(Json(state.bridge.next_after_idle(body.and_then(|b| b.0.idle_remaining)).await))
 }
 
 async fn discard_handler(
@@ -1077,6 +1096,31 @@ mod tests {
         (dir, LsBridge::new(eng, Path::new("/srv/media")).unwrap())
     }
 
+    #[tokio::test]
+    async fn resume_resolves_the_grid_at_idle_end_including_toph() {
+        let (_d, b) = bridge().await;
+        let pool = b.engine.pool_for_tests();
+        let toml = "name='clock'\n[selection]\nmode='dynamic'\norder='shuffle'\n";
+        let playlist = crate::playlist::Playlist::parse(toml).unwrap();
+        crate::store::upsert(&pool, "clock", &playlist, toml, Some("clock")).await.unwrap();
+        insert_rule(&pool, &Rule {
+            id: "TOPH".into(), enabled: true, validity: Validity::default(),
+            kind: RuleKind::AtClock {
+                playlist_ref: "clock".into(), anchor: crate::resolver::ClockAnchor::Minute(0),
+                mode: crate::resolver::Mode::Hard, expiry_secs: Some(60),
+            },
+        }).await.unwrap();
+        b.at(14 * 3600 + 59 * 60 + 50);
+        b.engine.control().sleep_now();
+        b.source("halted").await;
+        b.engine.control().apply(ControlAction::Wake, "listeners").unwrap();
+        let app = router(b.clone(), "tok", None);
+        assert_eq!(post_json(&app, "/ls/v1/next", r#"{"idle_remaining":20.0}"#).await.0, StatusCode::OK);
+        assert_eq!(b.status().next.unwrap().playlist_ref.as_deref(), Some("clock"));
+        let tokens = crate::grid_store::load_playback_state(&pool).await.unwrap().at_clock_taken;
+        assert_eq!(tokens.iter().filter(|t| t.ends_with("T15:00")).count(), 1);
+        assert!(tokens.iter().any(|t| t.ends_with("T14:00")), "past sleep mark discarded");
+    }
     #[tokio::test]
     async fn explicit_discard_returns_prepared_shuffle_member_and_requires_auth() {
         let (_dir, b) = bridge().await;
@@ -1257,7 +1301,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resync_during_a_pause_keeps_the_frozen_track_for_the_resume() {
+    async fn resync_during_a_pause_abandons_the_frozen_track_on_resume() {
         let (_d, old, pool) = pod_bridge().await;
         old.at(1000);
         let uri = old.next().await.uri;
@@ -1269,13 +1313,13 @@ mod tests {
         assert!(new.resync(&snap));
         assert_eq!(new.status().on_air.unwrap().kind, OnAirKind::Halted);
         new.engine.control().apply(ControlAction::Resume, "cli").unwrap();
-        new.resumed_from_pause();
+        new.resumed_from_pause().await;
         let back = new.status().on_air.unwrap();
-        assert_eq!((back.kind, back.media_path.as_deref()), (OnAirKind::Track, Some("pod/ep1.mp3")));
+        assert_eq!(back.kind, OnAirKind::Halted);
         new.at(5300); // 300 s more: 600 s in all
         let next = new.next().await.uri;
         new.track_started(&echo(&next)).await;
-        assert_eq!(played(&pool, "pod").await, ["pod/ep1.mp3".to_string()].into());
+        assert!(played(&pool, "pod").await.is_empty());
     }
 
     #[test]
@@ -1354,25 +1398,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resume_from_pause_puts_the_frozen_track_back_on_air() {
+    async fn resume_from_pause_keeps_idle_on_air_until_a_fresh_track_starts() {
         let (_d, b) = bridge().await;
         b.next().await;
         b.track_started(&TrackEvent { rid: "1".into(), ..Default::default() }).await;
-        let before = b.status().on_air.unwrap();
         // The noise takes over BECAUSE of a pause (the state is Paused first):
         // only then is the track frozen rather than ended.
         b.engine.control().apply(ControlAction::Pause, "cli").unwrap();
         b.track_started(&TrackEvent { rid: String::new(), kind: "halted".into(), ..Default::default() }).await;
         assert_eq!(b.status().on_air.unwrap().kind, OnAirKind::Halted);
         b.engine.control().apply(ControlAction::Resume, "cli").unwrap();
-        b.resumed_from_pause();
+        b.resumed_from_pause().await;
         let after = b.status().on_air.unwrap();
-        assert_eq!(after.kind, OnAirKind::Track);
-        assert_eq!(after.media_path, before.media_path);
-        assert_eq!(after.since, before.since, "same airing, not a new start");
+        assert_eq!(after.kind, OnAirKind::Halted);
+        assert!(b.lock().before_halt.is_none(), "old track cannot resume");
         // A second resume without a halt in between changes nothing.
-        b.resumed_from_pause();
-        assert_eq!(b.status().on_air.unwrap().kind, OnAirKind::Track);
+        b.resumed_from_pause().await;
+        assert_eq!(b.status().on_air.unwrap().kind, OnAirKind::Halted);
     }
 
     #[tokio::test]
@@ -1537,7 +1579,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_paused_then_resumed_track_played_to_the_end_is_marked() {
+    async fn a_paused_then_abandoned_track_is_not_marked_as_fully_played() {
         let (_d, b, pool) = pod_bridge().await;
         b.at(1000);
         b.next().await;
@@ -1547,13 +1589,13 @@ mod tests {
         b.source("halted").await;
         b.at(9000); // a long pause: not air time
         b.engine.control().apply(ControlAction::Resume, "cli").unwrap();
-        b.resumed_from_pause();
+        b.resumed_from_pause().await;
         let back = b.status().on_air.unwrap();
-        assert_eq!((back.kind, back.since), (OnAirKind::Track, 1000), "same airing");
+        assert_eq!(back.kind, OnAirKind::Halted, "waiting for a fresh track");
         b.at(9300); // 300 s more: 600 s in all
         b.next().await;
         b.start(2).await;
-        assert_eq!(played(&pool, "pod").await, ["pod/ep1.mp3".to_string()].into());
+        assert!(played(&pool, "pod").await.is_empty());
     }
 
     #[tokio::test]

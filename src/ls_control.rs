@@ -278,13 +278,13 @@ pub fn spawn_air_sync(
                     Ok(_) => {
                         tracing::info!(cmd, "Liquidsoap control: applied");
                         if let Push::State { t: Some(t), .. } = push {
-                            // From a pause: the frozen track plays on. (A
+                            // From a pause: abandon the frozen track. (A
                             // wake from sleeping has no frozen track: the
                             // pull brings the slot of now.)
                             if t.from == BroadcastState::Paused
                                 && t.to == BroadcastState::Running
                             {
-                                bridge.resumed_from_pause();
+                                bridge.resumed_from_pause().await;
                             }
                         }
                         pending = None;

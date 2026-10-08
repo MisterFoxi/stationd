@@ -1281,6 +1281,24 @@ impl GridEngine {
         Ok(decision)
     }
 
+    /// Reconcile sleep at the actual wake instant, before projecting a future prefetch.
+    pub(crate) async fn reconcile_wake(&self, now: Epoch) -> Result<(), EngineError> {
+        if self.control.take_woken() {
+            // A wake starts the programme of now, without catching up clock
+            // occurrences missed while asleep. Only past marks are consumed.
+            let local = clock::to_local_now(now, &self.tz)?;
+            let grid = grid_index::load_grid(&self.pool).await?;
+            for token in crate::resolver::missed_at_clock_marks(local, &grid) {
+                grid_store::record_at_clock_taken(&self.pool, &token, now).await?;
+            }
+            if let Some(hold) = grid_store::get_hold(&self.pool).await? {
+                tracing::info!(playlist = %hold.playlist_ref, "woke from sleep: held group released");
+                self.end_hold(&hold.playlist_ref, true).await?;
+            }
+        }
+        Ok(())
+    }
+
     /// Resolve the source AND the concrete media to pull, with **grid
     /// fallthrough**: ask the resolver for the applicable sources in priority
     /// order and keep the first that actually yields a media. A source whose
@@ -1318,19 +1336,7 @@ impl GridEngine {
                 log_id: None,
             });
         }
-        if self.control.take_woken() {
-            // A wake starts the programme of now, without catching up clock
-            // occurrences missed while asleep. Only past marks are consumed.
-            let local = clock::to_local_now(now, &self.tz)?;
-            let grid = grid_index::load_grid(&self.pool).await?;
-            for token in crate::resolver::missed_at_clock_marks(local, &grid) {
-                grid_store::record_at_clock_taken(&self.pool, &token, now).await?;
-            }
-            if let Some(hold) = grid_store::get_hold(&self.pool).await? {
-                tracing::info!(playlist = %hold.playlist_ref, "woke from sleep: held group released");
-                self.end_hold(&hold.playlist_ref, true).await?;
-            }
-        }
+        self.reconcile_wake(now).await?;
         if let Some(resolved) = self.next_override(now).await? {
             return Ok(resolved);
         }
@@ -1383,6 +1389,13 @@ impl GridEngine {
             _ => None,
         };
 
+        // If punctual playback is impossible, search again within the mark's
+        // expiry before allowing an arbitrary overrun. Every source gets the
+        // punctual search first; a lower-priority fitting source still wins.
+        let late_fit_ms = if let (Some(mark), Some(strict)) = (hard_mark, hard_fit_ms) {
+            self.hard_expiry_budget(&grid, &state, now, mark).await?
+                .filter(|late| *late > strict)
+        } else { None };
         let mut attempts: std::collections::VecDeque<_> = ranked.into_iter()
             .enumerate().map(|(i, d)| (i, d, hard_fit_ms)).collect();
         // Only retry without a budget after every applicable source was searched.
@@ -1393,7 +1406,7 @@ impl GridEngine {
             let held = held_at == Some(i);
             let start = if held {
                 TurnStart::Continue
-            } else if budget.is_none() && hard_fit_ms.is_some() {
+            } else if hard_fit_ms.is_some() && budget != hard_fit_ms {
                 TurnStart::Resume
             } else if matches!(decision.origin, Origin::Every | Origin::AtClockHard | Origin::AtClockSoft) {
                 TurnStart::Fresh
@@ -1402,14 +1415,15 @@ impl GridEngine {
             };
             let produced = match self.produce(&playlist_ref, now, start, budget).await {
                 Err(EngineError::Selection(crate::selection::SelectionError::NoFit)) if budget.is_some() => {
-                    attempts.push_back((i, decision, None));
+                    let retry = if budget == hard_fit_ms { late_fit_ms } else { None };
+                    attempts.push_back((i, decision, retry));
                     continue;
                 }
                 other => other?,
             };
 
             if let Some(turn) = produced {
-                if hard_fit_ms.is_some() && budget.is_none() {
+                if hard_fit_ms.is_some() && budget != hard_fit_ms {
                     if let Some(mark) = hard_mark {
                         self.report_boundary_no_fit(&grid, &state, &turn.resolved, now, mark).await?;
                     }
@@ -1634,6 +1648,37 @@ impl GridEngine {
         Ok(())
     }
 
+    /// Conservative late boundary: never extend past an explicit expiry or
+    /// a change of occurrence/validity, including UTC and civil-hour rules.
+    async fn hard_expiry_budget(
+        &self, grid: &Grid, state: &PlaybackState, now: Epoch, mark: Epoch,
+    ) -> Result<Option<u64>, EngineError> {
+        let local = clock::to_local_now(mark, &self.tz)?;
+        let due: Vec<_> = resolve_ranked(local, grid, state).into_iter()
+            .filter(|d| d.origin == Origin::AtClockHard && is_hard_mark_at(d, grid, local))
+            .collect();
+        let expiry = due.iter().filter_map(|d| {
+            grid.rules.iter().find(|r| Some(&r.id) == d.rule_id.as_ref())
+                .and_then(|r| match &r.kind {
+                    RuleKind::AtClock { expiry_secs, .. } => *expiry_secs,
+                    _ => None,
+                })
+        }).min();
+        let Some(expiry) = expiry else { return Ok(None); };
+        // Keep this fallback bounded even for a very large configured expiry.
+        let extension = expiry.min(HARD_GUARD_S as u64) as i64;
+        let mut deadline = mark.0.saturating_add(extension);
+        for offset in (60..=extension).step_by(60) {
+            let at = clock::to_local_now(Epoch(mark.0 + offset), &self.tz)?;
+            let later = resolve_ranked(at, grid, state);
+            if due.iter().any(|d| !later.iter().any(|l|
+                l.rule_id == d.rule_id && l.mark_taken == d.mark_taken)) {
+                deadline = mark.0 + offset - 1;
+                break;
+            }
+        }
+        Ok((deadline > now.0).then_some((deadline - now.0) as u64 * 1000))
+    }
     async fn report_boundary_no_fit(
         &self, grid: &Grid, state: &PlaybackState,
         media: &crate::selection::Resolved, now: Epoch, mark: Epoch,
@@ -2407,6 +2452,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn restarted_engine_searches_within_expiry_before_missing_toph() {
+        let (_d, eng) = hard_fixture(false).await;
+        sqlx::query("UPDATE grid_at_clock SET expiry_secs=60 WHERE rule_id='news'")
+            .execute(&eng.pool).await.unwrap();
+        sqlx::query("UPDATE media SET duration_ms=90000 WHERE rel_path='music/a.mp3'")
+            .execute(&eng.pool).await.unwrap();
+        let long = crate::media::ScannedMedia {
+            rel_path: "music/b.mp3".into(), title: None, artist: None, album: None,
+            year: None, genres: vec![], duration_ms: 300_000, size_bytes: 1, mtime_ns: 0,
+        };
+        let files = vec![long.clone(),
+            crate::media::ScannedMedia { rel_path: "music/a.mp3".into(), duration_ms: 90_000, ..long.clone() },
+            crate::media::ScannedMedia { rel_path: "news/n.mp3".into(), duration_ms: 60_000, ..long }];
+        crate::media_index::replace_library(&eng.pool, &files, 1000).await.unwrap();
+        sqlx::query("INSERT INTO shuffle_cycle (playlist_ref) VALUES ('music')")
+            .execute(&eng.pool).await.unwrap();
+        // The saved bag would choose the five-minute song on an unlimited retry.
+        sqlx::query("INSERT INTO shuffle_member (playlist_ref,media_uuid,position)
+            SELECT 'music',media_uuid,CASE rel_path WHEN 'music/b.mp3' THEN 0 ELSE 1 END
+            FROM media WHERE rel_path LIKE 'music/%'")
+            .execute(&eng.pool).await.unwrap();
+        let restarted = GridEngine::new(eng.pool.clone(), "UTC");
+        let r = restarted.next_media(at(9,14)).await.unwrap();
+        assert_eq!(r.media_path.as_deref(), Some("music/a.mp3"));
+        let incidents = restarted.control.incidents_since(Epoch(0));
+        assert_eq!(incidents.len(), 1);
+        assert_eq!(incidents[0].kind, crate::station_control::IncidentKind::BoundaryNoFit);
+        let next = restarted.next_media(Epoch(at(9,15).0 + 30)).await.unwrap();
+        assert_eq!(next.decision.origin, Origin::AtClockHard);
+        assert_eq!(next.media_path.as_deref(), Some("news/n.mp3"));
+        let used: i64 = sqlx::query_scalar("SELECT used FROM shuffle_member
+            WHERE playlist_ref='music' AND media_uuid=(SELECT media_uuid FROM media WHERE rel_path='music/b.mp3')")
+            .fetch_one(&eng.pool).await.unwrap();
+        assert_eq!(used, 0, "deferred long track remains in the saved bag");
+    }
+    #[tokio::test]
     async fn boundary_searches_other_grid_sources_before_accepting_an_overrun() {
         let (_d, eng) = hard_fixture(true).await;
         sqlx::query("UPDATE media SET duration_ms=300000 WHERE rel_path='jingle/j.mp3'")
@@ -2417,6 +2498,18 @@ mod tests {
         let track = eng.next_media(at(9,14)).await.unwrap();
         assert_eq!(track.media_path.as_deref(), Some("music/a.mp3"));
         assert!(eng.control.incidents_since(Epoch(0)).is_empty());
+    }
+    #[tokio::test]
+    async fn late_budget_stops_when_the_clock_occurrence_changes() {
+        let (_d, eng) = hard_fixture(false).await;
+        sqlx::query("UPDATE grid_at_clock SET every_minutes=NULL, at_hour=9,
+            at_minute=59, expiry_secs=300 WHERE rule_id='news'")
+            .execute(&eng.pool).await.unwrap();
+        let grid = grid_index::load_grid(&eng.pool).await.unwrap();
+        let state = grid_store::load_playback_state(&eng.pool).await.unwrap();
+        // A fixed-hour mark stops applying at 10:00 despite its longer expiry.
+        let budget = eng.hard_expiry_budget(&grid, &state, at(9,58), at(9,59)).await.unwrap();
+        assert_eq!(budget, Some(119_000));
     }
     #[tokio::test]
     async fn wake_drops_missed_toph_but_keeps_the_next_rendezvous() {

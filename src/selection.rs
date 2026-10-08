@@ -701,8 +701,11 @@ async fn resolve_group_rotation(
             }
             // `skip`: drop this member and try the next one this turn.
             Err(SelectionError::NoFit) if max_duration_ms.is_some() => {
-                // Borrow a fitting track without consuming the deferred passage.
-                for offset in 1..n {
+                // Sequence members must stay ordered: never replay an intro or play an outro early.
+                // Shuffle may borrow once while this passage is deferred; repeated pulls
+                // must not drain and refill a singleton bag in a loop.
+                let borrow_limit = if shuffle && !st.boundary_borrowed { n } else { 1 };
+                for offset in 1..borrow_limit {
                     let other = &sel.members[order[(st.member_idx + offset) % n]];
                     let key = crate::playlist::resolve_member_ref(group_ref, &other.r#ref)
                         .map_err(|_| SelectionError::PlaylistNotFound(other.r#ref.clone()))?;
@@ -2580,6 +2583,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn boundary_sequence_never_replays_intro_or_borrows_outro() {
+        let (_d, pool) = fresh_db().await;
+        let mut intro = media("intro.mp3", "", 0, &[]);
+        intro.duration_ms = 20_000;
+        let mut hit = media("hit.mp3", "", 0, &[]);
+        hit.duration_ms = 300_000;
+        let mut outro = media("outro.mp3", "", 0, &[]);
+        outro.duration_ms = 20_000;
+        media_index::replace_library(&pool, &[intro, hit, outro], 1000).await.unwrap();
+        for key in ["intro", "hit", "outro"] {
+            add_playlist(&pool, key, &format!(
+                "name=\"{key}\"\n[selection]\nmode=\"static\"\norder=\"shuffle\"\nfiles=[\"{key}.mp3\"]"
+            )).await;
+        }
+        add_playlist(&pool, "show",
+            "name=\"show\"\n[selection]\nmode=\"group\"\nstrategy=\"sequence\"\nmembers=[{ref=\"intro\"},{ref=\"hit\"},{ref=\"outro\"}]\n").await;
+        let first = resolve_turn(&pool, None, 1000, "show", TurnStart::Fresh).await.unwrap();
+        assert_eq!(first.resolved.into_token(), "intro.mp3");
+        let before = crate::group_state::get(&pool, "show").await.unwrap();
+        for t in 1020..1025 {
+            assert!(matches!(resolve_turn_fitting(&pool, None, t, "show",
+                TurnStart::Continue, 60_000).await, Err(SelectionError::NoFit)));
+            assert_eq!(crate::group_state::get(&pool, "show").await.unwrap(), before);
+        }
+        let next = resolve_turn(&pool, None, 1200, "show", TurnStart::Continue).await.unwrap();
+        assert_eq!(next.resolved.into_token(), "hit.mp3");
+        let last = resolve_turn(&pool, None, 1500, "show", TurnStart::Continue).await.unwrap();
+        assert_eq!(last.resolved.into_token(), "outro.mp3");
+        assert!(!last.holds);
+    }
+    #[tokio::test]
     async fn boundary_borrows_a_short_member_and_preserves_the_deferred_quota() {
         let (_d, pool) = fresh_db().await;
         let mut long = media("long.mp3", "", 0, &[]);
@@ -2592,7 +2626,7 @@ mod tests {
                 "name = \"{key}\"\n[selection]\nmode = \"static\"\norder = \"shuffle\"\nfiles = [\"{path}\"]"
             )).await;
         }
-        for strategy in ["sequence", "shuffle", "weighted"] {
+        for strategy in ["shuffle", "weighted"] {
             let toml = format!(
                 "name = \"show\"\n[selection]\nmode = \"group\"\nstrategy = \"{strategy}\"\nmembers = [{{ref=\"long\",take=3}},{{ref=\"short\"}}]"
             );
@@ -2609,6 +2643,9 @@ mod tests {
                 let st = crate::group_state::get(&pool, "show").await.unwrap();
                 assert_eq!((st.member_idx, st.take_count), (0,0));
                 assert!(st.boundary_borrowed);
+                assert!(matches!(resolve_turn_fitting(&pool, None, 1010, "show",
+                    TurnStart::Continue, 45_000).await, Err(SelectionError::NoFit)));
+                assert_eq!(crate::group_state::get(&pool, "show").await.unwrap(), st);
                 let resumed = resolve_turn(&pool, None, 1100, "show", TurnStart::Continue).await.unwrap();
                 assert_eq!(resumed.resolved.into_token(), "long.mp3");
                 let st = crate::group_state::get(&pool, "show").await.unwrap();

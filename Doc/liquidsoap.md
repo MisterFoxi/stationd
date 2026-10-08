@@ -71,7 +71,7 @@ continue sa piste. Deux mécanismes évitent que stationd redémarré soit aveug
   joué avant le redémarrage (marque `unplayed_only`). Ni recomptée, ni
   retamponnée (déjà fait par l'instance précédente). Ignoré si Liquidsoap a
   déjà signalé un démarrage à la nouvelle instance. En pause : la piste gelée
-  est gardée pour le `resume`. Liquidsoap injoignable = il démarre avec
+  est gardée pour juger son passage partiel, puis abandonnée au `resume`. Liquidsoap injoignable = il démarre avec
   stationd (il signalera sa première piste) ; script sans `stationd.on_air`
   = avertissement « redémarrer Liquidsoap » (le script est réécrit au
   démarrage de stationd).
@@ -172,7 +172,7 @@ Liquidsoap ne signale que les **débuts**. Une de nos pistes **quitte
 l'antenne** quand autre chose démarre : piste suivante (ou `rid` inconnu),
 bruit de fond après un `stop`, fallback. Le pont compte le **temps réellement
 passé à l'antenne** : une pause le gèle (bruit de fond pendant que l'état est
-`paused`), le `resume` le relance ; une piste gelée puis abandonnée (skip en
+`paused`), le `resume` abandonne ce morceau ; une piste gelée puis abandonnée (skip en
 pause) quitte l'antenne avec son temps gelé. À la sortie,
 `GridEngine::on_track_left` compare ce temps à la durée indexée :
 **jouée en entier** si `temps + 15 s ≥ durée` (la marge couvre le crossfade
@@ -243,8 +243,8 @@ donc ni `:` ni `,` (refusé par `dj hash`).
   la piste gelée, **sans crossfade** (`stationd.no_cross` : sinon la traîne
   tamponnée par `cross` se mêle à la piste de retour, vu en réel). La grille
   est donc résolue à l'heure du retour ; fondu d'entrée de `fade` s. En
-  pause : rien n'est sauté, le bruit de fond reste, `resume` reprend la
-  piste gelée.
+  pause : rien n'est sauté, le média de pause reste. Au `resume`, la piste
+  gelée est abandonnée et la boucle de pause se termine avant une nouvelle sélection.
 - **Double déconnexion** : après `stop()`, le harbor rappelle
   `on_disconnect` quand son fil d'alimentation s'arrête (~6 s plus tard, vu
   sur 2.2.4) — un second retour sauterait la piste de retour. Gardé par
@@ -275,7 +275,7 @@ Liquidsoap, qui doit être le groupe partagé `stationd`) et y enregistre :
 | Commande | Effet |
 |---|---|
 | `stationd.pause` | **immédiat** : la piste en cours est gelée (plus lue), le bruit de fond passe à l'antenne |
-| `stationd.resume` | la piste gelée reprend **là où elle s'était arrêtée** |
+| `stationd.resume` | abandonne la piste gelée et le préchargement ; termine la boucle de pause en cours, puis passe une nouvelle sélection |
 | `stationd.skip` | la piste en cours est abandonnée, la piste préparée démarre (crossfade) ; en pause, elle démarrera au resume |
 | `stationd.flush` | vide la piste déjà préparée (préchargée) : le pull redemande à stationd |
 | `stationd.interrupt <uri>` | override hard : la file `interrupt` coupe l'antenne maintenant ; la piste coupée est abandonnée (skip) ; à la fin de l'insert, la piste préparée démarre |
@@ -534,9 +534,10 @@ le dernier titre dans Icecast. La boucle de bruit remplace ses propres tags
 par ces mêmes valeurs vides ; un filtre de dédoublonnage avant les sorties
 évite de republier une mise à jour identique à chaque tour de boucle.
 
-À la reprise, les métadonnées conservées par la source du morceau gelé sont
-réinsérées sans créer de nouveau début de piste : l'historique de stationd
-continue le même passage. Le filtre de sortie se place après le fichier
+À la reprise, le morceau gelé et le préchargement sont abandonnés. Le média
+de pause termine sa boucle en cours, puis une nouvelle sélection commence,
+avec ses propres métadonnées et son nouveau début de piste. Le filtre de sortie
+se place après le fichier
 custom_include et ne change pas les callbacks du pont de diffusion.
 
 Après recompilation de stationd et régénération du script : make check-liq,
@@ -609,6 +610,10 @@ Sans pause_path, halted_path reste utilisé. Les chemins relatifs sont résolus
 depuis le répertoire de lancement. Le fichier doit être lisible par stationd et
 Liquidsoap ; les contrôles au démarrage sont identiques à ceux de halted_path.
 
-La pause conserve le morceau courant et la reprise continue ce morceau.
+La pause fige le morceau courant. La reprise abandonne ce morceau et les
+demandes préparées, reconstruit le pull pour vider aussi le fondu, puis termine
+la boucle de pause en cours avant de diffuser une nouvelle sélection. Si cette
+sélection n'est pas prête, une boucle complète supplémentaire est diffusée.
+Le réveil après veille termine également la boucle du média de veille en cours.
 Le média de pause ne consomme aucun titre du sac. La configuration est intégrée
 au script Liquidsoap généré et prend effet au prochain chargement de ce script.
