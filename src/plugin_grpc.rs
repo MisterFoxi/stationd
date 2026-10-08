@@ -106,6 +106,11 @@ fn map_value(v: serde_json::Value) -> PluginDbValue {
 
 #[tonic::async_trait]
 impl PluginService for PluginGrpc {
+    async fn admin(&self, request: Request<plugin::PluginAdminRequest>) -> Result<Response<plugin::PluginAdminResponse>, Status> {
+        let req = request.into_inner();
+        let payload = self.handle.admin(&req.name, req.payload).await.map_err(Status::failed_precondition)?;
+        Ok(Response::new(plugin::PluginAdminResponse { payload }))
+    }
     async fn list(
         &self,
         _request: Request<PluginListRequest>,
