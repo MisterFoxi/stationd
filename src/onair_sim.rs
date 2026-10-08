@@ -425,12 +425,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn boundary_sequence_intro_airs_once_then_waits_for_its_hit_across_toph() {
+        let (_d, path, pool) = station_with(300, "rotation", &[
+            ("rotation", "name=\"rotation\"\n[selection]\nmode=\"static\"\norder=\"shuffle\"\nfiles=[\"music/1.mp3\"]\n"),
+            ("hit", "name=\"hit\"\n[selection]\nmode=\"static\"\norder=\"shuffle\"\nfiles=[\"music/2.mp3\"]\n"),
+            ("show", "name=\"show\"\n[selection]\nmode=\"group\"\nstrategy=\"sequence\"\nmembers=[{ref=\"news\"},{ref=\"hit\"}]\n"),
+        ]).await;
+        sqlx::query("UPDATE media SET duration_ms=20000 WHERE rel_path IN ('news/n.mp3','music/1.mp3')")
+            .execute(&pool).await.unwrap();
+        insert_rule(&pool, &rule("Hit's hot", RuleKind::Every {
+            playlist_ref: "show".into(), cadence: crate::resolver::Cadence::Elapsed(3600),
+        })).await.unwrap();
+        let control = StationControl::new_in_memory();
+        let before = dump(&pool).await;
+        let out = simulate(SimStart { live_db: &path, tz: "UTC", control: &control,
+            plugins: None, at: at(9,14), at_known: true, count: 5 }).await;
+        assert_eq!(out.tracks.iter().map(|t| t.media.as_str()).collect::<Vec<_>>(),
+            ["news/n.mp3", "music/1.mp3", "music/1.mp3", "news/n.mp3", "music/2.mp3"],
+            "{:?}", out.notes);
+        assert_eq!(out.tracks.iter().filter(|t| t.media == "news/n.mp3" &&
+            t.rule_id.as_deref() == Some("Hit's hot")).count(), 1);
+        assert_eq!(out.tracks[3].starts_at, Some(at(9,15)));
+        assert_eq!(out.tracks[4].rule_id.as_deref(), Some("Hit's hot"));
+        assert!(out.tracks.iter().all(|t| t.cut_at.is_none()));
+        assert_eq!(dump(&pool).await, before);
+        assert_eq!(airs(&pool, at(9,14), 5).await,
+            out.tracks.into_iter().map(|t| t.media).collect::<Vec<_>>());
+        assert_eq!(crate::group_state::get(&pool, "show").await.unwrap().member_idx, 0);
+        assert!(crate::grid_store::get_hold(&pool).await.unwrap().is_none());
+    }
+    #[tokio::test]
     async fn boundary_borrowing_in_a_group_matches_the_real_air_and_keeps_the_quota() {
         let (_d, path, pool) = station_with(300, "mix", &[
-            ("mix", "name=\"mix\"\n[selection]\nmode=\"group\"\nstrategy=\"sequence\"\nmembers=[{ref=\"music\",take=3},{ref=\"news\"}]\n"),
+            ("mix", "name=\"mix\"\n[selection]\nmode=\"group\"\nstrategy=\"shuffle\"\nmembers=[{ref=\"music\",take=3},{ref=\"news\"}]\n"),
         ]).await;
         sqlx::query("UPDATE media SET duration_ms=60000 WHERE rel_path='news/n.mp3'")
             .execute(&pool).await.unwrap();
+        crate::group_state::set(&pool, "mix", &crate::group_state::GroupState {
+            permutation: Some(vec![0,1]), ..Default::default()
+        }).await.unwrap();
         let sim = simulated(&path, at(9,59), 4).await;
         assert_eq!(sim[0], "news/n.mp3", "short member borrowed");
         assert_eq!(sim[1], "news/n.mp3", "clock rendezvous kept");
