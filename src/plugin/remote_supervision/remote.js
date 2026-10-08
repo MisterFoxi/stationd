@@ -24,11 +24,13 @@ function timeText(value,zone){if(!value)return'Inconnue';try{return new Date(val
 function list(target,items){target.replaceChildren(...items.map(text=>{const item=document.createElement('li');item.textContent=text;return item;}));}
 function descriptionList(target,entries){target.replaceChildren(...entries.flatMap(([name,value])=>{const term=document.createElement('dt'),data=document.createElement('dd');term.textContent=name;data.textContent=value;return[term,data];}));}
 const cards=new Map();
+let consoleEnabled=false;
 function renderNetwork(data){
   const keep=new Set();
   for(const station of data.stations){
     keep.add(station.id);let card=cards.get(station.id);
-    if(!card){const element=document.createElement('article');element.className='station';const title=document.createElement('h2'),link=document.createElement('a');link.href=`/station/${encodeURIComponent(station.id)}`;title.append(link);const status=document.createElement('p'),media=document.createElement('p'),audience=document.createElement('p'),observed=document.createElement('p'),warnings=document.createElement('ul');observed.className='muted';element.append(title,status,media,audience,observed,warnings);card={element,link,status,media,audience,observed,warnings};cards.set(station.id,card);document.getElementById('stations').append(element);}
+    if(!card){const element=document.createElement('article');element.className='station';const title=document.createElement('h2'),link=document.createElement('a');link.href=`/station/${encodeURIComponent(station.id)}`;title.append(link);const status=document.createElement('p'),media=document.createElement('p'),audience=document.createElement('p'),observed=document.createElement('p'),warnings=document.createElement('ul');observed.className='muted';const consoleLink=document.createElement('a');consoleLink.className='console-action';consoleLink.href=`/station/${encodeURIComponent(station.id)}/console?open=1`;consoleLink.textContent='Ouvrir la TUI';consoleLink.hidden=true;element.append(title,status,media,audience,observed,warnings,consoleLink);card={element,link,status,media,audience,observed,warnings,consoleLink};cards.set(station.id,card);document.getElementById('stations').append(element);}
+    card.consoleLink.hidden=!(consoleEnabled&&station.role==='admin');card.consoleLink.setAttribute('aria-label',`Ouvrir la TUI de ${station.label}`);
     card.link.textContent=station.label;card.element.classList.toggle('stale',station.stale||station.connection==='offline');
     card.status.textContent=`${connections[station.connection]||'Connexion inconnue'} · ${station.stale?'Dernier état : ':''}${states[station.state]||'État inconnu'}`;
     card.media.textContent=mediaText(station.media,station.on_air_kind);card.audience.textContent=audienceText(station.audience);
@@ -56,6 +58,7 @@ function renderStation(station){
 }
 async function startDashboard(){
   let context;try{context=await request('/api/session');}catch(error){if(error.status===401||error.status===403)location.assign('/login');else message.textContent='Serveur indisponible. Rechargez la page pour réessayer.';return;}
+  consoleEnabled=context.console_enabled===true;
   document.getElementById('account').textContent=context.name;
   document.getElementById('logout').addEventListener('click',event=>run(event.target,async()=>{await request('/auth/logout',{},context.csrf_token);location.assign('/login');}));
   const id=document.body.dataset.stationId,isNetwork=page==='network';
