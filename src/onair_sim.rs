@@ -491,6 +491,35 @@ mod tests {
         assert!(control.incidents_since(Epoch(0)).is_empty());
     }
     #[tokio::test]
+    async fn late_fitting_track_preserves_toph_in_preview_and_real_playback() {
+        let (_d, path, pool) = station(300).await;
+        sqlx::query("UPDATE grid_at_clock SET every_minutes=NULL, at_minute=0, expiry_secs=60 WHERE rule_id='news'")
+            .execute(&pool).await.unwrap();
+        sqlx::query("UPDATE media SET duration_ms=90000 WHERE rel_path='music/1.mp3'")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO shuffle_cycle (playlist_ref) VALUES ('music')")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO shuffle_member (playlist_ref,media_uuid,position)
+            SELECT 'music',media_uuid,CASE rel_path WHEN 'music/1.mp3' THEN 9 ELSE 0 END
+            FROM media WHERE rel_path LIKE 'music/%'")
+            .execute(&pool).await.unwrap();
+        let before = dump(&pool).await;
+        let control = StationControl::new_in_memory();
+        let out = simulate(SimStart { live_db: &path, tz: "UTC", control: &control,
+            plugins: None, at: at(9,59), at_known: true, count: 3 }).await;
+        assert_eq!(out.tracks[0].media, "music/1.mp3");
+        assert_eq!(out.tracks[1].media, "news/n.mp3");
+        assert_eq!(out.tracks[1].starts_at, Some(Epoch(at(10,0).0 + 30)));
+        assert!(out.tracks.iter().all(|t| t.cut_at.is_none()));
+        assert!(out.incidents.iter().any(|i|
+            i.kind == crate::station_control::IncidentKind::BoundaryNoFit));
+        assert!(!out.incidents.iter().any(|i|
+            i.kind == crate::station_control::IncidentKind::BoundaryMissed));
+        assert_eq!(dump(&pool).await, before);
+        let expected: Vec<_> = out.tracks.iter().map(|t| t.media.clone()).collect();
+        assert_eq!(airs(&pool, at(9,59), 3).await, expected);
+    }
+    #[tokio::test]
     async fn hour_toph_fits_remaining_bag_and_resumes_without_replaying() {
         let (_d, path, pool) = station(420).await;
         for (path, ms) in [("music/1.mp3", 300_000), ("music/2.mp3", 240_000), ("music/3.mp3", 60_000)] {

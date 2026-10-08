@@ -90,7 +90,11 @@ Cet état est persisté dans group_state.boundary_borrowed ;
 la simulation le copie et applique le même algorithme.
 
 Si le groupe ne fournit rien d'assez court, toutes les autres sources applicables
-de la grille sont essayées avant le repli sans limite de durée. Ce repli conserve
+de la grille sont essayées. En cas d'échec, une deuxième recherche choisit un titre
+finissant au plus tard à l'expiration du rendez-vous (dans une limite de dix minutes).
+Elle reste soumise aux mêmes sacs et contraintes, et vérifie que l'occurrence reste
+applicable à cette heure. Le repli sans limite de durée vient seulement après ces
+deux recherches. Ce repli conserve
 la continuité : aucun titre commencé n'est coupé.
 
 « À suivre » expose deux notes spécifiques (rule, playlist, at) :
