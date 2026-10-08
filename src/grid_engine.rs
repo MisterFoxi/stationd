@@ -1281,6 +1281,24 @@ impl GridEngine {
         Ok(decision)
     }
 
+    /// Reconcile sleep at the actual wake instant, before projecting a future prefetch.
+    pub(crate) async fn reconcile_wake(&self, now: Epoch) -> Result<(), EngineError> {
+        if self.control.take_woken() {
+            // A wake starts the programme of now, without catching up clock
+            // occurrences missed while asleep. Only past marks are consumed.
+            let local = clock::to_local_now(now, &self.tz)?;
+            let grid = grid_index::load_grid(&self.pool).await?;
+            for token in crate::resolver::missed_at_clock_marks(local, &grid) {
+                grid_store::record_at_clock_taken(&self.pool, &token, now).await?;
+            }
+            if let Some(hold) = grid_store::get_hold(&self.pool).await? {
+                tracing::info!(playlist = %hold.playlist_ref, "woke from sleep: held group released");
+                self.end_hold(&hold.playlist_ref, true).await?;
+            }
+        }
+        Ok(())
+    }
+
     /// Resolve the source AND the concrete media to pull, with **grid
     /// fallthrough**: ask the resolver for the applicable sources in priority
     /// order and keep the first that actually yields a media. A source whose
@@ -1318,19 +1336,7 @@ impl GridEngine {
                 log_id: None,
             });
         }
-        if self.control.take_woken() {
-            // A wake starts the programme of now, without catching up clock
-            // occurrences missed while asleep. Only past marks are consumed.
-            let local = clock::to_local_now(now, &self.tz)?;
-            let grid = grid_index::load_grid(&self.pool).await?;
-            for token in crate::resolver::missed_at_clock_marks(local, &grid) {
-                grid_store::record_at_clock_taken(&self.pool, &token, now).await?;
-            }
-            if let Some(hold) = grid_store::get_hold(&self.pool).await? {
-                tracing::info!(playlist = %hold.playlist_ref, "woke from sleep: held group released");
-                self.end_hold(&hold.playlist_ref, true).await?;
-            }
-        }
+        self.reconcile_wake(now).await?;
         if let Some(resolved) = self.next_override(now).await? {
             return Ok(resolved);
         }
