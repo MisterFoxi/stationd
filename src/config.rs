@@ -428,6 +428,9 @@ pub struct LiquidsoapConfig {
     /// the file shipped in the production image ([`DEFAULT_HALTED_PATH`]).
     #[serde(default = "default_ls_halted_path")]
     pub halted_path: PathBuf,
+    /// Optional media looped specifically while paused; absent uses halted_path.
+    #[serde(default)]
+    pub pause_path: Option<PathBuf>,
     #[serde(default)]
     pub crossfade: CrossfadeConfig,
     /// Loudness normalisation + compression on the air chain (same settings
@@ -676,7 +679,9 @@ impl LiquidsoapConfig {
         use std::io::Read;
         use std::os::unix::fs::MetadataExt;
         let mut warnings = Vec::new();
-        for (what, path) in [("fallback_path", &self.fallback_path), ("halted_path", &self.halted_path)] {
+        let files = [("fallback_path", &self.fallback_path), ("halted_path", &self.halted_path)]
+            .into_iter().chain(self.pause_path.as_ref().map(|p| ("pause_path", p)));
+        for (what, path) in files {
             let meta = std::fs::metadata(path)
                 .map_err(|e| format!("[liquidsoap] {what} {path:?}: {e} (Liquidsoap cannot start without it)"))?;
             if !meta.is_file() {
@@ -1056,6 +1061,10 @@ mod tests {
         assert_eq!(ls.outputs[0].format, OutputFormat::Mp3);
         // Air files: explicit here; absent = the files of the production image.
         assert_eq!(ls.fallback_path, PathBuf::from("/srv/error.mp3"));
+        assert_eq!(ls.pause_path, None);
+        let with_pause = LS.replace("[liquidsoap]", "[liquidsoap]\npause_path = \"/srv/pause.mp3\"");
+        assert_eq!(load_str(&with_pause).unwrap().liquidsoap.unwrap().pause_path,
+            Some(PathBuf::from("/srv/pause.mp3")));
         let bare = LS.replace("fallback_path = \"/srv/error.mp3\"", "").replace("halted_path = \"/srv/noise.mp3\"", "");
         let ls = load_str(&bare).unwrap().liquidsoap.unwrap();
         assert_eq!(ls.fallback_path, PathBuf::from(DEFAULT_FALLBACK_PATH));
@@ -1266,6 +1275,11 @@ mod tests {
         ls.fallback_path = good.clone();
         ls.halted_path = good.clone();
         assert_eq!(ls.check_air_files(), Ok(vec![]));
+        ls.pause_path = Some(good.clone());
+        assert_eq!(ls.check_air_files(), Ok(vec![]));
+        ls.pause_path = Some(dir.path().join("missing-pause.mp3"));
+        assert!(ls.check_air_files().unwrap_err().contains("pause_path"));
+        ls.pause_path = None;
 
         // Group-only (640 / 660): fine for stationd, a warning for Liquidsoap.
         ls.fallback_path = file("error.mp3", b"ID3", 0o660);

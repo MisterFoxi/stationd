@@ -433,6 +433,19 @@ def stationd.reset_pull() =
 end
 "##,
     );
+    // A dedicated pause loop takes precedence over the ordinary halted source.
+    // Keep the original chain when the optional setting is absent.
+    let (pause_source, pause_transition, pause_available, pause_metadata) =
+        if let Some(path) = &ls.pause_path {
+            (
+                format!("pause_media = single(id=\"stationd_pause\", {})\npause_media = metadata.map(update=false, strip=false, insert_missing=true, fun (_) -> stationd.idle_metadata(), pause_media)\n", liq_path(&absolute(path))),
+                "fun (_, b) -> stationd.switched_to(\"halted\", b),\n    ",
+                "source.available(pause_media, {stationd.paused()}),\n    ",
+                "source.methods(pause_media).insert_metadata(new_track=false, stationd.idle_metadata())\n    ",
+            )
+        } else {
+            (String::new(), "", "", "")
+        };
     o.push_str(&format!(
         "\n# Liquidsoap's own sources. Plain `single` on a local file (no annotate:)\n\
          # stays infallible.\n\
@@ -440,7 +453,7 @@ end
          # The idle loop must never keep the previous song's ICY title.\n\
          halted_noise = metadata.map(update=false, strip=false, insert_missing=true,\n  \
            fun (_) -> stationd.idle_metadata(), halted_noise)\n\
-         safety = single(id=\"stationd_fallback\", {fallback})\n\
+         {pause_source}safety = single(id=\"stationd_fallback\", {fallback})\n\
          startup = blank(id=\"stationd_startup\")\n\n\
          # Relay of a `remote` playlist: idle until stationd answers `relay`.\n\
          relay = input.http(id=\"stationd_relay\", start=false, {{stationd.relay_url()}})\n\
@@ -476,8 +489,8 @@ end
          # would go unreported. Off the streaming thread (HTTP call).\n\
          def stationd.switched_to(kind, b) =\n  \
            if kind == \"halted\" then\n    \
-             source.methods(halted_noise).insert_metadata(new_track=false, stationd.idle_metadata())\n  \
-           end\n  \
+             source.methods(halted_noise).insert_metadata(new_track=false, stationd.idle_metadata())\n    \
+             {pause_metadata}end\n  \
            thread.run(fast=false, {{stationd.report([], kind)}})\n  \
            b\n\
          end\n\n\
@@ -487,7 +500,7 @@ end
            transitions=[\n    \
              fun (_, b) -> stationd.switched_to(\"relay\", b),\n    \
              fun (_, b) -> b,\n    \
-             fun (_, b) -> stationd.switched_to(\"halted\", b),\n    \
+             {pause_transition}fun (_, b) -> stationd.switched_to(\"halted\", b),\n    \
              fun (_, b) -> b,\n    \
              fun (_, b) -> stationd.switched_to(\"fallback\", b)\n  \
            ],\n  \
@@ -496,7 +509,7 @@ end
              # done (else the tail would be cut, then replayed at the exit)\n    \
              source.available(relay, {{stationd.relaying() and not stationd.paused() and not pull.is_ready()}}),\n    \
              source.available(pull, {{not stationd.paused()}}),\n    \
-             source.available(halted_noise, {{stationd.halted() or stationd.paused()}}),\n    \
+             {pause_available}source.available(halted_noise, {{stationd.halted() or stationd.paused()}}),\n    \
              source.available(startup, {{stationd.loading()}}),\n    \
              safety\n  \
            ]\n\
@@ -523,7 +536,7 @@ end
 # ─── control commands (socket, namespace `stationd`) ──────────────────────
 def stationd.cmd_pause(_) =
   stationd.paused := true
-  log.important(label="stationd", "pause: halted noise on air, current track frozen")
+  log.important(label="stationd", "pause: idle media on air, current track frozen")
   "OK"
 end
 
@@ -910,6 +923,7 @@ mod tests {
             api_token: "tok".into(),
             fallback_path: PathBuf::from("/srv/error.mp3"),
             halted_path: PathBuf::from("/srv/noise.mp3"),
+            pause_path: None,
             crossfade: CrossfadeConfig::default(),
             normalize: false,
             custom_include: None,
@@ -1175,10 +1189,14 @@ mod tests {
         let c = metadata_cfg();
         let dir = tempfile::tempdir().unwrap();
         let full = dir.path().join("full.liq");
-        for live in [None, Some(live_cfg())] {
-            std::fs::write(&full, render(&c, live.as_ref(), "Radio")).unwrap();
-            let check = std::process::Command::new("liquidsoap").arg("--check").arg(&full).output().unwrap();
-            assert!(check.status.success(), "{}\n{}", String::from_utf8_lossy(&check.stdout), String::from_utf8_lossy(&check.stderr));
+        for pause in [None, Some(PathBuf::from("/srv/pause jingle.mp3"))] {
+            let mut checked = c.clone();
+            checked.pause_path = pause;
+            for live in [None, Some(live_cfg())] {
+                std::fs::write(&full, render(&checked, live.as_ref(), "Radio")).unwrap();
+                let check = std::process::Command::new("liquidsoap").arg("--check").arg(&full).output().unwrap();
+                assert!(check.status.success(), "{}\n{}", String::from_utf8_lossy(&check.stdout), String::from_utf8_lossy(&check.stderr));
+            }
         }
         let mapper = render_metadata_rules(&c.metadata_rules);
         let mapper = mapper.split("\nradio = metadata.map").next().unwrap();
@@ -1209,6 +1227,19 @@ mod tests {
         assert!(result.status.success(), "{}\n{}", String::from_utf8_lossy(&result.stdout), String::from_utf8_lossy(&result.stderr));
     }
 
+    #[test]
+    fn dedicated_pause_media_is_optional_and_precedes_the_halted_loop() {
+        let mut c = cfg();
+        assert!(!render(&c, None, "Radio").contains("stationd_pause"));
+        c.pause_path = Some(PathBuf::from("/srv/pause jingle.mp3"));
+        let script = render(&c, None, "Radio");
+        assert!(script.contains("pause_media = single(id=\"stationd_pause\", \"/srv/pause jingle.mp3\")"));
+        let pause = script.find("source.available(pause_media, {stationd.paused()})").unwrap();
+        let halted = script.find("source.available(halted_noise,").unwrap();
+        assert!(pause < halted);
+        assert!(script.contains("source.available(pull, {not stationd.paused()})"));
+        assert!(script.contains("source.methods(pause_media).insert_metadata(new_track=false, stationd.idle_metadata())"));
+    }
     #[test]
     fn write_only_when_changed() {
         let dir = tempfile::tempdir().unwrap();

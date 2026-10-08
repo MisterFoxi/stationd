@@ -134,6 +134,7 @@ level = "info"
 #                                           # default: /usr/share/stationd/error.mp3
 #                                           # (production image only)
 # halted_path   = "./radio/bruit.mp3"       # looped while paused/sleeping/stopped
+# pause_path   = "/path/to/pause-jingle.mp3" # optional pause-only loop; absent uses halted_path
 #                                           # default: /usr/share/stationd/bruit.mp3
 # normalize     = false                     # normalize + compress on the air chain
 # custom_include = "/etc/stationd/custom.liq"  # sees `radio`, may reassign it

@@ -373,6 +373,7 @@ api_token      = "change-me"                 # ASCII shared secret
 control_socket = "/run/stationd/liquidsoap.sock"  # created by the image
 fallback_path  = "./radio/error.mp3"         # safety net (default: the production image's)
 halted_path    = "./radio/bruit.mp3"         # looped while paused/sleeping/stopped (idem)
+# pause_path   = "/path/to/pause-jingle.mp3" # optional pause-only loop; absent uses halted_path
 
 [[liquidsoap.output]]
 host     = "127.0.0.1"
