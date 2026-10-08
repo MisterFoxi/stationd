@@ -2,6 +2,7 @@
 //! A dedicated runtime lets the synchronous plugin unload join the server even
 //! when the plugin actor itself runs on a single-thread Tokio runtime.
 mod auth;
+mod console;
 mod live;
 mod web;
 use super::{Host, Plugin};
@@ -60,6 +61,8 @@ struct Config {
     password_max_length: usize,
     #[serde(default = "default_max_event_streams")]
     max_event_streams: usize,
+    #[serde(default)]
+    console: console::Settings,
 }
 
 fn default_max_event_streams() -> usize {
@@ -205,6 +208,7 @@ impl Config {
         {
             return Err("password lengths must satisfy 1 <= password_min_length <= password_max_length <= 256".into());
         }
+        self.console.validate()?;
         Ok(())
     }
 }
@@ -291,11 +295,11 @@ impl RemoteSupervision {
             let _entered = runtime.enter();
             tokio::net::TcpListener::from_std(listener).map_err(|e| format!("{NAME}: {e}"))?
         };
-        let (app, live) = match &self.auth {
+        let (app, services) = match &self.auth {
             Some(auth) => {
                 let web = web::Web::new(auth.clone(), &self.config);
-                let live = web.live.clone();
-                (probe_router().merge(web::routes(web)), Some(live))
+                let services = (web.live.clone(), web.console.clone());
+                (probe_router().merge(web::routes(web)), Some(services))
             }
             None => (probe_router(), None),
         };
@@ -305,9 +309,10 @@ impl RemoteSupervision {
         let grace = Duration::from_secs(self.config.shutdown_timeout_seconds);
         let server_thread = thread::Builder::new().name(NAME.into()).spawn(move || {
             runtime.block_on(async move {
-                if let Some(live) = live { live.start(); }
+                if let Some((live, console)) = &services { live.start(); console.start(); }
                 let serving = axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).with_graceful_shutdown(async move {
                     let _ = shutdown_rx.await;
+                    if let Some((_, console)) = &services { console.shutdown(); }
                     let _ = stopping.send(());
                 });
                 tokio::pin!(stopped);
@@ -452,7 +457,8 @@ mod tests {
         }
         let mut value = table();
         value.get_mut("stations").unwrap().as_array_mut().unwrap()[0]
-            .as_table_mut().unwrap()
+            .as_table_mut()
+            .unwrap()
             .insert("allow_plaintext_grpc".into(), toml::Value::Boolean(true));
         let opted_in = Config::parse(&value).unwrap();
         assert!(opted_in.stations[0].allow_plaintext_grpc);

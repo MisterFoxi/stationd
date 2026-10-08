@@ -69,7 +69,7 @@ pub fn lazy_channel(addr: &str) -> anyhow::Result<Channel> {
         .map_err(|e| anyhow::anyhow!(crate::tr!("rpc-bad-address", addr = addr.to_string(), reason = e.to_string())))?
         .connect_timeout(Duration::from_secs(3))
         .timeout(READ_TIMEOUT);
-    Ok(endpoint.connect_lazy())
+    Ok(secure_endpoint(endpoint)?.connect_lazy())
 }
 
 /// Canal pour les opérations longues (scan de la bibliothèque) : même
@@ -78,7 +78,15 @@ pub fn lazy_channel_long(addr: &str) -> anyhow::Result<Channel> {
     let endpoint = Endpoint::from_shared(normalize_address(addr)?)
         .map_err(|e| anyhow::anyhow!(crate::tr!("rpc-bad-address", addr = addr.to_string(), reason = e.to_string())))?
         .connect_timeout(Duration::from_secs(3));
-    Ok(endpoint.connect_lazy())
+    Ok(secure_endpoint(endpoint)?.connect_lazy())
+}
+
+fn secure_endpoint(endpoint: Endpoint) -> anyhow::Result<Endpoint> {
+    if endpoint.uri().scheme_str() == Some("https") {
+        Ok(endpoint.tls_config(tonic::transport::ClientTlsConfig::new().with_native_roots())?)
+    } else {
+        Ok(endpoint)
+    }
 }
 
 /// Borne un appel et aplatit l'erreur en texte lisible (code + message).

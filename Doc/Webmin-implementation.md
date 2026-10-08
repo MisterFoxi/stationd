@@ -369,3 +369,16 @@ Validation : 31 tests Webmin passent, plus le smoke test facultatif sur
 la station réelle. Les données du DTO concordent avec stationctl onair et
 icecast status (média, programme, audience). Aperçu navigateur vérifié sur
 ordinateur et à 360 px. La procédure est dans Doc/Webmin-dashboard.md.
+
+
+## 15. Console admin (tranche D)
+
+La console Linux est implémentée avec PTY, WebSocket et xterm.js embarqué.
+La réservation est liée à la session et à la station, réservée au rôle admin,
+à usage unique et protégée par origin/CSRF. Quotas, expiration et nettoyage
+du groupe de processus sont appliqués côté serveur. Les changements
+d'identité signalent immédiatement la révocation aux consoles actives.
+
+`make webmin` compile aussi stationd-tui. La console reste désactivée par
+défaut ; aucune configuration active ni station en cours n'a été redémarrée.
+Configuration, protocole et recette : [Webmin-console.md](Webmin-console.md).

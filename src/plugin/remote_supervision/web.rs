@@ -1,5 +1,5 @@
 //! HTTP boundary: secure cookies, same-origin mutations, bounded crypto jobs.
-use super::{auth::Auth, live::Live, Config};
+use super::{auth::Auth, console::Console, live::Live, Config};
 use axum::{
     extract::{ConnectInfo, Path, Request, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
@@ -22,16 +22,17 @@ use std::{
 use tokio::sync::{mpsc, Semaphore};
 use tokio_stream::wrappers::ReceiverStream;
 use webauthn_rs::prelude::{PublicKeyCredential, RegisterPublicKeyCredential};
-const SESSION: &str = "__Host-stationd-session";
+pub(super) const SESSION: &str = "__Host-stationd-session";
 const CEREMONY: &str = "__Host-stationd-ceremony";
 
 #[derive(Clone)]
 pub(super) struct Web {
-    auth: Arc<Mutex<Auth>>,
+    pub(super) auth: Arc<Mutex<Auth>>,
     pub(super) live: Live,
+    pub(super) console: Console,
     streams: Arc<Semaphore>,
     jobs: Arc<Semaphore>,
-    origin: String,
+    pub(super) origin: String,
     session_ttl: u64,
     rate: u32,
     password_min_length: usize,
@@ -40,6 +41,7 @@ pub(super) struct Web {
 impl Web {
     pub(super) fn new(auth: Arc<Mutex<Auth>>, config: &Config) -> Self {
         Self {
+            console: Console::new(auth.clone(), config),
             auth,
             live: Live::new(config),
             streams: Arc::new(Semaphore::new(config.max_event_streams)),
@@ -54,7 +56,7 @@ impl Web {
             password_max_length: config.password_max_length,
         }
     }
-    async fn work<T: Send + 'static>(
+    pub(super) async fn work<T: Send + 'static>(
         &self,
         f: impl FnOnce(&mut Auth) -> Result<T, String> + Send + 'static,
     ) -> Result<T, String> {
@@ -100,6 +102,7 @@ pub(super) fn routes(web: Web) -> Router {
                 )
             }),
         )
+        .merge(super::console::routes())
         .route("/auth/enroll/start", post(enroll_start))
         .route("/auth/enroll/finish", post(enroll_finish))
         .route("/auth/login/start", post(login_start))
@@ -117,7 +120,7 @@ pub(super) fn routes(web: Web) -> Router {
         .with_state(web)
 }
 
-fn cookie(headers: &HeaderMap, name: &str) -> Option<String> {
+pub(super) fn cookie(headers: &HeaderMap, name: &str) -> Option<String> {
     let mut found = None;
     for value in headers.get_all(header::COOKIE) {
         for item in value.to_str().ok()?.split(';') {
@@ -146,7 +149,7 @@ fn set_cookie(response: &mut Response, name: &str, value: &str, ttl: u64) {
         HeaderValue::from_str(&cookie).expect("server-generated cookie"),
     );
 }
-fn answer(result: Result<Value, String>) -> Response {
+pub(super) fn answer(result: Result<Value, String>) -> Response {
     match result {
         Ok(value) => Json(value).into_response(),
         Err(error) => {
@@ -191,11 +194,16 @@ async fn security(State(web): State<Web>, request: Request, next: Next) -> Respo
             return StatusCode::TOO_MANY_REQUESTS.into_response();
         }
     }
+    let console_document =
+        request.uri().path().starts_with("/station/") && request.uri().path().ends_with("/console");
     let mut response = next.run(request).await;
     for (key,value) in [
         ("cache-control","no-store"),("referrer-policy","no-referrer"),("x-content-type-options","nosniff"),
         ("content-security-policy","default-src 'self'; script-src 'self'; style-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"),
     ]{response.headers_mut().insert(axum::http::HeaderName::from_static(key),HeaderValue::from_static(value));}
+    if console_document {
+        response.headers_mut().insert("content-security-policy", HeaderValue::from_static("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"));
+    }
     response
 }
 #[derive(Deserialize)]

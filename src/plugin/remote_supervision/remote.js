@@ -59,6 +59,7 @@ async function startDashboard(){
   document.getElementById('account').textContent=context.name;
   document.getElementById('logout').addEventListener('click',event=>run(event.target,async()=>{await request('/auth/logout',{},context.csrf_token);location.assign('/login');}));
   const id=document.body.dataset.stationId,isNetwork=page==='network';
+  if(!isNetwork){const grant=context.stations.find(station=>station.id===id);if(context.console_enabled&&grant?.role==='admin'){const link=document.getElementById('open-console');link.href=`/station/${encodeURIComponent(id)}/console`;link.hidden=false;}}
   const endpoint=isNetwork?'/api/stations':`/api/stations/${encodeURIComponent(id)}`;
   const render=isNetwork?renderNetwork:renderStation;
   try{render(await request(endpoint));}catch(error){if(error.status===401||error.status===403){location.assign('/login');return;}message.textContent='Lecture indisponible. Nouvelle tentative en cours…';}

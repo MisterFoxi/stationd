@@ -75,7 +75,8 @@ build: ## cargo build (stationd + stationctl + plugins natifs, dont Webmin) : re
 > @echo "== profil $(PROFILE) (branche $(or $(BRANCH),?))"
 > $(EXEC) sh -c 'set -e; cargo build $(CARGO_PROFILE); ln -sfn $(PROFILE) /src/target/active'
 
-webmin: build ## Compile Webmin, plugin natif intégré à StationD (sans redémarrage)
+webmin: build ## Compile Webmin et stationd-tui (sans redémarrage)
+> $(EXEC) cargo build $(CARGO_PROFILE) -p stationd-tui
 
 webmin-test: ## Tests ciblés Webmin dans le conteneur de dev
 > $(EXEC) cargo test --locked --lib webmin_

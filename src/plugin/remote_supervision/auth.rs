@@ -163,6 +163,7 @@ pub(super) struct Auth {
     store: Store,
     challenges: HashMap<String, Ceremony>,
     attempts: HashMap<String, (i64, u32)>,
+    changes: tokio::sync::watch::Sender<u64>,
 }
 
 impl Auth {
@@ -209,6 +210,7 @@ impl Auth {
             store,
             challenges: HashMap::new(),
             attempts: HashMap::new(),
+            changes: tokio::sync::watch::channel(0).0,
         })
     }
 
@@ -228,6 +230,8 @@ impl Auth {
             stmt("DELETE FROM webmin_audit WHERE at < ?1", vec![json!(now() - 90*86400)]),
         ]).map_err(|_| "identity storage unavailable")?;
         self.store = store;
+        self.changes
+            .send_modify(|revision| *revision = revision.wrapping_add(1));
         Ok(())
     }
     fn audit_failure(&self, action: &str) -> Result<(), String> {
@@ -768,10 +772,56 @@ impl Auth {
             .ok_or("authentication denied")?;
         Ok((session, self.by_id(session.user)?))
     }
+    pub(super) fn changes(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.changes.subscribe()
+    }
+    pub(super) fn console_owner(
+        &self,
+        raw: &str,
+        station: &str,
+        csrf: &str,
+    ) -> Result<String, String> {
+        self.authorize(raw, station, "console.open", Some(csrf))?;
+        Ok(self.session(raw)?.1.id.to_string())
+    }
+    pub(super) fn console_attempt(
+        &self,
+        raw: &str,
+        station: &str,
+        csrf: &str,
+    ) -> Result<String, String> {
+        let result = self.console_owner(raw, station, csrf);
+        if result.is_err() {
+            let actor = self
+                .session(raw)
+                .map(|(_, user)| user.id.to_string())
+                .unwrap_or_else(|_| "anonymous".into());
+            let target = if self.known_station(station) {
+                station
+            } else {
+                ""
+            };
+            self.console_audit(&actor, "console.open", "denied", target)?;
+        }
+        result
+    }
+    pub(super) fn console_audit(
+        &self,
+        actor: &str,
+        action: &str,
+        result: &str,
+        station: &str,
+    ) -> Result<(), String> {
+        self.db.batch(&[
+            stmt("INSERT INTO webmin_audit(at,actor,action,result,station) VALUES(?1,?2,?3,?4,?5)", vec![json!(now()),json!(actor),json!(action),json!(result),json!(station)]),
+            stmt("DELETE FROM webmin_audit WHERE at < ?1", vec![json!(now()-90*86400)]),
+        ]).map_err(|_| "identity storage unavailable".to_string())?;
+        Ok(())
+    }
     pub(super) fn context(&self, raw: &str) -> Result<Value, String> {
         let (session, user) = self.session(raw)?;
         Ok(
-            json!({"name":user.name,"csrf_token":session.csrf,"expires_at":session.expires,"stations":self.config.stations.iter().filter(|s|self.authorize(raw,&s.id,"station.read",None).is_ok()).filter_map(|s|user.grants.get(&s.id).map(|role|json!({"id":s.id,"label":s.label,"role":role}))).collect::<Vec<_>>()}),
+            json!({"name":user.name,"csrf_token":session.csrf,"expires_at":session.expires,"console_enabled":self.config.console.enabled,"stations":self.config.stations.iter().filter(|s|self.authorize(raw,&s.id,"station.read",None).is_ok()).filter_map(|s|user.grants.get(&s.id).map(|role|json!({"id":s.id,"label":s.label,"role":role}))).collect::<Vec<_>>()}),
         )
     }
     pub(super) fn authorize(
@@ -1867,5 +1917,388 @@ mod tests {
                 .status(),
             StatusCode::UNAUTHORIZED
         );
+    }
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn webmin_console_linux_ws_acl_resize_revocation_and_shutdown() {
+        use axum::{
+            body::Body,
+            http::{Request, StatusCode},
+        };
+        use futures_util::{SinkExt, StreamExt};
+        use std::{os::unix::fs::PermissionsExt, time::Duration};
+        use tokio_tungstenite::{
+            connect_async,
+            tungstenite::{client::IntoClientRequest, Message},
+        };
+        use tower::ServiceExt;
+        let (dir, mut auth, mut soft) = fixture();
+        let enroll = add(&mut auth, "Alice", Role::Admin);
+        register(&mut auth, &mut soft, &enroll);
+        let (alice, session) = login(&mut auth, &mut soft, "Alice");
+        let enroll = add(&mut auth, "Bob", Role::Admin);
+        register(&mut auth, &mut soft, &enroll);
+        let (_, bob_session) = login(&mut auth, &mut soft, "Bob");
+        let enroll = add(&mut auth, "Helper", Role::Helper);
+        register(&mut auth, &mut soft, &enroll);
+        let (helper, helper_session) = login(&mut auth, &mut soft, "Helper");
+        let program = dir.path().join("stationd-tui");
+        let pid_file = dir.path().join("pid");
+        let script = format!(
+            r#"#!/usr/bin/python3
+import os, sys, tty, signal, fcntl, termios, struct, threading, time
+open({pid:?}, 'w').write(str(os.getpid()))
+assert sys.argv[1:] == ['--addr', 'http://127.0.0.1:50051'], sys.argv
+assert 'STATIOND_ROOT' not in os.environ
+tty.setraw(0)
+def dimensions(*args):
+    rows, cols, _, _ = struct.unpack('HHHH', fcntl.ioctl(0, termios.TIOCGWINSZ, bytes(8)))
+    os.write(1, ('SIZE:%sx%s\n' % (cols, rows)).encode())
+signal.signal(signal.SIGWINCH, dimensions)
+os.write(1, '\x1b[32mÉté 🎵\x1b[0m\n'.encode())
+dimensions()
+while True:
+    data = os.read(0, 4096)
+    os.write(1, b'ECHO:' + data)
+    if b'periodic' in data:
+        def ticker():
+            while True:
+                time.sleep(0.2)
+                os.write(1, b'TICK\n')
+        threading.Thread(target=ticker, daemon=True).start()
+"#,
+            pid = pid_file.to_str().unwrap()
+        );
+        std::fs::write(&program, script).unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut config = auth.config.clone();
+        config.console.enabled = true;
+        config.console.command = program.to_str().unwrap().into();
+        config.console.max_sessions = 2;
+        config.console.idle_timeout_seconds = 3;
+        config.console.max_duration_seconds = 5;
+        let auth = Arc::new(std::sync::Mutex::new(auth));
+        let web = super::super::web::Web::new(auth.clone(), &config);
+        let console = web.console.clone();
+        console.start();
+        let app = super::super::web::routes(web);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn({
+            let app = app.clone();
+            async move {
+                axum::serve(listener, app).await.unwrap();
+            }
+        });
+        let post = |session: &str, station: &str, csrf: &str, origin: &str| {
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/stations/{station}/console"))
+                .header("cookie", format!("__Host-stationd-session={session}"))
+                .header("origin", origin)
+                .header("x-csrf-token", csrf)
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"cols":80,"rows":24}"#))
+                .unwrap()
+        };
+        let csrf = alice["csrf_token"].as_str().unwrap();
+        for (token, station, proof, origin) in [
+            (&session[..], "one", "wrong", "https://remote.example.test"),
+            (&session[..], "one", csrf, "https://evil.test"),
+            (&session[..], "two", csrf, "https://remote.example.test"),
+            (
+                &helper_session[..],
+                "one",
+                helper["csrf_token"].as_str().unwrap(),
+                "https://remote.example.test",
+            ),
+        ] {
+            assert_eq!(
+                app.clone()
+                    .oneshot(post(token, station, proof, origin))
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::FORBIDDEN
+            );
+        }
+        let create = || post(&session, "one", csrf, "https://remote.example.test");
+        let response = app.clone().oneshot(create()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let data: Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), 65536)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let url = format!(
+            "ws://{addr}/api/stations/one/console/{}/ws",
+            data["id"].as_str().unwrap()
+        );
+        assert_eq!(
+            app.clone().oneshot(create()).await.unwrap().status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        let upgrade = |token: &str, origin: Option<&str>| {
+            let mut request = url.clone().into_client_request().unwrap();
+            request.headers_mut().insert(
+                "cookie",
+                format!("__Host-stationd-session={token}").parse().unwrap(),
+            );
+            if let Some(origin) = origin {
+                request
+                    .headers_mut()
+                    .insert("origin", origin.parse().unwrap());
+            }
+            request
+        };
+        assert!(
+            connect_async(upgrade(&bob_session, Some("https://remote.example.test")))
+                .await
+                .is_err()
+        );
+        assert!(connect_async(upgrade(&session, None)).await.is_err());
+        assert!(connect_async(upgrade(&session, Some("https://evil.test")))
+            .await
+            .is_err());
+        let (mut socket, _) = connect_async(upgrade(&session, Some("https://remote.example.test")))
+            .await
+            .unwrap();
+        assert!(
+            connect_async(upgrade(&session, Some("https://remote.example.test")))
+                .await
+                .is_err()
+        );
+        async fn read_until(
+            socket: &mut tokio_tungstenite::WebSocketStream<
+                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+            >,
+            expected: &str,
+        ) -> String {
+            let mut output = Vec::new();
+            tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    match socket.next().await.unwrap().unwrap() {
+                        Message::Binary(bytes) => {
+                            output.extend(bytes);
+                            socket
+                                .send(Message::Text(r#"{"type":"ack"}"#.into()))
+                                .await
+                                .unwrap();
+                        }
+                        other => panic!("unexpected {other:?}"),
+                    }
+                    let text = String::from_utf8_lossy(&output);
+                    if text.contains(expected) {
+                        return text.into_owned();
+                    }
+                }
+            })
+            .await
+            .unwrap()
+        }
+        let initial = read_until(&mut socket, "SIZE:80x24").await;
+        assert!(initial.contains("Été 🎵"));
+        assert!(initial.contains("\x1b[32m"));
+        socket
+            .send(Message::Text(
+                r#"{"type":"resize","cols":100,"rows":30}"#.into(),
+            ))
+            .await
+            .unwrap();
+        read_until(&mut socket, "SIZE:100x30").await;
+        socket
+            .send(Message::Text(
+                r#"{"type":"input","data":"Bonjour é"}"#.into(),
+            ))
+            .await
+            .unwrap();
+        read_until(&mut socket, "Bonjour é").await;
+        let pid: i32 = std::fs::read_to_string(&pid_file).unwrap().parse().unwrap();
+        auth.lock()
+            .unwrap()
+            .admin(AdminRequest::RevokeSessions {
+                name: "Alice".into(),
+            })
+            .unwrap();
+        let end = tokio::time::timeout(Duration::from_secs(2), socket.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(end.to_text().unwrap().contains("ended"));
+        assert_eq!(
+            unsafe { libc::kill(pid, 0) },
+            -1,
+            "PTY child still alive after revoke"
+        );
+        assert!(
+            connect_async(upgrade(&session, Some("https://remote.example.test")))
+                .await
+                .is_err()
+        );
+        assert!(app
+            .clone()
+            .oneshot(create())
+            .await
+            .unwrap()
+            .status()
+            .is_client_error());
+        // A fresh login can open a new console after revocation releases its quota.
+        let (value, fresh) = login(&mut auth.lock().unwrap(), &mut soft, "Alice");
+        let response = app
+            .clone()
+            .oneshot(post(
+                &fresh,
+                "one",
+                value["csrf_token"].as_str().unwrap(),
+                "https://remote.example.test",
+            ))
+            .await
+            .unwrap();
+        let data: Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), 65536)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let mut next = format!(
+            "ws://{addr}/api/stations/one/console/{}/ws",
+            data["id"].as_str().unwrap()
+        )
+        .into_client_request()
+        .unwrap();
+        next.headers_mut().insert(
+            "cookie",
+            format!("__Host-stationd-session={fresh}").parse().unwrap(),
+        );
+        next.headers_mut()
+            .insert("origin", "https://remote.example.test".parse().unwrap());
+        let (mut socket, _) = connect_async(next).await.unwrap();
+        read_until(&mut socket, "SIZE:80x24").await;
+        let pid: i32 = std::fs::read_to_string(&pid_file).unwrap().parse().unwrap();
+        // Periodic TUI output and acknowledgements do not extend idle lifetime.
+        socket
+            .send(Message::Text(
+                r#"{"type":"input","data":"periodic"}"#.into(),
+            ))
+            .await
+            .unwrap();
+        read_until(&mut socket, "ECHO:periodic").await;
+        let mut ticks = 0;
+        let ended = tokio::time::timeout(Duration::from_secs(4), async {
+            loop {
+                match socket.next().await.unwrap().unwrap() {
+                    Message::Binary(_) => {
+                        ticks += 1;
+                        socket
+                            .send(Message::Text(r#"{"type":"ack"}"#.into()))
+                            .await
+                            .unwrap();
+                    }
+                    Message::Text(text) => break text,
+                    other => panic!("unexpected {other:?}"),
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert!(ticks > 0 && ended.contains("idle"));
+        assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+        async fn reopen(
+            app: &axum::Router,
+            addr: std::net::SocketAddr,
+            session: &str,
+            csrf: &str,
+        ) -> tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        > {
+            let request = Request::builder()
+                .method("POST")
+                .uri("/api/stations/one/console")
+                .header("cookie", format!("__Host-stationd-session={session}"))
+                .header("origin", "https://remote.example.test")
+                .header("x-csrf-token", csrf)
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"cols":80,"rows":24}"#))
+                .unwrap();
+            let response = app.clone().oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let data: Value = serde_json::from_slice(
+                &axum::body::to_bytes(response.into_body(), 65536)
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            let mut request = format!(
+                "ws://{addr}/api/stations/one/console/{}/ws",
+                data["id"].as_str().unwrap()
+            )
+            .into_client_request()
+            .unwrap();
+            request.headers_mut().insert(
+                "cookie",
+                format!("__Host-stationd-session={session}")
+                    .parse()
+                    .unwrap(),
+            );
+            request
+                .headers_mut()
+                .insert("origin", "https://remote.example.test".parse().unwrap());
+            connect_async(request).await.unwrap().0
+        }
+        // Closing the browser releases the child and quota.
+        let proof = value["csrf_token"].as_str().unwrap();
+        let mut socket = reopen(&app, addr, &fresh, proof).await;
+        read_until(&mut socket, "SIZE:80x24").await;
+        let pid: i32 = std::fs::read_to_string(&pid_file).unwrap().parse().unwrap();
+        socket.close(None).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while unsafe { libc::kill(pid, 0) } == 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        // Input keeps the console active but cannot extend its absolute duration.
+        let mut socket = reopen(&app, addr, &fresh, proof).await;
+        read_until(&mut socket, "SIZE:80x24").await;
+        let pid: i32 = std::fs::read_to_string(&pid_file).unwrap().parse().unwrap();
+        let ended=tokio::time::timeout(Duration::from_secs(6),async {
+            let mut tick=tokio::time::interval(Duration::from_millis(200));
+            loop {
+                tokio::select! {
+                    _ = tick.tick() => { let _ = socket.send(Message::Text(r#"{"type":"input","data":"x"}"#.into())).await; },
+                    frame = socket.next() => match frame.unwrap().unwrap() {
+                        Message::Binary(_) => { let _ = socket.send(Message::Text(r#"{"type":"ack"}"#.into())).await; },
+                        Message::Text(text) => break text,
+                        other => panic!("unexpected {other:?}"),
+                    }
+                }
+            }
+        }).await.unwrap();
+        assert!(ended.contains("duration"));
+        assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+        let mut socket = reopen(&app, addr, &fresh, proof).await;
+        read_until(&mut socket, "SIZE:80x24").await;
+        let pid: i32 = std::fs::read_to_string(&pid_file).unwrap().parse().unwrap();
+        console.shutdown();
+        tokio::time::timeout(Duration::from_secs(2), socket.next())
+            .await
+            .unwrap();
+        assert_eq!(
+            unsafe { libc::kill(pid, 0) },
+            -1,
+            "PTY child still alive after stop"
+        );
+        let audit = auth
+            .lock()
+            .unwrap()
+            .admin(AdminRequest::Audit)
+            .unwrap()
+            .to_string();
+        assert!(audit.contains("console.open") && audit.contains("console.close"));
+        assert!(!audit.contains("Bonjour") && !audit.contains(&session));
+        server.abort();
     }
 }

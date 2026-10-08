@@ -310,6 +310,13 @@ level = "info"
 # password_min_length = 12       # Unicode characters, 1..password_max_length
 # password_max_length = 256      # Unicode characters, password_min_length..256
 # max_event_streams = 64         # Concurrent authenticated SSE streams, 1..256
+# [plugin.config.console]
+# enabled = false                # Linux admin TUI only; opt in after installing the binary
+# command = "/usr/local/bin/stationd-tui" # Absolute server-side path, never a shell
+# max_sessions = 5               # Global pending + active consoles, 1..64
+# max_sessions_per_user = 1      # Across all stations, 1..max_sessions
+# idle_timeout_seconds = 900     # Keyboard input only, 1..86400
+# max_duration_seconds = 14400   # Absolute duration, 1..86400
 # [[plugin.config.stations]]
 # id = "home-stone"               # Stable, unique ID for URLs and station permissions
 # label = "Home Stone"
