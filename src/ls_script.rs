@@ -559,9 +559,20 @@ end
 # Drop the track already prepared (prefetched) so the next pull asks stationd
 # again: a stop then takes effect at the end of the CURRENT track. A track the
 # crossfade already started mixing can no longer be dropped.
+# Report exactly the prepared requests being dropped, including their durable
+# log IDs. The playing request is not in the queue and is never returned.
+def stationd.discard_queue(pull_raw) =
+  messages = list.map(fun (r) -> begin
+    j = json()
+    stationd.track_fields(j, request.metadata(r))
+    json.stringify(compact=true, j)
+  end, pull_raw.queue())
+  pull_raw.set_queue([])
+  list.iter(fun (body) -> ignore(stationd.post("discard", body)), messages)
+end
 def stationd.cmd_flush(_) =
   pull_raw = stationd.raw_pull()
-  pull_raw.set_queue([])
+  stationd.discard_queue(pull_raw)
   stationd.next_not_before := 0.
   log.important(label="stationd", "flush: prepared track dropped")
   "OK"
@@ -764,7 +775,7 @@ def stationd.live_return() =
         true
       end
     pull_raw = stationd.raw_pull()
-    if flush then pull_raw.set_queue([]) end
+    if flush then stationd.discard_queue(pull_raw) end
     if not stationd.paused() then
       # the frozen track (if any) goes without a crossfade
       if pull_raw.is_ready() then stationd.no_cross := true end

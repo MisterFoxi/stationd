@@ -113,6 +113,8 @@ async fn reconcile(
                 "episode_play",
                 "queue_entry",
                 "playlist_cursor",
+                "shuffle_member",
+                "shuffle_pick",
             ] {
                 sqlx::query(&format!(
                     "UPDATE {table} SET media_uuid = ?1 WHERE media_uuid = ?2"

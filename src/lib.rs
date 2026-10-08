@@ -16,6 +16,7 @@ pub mod clock;
 pub mod config;
 pub mod db;
 pub mod draw;
+pub mod shuffle_bag;
 pub mod episode_play;
 pub mod events;
 pub mod events_grpc;

@@ -1371,7 +1371,8 @@ impl GridEngine {
         // selection stage instead of cutting the current song at the mark.
         // The small finish tolerance absorbs metadata/crossfade imprecision;
         // outside the guard window normal playlist selection is untouched.
-        let hard_fit_ms = match self.next_hard_mark(Epoch(now.0.saturating_add(1))).await? {
+        let hard_mark = self.next_hard_mark(Epoch(now.0.saturating_add(1))).await?;
+        let hard_fit_ms = match hard_mark {
             Some(mark) if mark.0 > now.0 => {
                 let remaining = mark.0 - now.0;
                 (remaining <= HARD_GUARD_S).then_some(
@@ -1382,21 +1383,37 @@ impl GridEngine {
             _ => None,
         };
 
-        for (i, decision) in ranked.into_iter().enumerate() {
+        let mut attempts: std::collections::VecDeque<_> = ranked.into_iter()
+            .enumerate().map(|(i, d)| (i, d, hard_fit_ms)).collect();
+        // Only retry without a budget after every applicable source was searched.
+        while let Some((i, decision, budget)) = attempts.pop_front() {
             let Some(playlist_ref) = decision.playlist_ref.clone() else {
                 continue;
             };
             let held = held_at == Some(i);
             let start = if held {
                 TurnStart::Continue
+            } else if budget.is_none() && hard_fit_ms.is_some() {
+                TurnStart::Resume
             } else if matches!(decision.origin, Origin::Every | Origin::AtClockHard | Origin::AtClockSoft) {
                 TurnStart::Fresh
             } else {
                 TurnStart::Resume
             };
-            let produced = self.produce(&playlist_ref, now, start, hard_fit_ms).await?;
+            let produced = match self.produce(&playlist_ref, now, start, budget).await {
+                Err(EngineError::Selection(crate::selection::SelectionError::NoFit)) if budget.is_some() => {
+                    attempts.push_back((i, decision, None));
+                    continue;
+                }
+                other => other?,
+            };
 
             if let Some(turn) = produced {
+                if hard_fit_ms.is_some() && budget.is_none() {
+                    if let Some(mark) = hard_mark {
+                        self.report_boundary_no_fit(&grid, &state, &turn.resolved, now, mark).await?;
+                    }
+                }
                 if held {
                     // The rule's effects were persisted when the group started.
                     if !turn.holds {
@@ -1492,33 +1509,9 @@ impl GridEngine {
         const MAX_DEAD_PICKS: u32 = 32;
         for _ in 0..MAX_DEAD_PICKS {
             let picked = match max_duration_ms {
-                Some(max) => match crate::selection::resolve_turn_fitting(
-                    &self.pool,
-                    self.plugins.as_ref(),
-                    now.0,
-                    playlist_ref,
-                    start,
-                    max,
-                )
-                .await
-                {
-                    Err(SelectionError::NoFit) => {
-                        tracing::info!(
-                            playlist = %playlist_ref,
-                            max_duration_ms = max,
-                            "nothing fits before AtClock hard; keeping continuity and letting the hard run late"
-                        );
-                        crate::selection::resolve_turn(
-                            &self.pool,
-                            self.plugins.as_ref(),
-                            now.0,
-                            playlist_ref,
-                            start,
-                        )
-                        .await
-                    }
-                    other => other,
-                },
+                Some(max) => crate::selection::resolve_turn_fitting(
+                    &self.pool, self.plugins.as_ref(), now.0, playlist_ref, start, max,
+                ).await,
                 None => crate::selection::resolve_turn(
                     &self.pool,
                     self.plugins.as_ref(),
@@ -1537,11 +1530,14 @@ impl GridEngine {
                 {
                     return Ok(Some(turn));
                 }
-                Ok(Turn { resolved: Resolved::File { path: missing, .. }, .. }) => {
+                Ok(Turn { resolved: Resolved::File { path: missing, reservation, .. }, .. }) => {
                     tracing::warn!(
                         media = %missing,
                         "resolved media missing on disk; marking unavailable and re-picking"
                     );
+                    if let Some(id) = reservation {
+                        crate::shuffle_bag::cancel_pick(&self.pool, id).await?;
+                    }
                     crate::media_index::mark_unavailable(&self.pool, &missing).await?;
                 }
                 Err(SelectionError::PoolEmpty) | Err(SelectionError::CycleComplete) => return Ok(None),
@@ -1635,6 +1631,36 @@ impl GridEngine {
         )
         .await?;
         tracing::info!(rule = %rule_id, playlist = %playlist_ref, "group holds the air until its cycle ends");
+        Ok(())
+    }
+
+    async fn report_boundary_no_fit(
+        &self, grid: &Grid, state: &PlaybackState,
+        media: &crate::selection::Resolved, now: Epoch, mark: Epoch,
+    ) -> Result<(), EngineError> {
+        let mark_local = clock::to_local_now(mark, &self.tz)?;
+        let duration = match media {
+            crate::selection::Resolved::File { path, .. } =>
+                crate::media_index::duration_ms_of(&self.pool, path).await?,
+            _ => None,
+        };
+        let finish = duration.filter(|d| *d > 0)
+            .map(|d| Epoch(now.0.saturating_add((d + 999) / 1000)));
+        for d in resolve_ranked(mark_local, grid, state).into_iter()
+            .filter(|d| d.origin == Origin::AtClockHard && is_hard_mark_at(d, grid, mark_local)) {
+            let missed = if let Some(end) = finish {
+                let end_local = clock::to_local_now(end, &self.tz)?;
+                !resolve_ranked(end_local, grid, state).iter()
+                    .any(|later| later.rule_id == d.rule_id && later.mark_taken == d.mark_taken)
+            } else { false };
+            let kind = if missed {
+                crate::station_control::IncidentKind::BoundaryMissed
+            } else {
+                crate::station_control::IncidentKind::BoundaryNoFit
+            };
+            self.control.record_incident(kind, d.rule_id.as_deref(),
+                d.playlist_ref.as_deref().unwrap_or(""), "AtClockHard", mark);
+        }
         Ok(())
     }
 
@@ -1802,7 +1828,7 @@ impl GridEngine {
             OverrideContent::Media(path) => {
                 if self.media_exists(path) {
                     // No playlist produced it: no leaf, never an unplayed_only mark.
-                    Ok(Turn { resolved: Resolved::File { path: path.clone(), leaf: None }, holds: false, cycles: false })
+                    Ok(Turn { resolved: Resolved::File { path: path.clone(), leaf: None, reservation: None }, holds: false, cycles: false })
                 } else {
                     // Keep the index honest: it is no longer offered as available.
                     crate::media_index::mark_unavailable(&self.pool, path).await?;
@@ -1816,7 +1842,10 @@ impl GridEngine {
                 match crate::selection::resolve_turn(&self.pool, self.plugins.as_ref(), now.0, reference, start)
                     .await
                 {
-                    Ok(Turn { resolved: Resolved::File { path: media, .. }, .. }) if !self.media_exists(&media) => {
+                    Ok(Turn { resolved: Resolved::File { path: media, reservation, .. }, .. }) if !self.media_exists(&media) => {
+                        if let Some(id) = reservation {
+                            crate::shuffle_bag::cancel_pick(&self.pool, id).await?;
+                        }
                         crate::media_index::mark_unavailable(&self.pool, &media).await?;
                         Err(format!("resolved media `{media}` missing on disk"))
                     }
@@ -1875,7 +1904,7 @@ impl GridEngine {
         origin: &str,
     ) -> Result<(String, bool, Option<String>, Option<i64>), EngineError> {
         Ok(match resolved {
-            crate::selection::Resolved::File { path: media, leaf } => {
+            crate::selection::Resolved::File { path: media, leaf, reservation } => {
                 let artist = crate::media_index::artist_of(&self.pool, &media).await?;
                 let from = crate::broadcast_log::Provenance {
                     rule_id: decision.rule_id.as_deref(),
@@ -1884,13 +1913,19 @@ impl GridEngine {
                     leaf_ref: leaf.as_deref(),
                 };
                 let id =
-                    crate::broadcast_log::record(&self.pool, &media, artist.as_deref(), now, from).await?;
+                    crate::broadcast_log::record_pick(&self.pool, &media, artist.as_deref(), now, from, reservation).await?;
                 (media, false, leaf, Some(id))
             }
             crate::selection::Resolved::Stream(url) => (url, true, None, None),
         })
     }
 
+    /// Only a request explicitly discarded by Liquidsoap is returned: pending
+    /// requests may survive a stationd restart through their annotations.
+    pub async fn cancel_prepared(&self, log_id: i64) -> Result<(), EngineError> {
+        crate::shuffle_bag::cancel(&self.pool, log_id).await?;
+        Ok(())
+    }
     /// Liquidsoap really started the track logged as `log_id` (stats: aired
     /// vs merely chosen).
     pub async fn mark_aired(&self, log_id: i64, at: Epoch) -> Result<(), EngineError> {
@@ -2349,6 +2384,40 @@ mod tests {
         (dir, eng)
     }
 
+    #[tokio::test]
+    async fn boundary_no_fit_reports_delay_or_expiry_without_cutting_a_track() {
+        for (duration, kind) in [
+            (90_000, crate::station_control::IncidentKind::BoundaryNoFit),
+            (300_000, crate::station_control::IncidentKind::BoundaryMissed),
+        ] {
+            let (_d, eng) = hard_fixture(false).await;
+            sqlx::query("UPDATE media SET duration_ms=? WHERE rel_path='music/a.mp3'")
+                .bind(duration).execute(&eng.pool).await.unwrap();
+            sqlx::query("UPDATE grid_at_clock SET expiry_secs=60 WHERE rule_id='news'")
+                .execute(&eng.pool).await.unwrap();
+            let track = eng.next_media(at(9,14)).await.unwrap();
+            assert_eq!(track.media_path.as_deref(), Some("music/a.mp3"));
+            let incidents = eng.control.incidents_since(Epoch(0));
+            assert_eq!(incidents.len(), 1);
+            assert_eq!((incidents[0].kind, incidents[0].first_at), (kind, at(9,15)));
+            assert_eq!(incidents[0].rule_id.as_deref(), Some("news"));
+            assert!(grid_store::load_playback_state(&eng.pool).await.unwrap()
+                .at_clock_taken.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn boundary_searches_other_grid_sources_before_accepting_an_overrun() {
+        let (_d, eng) = hard_fixture(true).await;
+        sqlx::query("UPDATE media SET duration_ms=300000 WHERE rel_path='jingle/j.mp3'")
+            .execute(&eng.pool).await.unwrap();
+        sqlx::query("UPDATE grid_at_clock SET every_minutes=1 WHERE rule_id='jingle'")
+            .execute(&eng.pool).await.unwrap();
+        // The higher-priority soft source cannot fit; the short floor must win.
+        let track = eng.next_media(at(9,14)).await.unwrap();
+        assert_eq!(track.media_path.as_deref(), Some("music/a.mp3"));
+        assert!(eng.control.incidents_since(Epoch(0)).is_empty());
+    }
     #[tokio::test]
     async fn wake_drops_missed_toph_but_keeps_the_next_rendezvous() {
         use crate::station_control::ControlAction;

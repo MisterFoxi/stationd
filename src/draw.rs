@@ -9,7 +9,7 @@
 //! number of draws its scope has consumed — so the copy draws exactly what
 //! the real pull will draw next, from the same state.
 //!
-//! One counter per scope (`pick:<playlist>`, `perm:<group>`,
+//! One counter per scope (`bag:<playlist>`, `perm:<group>`,
 //! `weight:<group>`): an override or a rendez-vous that pulls from another
 //! playlist does not shift this one's draws.
 //!
@@ -32,28 +32,33 @@ pub async fn ensure_seed(pool: &SqlitePool) -> Result<(), sqlx::Error> {
 
 /// The generator of the next draw of `scope`, and the draw consumed.
 pub async fn rng(pool: &SqlitePool, scope: &str) -> Result<ChaCha8Rng, sqlx::Error> {
-    // Normally created by `db::init`; a pool opened otherwise (tests) gets it here.
-    ensure_seed(pool).await?;
-    let (seed,): (Vec<u8>,) = sqlx::query_as("SELECT seed FROM rng_seed WHERE id = 1")
-        .fetch_one(pool)
+    let mut conn = pool.acquire().await?;
+    rng_on(&mut conn, scope).await
+}
+
+/// A draw on an existing connection, allowing bag state and RNG to commit
+/// together (or roll back together when no remaining track fits).
+pub(crate) async fn rng_on(
+    conn: &mut sqlx::SqliteConnection,
+    scope: &str,
+) -> Result<ChaCha8Rng, sqlx::Error> {
+    sqlx::query("INSERT OR IGNORE INTO rng_seed (id, seed) VALUES (1, randomblob(32))")
+        .execute(&mut *conn)
         .await?;
-    // `fetch_all`, not `fetch_one`: a RETURNING statement keeps its write
-    // transaction open until it has run to completion, and `fetch_one` hands
-    // the row back after the first step — the lock then outlived the call and
-    // the next writer on another connection of the pool waited on it
-    // (« database is locked » once past the busy timeout, on a loaded host).
+    let (seed,): (Vec<u8>,) = sqlx::query_as("SELECT seed FROM rng_seed WHERE id = 1")
+        .fetch_one(&mut *conn)
+        .await?;
     let rows: Vec<(i64,)> = sqlx::query_as(
         "INSERT INTO rng_draws (scope, draws) VALUES (?1, 1)
          ON CONFLICT(scope) DO UPDATE SET draws = draws + 1
          RETURNING draws - 1",
     )
     .bind(scope)
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await?;
     let n = rows.first().map(|r| r.0).ok_or(sqlx::Error::RowNotFound)?;
     Ok(stream(&seed, scope, n as u64))
 }
-
 /// Draw `n` of `scope`: a key derived from the seed and the scope, stream `n`.
 fn stream(seed: &[u8], scope: &str, n: u64) -> ChaCha8Rng {
     let mut key = [0u8; 32];
@@ -70,8 +75,9 @@ fn stream(seed: &[u8], scope: &str, n: u64) -> ChaCha8Rng {
 /// FNV-1a 64 — stable across builds and Rust versions (unlike `DefaultHasher`),
 /// so a scope keeps its key after an upgrade.
 fn fnv1a(s: &str) -> u64 {
-    s.bytes()
-        .fold(0xcbf2_9ce4_8422_2325, |h, b| (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3))
+    s.bytes().fold(0xcbf2_9ce4_8422_2325, |h, b| {
+        (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
 }
 
 #[cfg(test)]
@@ -109,8 +115,15 @@ mod tests {
         assert_eq!(uniq.len(), 4, "each draw is a new one: {a:?}");
         // Same seed elsewhere: draws of another scope in between do not shift `pick:a`.
         let other = crate::db::init(&dir.path().join("b.db")).await.unwrap();
-        let (seed,): (Vec<u8>,) = sqlx::query_as("SELECT seed FROM rng_seed").fetch_one(&pool).await.unwrap();
-        sqlx::query("UPDATE rng_seed SET seed = ?1").bind(&seed).execute(&other).await.unwrap();
+        let (seed,): (Vec<u8>,) = sqlx::query_as("SELECT seed FROM rng_seed")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE rng_seed SET seed = ?1")
+            .bind(&seed)
+            .execute(&other)
+            .await
+            .unwrap();
         let mut mixed = Vec::new();
         for _ in 0..4 {
             draws(&other, "weight:g", 2).await;
@@ -129,7 +142,11 @@ mod tests {
         let pool = crate::db::init(&path).await.unwrap();
         let impatient = SqlitePoolOptions::new()
             .max_connections(1)
-            .connect_with(SqliteConnectOptions::new().filename(&path).busy_timeout(std::time::Duration::ZERO))
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .filename(&path)
+                    .busy_timeout(std::time::Duration::ZERO),
+            )
             .await
             .unwrap();
         for i in 0..50 {

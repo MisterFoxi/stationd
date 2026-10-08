@@ -2373,6 +2373,8 @@ fn onair_when(at: Option<i64>, tz: &jiff::tz::TimeZone) -> String {
 fn onair_note(n: &onair::Note, tz: &jiff::tz::TimeZone) -> String {
     use onair::note::Code as C;
     match C::try_from(n.code) {
+        Ok(C::BoundaryNoFit) => format!("rendezvous {} at {} delayed: no eligible track fits before it; tracks play to the end", n.rule, onair_when(n.at, tz)),
+        Ok(C::BoundaryMissed) => format!("rendezvous {} at {} will be missed: no eligible track fits and the next track ends after its expiry; tracks play to the end", n.rule, onair_when(n.at, tz)),
         Ok(C::StationPaused) => "station paused: nothing follows until it resumes".into(),
         Ok(C::StationSleeping) => "station asleep: nothing follows until it wakes".into(),
         Ok(C::SleepAtTrackEnd) => "falls asleep at the end of this track (0 listeners)".into(),

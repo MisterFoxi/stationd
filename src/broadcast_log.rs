@@ -40,7 +40,23 @@ pub async fn record(
     played_at: Epoch,
     from: Provenance<'_>,
 ) -> Result<i64, sqlx::Error> {
-    let id = crate::media_identity::ensure(pool, rel_path).await?;
+    record_pick(pool, rel_path, artist, played_at, from, None).await
+}
+
+/// Record the exact shuffle reservation carried by selection. The persisted
+/// UUID survives a relocation between selection and logging.
+pub(crate) async fn record_pick(
+    pool: &SqlitePool, rel_path: &str, artist: Option<&str>, played_at: Epoch,
+    from: Provenance<'_>, reservation: Option<i64>,
+) -> Result<i64, sqlx::Error> {
+    let id = if let Some(pick) = reservation {
+        sqlx::query_scalar::<_, String>("SELECT media_uuid FROM shuffle_pick WHERE id = ?")
+            .bind(pick).fetch_one(pool).await?
+    } else {
+        crate::media_identity::ensure(pool, rel_path).await?
+    };
+
+    let mut tx = pool.begin().await?;
     let r = sqlx::query(
         "INSERT INTO broadcast_log (rel_path, artist, played_at, rule_id, origin, playlist_ref, leaf_ref, media_uuid)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
@@ -52,10 +68,17 @@ pub async fn record(
     .bind(from.origin)
     .bind(from.playlist_ref)
     .bind(from.leaf_ref)
-    .bind(id)
-    .execute(pool)
+    .bind(&id)
+    .execute(&mut *tx)
     .await?;
-    Ok(r.last_insert_rowid())
+    let log_id = r.last_insert_rowid();
+    if let Some(pick) = reservation {
+        let changed = sqlx::query("UPDATE shuffle_pick SET log_id = ? WHERE id = ? AND log_id IS NULL AND settled = 0")
+            .bind(log_id).bind(pick).execute(&mut *tx).await?.rows_affected();
+        if changed != 1 { return Err(sqlx::Error::RowNotFound); }
+    }
+    tx.commit().await?;
+    Ok(log_id)
 }
 
 /// Song keys (`media_index::song_keys`) of everything chosen at or after
@@ -80,11 +103,15 @@ pub async fn song_keys_since(pool: &SqlitePool, cutoff: i64) -> Result<HashSet<S
 
 /// Liquidsoap really started the track logged as `id` at `at`.
 pub async fn mark_aired(pool: &SqlitePool, id: i64, at: Epoch) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
     sqlx::query("UPDATE broadcast_log SET aired_at = ?2 WHERE id = ?1 AND aired_at IS NULL")
         .bind(id)
         .bind(at.0)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
+    sqlx::query("UPDATE shuffle_pick SET settled = 1 WHERE log_id = ?")
+        .bind(id).execute(&mut *tx).await?;
+    tx.commit().await?;
     Ok(())
 }
 

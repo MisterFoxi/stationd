@@ -9,7 +9,7 @@
 //! Pipeline: **materialize → filter_pool → choose.** The pool is a
 //! `Vec<Candidate>` (available media matching the selection); plugins may
 //! remove candidates (`filter_pool`, A2); the remaining pool is then chosen
-//! from by the order — `shuffle` (rand), `sequential`/`oldest` (persisted
+//! from by the order — `shuffle` (persisted UUID bag), `sequential`/`oldest` (persisted
 //! cursor), `newest` (head, stateless).
 //!
 //! SCOPE:
@@ -87,7 +87,12 @@ pub enum SelectionError {
 /// leaf. `None` only for a file that no playlist produced (a media override).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Resolved {
-    File { path: String, leaf: Option<String> },
+    File {
+        path: String,
+        leaf: Option<String>,
+        /// Exact persisted shuffle choice, carried through validation to the log.
+        reservation: Option<i64>,
+    },
     Stream(String),
 }
 
@@ -235,7 +240,7 @@ async fn resolve_turn_limited(
         )
         .await?;
     let st = crate::group_state::get(pool, &key).await?;
-    let holds = st.member_idx != 0 || st.take_count != 0 || st.member_started_at.is_some();
+    let holds = st.boundary_borrowed || st.member_idx != 0 || st.take_count != 0 || st.member_started_at.is_some();
     Ok(Turn { resolved, holds, cycles: true })
 }
 
@@ -294,7 +299,7 @@ async fn resolve_media(
             pool, plugins, now, reference, sel, &scope, max_duration_ms,
         )
         .await
-        .map(|path| Resolved::File { path, leaf: Some(reference.to_string()) }),
+        .map(|(path, reservation)| Resolved::File { path, leaf: Some(reference.to_string()), reservation }),
         Mode::Group => match sel.strategy {
             Some(Strategy::Sequence) => {
                 resolve_group_rotation(pool, plugins, now, reference, sel, false, depth, &scope, false, max_duration_ms)
@@ -338,7 +343,7 @@ async fn resolve_media(
                 None => crate::queue_state::pop(pool, reference, lifo).await?,
             };
             match path {
-                Some(path) => Ok(Resolved::File { path, leaf: Some(reference.to_string()) }),
+                Some(path) => Ok(Resolved::File { path, leaf: Some(reference.to_string()), reservation: None }),
                 None if max_duration_ms.is_some() && crate::queue_state::count(pool, reference).await? > 0 => {
                     Err(SelectionError::NoFit)
                 }
@@ -359,7 +364,7 @@ async fn resolve_leaf(
     sel: &Selection,
     constraints: &[&Constraints],
     max_duration_ms: Option<u64>,
-) -> Result<String, SelectionError> {
+) -> Result<(String, Option<i64>), SelectionError> {
     let order = effective_order(sel);
 
     // 1. Materialize the base pool (base order: static = declared, dynamic =
@@ -369,6 +374,8 @@ async fn resolve_leaf(
         Mode::Static => materialize_static(pool, &sel.files).await?,
         m => return Err(SelectionError::UnsupportedMode(m)),
     };
+
+    let bag_pool = if order == Order::Shuffle { candidates.clone() } else { Vec::new() };
 
     // 2. Plugin filtering (if wired). A plugin may remove candidates — even
     //    all of them. We do NOT fail-open here (choice (b)): an emptied pool
@@ -416,6 +423,11 @@ async fn resolve_leaf(
         candidates.retain(|c| !played.contains(&c.rel_path));
     }
 
+    if order == Order::Shuffle {
+        return crate::shuffle_bag::pick_reserved(pool, reference, &bag_pool, &candidates, max_duration_ms).await
+            .map(|(path, id)| (path, Some(id)));
+    }
+
     if let Some(max) = max_duration_ms {
         let had_candidates = !candidates.is_empty();
         // Best effort for a protected AtClock hard boundary: among all
@@ -437,11 +449,7 @@ async fn resolve_leaf(
     }
 
     // 3. Choose from the filtered pool.
-    match order {
-        Order::Shuffle => {
-            let mut rng = crate::draw::rng(pool, &format!("pick:{reference}")).await?;
-            Ok(candidates.choose(&mut rng).expect("non-empty pool").rel_path.clone())
-        }
+    let path = match order {
         Order::Sequential => cursor_pick(pool, reference, &candidates).await,
         Order::Newest => {
             let key = order_key(sel)?;
@@ -455,7 +463,8 @@ async fn resolve_leaf(
             cursor_pick(pool, reference, &candidates).await
         }
         other => Err(SelectionError::UnsupportedOrder(other)),
-    }
+    }?;
+    Ok((path, None))
 }
 
 /// Drop candidates barred by the anti-repetition constraints in scope — the
@@ -568,7 +577,7 @@ async fn resolve_group_rotation(
 
     let mut st = crate::group_state::get(pool, group_ref).await?;
     let at_top = |st: &crate::group_state::GroupState| {
-        st.member_idx == 0 && st.take_count == 0 && st.member_started_at.is_none()
+        st.member_idx == 0 && st.take_count == 0 && st.member_started_at.is_none() && !st.boundary_borrowed
     };
     if stop_at_wrap && at_top(&st) {
         return Err(SelectionError::CycleComplete);
@@ -658,6 +667,7 @@ async fn resolve_group_rotation(
         .await
         {
             Ok(track) => {
+                st.boundary_borrowed = false;
                 if member.runtime.is_some() {
                     // Time budget: stamp the slot start on the first track and
                     // stay — the expiry check above is what advances later.
@@ -690,6 +700,27 @@ async fn resolve_group_rotation(
                 return Ok(track);
             }
             // `skip`: drop this member and try the next one this turn.
+            Err(SelectionError::NoFit) if max_duration_ms.is_some() => {
+                // Borrow a fitting track without consuming the deferred passage.
+                for offset in 1..n {
+                    let other = &sel.members[order[(st.member_idx + offset) % n]];
+                    let key = crate::playlist::resolve_member_ref(group_ref, &other.r#ref)
+                        .map_err(|_| SelectionError::PlaylistNotFound(other.r#ref.clone()))?;
+                    match resolve_member(pool, plugins, now, &key, depth, scope, max_duration_ms).await {
+                        Ok(track) => {
+                            st.boundary_borrowed = true;
+                            st.permutation = shuffle.then(|| order.clone());
+                            crate::group_state::set(pool, group_ref, &st).await?;
+                            return Ok(track);
+                        }
+                        Err(SelectionError::NoFit | SelectionError::PoolEmpty) => {}
+                        Err(e) => return Err(e),
+                    }
+                }
+                st.permutation = shuffle.then(|| order.clone());
+                crate::group_state::set(pool, group_ref, &st).await?;
+                return Err(SelectionError::NoFit);
+            }
             Err(SelectionError::PoolEmpty) if policy == MemberUnavailable::Skip => {
                 st.member_idx += 1;
                 st.take_count = 0;
@@ -757,6 +788,7 @@ async fn resolve_group_weighted(
     // `members.len()` iterations before the pool is empty.
     // One draw per turn (`draw`), reused by the `skip` re-draws.
     let mut rng = crate::draw::rng(pool, &format!("weight:{group_ref}")).await?;
+    let mut no_fit = false;
     while !eligible.is_empty() {
         let &(member_i, _) = eligible
             .choose_weighted(&mut rng, |&(_, w)| w)
@@ -770,6 +802,10 @@ async fn resolve_group_weighted(
         .await
         {
             Ok(track) => return Ok(track),
+            Err(SelectionError::NoFit) if max_duration_ms.is_some() => {
+                no_fit = true;
+                eligible.retain(|&(i, _)| i != member_i);
+            }
             // `skip`: drop this empty member and re-draw among the rest.
             Err(SelectionError::PoolEmpty) if policy == MemberUnavailable::Skip => {
                 eligible.retain(|&(i, _)| i != member_i);
@@ -779,7 +815,7 @@ async fn resolve_group_weighted(
             Err(e) => return Err(e),
         }
     }
-    Err(SelectionError::PoolEmpty)
+    Err(if no_fit { SelectionError::NoFit } else { SelectionError::PoolEmpty })
 }
 
 /// A fresh random permutation of member indices `0..n` (for `shuffle`),
@@ -840,7 +876,7 @@ async fn resolve_member(
                 pool, plugins, now, member_key, &playlist.selection, &scope, max_duration_ms,
             )
             .await
-                .map(|path| Resolved::File { path, leaf: Some(member_key.to_string()) })
+                .map(|(path, reservation)| Resolved::File { path, leaf: Some(member_key.to_string()), reservation })
         }
         Mode::Group => {
             if depth >= MAX_GROUP_DEPTH {
@@ -878,7 +914,7 @@ async fn resolve_member(
                 None => crate::queue_state::pop(pool, member_key, lifo).await?,
             };
             match path {
-                Some(path) => Ok(Resolved::File { path, leaf: Some(member_key.to_string()) }),
+                Some(path) => Ok(Resolved::File { path, leaf: Some(member_key.to_string()), reservation: None }),
                 None if max_duration_ms.is_some() && crate::queue_state::count(pool, member_key).await? > 0 => {
                     Err(SelectionError::NoFit)
                 }
@@ -2051,6 +2087,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fresh_leaf_activations_and_real_constraints_preserve_shuffle_cycle() {
+        let (_d, pool) = fresh_db().await;
+        media_index::replace_library(&pool, &[
+            media("a.mp3", "A", 0, &[]), media("b.mp3", "B", 0, &[]), media("c.mp3", "C", 0, &[]),
+        ], 1000).await.unwrap();
+        add_playlist(&pool, "music", r#"name = "music"
+            [selection]
+            mode = "static"
+            order = "shuffle"
+            files = ["a.mp3", "b.mp3", "c.mp3"]
+            [broadcast.constraints]
+            no_same_track_within = "1h"
+        "#).await;
+        let mut seen = HashSet::new();
+        for _ in 0..3 {
+            let path = resolve_turn(&pool, None, 1000, "music", TurnStart::Fresh)
+                .await.unwrap().resolved.into_token();
+            assert!(seen.insert(path.clone()));
+            let id = broadcast_log::record(&pool, &path, None, crate::resolver::Epoch(1000),
+                broadcast_log::Provenance { leaf_ref: Some("music"), ..Default::default() }).await.unwrap();
+            broadcast_log::mark_aired(&pool, id, crate::resolver::Epoch(1000)).await.unwrap();
+        }
+        assert!(matches!(resolve_turn(&pool, None, 1000, "music", TurnStart::Fresh).await,
+            Err(SelectionError::PoolEmpty)));
+        // Constraint expiry opens the next cycle, not a schedule reactivation.
+        assert!(resolve_turn(&pool, None, 5000, "music", TurnStart::Fresh).await.is_ok());
+    }
+    #[tokio::test]
     async fn static_shuffle_resolves_a_listed_file() {
         let (_d, pool) = fresh_db().await;
         media_index::replace_library(&pool, &[media("jingles/id-01.wav", "", 0, &[])], 1000)
@@ -2237,12 +2301,12 @@ mod tests {
         .await;
         // Through the group: the leaf is the member, never the group's ref.
         let first = resolve_ref_with_plugins(&pool, None, 0, "rot").await.unwrap();
-        assert_eq!(first, Resolved::File { path: "a/x.mp3".into(), leaf: Some("a".into()) });
+        assert!(matches!(first, Resolved::File { path, leaf, .. } if path == "a/x.mp3" && leaf.as_deref() == Some("a")));
         let second = resolve_ref_with_plugins(&pool, None, 0, "rot").await.unwrap();
-        assert_eq!(second, Resolved::File { path: "b/x.mp3".into(), leaf: Some("b".into()) });
+        assert!(matches!(second, Resolved::File { path, leaf, .. } if path == "b/x.mp3" && leaf.as_deref() == Some("b")));
         // A leaf referenced directly (any spelling) is its own canonical key.
         let direct = resolve_ref_with_plugins(&pool, None, 0, "A").await.unwrap();
-        assert_eq!(direct, Resolved::File { path: "a/x.mp3".into(), leaf: Some("a".into()) });
+        assert!(matches!(direct, Resolved::File { path, leaf, .. } if path == "a/x.mp3" && leaf.as_deref() == Some("a")));
     }
 
     #[tokio::test]
@@ -2515,6 +2579,44 @@ mod tests {
         assert_eq!(resolve_ref(&pool, "show").await.unwrap(), "intros/i1.mp3");
     }
 
+    #[tokio::test]
+    async fn boundary_borrows_a_short_member_and_preserves_the_deferred_quota() {
+        let (_d, pool) = fresh_db().await;
+        let mut long = media("long.mp3", "", 0, &[]);
+        long.duration_ms = 300_000;
+        let mut short = media("short.mp3", "", 0, &[]);
+        short.duration_ms = 30_000;
+        media_index::replace_library(&pool, &[long, short], 1000).await.unwrap();
+        for (key, path) in [("long", "long.mp3"), ("short", "short.mp3")] {
+            add_playlist(&pool, key, &format!(
+                "name = \"{key}\"\n[selection]\nmode = \"static\"\norder = \"shuffle\"\nfiles = [\"{path}\"]"
+            )).await;
+        }
+        for strategy in ["sequence", "shuffle", "weighted"] {
+            let toml = format!(
+                "name = \"show\"\n[selection]\nmode = \"group\"\nstrategy = \"{strategy}\"\nmembers = [{{ref=\"long\",take=3}},{{ref=\"short\"}}]"
+            );
+            add_playlist(&pool, "show", &toml).await;
+            if strategy != "weighted" {
+                crate::group_state::set(&pool, "show", &crate::group_state::GroupState {
+                    permutation: Some(vec![0,1]), ..Default::default()
+                }).await.unwrap();
+            }
+            let turn = resolve_turn_fitting(&pool, None, 1000, "show", TurnStart::Resume, 45_000).await.unwrap();
+            assert_eq!(turn.resolved.into_token(), "short.mp3");
+            if strategy != "weighted" {
+                assert!(turn.holds);
+                let st = crate::group_state::get(&pool, "show").await.unwrap();
+                assert_eq!((st.member_idx, st.take_count), (0,0));
+                assert!(st.boundary_borrowed);
+                let resumed = resolve_turn(&pool, None, 1100, "show", TurnStart::Continue).await.unwrap();
+                assert_eq!(resumed.resolved.into_token(), "long.mp3");
+                let st = crate::group_state::get(&pool, "show").await.unwrap();
+                assert_eq!((st.member_idx, st.take_count), (0,1));
+                assert!(!st.boundary_borrowed);
+            }
+        }
+    }
     #[tokio::test]
     async fn group_sequence_honours_take() {
         let (_d, pool) = fresh_db().await;
@@ -3104,16 +3206,18 @@ mod tests {
         .unwrap();
         // The played file, its `_1` version (same title tag) and the EpicBallad
         // copy (same file name) are all the same song: only b.mp3 is left.
-        for _ in 0..20 {
-            assert_eq!(resolve_ref_at(&pool, now, "rot").await.unwrap(), "Other/b.mp3");
-        }
-        // Outside the window: the song is back.
+        assert_eq!(resolve_ref_at(&pool, now, "rot").await.unwrap(), "Other/b.mp3");
+        // The remaining three copies stay in this cycle, but the title
+        // constraint bars them. Do not replay b to restart an incomplete bag.
+        assert!(matches!(resolve_ref_at(&pool, now, "rot").await, Err(SelectionError::PoolEmpty)));
         let later = now + 3600;
         let mut seen = std::collections::HashSet::new();
-        for _ in 0..60 {
-            seen.insert(resolve_ref_at(&pool, later, "rot").await.unwrap());
+        for _ in 0..3 {
+            let pending = resolve_ref_at(&pool, later, "rot").await.unwrap();
+            assert_ne!(pending, "Other/b.mp3");
+            assert!(seen.insert(pending));
         }
-        assert!(seen.len() > 1);
+        assert_eq!(seen.len(), 3, "all deferred copies return after constraint expiry");
     }
 
     #[tokio::test]
