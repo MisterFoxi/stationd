@@ -79,9 +79,14 @@ quand les fichiers et UUID proviennent d'une bibliothèque NFS partagée.
 ### Best effort avant un rendez-vous horaire
 
 La recherche respecte le sac, les plugins et les contraintes. Si le membre courant
-ne propose aucun titre assez court, les autres membres du groupe sont essayés.
+ne propose aucun titre assez court, les autres membres sont essayés uniquement
+pour un groupe shuffle. Un groupe sequence conserve strictement son ordre :
+il ne rejoue pas son intro et ne joue pas son outro avant le contenu.
+Le groupe reste différé pendant que la grille cherche un autre titre compatible.
 Un titre emprunté consomme son sac feuille, sans avancer la position ni le quota
-du membre différé. Cet état est persisté dans group_state.boundary_borrowed ;
+du membre différé. Un seul emprunt est autorisé pendant ce report ; les pulls
+suivants ne peuvent pas répéter en boucle un membre à un seul média.
+Cet état est persisté dans group_state.boundary_borrowed ;
 la simulation le copie et applique le même algorithme.
 
 Si le groupe ne fournit rien d'assez court, toutes les autres sources applicables
