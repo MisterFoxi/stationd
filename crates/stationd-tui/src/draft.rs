@@ -41,8 +41,10 @@ pub fn orders(mode: &str) -> &'static [&'static str] {
 }
 
 /// Champs de filtre du catalogue, et opérateurs proposés pour chacun.
-pub const FILTER_FIELDS: [&str; 12] =
-    ["path", "genre", "genre_ai", "mood", "artist", "title", "album", "year", "duration", "age", "creation", "tempo"];
+pub const FILTER_FIELDS: [&str; 14] = [
+    "path", "genre", "genre_ai", "mood", "artist", "title", "album", "year", "duration", "age",
+    "creation", "tempo", "play_count", "last_played",
+];
 
 pub fn filter_ops(field: &str) -> &'static [&'static str] {
     match field {
@@ -56,6 +58,10 @@ pub fn filter_ops(field: &str) -> &'static [&'static str] {
         // Date RFC 3339 avec fuseau (`2026-09-01T00:00:00+02:00`).
         "creation" => &[">=", "<=", ">", "<", "eq", "ne"],
         "tempo" => &["eq", "ne"],
+        // Historique : nombre de passages (entier) dans la fenêtre `within`.
+        "play_count" => &[">=", "<=", "=", "!=", ">", "<"],
+        // Âge du dernier passage, durée (`7d`) : `>=` = pas passé depuis.
+        "last_played" => &["<", "<=", ">", ">="],
         _ => &[],
     }
 }
@@ -66,7 +72,7 @@ fn list_op(op: &str) -> bool {
 }
 
 fn numeric_field(field: &str) -> bool {
-    matches!(field, "year" | "duration")
+    matches!(field, "year" | "duration" | "play_count")
 }
 
 /// Un champ simple du brouillon (hors listes).
@@ -134,12 +140,14 @@ impl Key {
     }
 }
 
-/// Un filtre dynamique, tel qu'affiché.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Un filtre dynamique, tel qu'affiché. `within` n'est rempli que pour le
+/// filtre d'historique `play_count` (sa fenêtre glissante) ; vide ailleurs.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct FilterView {
     pub field: String,
     pub op: String,
     pub value: String,
+    pub within: String,
 }
 
 /// Un membre de groupe, tel qu'affiché (vide = absent).
@@ -158,6 +166,7 @@ pub enum FilterPart {
     Field,
     Op,
     Value,
+    Within,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -237,6 +246,18 @@ fn filter_value(field: &str, op: &str, raw: &str) -> Value {
         typed(raw, Kind::Int)
     } else {
         Value::from(raw.trim())
+    }
+}
+
+/// Écrit (ou retire) la fenêtre `within` d'un filtre : elle n'existe que pour
+/// `play_count` et non vide ; partout ailleurs elle est retirée (stationd
+/// refuse un `within` hors `play_count`).
+fn write_within(t: &mut dyn toml_edit::TableLike, f: &FilterView) {
+    if f.field == "play_count" && !f.within.trim().is_empty() {
+        let slot = t.entry("within").or_insert(Item::None);
+        replace_value(slot, Value::from(f.within.trim()));
+    } else {
+        t.remove("within");
     }
 }
 
@@ -505,6 +526,7 @@ impl Draft {
                 field: t.get("field").and_then(show_item).unwrap_or_default(),
                 op: t.get("op").and_then(show_item).unwrap_or_default(),
                 value: t.get("value").and_then(show_item).unwrap_or_default(),
+                within: t.get("within").and_then(show_item).unwrap_or_default(),
             })
             .collect()
     }
@@ -535,6 +557,7 @@ impl Draft {
             }
             FilterPart::Op => f.op = raw.to_string(),
             FilterPart::Value => f.value = raw.to_string(),
+            FilterPart::Within => f.within = raw.to_string(),
         }
         let value = filter_value(&f.field, &f.op, &f.value);
         let Some(t) = self.filter_mut(i) else { return };
@@ -542,6 +565,7 @@ impl Draft {
             let slot = t.entry(k).or_insert(Item::None);
             replace_value(slot, v);
         }
+        write_within(t, &f);
         self.sync_text();
     }
 
@@ -593,6 +617,7 @@ impl Draft {
                 let slot = t.entry(k).or_insert(Item::None);
                 replace_value(slot, v);
             }
+            write_within(t, f);
         }
         self.sync_text();
         Some(j)
@@ -821,8 +846,8 @@ no_same_artist_within = "1h"
         assert_eq!(
             d.filters(),
             vec![
-                FilterView { field: "path".into(), op: "prefix".into(), value: "Musique/".into() },
-                FilterView { field: "genre".into(), op: "has_none".into(), value: "talks, jingle".into() },
+                FilterView { field: "path".into(), op: "prefix".into(), value: "Musique/".into(), ..Default::default() },
+                FilterView { field: "genre".into(), op: "has_none".into(), value: "talks, jingle".into(), ..Default::default() },
             ]
         );
     }
@@ -897,6 +922,33 @@ no_same_artist_within = "1h"
     }
 
     #[test]
+    fn play_count_carries_a_within_window_only_for_play_count() {
+        let mut d = Draft::parse(MUSIQUE);
+        // path/prefix → play_count : op numérique par défaut, valeur entière,
+        // fenêtre `within` écrite.
+        d.set_filter(0, FilterPart::Field, "play_count");
+        assert_eq!(d.filters()[0].op, ">=", "op numérique par défaut");
+        d.set_filter(0, FilterPart::Value, "3");
+        d.set_filter(0, FilterPart::Within, "30d");
+        assert!(d.text().contains("field = \"play_count\""), "{}", d.text());
+        assert!(d.text().contains("value = 3"), "entier : {}", d.text());
+        assert!(d.text().contains("within = \"30d\""), "{}", d.text());
+        let f = Draft::parse(d.text()).filters()[0].clone();
+        assert_eq!((f.value.as_str(), f.within.as_str()), ("3", "30d"), "round-trip");
+
+        // Changer de champ retire le `within` (interdit hors play_count).
+        d.set_filter(0, FilterPart::Field, "last_played");
+        assert!(!d.text().contains("within"), "within retiré hors play_count : {}", d.text());
+        // last_played : valeur durée écrite en texte.
+        d.set_filter(0, FilterPart::Value, "7d");
+        assert!(
+            d.text().contains("field = \"last_played\"") && d.text().contains("value = \"7d\""),
+            "{}",
+            d.text()
+        );
+    }
+
+    #[test]
     fn analysis_filters_replace_genre_lists_with_text_and_round_trip() {
         let mut d = Draft::parse(MUSIQUE);
         for (field, value) in [("genre_ai", "Electronic---Italo-Disco"), ("mood", "party")] {
@@ -912,7 +964,7 @@ no_same_artist_within = "1h"
                 assert_eq!(doc["selection"]["filter"][1]["value"].as_str(), Some(value));
                 assert_eq!(
                     Draft::parse(d.text()).filters()[1],
-                    FilterView { field: field.into(), op: op.into(), value: value.into() }
+                    FilterView { field: field.into(), op: op.into(), value: value.into(), ..Default::default() }
                 );
             }
         }

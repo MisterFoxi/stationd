@@ -147,6 +147,8 @@ fn val_label(v: &str) -> String {
         "age" => tr!("val-age"),
         "creation" => tr!("val-creation"),
         "tempo" => tr!("val-tempo"),
+        "play_count" => tr!("val-play-count"),
+        "last_played" => tr!("val-last-played"),
         "prefix" => tr!("val-prefix"),
         "eq" => tr!("val-eq"),
         "ne" => tr!("val-ne"),
@@ -521,6 +523,10 @@ impl Editor {
                         path: format!("{base}.op"),
                     });
                     text(&mut out, Target::Filter(i, FilterPart::Value), format!("  {}", tr!("pl-f-value")), f.value.clone(), format!("{base}.value"));
+                    // `play_count` porte une fenêtre glissante `within`.
+                    if f.field == "play_count" {
+                        text(&mut out, Target::Filter(i, FilterPart::Within), format!("  {}", tr!("pl-f-within")), f.within.clone(), format!("{base}.within"));
+                    }
                 }
                 action(&mut out, Target::AddFilter, tr!("pl-add-filter"), "selection.filter");
             }
