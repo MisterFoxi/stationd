@@ -733,6 +733,9 @@ pub struct DatabaseConfig {
 #[derive(Debug, Deserialize)]
 pub struct MediaConfig {
     pub library_path: PathBuf,
+    /// Replicas index master's tags without writing to the shared library.
+    #[serde(default)]
+    pub read_only: bool,
 }
 
 #[derive(Debug, Deserialize)]

@@ -900,6 +900,12 @@ impl GridEngine {
         aired_s: i64,
         now: Epoch,
     ) -> Result<Option<bool>, EngineError> {
+        // A file may have moved after it was prepared. Resolve the logged UUID.
+        let current_uri = match log_id {
+            Some(id) => crate::broadcast_log::current_uri(&self.pool, id).await?,
+            None => None,
+        };
+        let media = current_uri.as_deref().unwrap_or(media);
         let duration_ms = crate::media_index::duration_ms_of(&self.pool, media).await?;
         let verdict = duration_ms.filter(|d| *d > 0).map(|d| played_to_end(aired_s, d));
         if let Some(id) = log_id {

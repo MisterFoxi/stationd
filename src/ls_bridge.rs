@@ -1057,9 +1057,9 @@ mod tests {
     async fn metadata_policy_matches_tags_and_origins_in_order() {
         let (_dir, b) = bridge().await;
         let pool = b.engine.pool_for_tests();
-        sqlx::query("INSERT INTO media_genre VALUES ('music/a.mp3', 'JINGLE', 'jingle')")
+        sqlx::query("INSERT INTO media_genre (rel_path, genre, genre_key) VALUES ('music/a.mp3', 'JINGLE', 'jingle')")
             .execute(&pool).await.unwrap();
-        sqlx::query("INSERT INTO media_tag VALUES ('music/a.mp3', 'Type', 'JINGLE', 'jingle')")
+        sqlx::query("INSERT INTO media_tag (rel_path, origin, value, value_key) VALUES ('music/a.mp3', 'Type', 'JINGLE', 'jingle')")
             .execute(&pool).await.unwrap();
         let rules: Vec<crate::config::MetadataRule> = [
             "tag = 'jingle'\norigin = ''\nfields = []",

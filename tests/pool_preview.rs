@@ -380,6 +380,7 @@ members = [{ ref = "jazz", runtime = "20m" }, { ref = "remote", runtime = "5m" }
     assert!(
         handle
             .filter_pool(vec![plugin::Candidate {
+                media_uuid: String::new(),
                 rel_path: "jazz/a.mp3".into(),
                 artist: None,
                 title: None,

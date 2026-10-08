@@ -11,6 +11,8 @@ path = "./data/stationd.db"
 
 [media]
 library_path = "./media"
+# Shared library: false on the MO master, true on secondary stations.
+read_only = false
 
 # Optional — offline media analysis (Essentia). Disabled by default: while
 # disabled, scans run no analysis and the typed `media_analysis` cache is only

@@ -177,7 +177,10 @@ fn push_custom(out: &mut Vec<CustomTag>, name: &str, value: &str) {
     }
     for v in value.split('\0') {
         let v = v.trim();
-        if !v.is_empty() {
+        // Even an empty identity tag is a conflict, not an absent UUID.
+        if name.eq_ignore_ascii_case(crate::media_identity::UUID_TAG) {
+            out.push(CustomTag { name: name.to_string(), value: v.to_string() });
+        } else if !v.is_empty() {
             out.push(CustomTag { name: name.to_string(), value: v.to_string() });
         }
     }
@@ -223,22 +226,31 @@ fn mp4_custom(tag: Option<&lofty::mp4::Ilst>, out: &mut Vec<CustomTag>) {
 /// tags from the raw tag (the generic `Tag` drops unknown `TXXX` & co.), then
 /// convert to the generic `TaggedFile` for the standard fields. Same parse
 /// options and extension-based type detection as `lofty::read_from_path`.
-fn read_tagged(
+pub(crate) fn read_tagged(
     full: &Path,
 ) -> Result<(lofty::file::TaggedFile, Vec<CustomTag>), lofty::error::LoftyError> {
+    let (tagged, custom, _) = read_tagged_snapshot(full)?;
+    Ok((tagged, custom))
+}
+
+/// Fingerprint the opened file, after NFS close-to-open revalidation, rather
+/// than a path stat potentially served from the pre-open attribute cache.
+pub(crate) fn read_tagged_snapshot(
+    full: &Path,
+) -> Result<(lofty::file::TaggedFile, Vec<CustomTag>, std::fs::Metadata), lofty::error::LoftyError> {
     use lofty::config::ParseOptions;
     use lofty::file::{AudioFile, FileType, TaggedFile};
     use lofty::probe::Probe;
 
+    let mut f = std::fs::File::open(full)?;
     let probe = Probe::open(full)?;
     let Some(file_type) = probe.file_type() else {
         // Unknown to lofty by extension: let the generic path report it.
         let tagged = probe.read()?;
         let mut custom = Vec::new();
         standard_plugin_tags(&tagged, &mut custom);
-        return Ok((tagged, custom));
+        return Ok((tagged, custom, f.metadata()?));
     };
-    let mut f = std::fs::File::open(full)?;
     let opts = ParseOptions::new();
     let mut custom = Vec::new();
     let tagged: TaggedFile = match file_type {
@@ -304,7 +316,7 @@ fn read_tagged(
         _ => probe.read()?,
     };
     standard_plugin_tags(&tagged, &mut custom);
-    Ok((tagged, custom))
+    Ok((tagged, custom, f.metadata()?))
 }
 
 /// Read one audio file's tags + duration. Returns the media and its
@@ -341,7 +353,8 @@ fn read_one(root: &Path, full: &Path) -> Result<(ScannedMedia, Vec<CustomTag>), 
     let rel_path = to_rel_path(root, full)
         .unwrap_or_else(|| full.to_string_lossy().replace('\\', "/"));
 
-    let meta = std::fs::metadata(full).map_err(|e| SkipReason::Unreadable(e.to_string()))?;
+    let (tagged, custom_tags, meta) =
+        read_tagged_snapshot(full).map_err(|e| SkipReason::Unreadable(e.to_string()))?;
     let size_bytes = meta.len();
     let mtime_ns = meta
         .modified()
@@ -349,9 +362,6 @@ fn read_one(root: &Path, full: &Path) -> Result<(ScannedMedia, Vec<CustomTag>), 
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_nanos() as i64)
         .unwrap_or(0);
-
-    let (tagged, custom_tags) =
-        read_tagged(full).map_err(|e| SkipReason::Unreadable(e.to_string()))?;
 
     let duration_ms = tagged.properties().duration().as_millis() as u64;
     if duration_ms == 0 {

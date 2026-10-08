@@ -248,7 +248,7 @@ fn component_of(target: &str) -> Component {
     match module {
         "grid_engine" | "grid_files" | "grid_index" | "grid_store" | "grid_toml" | "resolver" | "schedule_grpc"
         | "selection" | "playlist" | "playlist_edit" | "playlist_grpc" | "sync" => Component::Grid,
-        "library_actor" | "library_grpc" | "media" | "media_index" | "media_tags" | "scan_writeback"
+        "library_actor" | "library_grpc" | "media" | "media_index" | "media_tags" | "scan_writeback" | "media_identity"
         | "bpm_analysis" => Component::Library,
         "plugin" | "plugin_db" | "plugin_grpc" => Component::Plugin,
         "live" | "live_grpc" | "live_opening" => Component::Live,

@@ -49,6 +49,8 @@ pub mod onair;
 pub mod onair_grpc;
 pub mod onair_sim;
 pub mod media_index;
+pub mod media_identity;
+mod library_lock;
 mod media_folders;
 pub mod operator_stop;
 pub mod playlist;

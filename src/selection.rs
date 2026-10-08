@@ -377,7 +377,18 @@ async fn resolve_leaf(
     //    loud warning — a filter causing a potential gap must be visible.
     if let Some(handle) = plugins {
         let before = candidates.len();
+        let identities: HashMap<_, _> = candidates.iter()
+            .map(|c| (c.rel_path.clone(), c.media_uuid.clone())).collect();
         candidates = handle.filter_pool(candidates).await;
+        // UUID is core-owned. Existing WASM binaries only return path fields.
+        candidates.retain_mut(|c| match identities.get(&c.rel_path) {
+            Some(id) => { c.media_uuid = id.clone(); true }
+            None => {
+                tracing::warn!(playlist = %reference, path = %c.rel_path,
+                    "plugin returned a candidate outside its input pool");
+                false
+            }
+        });
         if before > 0 && candidates.is_empty() {
             tracing::warn!(
                 playlist = %reference,
@@ -931,8 +942,8 @@ async fn cursor_pick(
     if ordered.is_empty() {
         return Err(SelectionError::PoolEmpty);
     }
-    let last = playlist_cursor::get(pool, reference).await?;
-    let idx = match last.and_then(|l| ordered.iter().position(|c| c.rel_path == l)) {
+    let last = playlist_cursor::get_id(pool, reference).await?;
+    let idx = match last.and_then(|l| ordered.iter().position(|c| c.media_uuid == l)) {
         Some(i) => (i + 1) % ordered.len(),
         None => 0,
     };
@@ -952,6 +963,7 @@ type CandRow = (
     Option<i64>,    // year
     i64,            // duration_ms
     i64,            // mtime_ns
+    String,         // media_uuid
 );
 
 /// `now` (epoch seconds, the station clock) resolves the relative filters
@@ -964,7 +976,7 @@ pub(crate) async fn materialize_dynamic(
     let m = sel.r#match.unwrap_or(Match::All);
     let w = combine_where(&sel.filter, m, now)?;
     let sql = format!(
-        "SELECT rel_path, artist, title, album, year, duration_ms, mtime_ns \
+        "SELECT rel_path, artist, title, album, year, duration_ms, mtime_ns, media_uuid \
          FROM media WHERE available = 1 AND ({}) ORDER BY rel_path",
         w.sql
     );
@@ -1020,7 +1032,7 @@ pub(crate) async fn materialize_static(
         return Ok(Vec::new());
     }
     let sql = format!(
-        "SELECT rel_path, artist, title, album, year, duration_ms, mtime_ns \
+        "SELECT rel_path, artist, title, album, year, duration_ms, mtime_ns, media_uuid \
          FROM media WHERE available = 1 AND rel_path IN ({})",
         placeholders(declared.len())
     );
@@ -1056,9 +1068,10 @@ async fn with_genres(
     let genres = fetch_genres(pool, &paths).await?;
     Ok(rows
         .into_iter()
-        .map(|(rel_path, artist, title, album, year, duration_ms, mtime_ns)| {
+        .map(|(rel_path, artist, title, album, year, duration_ms, mtime_ns, media_uuid)| {
             let g = genres.get(&rel_path).cloned().unwrap_or_default();
             Candidate {
+                media_uuid,
                 rel_path,
                 artist,
                 title,
@@ -1218,7 +1231,7 @@ fn filter_sql(f: &Filter, now: i64) -> Result<Where, SelectionError> {
                 _ => return Err(unsupported()),
             };
             Ok(Where {
-                sql: format!("EXISTS (SELECT 1 FROM media_meta d WHERE d.rel_path = media.rel_path AND d.key = 'tempo' AND d.value {op} ?)"),
+                sql: format!("EXISTS (SELECT 1 FROM media_meta d WHERE d.media_uuid = media.media_uuid AND d.key = 'tempo' AND d.value {op} ?)"),
                 binds: vec![Bind::Text(as_text(f)?)],
             })
         }
@@ -1234,7 +1247,7 @@ fn filter_sql(f: &Filter, now: i64) -> Result<Where, SelectionError> {
             })?;
             // Same UTC, fixed precision representation as media_index.
             Ok(Where {
-                sql: format!("EXISTS (SELECT 1 FROM media_meta d WHERE d.rel_path = media.rel_path AND d.key = 'creation' AND d.value {op} ?)"),
+                sql: format!("EXISTS (SELECT 1 FROM media_meta d WHERE d.media_uuid = media.media_uuid AND d.key = 'creation' AND d.value {op} ?)"),
                 binds: vec![Bind::Text(timestamp)],
             })
         }
@@ -1251,7 +1264,7 @@ fn filter_sql(f: &Filter, now: i64) -> Result<Where, SelectionError> {
                 },
             })?;
             Ok(Where {
-                sql: format!("EXISTS (SELECT 1 FROM media_meta d WHERE d.rel_path = media.rel_path AND d.key = 'creation' AND d.value {op} ?)"),
+                sql: format!("EXISTS (SELECT 1 FROM media_meta d WHERE d.media_uuid = media.media_uuid AND d.key = 'creation' AND d.value {op} ?)"),
                 binds: vec![Bind::Text(bound)],
             })
         }
@@ -1281,7 +1294,7 @@ fn filter_sql(f: &Filter, now: i64) -> Result<Where, SelectionError> {
             let op = num_op(&f.op).ok_or_else(unsupported)?;
             Ok(Where {
                 sql: format!(
-                    "EXISTS (SELECT 1 FROM media_analysis a WHERE a.rel_path = media.rel_path AND a.{col} {op} ?)"
+                    "EXISTS (SELECT 1 FROM media_analysis a WHERE a.media_uuid = media.media_uuid AND a.{col} {op} ?)"
                 ),
                 binds: vec![Bind::Real(as_float(f)?)],
             })
@@ -1299,7 +1312,7 @@ fn filter_sql(f: &Filter, now: i64) -> Result<Where, SelectionError> {
             };
             Ok(Where {
                 sql: format!(
-                    "EXISTS (SELECT 1 FROM media_analysis a WHERE a.rel_path = media.rel_path AND {expr})"
+                    "EXISTS (SELECT 1 FROM media_analysis a WHERE a.media_uuid = media.media_uuid AND {expr})"
                 ),
                 binds: vec![Bind::Text(value)],
             })
@@ -1365,12 +1378,12 @@ fn set_field_sql(sf: &SetField, f: &Filter) -> Result<Where, SelectionError> {
     let as_text_list = |f: &Filter| as_text_list(f).map(|v| v.into_iter().map(fold).collect::<Vec<_>>());
     // One `EXISTS (… d.<col> = ?)` fragment (one bind).
     let exists_eq = || {
-        format!("EXISTS (SELECT 1 FROM {table} d WHERE d.rel_path = media.rel_path AND d.{column} = ?)")
+        format!("EXISTS (SELECT 1 FROM {table} d WHERE d.media_uuid = media.media_uuid AND d.{column} = ?)")
     };
     // `[NOT] EXISTS (… d.<col> IN (?, …))` over a list (N binds).
     let exists_in = |neg: bool, n: usize| {
         format!(
-            "{}EXISTS (SELECT 1 FROM {table} d WHERE d.rel_path = media.rel_path AND d.{column} IN ({}))",
+            "{}EXISTS (SELECT 1 FROM {table} d WHERE d.media_uuid = media.media_uuid AND d.{column} IN ({}))",
             if neg { "NOT " } else { "" },
             placeholders(n)
         )
@@ -1578,7 +1591,7 @@ mod tests {
         let w = sql(&filt("genre", "has", toml::Value::String("jazz".into()))).unwrap();
         assert_eq!(
             w.sql,
-            "EXISTS (SELECT 1 FROM media_genre d WHERE d.rel_path = media.rel_path AND d.genre_key = ?)"
+            "EXISTS (SELECT 1 FROM media_genre d WHERE d.media_uuid = media.media_uuid AND d.genre_key = ?)"
         );
         assert_eq!(w.binds, vec![Bind::Text("jazz".into())]);
     }
@@ -1596,7 +1609,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             w.sql,
-            "EXISTS (SELECT 1 FROM media_genre d WHERE d.rel_path = media.rel_path AND d.genre_key IN (?, ?))"
+            "EXISTS (SELECT 1 FROM media_genre d WHERE d.media_uuid = media.media_uuid AND d.genre_key IN (?, ?))"
         );
         assert_eq!(
             w.binds,
@@ -1654,8 +1667,8 @@ mod tests {
         .unwrap();
         assert_eq!(
             w.sql,
-            "EXISTS (SELECT 1 FROM media_genre d WHERE d.rel_path = media.rel_path AND d.genre_key = ?) \
-             AND EXISTS (SELECT 1 FROM media_genre d WHERE d.rel_path = media.rel_path AND d.genre_key = ?)"
+            "EXISTS (SELECT 1 FROM media_genre d WHERE d.media_uuid = media.media_uuid AND d.genre_key = ?) \
+             AND EXISTS (SELECT 1 FROM media_genre d WHERE d.media_uuid = media.media_uuid AND d.genre_key = ?)"
         );
         assert_eq!(
             w.binds,
@@ -1676,7 +1689,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             w.sql,
-            "NOT EXISTS (SELECT 1 FROM media_genre d WHERE d.rel_path = media.rel_path AND d.genre_key IN (?, ?))"
+            "NOT EXISTS (SELECT 1 FROM media_genre d WHERE d.media_uuid = media.media_uuid AND d.genre_key IN (?, ?))"
         );
         assert_eq!(
             w.binds,

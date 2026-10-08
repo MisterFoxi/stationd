@@ -34,10 +34,12 @@ pub async fn push(
             return Ok(PushOutcome { accepted: false, len: current });
         }
     }
-    sqlx::query("INSERT INTO queue_entry (playlist_ref, rel_path, enqueued_at) VALUES (?1, ?2, ?3)")
+    let id = crate::media_identity::ensure(pool, rel_path).await?;
+    sqlx::query("INSERT INTO queue_entry (playlist_ref, rel_path, enqueued_at, media_uuid) VALUES (?1, ?2, ?3, ?4)")
         .bind(playlist_ref)
         .bind(rel_path)
         .bind(at.0)
+        .bind(id)
         .execute(pool)
         .await?;
     Ok(PushOutcome { accepted: true, len: current + 1 })
@@ -54,7 +56,7 @@ pub async fn pop(
     // `order` is a constant, never user input — no injection surface.
     let order = if lifo { "DESC" } else { "ASC" };
     let row: Option<(i64, String)> = sqlx::query_as(&format!(
-        "SELECT id, rel_path FROM queue_entry WHERE playlist_ref = ?1 ORDER BY id {order} LIMIT 1"
+        "SELECT q.id, i.uri FROM queue_entry q JOIN media_identity i ON i.uuid = q.media_uuid WHERE q.playlist_ref = ?1 ORDER BY q.id {order} LIMIT 1"
     ))
     .bind(playlist_ref)
     .fetch_optional(pool)
@@ -86,7 +88,7 @@ pub async fn pop_fitting(
 ) -> Result<Option<String>, sqlx::Error> {
     let order = if lifo { "DESC" } else { "ASC" };
     let row: Option<(i64, String)> = sqlx::query_as(&format!(
-        "SELECT q.id, q.rel_path          FROM queue_entry q          JOIN media m ON m.rel_path = q.rel_path          WHERE q.playlist_ref = ?1            AND m.available = 1            AND m.duration_ms > 0            AND m.duration_ms <= ?2          ORDER BY m.duration_ms DESC, q.id {order} LIMIT 1"
+        "SELECT q.id, m.rel_path          FROM queue_entry q          JOIN media m ON m.media_uuid = q.media_uuid          WHERE q.playlist_ref = ?1            AND m.available = 1            AND m.duration_ms > 0            AND m.duration_ms <= ?2          ORDER BY m.duration_ms DESC, q.id {order} LIMIT 1"
     ))
     .bind(playlist_ref)
     .bind(max_duration_ms as i64)
