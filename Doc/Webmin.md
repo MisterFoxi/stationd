@@ -1534,3 +1534,43 @@ complete audit trail
 ```
 
 Le plugin devient ainsi une **passerelle de supervision StationD sécurisée**, plutôt qu’un serveur SSH accessible depuis le Web.
+---
+
+# 55. Supervision multi-stations — exigence du 7 octobre 2026
+
+Une installation Webmin peut gérer plusieurs stations StationD.
+Le premier écran après authentification est une **synthèse du réseau**,
+et non le dashboard d’une station choisie implicitement.
+
+La synthèse présente les stations accessibles à l’utilisateur : identité,
+état de diffusion, média en cours, audience et alertes principales. Les
+informations inconnues ou périmées doivent être identifiées ; une station
+injoignable ne doit pas rendre les autres indisponibles.
+
+Choisir une station ouvre son dashboard détaillé puis, selon les droits,
+ses actions et sa console. La station cible doit toujours être visible,
+notamment avant une confirmation d’action et lors de l’ouverture d’une TUI.
+Même avec une seule station, conserver cette entrée par la synthèse réseau.
+
+Chaque station dispose d’un identifiant stable et unique, d’un libellé et
+d’un endpoint gRPC configuré côté serveur. Le navigateur ne peut pas fournir
+un endpoint arbitraire. Les permissions doivent pouvoir être limitées par
+station ; être admin sur une station ne donne pas implicitement accès aux
+autres. L’audit et les sessions terminal doivent identifier la station cible.
+
+La tranche A prépare le catalogue validé. La synthèse visuelle sera réalisée
+avec le dashboard authentifié (tranche C), après les sessions et permissions
+(tranche B). La sécurité du transport vers les stations distantes devra être
+précisée avant leur connexion : ne pas exposer leur gRPC directement sur
+Internet.
+
+# 56. Connexion par mot de passe — décision du 7 octobre 2026
+
+À la demande de l'opérateur, le parcours utilisateur est remplacé par une
+connexion nom de compte + mot de passe. Aucun enrôlement d'appareil ni
+passkey n'est demandé. Le lien temporaire créé par `remote-user add` ou
+`remote-user enroll` sert à définir ou réinitialiser le mot de passe.
+La validation d'un nouveau mot de passe révoque les sessions existantes.
+Les exigences passkeys des sections précédentes décrivent la proposition
+initiale ; cette décision prévaut pour le parcours utilisateur.
+Les rôles par station et la synthèse réseau après connexion sont conservés.

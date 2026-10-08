@@ -13,6 +13,9 @@ syntax = "proto3";
 package webradio.plugin.v1;
 
 service PluginService {
+  // Trusted local/operator gRPC only. Bounded plugin-owned JSON commands.
+  // This RPC must never be proxied to unauthenticated Web clients.
+  rpc Admin(PluginAdminRequest) returns (PluginAdminResponse);
   // État de tous les plugins déclarés (chargés, désactivés, en échec, en
   // quarantaine).
   rpc List(PluginListRequest) returns (PluginListResponse);
@@ -178,3 +181,5 @@ message PluginConfigResponse {
   bool applied = 9;
   string message = 10;
 }
+message PluginAdminRequest { string name = 1; string payload = 2; }
+message PluginAdminResponse { string payload = 1; }

@@ -1,0 +1,20 @@
+# Merge these entries into the existing Traefik dynamic configuration.
+http:
+  routers:
+    stationd-webmin:
+      entryPoints: [https]
+      rule: "Host(`remote.homestone.rp-radio.live`)"
+      service: stationd-webmin
+      tls:
+        certResolver: cloudflare
+    stationd-webmin-http:
+      entryPoints: [http]
+      rule: "Host(`remote.homestone.rp-radio.live`)"
+      middlewares: [https-redirectscheme]
+      service: noop@internal
+  services:
+    stationd-webmin:
+      loadBalancer:
+        servers:
+          - url: "http://192.168.1.111:18090"
+        passHostHeader: true

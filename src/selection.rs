@@ -1025,6 +1025,7 @@ pub(crate) async fn materialize_dynamic(
             Bind::Text(s) => q.bind(s.clone()),
             Bind::Int(i) => q.bind(*i),
             Bind::Real(r) => q.bind(*r),
+            Bind::AirCutoff(secs) => q.bind(crate::air_time::cutoff(pool, now, *secs).await?),
         };
     }
     let rows = q.fetch_all(pool).await?;
@@ -1049,6 +1050,7 @@ pub(crate) async fn dynamic_matches(
             Bind::Text(s) => q.bind(s.clone()),
             Bind::Int(i) => q.bind(*i),
             Bind::Real(r) => q.bind(*r),
+            Bind::AirCutoff(secs) => q.bind(crate::air_time::cutoff(pool, now, *secs).await?),
         };
     }
     let (n,) = q.fetch_one(pool).await?;
@@ -1170,6 +1172,11 @@ enum Bind {
     Text(String),
     Int(i64),
     Real(f64),
+    /// A deferred air-time cutoff: a window in seconds that the async
+    /// materializer resolves to a wall-time instant via `air_time::cutoff`
+    /// (station halts frozen) right before binding. Lets the history filters
+    /// (`play_count`, `last_played`) live in the pure, DB-free WHERE builder.
+    AirCutoff(i64),
 }
 
 /// A generated predicate: SQL with `?` placeholders plus the binds, in the
@@ -1224,6 +1231,14 @@ fn filter_sql(f: &Filter, now: i64) -> Result<Where, SelectionError> {
         field: f.field.clone(),
         op: f.op.clone(),
     };
+    // `within` (the sliding window) belongs only to `play_count`. Anywhere else
+    // it is a loud error, never silently ignored (no-silent-failure).
+    if f.within.is_some() && f.field != "play_count" {
+        return Err(SelectionError::BadFilterValue {
+            field: f.field.clone(),
+            reason: "`within` is only valid for the `play_count` filter".into(),
+        });
+    }
     match f.field.as_str() {
         "path" => {
             let v = as_text(f)?;
@@ -1354,6 +1369,63 @@ fn filter_sql(f: &Filter, now: i64) -> Result<Where, SelectionError> {
                     "EXISTS (SELECT 1 FROM media_analysis a WHERE a.media_uuid = media.media_uuid AND {expr})"
                 ),
                 binds: vec![Bind::Text(value)],
+            })
+        }
+        // Station-wide broadcast history (`broadcast_log`), counted in AIR time
+        // like the anti-repetition windows: the wall cutoff is resolved async
+        // (`Bind::AirCutoff`), frozen during halts (`air_time`). A never-played
+        // media has no row → 0 plays and an infinitely old last play, handled
+        // naturally (it matches `play_count = 0` and `last_played >= …`). Keyed
+        // by `media_uuid` (identity, like tempo/analysis), using the
+        // `broadcast_log (media_uuid, played_at)` index.
+        "last_played" => {
+            // Age of the most recent play, relative to now. `< / <=` → played
+            // within the last window (EXISTS); `> / >=` → not played since (NOT
+            // EXISTS), which a never-played media satisfies. Equality on an age
+            // is meaningless and rejected.
+            let secs = as_duration_secs(f)?;
+            let recent = match f.op.as_str() {
+                "<" | "<=" => true,
+                ">" | ">=" => false,
+                _ => return Err(unsupported()),
+            };
+            Ok(Where {
+                sql: format!(
+                    "{}EXISTS (SELECT 1 FROM broadcast_log b WHERE b.media_uuid = media.media_uuid AND b.played_at >= ?)",
+                    if recent { "" } else { "NOT " }
+                ),
+                binds: vec![Bind::AirCutoff(secs)],
+            })
+        }
+        "play_count" => {
+            // Number of station plays within the sliding window `within`.
+            let op = match f.op.as_str() {
+                "eq" => "=",
+                "ne" => "<>",
+                other => num_op(other).ok_or_else(unsupported)?,
+            };
+            let n = as_int(f)?;
+            if n < 0 {
+                return Err(SelectionError::BadFilterValue {
+                    field: f.field.clone(),
+                    reason: "expected a non-negative integer".into(),
+                });
+            }
+            let window = f.within.as_deref().ok_or_else(|| SelectionError::BadFilterValue {
+                field: f.field.clone(),
+                reason: "`play_count` requires `within`, its sliding window (e.g. within = \"30d\")".into(),
+            })?;
+            let secs = crate::playlist::parse_duration_secs(window)
+                .map(|s| s as i64)
+                .map_err(|_| SelectionError::BadFilterValue {
+                    field: f.field.clone(),
+                    reason: format!("`within` is not a valid duration ({window:?}); want e.g. 30d, 12h, 30m"),
+                })?;
+            Ok(Where {
+                sql: format!(
+                    "(SELECT count(*) FROM broadcast_log b WHERE b.media_uuid = media.media_uuid AND b.played_at >= ?) {op} ?"
+                ),
+                binds: vec![Bind::AirCutoff(secs), Bind::Int(n)],
             })
         }
         // Set-valued fields (genre today, others slot into `set_field`): the
@@ -1512,6 +1584,18 @@ fn as_float(f: &Filter) -> Result<f64, SelectionError> {
         })
 }
 
+/// Read a filter value as a duration in seconds (`[1-9][0-9]*(s|m|h|d)`), for
+/// the age-style history filter `last_played`.
+fn as_duration_secs(f: &Filter) -> Result<i64, SelectionError> {
+    let v = as_text(f)?;
+    crate::playlist::parse_duration_secs(&v)
+        .map(|s| s as i64)
+        .map_err(|_| SelectionError::BadFilterValue {
+            field: f.field.clone(),
+            reason: "expected a duration, e.g. 7d, 12h, 30m".into(),
+        })
+}
+
 /// Read a filter value as a non-empty list of non-empty strings (for `has_any`
 /// and other list ops). Loud errors, per no-silent-failure: not an array, an
 /// empty array, a non-string element, or an empty string — a mistyped list must
@@ -1560,6 +1644,17 @@ mod tests {
             field: field.into(),
             op: op.into(),
             value,
+            within: None,
+        }
+    }
+
+    /// Like [`filt`] but with a `within` window (for `play_count`).
+    fn filt_within(field: &str, op: &str, value: toml::Value, within: &str) -> Filter {
+        Filter {
+            field: field.into(),
+            op: op.into(),
+            value,
+            within: Some(within.into()),
         }
     }
 
@@ -1847,6 +1942,113 @@ mod tests {
             filter_sql(&filt("age", "<", toml::Value::Integer(10)), 0),
             Err(SelectionError::BadFilterValue { .. })
         ));
+    }
+
+    #[test]
+    fn last_played_builds_air_time_predicates() {
+        let f = |op: &str| filter_sql(&filt("last_played", op, toml::Value::String("7d".into())), 0);
+        // "played within the last 7d of air time" → EXISTS, deferred cutoff.
+        let w = f("<").unwrap();
+        assert_eq!(
+            w.sql,
+            "EXISTS (SELECT 1 FROM broadcast_log b WHERE b.media_uuid = media.media_uuid AND b.played_at >= ?)"
+        );
+        assert_eq!(w.binds, vec![Bind::AirCutoff(7 * 86400)]);
+        // "not played since 7d" → NOT EXISTS (a never-played media matches).
+        assert!(f(">=").unwrap().sql.starts_with("NOT EXISTS"));
+        assert_eq!(f("<=").unwrap().sql, f("<").unwrap().sql);
+        assert_eq!(f(">").unwrap().sql, f(">=").unwrap().sql);
+        // Equality on an age is meaningless; a non-duration value is loud.
+        assert!(matches!(f("="), Err(SelectionError::UnsupportedFilter { .. })));
+        assert!(matches!(
+            filter_sql(&filt("last_played", "<", toml::Value::Integer(7)), 0),
+            Err(SelectionError::BadFilterValue { .. })
+        ));
+        // `within` is forbidden here (the value is already the age bound).
+        assert!(matches!(
+            filter_sql(&filt_within("last_played", "<", toml::Value::String("7d".into()), "30d"), 0),
+            Err(SelectionError::BadFilterValue { .. })
+        ));
+    }
+
+    #[test]
+    fn play_count_counts_in_a_required_window() {
+        let w = filter_sql(&filt_within("play_count", "<", toml::Value::Integer(3), "30d"), 0).unwrap();
+        assert_eq!(
+            w.sql,
+            "(SELECT count(*) FROM broadcast_log b WHERE b.media_uuid = media.media_uuid AND b.played_at >= ?) < ?"
+        );
+        assert_eq!(w.binds, vec![Bind::AirCutoff(30 * 86400), Bind::Int(3)]);
+        // eq/ne map onto SQL = / <>.
+        assert!(filter_sql(&filt_within("play_count", "eq", toml::Value::Integer(0), "1d"), 0).unwrap().sql.contains(") = ?"));
+        assert!(filter_sql(&filt_within("play_count", "ne", toml::Value::Integer(0), "1d"), 0).unwrap().sql.contains(") <> ?"));
+        // `within` is mandatory, an integer value is required, N must be >= 0.
+        assert!(matches!(
+            filter_sql(&filt("play_count", "<", toml::Value::Integer(3)), 0),
+            Err(SelectionError::BadFilterValue { .. })
+        ));
+        assert!(matches!(
+            filter_sql(&filt_within("play_count", "<", toml::Value::String("3".into()), "30d"), 0),
+            Err(SelectionError::BadFilterValue { .. })
+        ));
+        assert!(matches!(
+            filter_sql(&filt_within("play_count", "<", toml::Value::Integer(-1), "30d"), 0),
+            Err(SelectionError::BadFilterValue { .. })
+        ));
+        // A bad `within` duration is loud.
+        assert!(matches!(
+            filter_sql(&filt_within("play_count", "<", toml::Value::Integer(3), "30 days"), 0),
+            Err(SelectionError::BadFilterValue { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn history_filters_select_on_play_count_and_last_played() {
+        use crate::resolver::Epoch;
+        let (_d, pool) = fresh_db().await;
+        media_index::replace_library(
+            &pool,
+            &[
+                media("hot.mp3", "A", 2020, &[]),
+                media("cold.mp3", "B", 2020, &[]),
+                media("fresh.mp3", "C", 2020, &[]), // never played
+            ],
+            1,
+        )
+        .await
+        .unwrap();
+        // hot: three recent plays; cold: one, long ago.
+        for t in [100_000, 100_500, 101_000] {
+            broadcast_log::record(&pool, "hot.mp3", Some("A"), Epoch(t), broadcast_log::Provenance::default()).await.unwrap();
+        }
+        broadcast_log::record(&pool, "cold.mp3", Some("B"), Epoch(1_000), broadcast_log::Provenance::default()).await.unwrap();
+        let now = 101_000i64;
+
+        let sel = |filter: &str| {
+            Playlist::parse(&format!(
+                "name = \"n\"\n[selection]\nmode = \"dynamic\"\norder = \"shuffle\"\n{filter}"
+            ))
+            .unwrap()
+            .selection
+        };
+        let paths = |mut c: Vec<Candidate>| {
+            c.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
+            c.into_iter().map(|c| c.rel_path).collect::<Vec<_>>()
+        };
+
+        // play_count < 2 over a wide window → cold + fresh (hot has three).
+        let s = sel("[[selection.filter]]\nfield = \"play_count\"\nop = \"<\"\nvalue = 2\nwithin = \"1d\"");
+        assert_eq!(paths(materialize_dynamic(&pool, &s, now).await.unwrap()), ["cold.mp3", "fresh.mp3"]);
+
+        // last_played >= 1h → not aired in the last hour: cold + fresh.
+        let s = sel("[[selection.filter]]\nfield = \"last_played\"\nop = \">=\"\nvalue = \"1h\"");
+        assert_eq!(paths(materialize_dynamic(&pool, &s, now).await.unwrap()), ["cold.mp3", "fresh.mp3"]);
+
+        // last_played < 1h → only hot.
+        let s = sel("[[selection.filter]]\nfield = \"last_played\"\nop = \"<\"\nvalue = \"1h\"");
+        assert_eq!(paths(materialize_dynamic(&pool, &s, now).await.unwrap()), ["hot.mp3"]);
+        assert!(dynamic_matches(&pool, &s, "hot.mp3", now).await.unwrap());
+        assert!(!dynamic_matches(&pool, &s, "fresh.mp3", now).await.unwrap());
     }
 
     #[tokio::test]
@@ -3838,7 +4040,7 @@ mod tests {
             let sql = format!("SELECT count(*) FROM media WHERE available = 1 AND {}", w.sql);
             let mut query = sqlx::query_as::<_, (i64,)>(&sql);
             for bind in w.binds {
-                query = match bind { Bind::Text(v) => query.bind(v), Bind::Int(v) => query.bind(v), Bind::Real(v) => query.bind(v) };
+                query = match bind { Bind::Text(v) => query.bind(v), Bind::Int(v) => query.bind(v), Bind::Real(v) => query.bind(v), Bind::AirCutoff(v) => query.bind(v) };
             }
             assert_eq!(query.fetch_one(&pool).await.unwrap().0, expected, "{field} {op} {value}");
         }

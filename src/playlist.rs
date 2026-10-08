@@ -160,6 +160,12 @@ pub struct Filter {
     pub field: String,
     pub op: String,
     pub value: toml::Value,
+    /// Sliding window for the history filter `play_count` (e.g. `"30d"`): the
+    /// count is taken over that much AIR time (station halts frozen, like the
+    /// anti-repetition windows). Required for `play_count`, forbidden on every
+    /// other field. `last_played` needs none — its `value` is the age bound.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub within: Option<String>,
 }
 
 /// A group member: a reference to another playlist, plus an optional quota.

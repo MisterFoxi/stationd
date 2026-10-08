@@ -25,7 +25,7 @@ toml = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time", "net", "io-util"] }
-tonic = "0.12"
+tonic = { version = "0.12", features = ["tls-native-roots"] }
 prost = "0.13"
 prost-types = "0.13"
 tokio-stream = "0.1"   # flux serveur gRPC (OnAirService.Watch) ; déjà dans l'arbre via tonic
@@ -41,7 +41,7 @@ rand = "0.8"            # tirage shuffle en mémoire (pool matérialisé, filtra
 rand_chacha = "0.3"     # tirages reproductibles (`draw`) : la simulation tire ce que tirera l'antenne
 extism = "1"            # runtime WASM hôte pour les plugins (tire wasmtime)
 serde_json = "1"        # sérialisation à la frontière host↔wasm
-axum = { version = "0.7", default-features = false, features = ["tokio", "http1", "json"] }  # pont HTTP loopback Liquidsoap → stationd
+axum = { version = "0.7", default-features = false, features = ["tokio", "http1", "json", "ws"] }  # pont HTTP loopback Liquidsoap → stationd
 # Lecture de l'API admin Icecast (stationd → Icecast, HTTP simple). hyper / hyper-util /
 # http-body-util / bytes / base64 sont déjà dans l'arbre (axum, tonic) : seul roxmltree est neuf.
 hyper = { version = "1", features = ["client", "http1"] }
@@ -61,11 +61,19 @@ rusqlite = { version = "0.30", features = ["hooks", "limits"] }
 # Local DB-IP City Lite MMDB lookups; no network or mmap feature.
 maxminddb = { version = "0.24", default-features = false }
 
+# Webmin passkeys: safe WebAuthn API; vendored crypto avoids a system libssl requirement.
+webauthn-rs = "=0.5.5"
+openssl = { version = "0.10", features = ["vendored"] }
+subtle = "2"
+
 [build-dependencies]
 tonic-build = "0.12"
 
 [dev-dependencies]
+futures-util = "0.3"
+tokio-tungstenite = "0.24"
 tempfile = "3"
+webauthn-authenticator-rs = { version = "=0.5.5", default-features = false, features = ["softpasskey"] }
 tower = { version = "0.5", features = ["util"] }   # oneshot sur le routeur du pont LS
 
 [profile.dev]
