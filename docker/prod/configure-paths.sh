@@ -8,15 +8,17 @@ template="$here/compose.template.yaml"
 envfile=""
 output=""
 image=""
+service_output=""
 media=/mnt/nfs/radio
 die() { echo "configure-paths.sh : $*" >&2; exit 1; }
 while [ $# -gt 0 ]; do
   case "$1" in
-    --dir|--template|--env-file|--output|--image|--media)
+    --dir|--template|--env-file|--output|--image|--media|--service-output)
       [ $# -ge 2 ] || die "$1 attend une valeur"
       case "$1" in
         --dir) dir="$2";; --template) template="$2";; --env-file) envfile="$2";;
         --output) output="$2";; --image) image="$2";; --media) media="$2";;
+        --service-output) service_output="$2";;
       esac
       shift 2;;
     *) die "option inconnue : $1";;
@@ -73,4 +75,10 @@ awk -v volumes="$tmp/volumes" -v gids="$gids" '
 docker compose --project-directory "$dir" --env-file "$envfile" -f "$tmp/compose.yaml" config --quiet
 install -m 0644 "$tmp/compose.yaml" "$output.new"
 mv -f "$output.new" "$output"
+if [ -n "$service_output" ]; then
+  docker run --rm -i --entrypoint python3 -v "$tmp/plan:/stationd-plan:ro" \
+    "$image" - "$dir" < "$here/service-unit.py" > "$tmp/stationd.service"
+  install -m 0644 "$tmp/stationd.service" "$service_output"
+fi
+
 echo "Compose généré depuis $dir/stationd.toml : $output"

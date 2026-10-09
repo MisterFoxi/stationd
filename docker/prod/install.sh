@@ -19,7 +19,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 [ "$(id -u)" = 0 ] || die "à lancer avec sudo (ou en root avec --admin USER)"
-for cmd in docker flock sha256sum getent usermod groupadd useradd install realpath; do
+for cmd in docker flock sha256sum getent usermod groupadd useradd install realpath systemctl ip; do
   command -v "$cmd" >/dev/null || die "commande requise absente : $cmd"
 done
 case "$dir" in /*) ;; *) die "--dir doit être un chemin absolu" ;; esac
@@ -32,7 +32,7 @@ exec 9>/run/lock/stationd-install.lock
 flock -n 9 || die "une installation stationd est déjà en cours"
 docker compose version >/dev/null 2>&1 || die "plugin docker compose absent"
 docker info >/dev/null 2>&1 || die "daemon Docker indisponible"
-for f in VERSION SHA256SUMS compose.yaml stationd.example.toml client.sh configure-paths.sh paths.py scripts/update-geolite2.sh radio/error.mp3 radio/bruit.mp3; do
+for f in VERSION SHA256SUMS compose.yaml stationd.example.toml client.sh configure-paths.sh paths.py service.sh network.py service-unit.py scripts/update-geolite2.sh radio/error.mp3 radio/bruit.mp3; do
   [ -s "$here/$f" ] || die "bundle incomplet : $f absent ou vide"
 done
 [ -d "$here/examples" ] || die "bundle incomplet : examples/"
@@ -55,7 +55,7 @@ docker run --rm --entrypoint /bin/sh "stationd:$tag" -euc '
   test -s /usr/share/stationd/error.mp3
   test -s /usr/share/stationd/bruit.mp3
   test -x /usr/local/bin/update-geolite2.sh
-  for cmd in curl tar gzip stty; do command -v "$cmd" >/dev/null; done
+  for cmd in curl tar gzip stty timeout; do command -v "$cmd" >/dev/null; done
 '
 getent group stationd >/dev/null || groupadd --system stationd
 id stationd >/dev/null 2>&1 || useradd --system -g stationd -d "$dir" -M -s /usr/sbin/nologin stationd
@@ -80,13 +80,14 @@ STATIOND_GID=$(getent group stationd | cut -d: -f3)
 MEDIA_PATH='$media'
 MEDIA_GID=$(stat -c %g "$media" 2>/dev/null || getent group stationd | cut -d: -f3)
 TZ='${TZ:-UTC}'
+STATIOND_BIND_MODE=auto
 EOF
 fi
 # Le TOML est la source des chemins ; MEDIA_PATH sert au bootstrap sans TOML.
 media_line="$(docker compose --project-directory "$dir" --env-file "$tmp/.env" -f "$here/compose.yaml" config --environment | sed -n 's/^MEDIA_PATH=//p')"
 bash "$here/configure-paths.sh" --dir "$dir" --image "stationd:$tag" \
   --template "$here/compose.yaml" --env-file "$tmp/.env" \
-  --output "$tmp/compose.yaml" --media "${media_line:-$media}"
+  --output "$tmp/compose.yaml" --service-output "$tmp/stationd.service" --media "${media_line:-$media}"
 install -d -m 2770 -o stationd -g stationd "$dir" "$dir/playlist" "$dir/radio" "$dir/grid"
 install -d -m 2770 -o stationd -g stationd "$dir/data" "$dir/data/geoip"
 install -d -m 0755 "$dir/scripts"
@@ -103,6 +104,13 @@ install -m 0644 "$tmp/compose.yaml" "$dir/compose.yaml"
 install -m 0644 "$here/compose.yaml" "$dir/scripts/compose.template.yaml"
 install -m 0755 "$here/configure-paths.sh" "$dir/scripts/configure-paths.sh"
 install -m 0644 "$here/paths.py" "$dir/scripts/paths.py"
+install -m 0755 "$here/service.sh" "$dir/scripts/service.sh"
+install -m 0644 "$here/network.py" "$dir/scripts/network.py"
+install -m 0644 "$here/service-unit.py" "$dir/scripts/service-unit.py"
+install -d -m 0755 /etc/systemd/system
+install -m 0644 "$tmp/stationd.service" /etc/systemd/system/stationd.service
+systemctl daemon-reload
+systemctl enable docker.service stationd.service
 install -m 0660 -o stationd -g stationd "$here/stationd.example.toml" "$dir/stationd.example.toml"
 # Rafraîchir les exemples sans effacer ceux en place avant la copie.
 cp -r "$here/examples" "$tmp/examples"
@@ -137,15 +145,15 @@ echo "Commandes installées : /usr/local/bin/stationctl et /usr/local/bin/statio
 [ -z "$relog" ] || echo "$relog"
 if [ ! -f "$dir/stationd.toml" ]; then
   echo "Installation prête, configuration requise : créer $dir/stationd.toml depuis stationd.example.toml."
-  echo "Puis : sudo bash $dir/scripts/configure-paths.sh && cd $dir && docker compose up -d"
+  echo "Puis : sudo systemctl start stationd"
   exit 0
 fi
 dc() { docker compose --project-directory "$dir" -f "$dir/compose.yaml" "$@"; }
-if dc up -d; then
+if systemctl restart stationd.service; then
   if [ -f "$dir/data/stationd.stopped" ]; then
     echo "Installation mise à jour ; stationd reste volontairement arrêté. Reprise : stationctl station start"
   else
-    echo "stationd $tag installé ; conteneur démarré. Administration : stationctl ; stationd-tui"
+    echo "stationd $tag installé ; conteneur démarré et gRPC disponible. Administration : stationctl ; stationd-tui"
   fi
 else
   dc logs --tail 80 >&2 || true
@@ -153,7 +161,7 @@ else
     install -m 0640 -o root -g stationd "$tmp/previous.env" "$dir/.env"
     [ ! -f "$tmp/previous.compose.yaml" ] || install -m 0644 "$tmp/previous.compose.yaml" "$dir/compose.yaml"
     echo "Échec du démarrage : restauration de la version précédente dans .env." >&2
-    dc up -d >&2 || true
+    systemctl restart stationd.service >&2 || true
   fi
-  die "docker compose up a échoué ; consulter docker compose logs dans $dir"
+  die "service stationd en échec ; consulter journalctl -u stationd et docker compose logs dans $dir"
 fi

@@ -10,6 +10,8 @@ export TEST_HOME="$tmp"
 export TEST_LOG="$tmp/log"
 export TEST_MEDIA="$tmp/media"
 export TEST_PATH_HELPER="$root/docker/prod/paths.py"
+export TEST_UNIT_HELPER="$root/docker/prod/service-unit.py"
+export TEST_NETWORK_HELPER="$root/docker/prod/network.py"
 export TEST_PYTHON="${TEST_PYTHON:-python3}"
 : > "$TEST_LOG"
 for cmd in chown chgrp flock groupadd useradd; do
@@ -59,11 +61,25 @@ printf ' %q' "$@" >> "$TEST_LOG"
 printf '\n' >> "$TEST_LOG"
 if [ "$1" = info ]; then exit "${TEST_INFO_FAIL:-0}"; fi
 if [ "$1" = run ] && [[ " $* " = *" --entrypoint python3 "* ]]; then
+  input="$(cat)"
+  if [[ "$input" = *"stationd network:"* ]]; then mode=network; else mode=paths; fi
   config=""
   while [ $# -gt 0 ]; do
-    if [ "$1" = -v ]; then config="${2%:/stationd-config.toml:ro}"; shift 2; else shift; fi
-    if [ "${1:-}" = - ]; then shift; dir="$1"; media="$2"; break; fi
+    if [ "$1" = -v ]; then
+      config="${2%:/stationd-config.toml:ro}"
+      if [[ "$2" = *:/stationd-plan:ro ]]; then mode=unit; config="${2%:/stationd-plan:ro}"; fi
+      shift 2
+    else shift; fi
+    if [ "${1:-}" = - ]; then shift; dir="$1"; media="${2:-}"; break; fi
   done
+  if [ "$mode" = unit ]; then
+    "$TEST_PYTHON" -c 'import runpy,sys; ns=runpy.run_path(sys.argv[1]); print(ns["unit"](sys.argv[2],[line.split("\t")[1] for line in open(sys.argv[3])]),end="")' "$TEST_UNIT_HELPER" "$dir" "$config"
+    exit $?
+  fi
+  if [ "$mode" = network ]; then
+    "$TEST_PYTHON" -c 'import runpy,sys; ns=runpy.run_path(sys.argv[1]); print(ns["configure"](open(sys.argv[2]).read(),sys.argv[3]),end="")' "$TEST_NETWORK_HELPER" "$config" "$dir"
+    exit $?
+  fi
   helper="$TEST_PATH_HELPER"
   if [[ "$OSTYPE" = msys* ]]; then
     config="$(cygpath -m "$config")"; helper="$(cygpath -m "$helper")"
@@ -80,12 +96,13 @@ if [ "$1" = compose ]; then
   fi
   for arg in "$@"; do
     case "$arg" in
-      --environment) printf 'MEDIA_PATH=%s\n' "$TEST_MEDIA"; exit 0;;
+      --environment) printf 'MEDIA_PATH=%s\n' "$TEST_MEDIA"; sed -n '/^STATIOND_VERSION=/p; /^STATIOND_BIND_MODE=/p' "$TEST_HOME/node/.env" 2>/dev/null || true; exit 0;;
       ps) echo station; exit 0;;
       cp) dest="${@: -1}"; printf binary > "$dest"; exit 0;;
     esac
   done
   if [[ " $* " = *" up "* ]]; then
+    if [ "${TEST_WAIT_FAIL:-0}" = 1 ]; then exit 1; fi
     if [ "${TEST_UP_FAIL:-0}" = 1 ] && [ ! -f "$TEST_HOME/up-failed" ]; then
       touch "$TEST_HOME/up-failed"; exit 1
     fi
@@ -105,13 +122,24 @@ if [[ "$OSTYPE" = msys* ]]; then
   /usr/bin/chmod +x "$tmp/mock/chmod"
 fi
 export PATH="$tmp/mock:$PATH"
+cat > "$tmp/mock/systemctl" <<'EOF'
+#!/usr/bin/env bash
+printf 'systemctl %s\n' "$*" >> "$TEST_LOG"
+if [ "$1" = restart ]; then bash "$TEST_HOME/node/scripts/service.sh" start; fi
+EOF
+cat > "$tmp/mock/ip" <<'EOF'
+#!/usr/bin/env bash
+echo "1.1.1.1 via 192.168.1.1 dev eth0 src ${TEST_IP:-192.168.1.134}"
+EOF
+chmod +x "$tmp/mock/systemctl" "$tmp/mock/ip"
 # Rediriger uniquement les chemins système du script testé vers le bac à sable.
 sed -e "s|/run/lock/stationd-install.lock|$tmp/install.lock|g" \
     -e "s|/usr/local/libexec|$tmp/system/libexec|g" \
     -e "s|/usr/local/bin|$tmp/system/bin|g" \
+    -e "s|/etc/systemd/system|$tmp/system/units|g" \
     "$root/docker/prod/install.sh" > "$tmp/bundle/install.sh"
 cp "$root/docker/prod/client.sh" "$tmp/bundle/client.sh"
-cp "$root/docker/prod/"{configure-paths.sh,paths.py} "$tmp/bundle/"
+cp "$root/docker/prod/"{configure-paths.sh,paths.py,service.sh,network.py,service-unit.py} "$tmp/bundle/"
 cp "$root/scripts/update-geolite2.sh" "$tmp/bundle/scripts/update-geolite2.sh"
 cp "$root/docker/prod/compose.yaml" "$tmp/bundle/compose.yaml"
 printf config > "$tmp/bundle/stationd.example.toml"
@@ -142,7 +170,7 @@ grep -q 'configuration requise' "$tmp/output"
 # Mise à jour : garder config, fichiers personnalisés et montage ; ajouter VERSION si absente.
 printf custom > "$tmp/node/radio/error.mp3"
 printf geodb > "$tmp/node/data/geoip/GeoLite2-City.mmdb"
-printf '[media]\nlibrary_path = "%s"\n[playlist]\npath = "./playlist"\n' "$tmp/media" > "$tmp/node/stationd.toml"
+printf '[server]\ngrpc_bind = "192.168.1.134:50051"\n[media]\nlibrary_path = "%s"\n[playlist]\npath = "./playlist"\n' "$tmp/media" > "$tmp/node/stationd.toml"
 printf 'MEDIA_PATH=%s\nSTATIOND_UID=982\nSTATIOND_GID=982\nMEDIA_GID=982\n' "$tmp/media" > "$tmp/node/.env"
 cp "$tmp/node/stationd.toml" "$tmp/expected-config"
 bash "$tmp/bundle/install.sh" --dir "$tmp/node" --admin foxi > "$tmp/output"
@@ -151,10 +179,17 @@ cmp "$tmp/expected-config" "$tmp/node/stationd.toml"
 test "$(cat "$tmp/node/data/geoip/GeoLite2-City.mmdb")" = geodb
 grep -qx STATIOND_VERSION=v1 "$tmp/node/.env"
 grep -q 'conteneur démarré' "$tmp/output"
-! grep -q 'stationctl status' "$TEST_LOG"
+grep -q 'systemctl enable docker.service stationd.service' "$TEST_LOG"
+grep -q 'up -d --force-recreate --wait --wait-timeout 60' "$TEST_LOG"
+grep -q 'RequiresMountsFor=' "$tmp/system/units/stationd.service"
+# Different VMs/reboots: discover this node's new address; preserve station and port.
+TEST_IP=192.168.1.136 bash "$tmp/node/scripts/service.sh" start > "$tmp/output"
+grep -q 'grpc_bind = "192.168.1.136:50051"' "$tmp/node/stationd.toml"
+bash "$tmp/node/scripts/service.sh" start > "$tmp/output"
+cmp "$tmp/expected-config" "$tmp/node/stationd.toml"
 # TOML authoritative: external playlist mount, missing directory and invalid TOML.
 mkdir -p "$tmp/shared playlists"
-printf '[media]\nlibrary_path = "%s"\n[playlist]\npath = "%s"\n' "$tmp/media" "$tmp/shared playlists" > "$tmp/node/stationd.toml"
+printf '[server]\ngrpc_bind = "192.168.1.134:50051"\n[media]\nlibrary_path = "%s"\n[playlist]\npath = "%s"\n' "$tmp/media" "$tmp/shared playlists" > "$tmp/node/stationd.toml"
 bash "$tmp/bundle/install.sh" --dir "$tmp/node" --admin foxi > "$tmp/output"
 grep -Fq "\"target\": \"$tmp/shared playlists\"" "$tmp/node/compose.yaml"
 grep -Fq '"create_host_path": false' "$tmp/node/compose.yaml"
@@ -177,6 +212,9 @@ if TEST_UP_FAIL=1 bash "$tmp/bundle/install.sh" --dir "$tmp/node" --admin foxi >
 grep -qx STATIOND_VERSION=old "$tmp/node/.env"
 cmp "$tmp/expected-compose" "$tmp/node/compose.yaml"
 grep -q 'restauration' "$tmp/output"
+if TEST_WAIT_FAIL=1 bash "$tmp/bundle/install.sh" --dir "$tmp/node" --admin foxi > "$tmp/output" 2>&1; then exit 1; fi
+grep -qx STATIOND_VERSION=old "$tmp/node/.env"
+grep -q 'service stationd en échec' "$tmp/output"
 # Arrêt volontaire : ne pas réactiver le daemon, ni attendre un RPC impossible.
 touch "$tmp/node/data/stationd.stopped"
 TEST_STATUS_FAIL=1 bash "$tmp/bundle/install.sh" --dir "$tmp/node" --admin foxi > "$tmp/output"
@@ -204,7 +242,7 @@ chmod +x "$tmp/repo/docker/package.sh"
 mkdir -p "$tmp/repo/tools" "$tmp/repo/scripts"
 cp "$root/scripts/update-geolite2.sh" "$tmp/repo/scripts/update-geolite2.sh"
 printf extractor > "$tmp/repo/tools/essentia_analyze.py"
-cp "$root/docker/prod/"{install.sh,client.sh,compose.yaml,configure-paths.sh,paths.py} "$tmp/repo/docker/prod/"
+cp "$root/docker/prod/"{install.sh,client.sh,compose.yaml,configure-paths.sh,paths.py,service.sh,network.py,service-unit.py} "$tmp/repo/docker/prod/"
 cp -r "$tmp/bundle/radio" "$tmp/repo/radio"
 cp -r "$tmp/bundle/examples" "$tmp/repo/examples"
 cp "$tmp/bundle/stationd.example.toml" "$tmp/repo/"
@@ -220,6 +258,9 @@ diff -r "$tmp/repo/radio" "$bundle/radio"
 test -x "$bundle/client.sh"
 test -x "$bundle/configure-paths.sh"
 test -s "$bundle/paths.py"
+test -x "$bundle/service.sh"
+test -s "$bundle/network.py"
+test -s "$bundle/service-unit.py"
 test -x "$bundle/scripts/update-geolite2.sh"
 cmp "$tmp/repo/scripts/update-geolite2.sh" "$bundle/scripts/update-geolite2.sh"
 grep -q -- 'cargo build --release --locked --workspace --bins' "$TEST_LOG"

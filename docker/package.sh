@@ -132,7 +132,7 @@ docker run --rm --entrypoint /bin/sh "stationd:$tag" -euc '
   test -d /usr/share/zoneinfo/Europe
   test -x /usr/local/bin/essentia_analyze.py
   test -x /usr/local/bin/update-geolite2.sh
-  for cmd in curl tar gzip stty; do command -v "$cmd" >/dev/null; done
+  for cmd in curl tar gzip stty timeout; do command -v "$cmd" >/dev/null; done
   python3 --version >/dev/null
 '
 
@@ -160,6 +160,9 @@ install -m 0755 docker/prod/install.sh "$out/install.sh"
 install -m 0755 docker/prod/client.sh "$out/client.sh"
 install -m 0755 docker/prod/configure-paths.sh "$out/configure-paths.sh"
 install -m 0644 docker/prod/paths.py "$out/paths.py"
+install -m 0755 docker/prod/service.sh "$out/service.sh"
+install -m 0644 docker/prod/network.py "$out/network.py"
+install -m 0644 docker/prod/service-unit.py "$out/service-unit.py"
 echo "$tag" > "$out/VERSION"
 (cd "$out" && find . -type f -printf '%P\0' | sort -z | xargs -0 sha256sum -- > "$root/dist/SHA256SUMS.tmp")
 mv "$root/dist/SHA256SUMS.tmp" "$out/SHA256SUMS"
