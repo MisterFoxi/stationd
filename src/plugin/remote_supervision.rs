@@ -3,6 +3,7 @@
 //! when the plugin actor itself runs on a single-thread Tokio runtime.
 mod auth;
 mod console;
+mod i18n;
 mod live;
 mod web;
 use super::{Host, Plugin};

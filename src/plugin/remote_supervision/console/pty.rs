@@ -30,6 +30,7 @@ mod linux {
             endpoint: &str,
             cols: u16,
             rows: u16,
+            language: &str,
         ) -> io::Result<Self> {
             let (mut master, mut slave) = (-1, -1);
             let dimensions = size(cols, rows);
@@ -63,11 +64,12 @@ mod linux {
             let master = AsyncFd::new(master)?;
             let mut command = Command::new(program);
             command
-                .args(["--addr", endpoint])
+                .args(["--addr", endpoint, "--lang", language])
                 .current_dir("/")
                 .env_clear()
                 .env("TERM", "xterm-256color")
                 .env("LANG", "C.UTF-8")
+                .env("STATIOND_WEBMIN_DIAGNOSTICS", "1")
                 .stdin(Stdio::from(slave.try_clone()?))
                 .stdout(Stdio::from(slave.try_clone()?))
                 .stderr(Stdio::from(slave));
@@ -164,7 +166,7 @@ pub(super) use linux::Pty;
 pub(super) struct Pty;
 #[cfg(not(target_os = "linux"))]
 impl Pty {
-    pub(crate) fn spawn(_: &str, _: &str, _: u16, _: u16) -> std::io::Result<Self> {
+    pub(crate) fn spawn(_: &str, _: &str, _: u16, _: u16, _: &str) -> std::io::Result<Self> {
         Err(std::io::ErrorKind::Unsupported.into())
     }
     pub(crate) async fn read(&self, _: &mut [u8]) -> std::io::Result<usize> {
@@ -186,6 +188,33 @@ mod tests {
     use super::Pty;
     use std::{os::unix::fs::PermissionsExt, time::Duration};
     #[tokio::test]
+    async fn webmin_console_pty_passes_viewer_language() {
+        let dir = tempfile::tempdir().unwrap();
+        let program = dir.path().join("stationd-tui");
+        std::fs::write(&program, "#!/usr/bin/python3\nimport os,sys,time,json\nos.write(1,(json.dumps(sys.argv[1:])+'\\n').encode())\ntime.sleep(30)\n").unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        for language in ["fr", "en", "de"] {
+            let terminal = Pty::spawn(
+                program.to_str().unwrap(),
+                "http://127.0.0.1:50051",
+                80,
+                24,
+                language,
+            )
+            .unwrap();
+            let mut buffer = [0; 256];
+            let count = tokio::time::timeout(Duration::from_secs(2), terminal.read(&mut buffer))
+                .await
+                .unwrap()
+                .unwrap();
+            let args: Vec<String> = serde_json::from_slice(&buffer[..count]).unwrap();
+            assert_eq!(
+                args,
+                ["--addr", "http://127.0.0.1:50051", "--lang", language]
+            );
+        }
+    }
+    #[tokio::test]
     async fn webmin_console_pty_drop_kills_child_and_descendant_group() {
         let dir = tempfile::tempdir().unwrap();
         let program = dir.path().join("stationd-tui");
@@ -199,8 +228,14 @@ while True: time.sleep(1)
 "#;
         std::fs::write(&program, script).unwrap();
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let terminal =
-            Pty::spawn(program.to_str().unwrap(), "http://127.0.0.1:50051", 80, 24).unwrap();
+        let terminal = Pty::spawn(
+            program.to_str().unwrap(),
+            "http://127.0.0.1:50051",
+            80,
+            24,
+            "fr",
+        )
+        .unwrap();
         let mut buffer = [0; 128];
         let count = tokio::time::timeout(Duration::from_secs(2), terminal.read(&mut buffer))
             .await

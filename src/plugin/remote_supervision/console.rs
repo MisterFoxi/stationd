@@ -77,6 +77,7 @@ struct Reservation {
     station: String,
     cols: u16,
     rows: u16,
+    language: &'static str,
     expires: Instant,
     active: bool,
     cancel: watch::Sender<bool>,
@@ -163,6 +164,7 @@ impl Console {
         csrf: String,
         station: String,
         size: Size,
+        language: &'static str,
     ) -> Result<String, String> {
         if !self.settings.enabled {
             return Err("permission denied".into());
@@ -192,6 +194,7 @@ impl Console {
                 station,
                 cols: size.cols,
                 rows: size.rows,
+                language,
                 expires: Instant::now() + Duration::from_secs(15),
                 active: false,
                 cancel: watch::channel(false).0,
@@ -309,7 +312,11 @@ async fn page(State(web): State<Web>, Path(id): Path<String>, headers: HeaderMap
         })
         .await
     {
-        Ok(()) => Html(include_str!("console.html").replace("{{STATION_ID}}", &id)).into_response(),
+        Ok(()) => Html(
+            super::i18n::page(include_str!("console.html"), &headers)
+                .replace("{{STATION_ID}}", &id),
+        )
+        .into_response(),
         Err(error) => answer(Err(error)),
     }
 }
@@ -338,7 +345,7 @@ async fn create(
     };
     answer(
         web.console
-            .reserve(owner, raw, csrf, id, size)
+            .reserve(owner, raw, csrf, id, size, super::i18n::language(&headers))
             .map(|id| json!({"id":id})),
     )
 }
@@ -374,9 +381,17 @@ async fn upgrade(
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
 enum Input {
-    Input { data: String },
-    Resize { cols: u16, rows: u16 },
+    Input {
+        data: String,
+        #[serde(default)]
+        seq: Option<u32>,
+    },
+    Resize {
+        cols: u16,
+        rows: u16,
+    },
     Ack,
+    Probe,
 }
 async fn send(socket: &mut WebSocket, message: Message) -> bool {
     matches!(
@@ -411,6 +426,7 @@ async fn run(mut socket: WebSocket, web: Web, entry: Reservation, _lease: Lease)
         endpoint,
         entry.cols,
         entry.rows,
+        entry.language,
     ) {
         Ok(terminal) => terminal,
         Err(_) => {
@@ -478,7 +494,10 @@ async fn run(mut socket: WebSocket, web: Web, entry: Reservation, _lease: Lease)
                         if web.work(move |a| a.console_owner(&check.session, &check.station, &check.csrf)).await.is_err() || *cancel.borrow() { break "revoked"; }
                         match serde_json::from_str::<Input>(&text) {
                             Ok(Input::Ack) if awaiting_output => { awaiting_output = false; }
-                            Ok(Input::Input { data }) if !data.is_empty() && data.len() <= 4096 => {
+                            Ok(Input::Probe) => {
+                                if !send(&mut socket, Message::Text(json!({"type":"probe_ack"}).to_string())).await { break "disconnected"; }
+                            }
+                            Ok(Input::Input { data, seq }) if !data.is_empty() && data.len() <= 4096 => {
                                 let written = tokio::select! {
                                     result = tokio::time::timeout(Duration::from_secs(1), terminal.write(data.as_bytes())) => matches!(result, Ok(Ok(()))),
                                     _ = cancel.changed() => false,
@@ -486,6 +505,10 @@ async fn run(mut socket: WebSocket, web: Web, entry: Reservation, _lease: Lease)
                                 };
                                 if !written { break "io_error"; }
                                 activity = Instant::now();
+                                // Confirms writing to the PTY, never application processing.
+                                if let Some(seq) = seq {
+                                    if !send(&mut socket, Message::Text(json!({"type":"input_ack","seq":seq}).to_string())).await { break "disconnected"; }
+                                }
                             }
                             Ok(Input::Resize { cols, rows }) if (Size { cols, rows }).valid() => {
                                 if terminal.resize(cols, rows).is_err() { break "io_error"; }
@@ -588,6 +611,7 @@ grpc_endpoint="http://127.0.0.1:50051"
                 "csrf".into(),
                 "one".into(),
                 Size { cols: 80, rows: 24 },
+                "fr",
             )
         };
         let alice = reserve("alice", "session-a").unwrap();

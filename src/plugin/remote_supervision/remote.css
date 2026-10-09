@@ -4,3 +4,10 @@
 .panel h3,.panel li{overflow-wrap:anywhere}
 
 .console-action{display:inline-block;padding:12px 16px;margin-top:8px;border:1px solid #45576c;border-radius:8px;background:#294d73;color:white;text-decoration:none}.console-action[hidden]{display:none}
+
+#terminal-status{display:flex;flex-wrap:wrap;gap:10px;background:#1b2938;padding:12px;border:1px solid #45576c;border-radius:8px}#terminal-status span{font-family:monospace;font-weight:bold;padding:4px 8px;border-radius:4px;background:#101822}#terminal-status [data-level="ok"]{color:#9fe0b1}#terminal-status [data-level="warning"],#focus-help{color:#f4c478}
+
+#input-activity:empty{display:none}
+
+/* Keep the terminal under the pointer when focus changes during a click. */
+#focus-help[hidden]{display:block;visibility:hidden}

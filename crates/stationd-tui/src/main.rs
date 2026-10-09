@@ -10,6 +10,7 @@
 mod action;
 mod agenda;
 mod app;
+mod webmin_diagnostics;
 mod banner;
 mod operator_notice;
 mod dialog;
@@ -80,7 +81,7 @@ fn main() -> Result<()> {
     run_tui(
         app::init,
         app::render,
-        app::event,
+        webmin_diagnostics::event,
         app::error,
         &mut global,
         &mut state,

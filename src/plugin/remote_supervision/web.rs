@@ -79,8 +79,29 @@ impl Web {
 pub(super) fn routes(web: Web) -> Router {
     Router::new()
         .route("/", get(home))
-        .route("/login", get(|| async { Html(include_str!("login.html")) }))
+        .route(
+            "/login",
+            get(|headers: HeaderMap| async move {
+                Html(super::i18n::page(include_str!("login.html"), &headers))
+            }),
+        )
         .route("/enroll", get(enroll_page))
+        .route(
+            "/i18n.js",
+            get(|| async {
+                (
+                    [(
+                        header::CONTENT_TYPE,
+                        "application/javascript; charset=utf-8",
+                    )],
+                    format!(
+                        "const WEBMIN_TRANSLATIONS={};\n{}",
+                        include_str!("translations.json"),
+                        include_str!("i18n.js")
+                    ),
+                )
+            }),
+        )
         .route(
             "/remote.js",
             get(|| async {
@@ -194,6 +215,7 @@ async fn security(State(web): State<Web>, request: Request, next: Next) -> Respo
             return StatusCode::TOO_MANY_REQUESTS.into_response();
         }
     }
+    let language = super::i18n::language(request.headers());
     let console_document =
         request.uri().path().starts_with("/station/") && request.uri().path().ends_with("/console");
     let mut response = next.run(request).await;
@@ -204,6 +226,12 @@ async fn security(State(web): State<Web>, request: Request, next: Next) -> Respo
     if console_document {
         response.headers_mut().insert("content-security-policy", HeaderValue::from_static("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"));
     }
+    response
+        .headers_mut()
+        .insert(header::CONTENT_LANGUAGE, HeaderValue::from_static(language));
+    response
+        .headers_mut()
+        .insert(header::VARY, HeaderValue::from_static("Accept-Language"));
     response
 }
 #[derive(Deserialize)]
@@ -228,9 +256,9 @@ struct PasswordLogin {
     name: String,
     password: String,
 }
-async fn enroll_page(State(web): State<Web>) -> Html<String> {
+async fn enroll_page(State(web): State<Web>, headers: HeaderMap) -> Html<String> {
     Html(
-        include_str!("enroll.html")
+        super::i18n::page(include_str!("enroll.html"), &headers)
             .replace(
                 "{{PASSWORD_MIN_LENGTH}}",
                 &web.password_min_length.to_string(),
@@ -241,7 +269,11 @@ async fn enroll_page(State(web): State<Web>) -> Html<String> {
             ),
     )
 }
-async fn password_enroll(State(web): State<Web>, Json(body): Json<PasswordEnrollment>) -> Response {
+async fn password_enroll(
+    State(web): State<Web>,
+    headers: HeaderMap,
+    Json(body): Json<PasswordEnrollment>,
+) -> Response {
     let length = body.password.chars().count();
     if body.token.len() != 43
         || length < web.password_min_length
@@ -250,7 +282,7 @@ async fn password_enroll(State(web): State<Web>, Json(body): Json<PasswordEnroll
     {
         return (
             StatusCode::BAD_REQUEST,
-            Json(json!({"error":format!("Mot de passe : entre {} et {} caractères.", web.password_min_length, web.password_max_length)})),
+            Json(json!({"error":super::i18n::text("Mot de passe : entre {minimum} et {maximum} caractères.", super::i18n::language(&headers)).replace("{minimum}", &web.password_min_length.to_string()).replace("{maximum}", &web.password_max_length.to_string())})),
         )
             .into_response();
     }
@@ -352,7 +384,11 @@ async fn station_page(
         .work(move |a| a.authorize(&raw, &target, "station.read", None))
         .await
     {
-        Ok(()) => Html(include_str!("station.html").replace("{{STATION_ID}}", &id)).into_response(),
+        Ok(()) => Html(
+            super::i18n::page(include_str!("station.html"), &headers)
+                .replace("{{STATION_ID}}", &id),
+        )
+        .into_response(),
         Err(error) => answer(Err(error)),
     }
 }
@@ -478,7 +514,7 @@ async fn logout(State(web): State<Web>, headers: HeaderMap) -> Response {
 async fn home(State(web): State<Web>, headers: HeaderMap) -> Response {
     let raw = cookie(&headers, SESSION).unwrap_or_default();
     if web.work(move |a| a.context(&raw)).await.is_ok() {
-        Html(include_str!("network.html")).into_response()
+        Html(super::i18n::page(include_str!("network.html"), &headers)).into_response()
     } else {
         Redirect::to("/login").into_response()
     }

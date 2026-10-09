@@ -569,8 +569,8 @@ sudo stationd-<tag>/install.sh            # [--dir /opt/stationd] [--media /mnt/
 
 `install.sh` loads the image, creates the system user `stationd` (owner of
 the directory) and, the first time, `.env` (image tag, `stationd` UID/GID,
-a legacy media bootstrap path — used only before stationd.toml exists). It starts
-the station when `stationd.toml` exists; otherwise it stops there.
+a legacy media bootstrap path — used only before stationd.toml exists). It enables Docker and `stationd.service`, and starts
+the station when `stationd.toml` exists; otherwise configuration is still required.
 
 The installer generates Compose bind mounts from `[media] library_path`,
 `[playlist] path`, `[grid] path`, and the parent directory of `[database] path`
@@ -590,7 +590,7 @@ the container (a restart alone does not update mounts):
 ```sh
 cd /opt/stationd
 sudo bash scripts/configure-paths.sh
-sudo docker compose up -d
+sudo systemctl restart stationd
 ```
 
 `compose.yaml` is generated; change `stationd.toml` for paths. Other Compose
@@ -642,10 +642,38 @@ The installer validates the bundle checksums, Docker, the media mount, Compose
 configuration and client executables before activating the new version. It
 serializes concurrent installations, preserves existing configuration and
 radio files, copies all missing radio files (including nested/hidden files),
-and finishes after `docker compose up -d`, without a final gRPC check or
-readiness wait. If Compose fails during an update, it restores the previous
-`.env` and generated Compose file and attempts to restart the previous image; it reports an error. Database/data migrations are not rolled back.
+and installs/enables `stationd.service`. It restarts the service and waits up to
+60 seconds for a real gRPC response (Compose healthcheck). If startup or readiness
+fails during an update, it restores the previous
+`.env` and generated Compose file and attempts to restart the previous service; it reports an error. Database/data migrations are not rolled back.
 A deliberately stopped station (`data/stationd.stopped`) remains stopped.
+
+On every boot or `sudo systemctl restart stationd`, the host script
+`scripts/service.sh` discovers **this VM's IPv4 address** from its default
+route (no network packet is sent). In auto mode it updates only
+`[server] grpc_bind` in that node's TOML, preserving the port, comments,
+station identity and other settings. The first changed configuration is saved as
+`stationd.toml.before-auto-ip`. No shared or hardcoded VM address is used.
+`STATIOND_BIND_MODE=auto` is the default; set it to `static` in the node's
+`.env` for an intentional loopback, IPv6 or fixed-address bind.
+
+The systemd unit waits for Docker, network-online and the directories used by
+the station (`RequiresMountsFor`). The script regenerates Compose and recreates
+the container after these dependencies are ready, so Docker's own early restart
+does not leave it attached to stale mounts or an old address. Network mounts
+must still be declared in the host's fstab/systemd configuration. After adding
+new external paths, rerun the installer to refresh the unit's mount dependencies.
+
+```sh
+sudo systemctl start stationd
+sudo systemctl stop stationd
+sudo systemctl restart stationd
+systemctl status stationd
+journalctl -u stationd -b
+```
+
+All lifecycle/network/unit scripts are versioned under `docker/prod/` in
+stationD and installed under the node's own `scripts/` directory.
 
 First install: write `stationd.toml` from `stationd.example.toml` — relative
 paths resolve against the directory (`./playlist`…), `[media] library_path`

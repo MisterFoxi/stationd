@@ -1948,7 +1948,7 @@ mod tests {
             r#"#!/usr/bin/python3
 import os, sys, tty, signal, fcntl, termios, struct, threading, time
 open({pid:?}, 'w').write(str(os.getpid()))
-assert sys.argv[1:] == ['--addr', 'http://127.0.0.1:50051'], sys.argv
+assert sys.argv[1:] == ['--addr', 'http://127.0.0.1:50051', '--lang', 'de'], sys.argv
 assert 'STATIOND_ROOT' not in os.environ
 tty.setraw(0)
 def dimensions(*args):
@@ -1982,6 +1982,26 @@ while True:
         let console = web.console.clone();
         console.start();
         let app = super::super::web::routes(web);
+        // All pages negotiate the browser language before the console opens.
+        for language in ["fr", "en", "de"] {
+            for path in ["/login", "/enroll", "/", "/station/one", "/station/one/console"] {
+                let response = app.clone().oneshot(
+                    Request::builder()
+                        .uri(path)
+                        .header("cookie", format!("__Host-stationd-session={session}"))
+                        .header("accept-language", format!("{language}-ZZ"))
+                        .body(Body::empty())
+                        .unwrap(),
+                ).await.unwrap();
+                assert_eq!(response.status(), StatusCode::OK, "{path}");
+                assert_eq!(response.headers()["content-language"], language);
+                assert_eq!(response.headers()["vary"], "Accept-Language");
+                let body = axum::body::to_bytes(response.into_body(), 65536).await.unwrap();
+                let html = std::str::from_utf8(&body).unwrap();
+                assert!(html.contains(&format!("lang=\"{language}\"")), "{path}");
+                assert!(html.contains("src=\"/i18n.js\""), "{path}");
+            }
+        }
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let server = tokio::spawn({
@@ -1996,6 +2016,7 @@ while True:
                 .uri(format!("/api/stations/{station}/console"))
                 .header("cookie", format!("__Host-stationd-session={session}"))
                 .header("origin", origin)
+                .header("accept-language", "de-DE,de;q=0.9,en;q=0.5")
                 .header("x-csrf-token", csrf)
                 .header("content-type", "application/json")
                 .body(Body::from(r#"{"cols":80,"rows":24}"#))
@@ -2108,6 +2129,27 @@ while True:
             .unwrap();
         read_until(&mut socket, "SIZE:100x30").await;
         socket
+            .send(Message::Text(r#"{"type":"probe"}"#.into()))
+            .await
+            .unwrap();
+        let probe = tokio::time::timeout(Duration::from_secs(2), socket.next())
+            .await.unwrap().unwrap().unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(probe.to_text().unwrap()).unwrap(),
+            json!({"type":"probe_ack"})
+        );
+        socket
+            .send(Message::Text(r#"{"type":"input","data":"diagnostic","seq":7}"#.into()))
+            .await
+            .unwrap();
+        let ack = tokio::time::timeout(Duration::from_secs(2), socket.next())
+            .await.unwrap().unwrap().unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(ack.to_text().unwrap()).unwrap(),
+            json!({"type":"input_ack","seq":7})
+        );
+        read_until(&mut socket, "diagnostic").await;
+        socket
             .send(Message::Text(
                 r#"{"type":"input","data":"Bonjour é"}"#.into(),
             ))
@@ -2218,6 +2260,7 @@ while True:
                 .uri("/api/stations/one/console")
                 .header("cookie", format!("__Host-stationd-session={session}"))
                 .header("origin", "https://remote.example.test")
+                .header("accept-language", "de-DE")
                 .header("x-csrf-token", csrf)
                 .header("content-type", "application/json")
                 .body(Body::from(r#"{"cols":80,"rows":24}"#))

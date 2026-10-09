@@ -1,0 +1,626 @@
+{
+  "StationD — Connexion": {
+    "en": "StationD — Login",
+    "de": "StationD — Anmeldung"
+  },
+  "StationD — Mot de passe": {
+    "en": "StationD — Password",
+    "de": "StationD — Passwort"
+  },
+  "StationD — Réseau": {
+    "en": "StationD — Network",
+    "de": "StationD — Netzwerk"
+  },
+  "StationD — Station": {
+    "en": "StationD — Station",
+    "de": "StationD — Station"
+  },
+  "StationD — Console": {
+    "en": "StationD — Console",
+    "de": "StationD — Konsole"
+  },
+  "Connexion": {
+    "en": "Login",
+    "de": "Anmeldung"
+  },
+  "Nom du compte": {
+    "en": "Account name",
+    "de": "Kontoname"
+  },
+  "Mot de passe": {
+    "en": "Password",
+    "de": "Passwort"
+  },
+  "Se connecter": {
+    "en": "Log in",
+    "de": "Anmelden"
+  },
+  "Se déconnecter": {
+    "en": "Log out",
+    "de": "Abmelden"
+  },
+  "Définir votre mot de passe": {
+    "en": "Set your password",
+    "de": "Passwort festlegen"
+  },
+  "Mot de passe ({{PASSWORD_MIN_LENGTH}} à {{PASSWORD_MAX_LENGTH}} caractères)": {
+    "en": "Password ({{PASSWORD_MIN_LENGTH}} to {{PASSWORD_MAX_LENGTH}} characters)",
+    "de": "Passwort ({{PASSWORD_MIN_LENGTH}} bis {{PASSWORD_MAX_LENGTH}} Zeichen)"
+  },
+  "Confirmer le mot de passe": {
+    "en": "Confirm password",
+    "de": "Passwort bestätigen"
+  },
+  "Enregistrer le mot de passe": {
+    "en": "Save password",
+    "de": "Passwort speichern"
+  },
+  "Réseau StationD": {
+    "en": "StationD network",
+    "de": "StationD-Netzwerk"
+  },
+  "Connexion aux stations…": {
+    "en": "Connecting to stations…",
+    "de": "Verbindung zu Stationen…"
+  },
+  "Stations accessibles": {
+    "en": "Accessible stations",
+    "de": "Zugängliche Stationen"
+  },
+  "← Synthèse réseau": {
+    "en": "← Network overview",
+    "de": "← Netzwerkübersicht"
+  },
+  "Connexion à la station…": {
+    "en": "Connecting to station…",
+    "de": "Verbindung zur Station…"
+  },
+  "À l’antenne": {
+    "en": "On air",
+    "de": "Auf Sendung"
+  },
+  "Progression du média": {
+    "en": "Media progress",
+    "de": "Medienfortschritt"
+  },
+  "Alertes": {
+    "en": "Alerts",
+    "de": "Warnungen"
+  },
+  "Suite prévue": {
+    "en": "Coming up",
+    "de": "Als Nächstes"
+  },
+  "Le média préchargé est confirmé. Les suivants sont une simulation et peuvent changer.": {
+    "en": "The preloaded media is confirmed. Subsequent items are simulated and may change.",
+    "de": "Das vorgeladene Medium ist bestätigt. Weitere Einträge sind simuliert und können sich ändern."
+  },
+  "Services": {
+    "en": "Services",
+    "de": "Dienste"
+  },
+  "Programmation": {
+    "en": "Schedule",
+    "de": "Programm"
+  },
+  "Ouvrir la console de cette station": {
+    "en": "Open this station’s console",
+    "de": "Konsole dieser Station öffnen"
+  },
+  "← Retour à la station": {
+    "en": "← Back to station",
+    "de": "← Zurück zur Station"
+  },
+  "Console de la station": {
+    "en": "Station console",
+    "de": "Stationskonsole"
+  },
+  "Console d’administration StationD. Vos commandes agissent sur la station indiquée ci-dessus.": {
+    "en": "StationD administration console. Your commands affect the station shown above.",
+    "de": "StationD-Verwaltungskonsole. Ihre Befehle wirken auf die oben angezeigte Station."
+  },
+  "Chargement…": {
+    "en": "Loading…",
+    "de": "Laden…"
+  },
+  "Ouvrir la console": {
+    "en": "Open console",
+    "de": "Konsole öffnen"
+  },
+  "Fermer la console": {
+    "en": "Close console",
+    "de": "Konsole schließen"
+  },
+  "Activer le clavier": {
+    "en": "Enable keyboard",
+    "de": "Tastatur aktivieren"
+  },
+  "Cliquez dans le terminal pour y diriger le clavier.": {
+    "en": "Click inside the terminal to direct keyboard input there.",
+    "de": "Klicken Sie in das Terminal, um die Tastatureingabe dorthin zu richten."
+  },
+  "Console StationD": {
+    "en": "StationD console",
+    "de": "StationD-Konsole"
+  },
+  "Trop de tentatives. Réessayez dans une minute.": {
+    "en": "Too many attempts. Try again in a minute.",
+    "de": "Zu viele Versuche. Versuchen Sie es in einer Minute erneut."
+  },
+  "Accès refusé. Vérifiez vos identifiants ou demandez un nouveau lien.": {
+    "en": "Access denied. Check your credentials or request a new link.",
+    "de": "Zugriff verweigert. Prüfen Sie Ihre Zugangsdaten oder fordern Sie einen neuen Link an."
+  },
+  "Ce lien est incomplet. Demandez un nouveau lien à votre administrateur.": {
+    "en": "This link is incomplete. Ask your administrator for a new link.",
+    "de": "Dieser Link ist unvollständig. Bitten Sie Ihren Administrator um einen neuen Link."
+  },
+  "Les deux mots de passe doivent être identiques.": {
+    "en": "Both passwords must match.",
+    "de": "Die beiden Passwörter müssen übereinstimmen."
+  },
+  "Le mot de passe doit contenir entre {minimum} et {maximum} caractères.": {
+    "en": "The password must contain between {minimum} and {maximum} characters.",
+    "de": "Das Passwort muss zwischen {minimum} und {maximum} Zeichen enthalten."
+  },
+  "Mot de passe enregistré. Vous pouvez vous connecter.": {
+    "en": "Password saved. You can now log in.",
+    "de": "Passwort gespeichert. Sie können sich jetzt anmelden."
+  },
+  "En diffusion": {
+    "en": "Broadcasting",
+    "de": "Auf Sendung"
+  },
+  "En pause": {
+    "en": "Paused",
+    "de": "Pausiert"
+  },
+  "Veille en attente": {
+    "en": "Standby pending",
+    "de": "Ruhezustand ausstehend"
+  },
+  "En veille": {
+    "en": "Sleeping",
+    "de": "Im Ruhezustand"
+  },
+  "Connexion…": {
+    "en": "Connecting…",
+    "de": "Verbindung wird hergestellt…"
+  },
+  "Station connectée": {
+    "en": "Station connected",
+    "de": "Station verbunden"
+  },
+  "Station inaccessible": {
+    "en": "Station unreachable",
+    "de": "Station nicht erreichbar"
+  },
+  "StationD inaccessible": {
+    "en": "StationD unreachable",
+    "de": "StationD nicht erreichbar"
+  },
+  "Flux d’antenne indisponible": {
+    "en": "On-air stream unavailable",
+    "de": "Sendestream nicht verfügbar"
+  },
+  "Dernières données connues — périmées": {
+    "en": "Last known data — stale",
+    "de": "Letzte bekannte Daten — veraltet"
+  },
+  "Erreur Liquidsoap": {
+    "en": "Liquidsoap error",
+    "de": "Liquidsoap-Fehler"
+  },
+  "Audience Icecast indisponible": {
+    "en": "Icecast audience unavailable",
+    "de": "Icecast-Hörerzahl nicht verfügbar"
+  },
+  "Un plugin est en échec": {
+    "en": "A plugin has failed",
+    "de": "Ein Plugin ist fehlgeschlagen"
+  },
+  "Liquidsoap non configuré": {
+    "en": "Liquidsoap not configured",
+    "de": "Liquidsoap nicht konfiguriert"
+  },
+  "Aucun média diffusable": {
+    "en": "No playable media",
+    "de": "Keine abspielbaren Medien"
+  },
+  "Erreur de calcul du programme": {
+    "en": "Schedule calculation error",
+    "de": "Fehler bei der Programmberechnung"
+  },
+  "La station est en pause.": {
+    "en": "The station is paused.",
+    "de": "Die Station ist pausiert."
+  },
+  "La station est en veille.": {
+    "en": "The station is sleeping.",
+    "de": "Die Station ist im Ruhezustand."
+  },
+  "Veille à la fin du morceau.": {
+    "en": "Standby at the end of the track.",
+    "de": "Ruhezustand am Ende des Titels."
+  },
+  "Veille dès qu’il n’y aura plus d’auditeur.": {
+    "en": "Standby when no listeners remain.",
+    "de": "Ruhezustand, sobald keine Hörer mehr verbunden sind."
+  },
+  "Un DJ tient l’antenne.": {
+    "en": "A DJ is on air.",
+    "de": "Ein DJ ist auf Sendung."
+  },
+  "Liquidsoap n’est pas configuré.": {
+    "en": "Liquidsoap is not configured.",
+    "de": "Liquidsoap ist nicht konfiguriert."
+  },
+  "La suite est simulée.": {
+    "en": "Upcoming items are simulated.",
+    "de": "Die nächsten Einträge sind simuliert."
+  },
+  "Aucun média diffusable.": {
+    "en": "No playable media.",
+    "de": "Keine abspielbaren Medien."
+  },
+  "Programme de secours.": {
+    "en": "Fallback schedule.",
+    "de": "Ersatzprogramm."
+  },
+  "Relais : durée inconnue.": {
+    "en": "Relay: unknown duration.",
+    "de": "Relais: Dauer unbekannt."
+  },
+  "Une durée de média est inconnue.": {
+    "en": "A media duration is unknown.",
+    "de": "Die Dauer eines Mediums ist unbekannt."
+  },
+  "La simulation a échoué.": {
+    "en": "Simulation failed.",
+    "de": "Die Simulation ist fehlgeschlagen."
+  },
+  "Un filtre de plugin a échoué.": {
+    "en": "A plugin filter failed.",
+    "de": "Ein Plugin-Filter ist fehlgeschlagen."
+  },
+  "La projection du programme a échoué.": {
+    "en": "Schedule projection failed.",
+    "de": "Die Programmvorschau ist fehlgeschlagen."
+  },
+  "L’historique est indisponible.": {
+    "en": "History is unavailable.",
+    "de": "Der Verlauf ist nicht verfügbar."
+  },
+  "Un rendez-vous ne pourra pas couper l’antenne.": {
+    "en": "A scheduled event will not be able to interrupt the broadcast.",
+    "de": "Ein geplanter Termin kann die Sendung nicht unterbrechen."
+  },
+  "Une source prévue sera vide.": {
+    "en": "A scheduled source will be empty.",
+    "de": "Eine geplante Quelle wird leer sein."
+  },
+  "Un rendez-vous n’a pas coupé l’antenne.": {
+    "en": "A scheduled event did not interrupt the broadcast.",
+    "de": "Ein geplanter Termin hat die Sendung nicht unterbrochen."
+  },
+  "Une source était vide.": {
+    "en": "A source was empty.",
+    "de": "Eine Quelle war leer."
+  },
+  "Média sans titre": {
+    "en": "Untitled media",
+    "de": "Medium ohne Titel"
+  },
+  "Direct DJ": {
+    "en": "Live DJ",
+    "de": "DJ live"
+  },
+  "Relais": {
+    "en": "Relay",
+    "de": "Relais"
+  },
+  "Secours": {
+    "en": "Fallback",
+    "de": "Ersatz"
+  },
+  "Fond d’arrêt": {
+    "en": "Stopped background",
+    "de": "Hintergrund bei Stillstand"
+  },
+  "Média non identifié": {
+    "en": "Unidentified media",
+    "de": "Unbekanntes Medium"
+  },
+  "Aucun média signalé": {
+    "en": "No media reported",
+    "de": "Kein Medium gemeldet"
+  },
+  "Audience inconnue": {
+    "en": "Unknown audience",
+    "de": "Hörerzahl unbekannt"
+  },
+  "{value} auditeur": {
+    "en": "{value} listener",
+    "de": "{value} Hörer"
+  },
+  "{value} auditeurs": {
+    "en": "{value} listeners",
+    "de": "{value} Hörer"
+  },
+  "Inconnue": {
+    "en": "Unknown",
+    "de": "Unbekannt"
+  },
+  "Ouvrir la TUI": {
+    "en": "Open TUI",
+    "de": "TUI öffnen"
+  },
+  "Ouvrir la TUI de {name}": {
+    "en": "Open TUI for {name}",
+    "de": "TUI von {name} öffnen"
+  },
+  "Connexion inconnue": {
+    "en": "Unknown connection",
+    "de": "Verbindung unbekannt"
+  },
+  "Dernier état : ": {
+    "en": "Last state: ",
+    "de": "Letzter Zustand: "
+  },
+  "État inconnu": {
+    "en": "Unknown state",
+    "de": "Zustand unbekannt"
+  },
+  "Antenne observée à {time}": {
+    "en": "On air observed at {time}",
+    "de": "Sendung beobachtet um {time}"
+  },
+  "Aucune donnée d’antenne reçue": {
+    "en": "No on-air data received",
+    "de": "Keine Sendedaten empfangen"
+  },
+  "Aucune station accessible.": {
+    "en": "No accessible stations.",
+    "de": "Keine zugänglichen Stationen."
+  },
+  " — données périmées": {
+    "en": " — stale data",
+    "de": " — veraltete Daten"
+  },
+  "Préchargé (confirmé) : {media}": {
+    "en": "Preloaded (confirmed): {media}",
+    "de": "Vorgeladen (bestätigt): {media}"
+  },
+  " — simulé": {
+    "en": " — simulated",
+    "de": " — simuliert"
+  },
+  "Aucune suite disponible.": {
+    "en": "No upcoming items available.",
+    "de": "Keine nächsten Einträge verfügbar."
+  },
+  "Information de programme (code {code}).": {
+    "en": "Schedule information (code {code}).",
+    "de": "Programminformation (Code {code})."
+  },
+  "Connecté": {
+    "en": "Connected",
+    "de": "Verbunden"
+  },
+  "Inaccessible": {
+    "en": "Unreachable",
+    "de": "Nicht erreichbar"
+  },
+  "Erreur": {
+    "en": "Error",
+    "de": "Fehler"
+  },
+  "Non configuré": {
+    "en": "Not configured",
+    "de": "Nicht konfiguriert"
+  },
+  "Inconnu": {
+    "en": "Unknown",
+    "de": "Unbekannt"
+  },
+  "Pont Liquidsoap": {
+    "en": "Liquidsoap bridge",
+    "de": "Liquidsoap-Brücke"
+  },
+  "Sans erreur signalée": {
+    "en": "No errors reported",
+    "de": "Keine Fehler gemeldet"
+  },
+  "Aucun échec signalé": {
+    "en": "No failures reported",
+    "de": "Keine Ausfälle gemeldet"
+  },
+  "Programme courant : {name}": {
+    "en": "Current schedule: {name}",
+    "de": "Aktuelles Programm: {name}"
+  },
+  "Aucun programme courant signalé.": {
+    "en": "No current schedule reported.",
+    "de": "Kein aktuelles Programm gemeldet."
+  },
+  " — source indisponible": {
+    "en": " — source unavailable",
+    "de": " — Quelle nicht verfügbar"
+  },
+  "Serveur indisponible. Rechargez la page pour réessayer.": {
+    "en": "Server unavailable. Reload the page to retry.",
+    "de": "Server nicht verfügbar. Laden Sie die Seite neu, um es erneut zu versuchen."
+  },
+  "Lecture indisponible. Nouvelle tentative en cours…": {
+    "en": "Data unavailable. Retrying…",
+    "de": "Daten nicht verfügbar. Erneuter Versuch…"
+  },
+  "Mise à jour en direct": {
+    "en": "Live updates",
+    "de": "Live-Aktualisierung"
+  },
+  "Données reçues illisibles.": {
+    "en": "Received data is unreadable.",
+    "de": "Empfangene Daten sind unlesbar."
+  },
+  "Connexion perdue — données affichées à vérifier. Reconnexion automatique…": {
+    "en": "Connection lost — check displayed data. Reconnecting automatically…",
+    "de": "Verbindung verloren — angezeigte Daten prüfen. Automatische Wiederverbindung…"
+  },
+  "Le serveur ne répond plus. Rouvrez la console pour créer une nouvelle session.": {
+    "en": "The server is no longer responding. Reopen the console to create a new session.",
+    "de": "Der Server antwortet nicht mehr. Öffnen Sie die Konsole erneut, um eine neue Sitzung zu erstellen."
+  },
+  "Quota atteint ou serveur occupé. Réessayez dans quelques secondes.": {
+    "en": "Quota reached or server busy. Try again in a few seconds.",
+    "de": "Kontingent erreicht oder Server beschäftigt. Versuchen Sie es in wenigen Sekunden erneut."
+  },
+  "La console est désactivée sur ce serveur.": {
+    "en": "The console is disabled on this server.",
+    "de": "Die Konsole ist auf diesem Server deaktiviert."
+  },
+  "Accès refusé ou session expirée.": {
+    "en": "Access denied or session expired.",
+    "de": "Zugriff verweigert oder Sitzung abgelaufen."
+  },
+  "Ouverture de la console…": {
+    "en": "Opening console…",
+    "de": "Konsole wird geöffnet…"
+  },
+  "Console connectée. Fermez-la après utilisation.": {
+    "en": "Console connected. Close it after use.",
+    "de": "Konsole verbunden. Schließen Sie sie nach der Verwendung."
+  },
+  "Console fermée après inactivité.": {
+    "en": "Console closed after inactivity.",
+    "de": "Konsole wegen Inaktivität geschlossen."
+  },
+  "Durée maximale atteinte.": {
+    "en": "Maximum duration reached.",
+    "de": "Maximale Dauer erreicht."
+  },
+  "Le programme stationd-tui ne peut pas démarrer. Vérifiez son installation.": {
+    "en": "The stationd-tui program cannot start. Check its installation.",
+    "de": "Das Programm stationd-tui kann nicht starten. Prüfen Sie die Installation."
+  },
+  "Session ou autorisation révoquée.": {
+    "en": "Session or permission revoked.",
+    "de": "Sitzung oder Berechtigung widerrufen."
+  },
+  "Session révoquée ou serveur arrêté.": {
+    "en": "Session revoked or server stopped.",
+    "de": "Sitzung widerrufen oder Server gestoppt."
+  },
+  "Console fermée : connexion trop lente.": {
+    "en": "Console closed: connection too slow.",
+    "de": "Konsole geschlossen: Verbindung zu langsam."
+  },
+  "Erreur de transmission au PTY.": {
+    "en": "PTY transmission error.",
+    "de": "PTY-Übertragungsfehler."
+  },
+  "Console fermée : trop de données envoyées.": {
+    "en": "Console closed: too much data sent.",
+    "de": "Konsole geschlossen: zu viele Daten gesendet."
+  },
+  "La TUI est terminée.": {
+    "en": "The TUI has exited.",
+    "de": "Die TUI wurde beendet."
+  },
+  "Console fermée.": {
+    "en": "Console closed.",
+    "de": "Konsole geschlossen."
+  },
+  "Connexion à la console impossible.": {
+    "en": "Cannot connect to console.",
+    "de": "Verbindung zur Konsole nicht möglich."
+  },
+  "Console déconnectée. Une nouvelle ouverture crée une nouvelle session.": {
+    "en": "Console disconnected. Reopening creates a new session.",
+    "de": "Konsole getrennt. Erneutes Öffnen erstellt eine neue Sitzung."
+  },
+  "Envoi interrompu : connexion saturée. Les caractères restants ne sont pas envoyés.": {
+    "en": "Sending interrupted: connection saturated. Remaining characters were not sent.",
+    "de": "Übertragung unterbrochen: Verbindung überlastet. Die übrigen Zeichen wurden nicht gesendet."
+  },
+  "Entrée non envoyée : console déconnectée.": {
+    "en": "Input not sent: console disconnected.",
+    "de": "Eingabe nicht gesendet: Konsole getrennt."
+  },
+  "Cette console nécessite le rôle admin sur cette station.": {
+    "en": "This console requires the admin role on this station.",
+    "de": "Diese Konsole erfordert die Admin-Rolle auf dieser Station."
+  },
+  "Console — {name}": {
+    "en": "Console — {name}",
+    "de": "Konsole — {name}"
+  },
+  "Prête à ouvrir.": {
+    "en": "Ready to open.",
+    "de": "Bereit zum Öffnen."
+  },
+  "DISCONNECTED": {
+    "en": "DISCONNECTED",
+    "de": "GETRENNT",
+    "fr": "DÉCONNECTÉ"
+  },
+  "TERMINAL NOT FOCUSED": {
+    "en": "TERMINAL NOT FOCUSED",
+    "de": "TERMINAL NICHT FOKUSSIERT",
+    "fr": "TERMINAL NON FOCALISÉ"
+  },
+  "UNKNOWN": {
+    "en": "UNKNOWN",
+    "de": "UNBEKANNT",
+    "fr": "INCONNU"
+  },
+  "FOCUSED": {
+    "en": "FOCUSED",
+    "de": "FOKUSSIERT",
+    "fr": "FOCALISÉ"
+  },
+  "INPUT DELAYED": {
+    "en": "INPUT DELAYED",
+    "de": "EINGABE VERZÖGERT",
+    "fr": "ENTRÉE RETARDÉE"
+  },
+  "INPUT SENT": {
+    "en": "INPUT SENT",
+    "de": "EINGABE GESENDET",
+    "fr": "ENTRÉE ENVOYÉE"
+  },
+  "CONNECTED": {
+    "en": "CONNECTED",
+    "de": "VERBUNDEN",
+    "fr": "CONNECTÉ"
+  },
+  "CONNECTION UNRESPONSIVE": {
+    "en": "CONNECTION UNRESPONSIVE",
+    "de": "VERBINDUNG REAGIERT NICHT",
+    "fr": "CONNEXION SANS RÉPONSE"
+  },
+  "READY": {
+    "en": "READY",
+    "de": "BEREIT",
+    "fr": "PRÊT"
+  },
+  "BUSY": {
+    "en": "BUSY",
+    "de": "BESCHÄFTIGT",
+    "fr": "OCCUPÉ"
+  },
+  "RECONNECTING": {
+    "en": "RECONNECTING",
+    "de": "WIEDERVERBINDUNG",
+    "fr": "RECONNEXION"
+  },
+  "CONNECTING": {
+    "en": "CONNECTING",
+    "de": "VERBINDUNGSAUFBAU",
+    "fr": "CONNEXION"
+  },
+  "Mot de passe : entre {minimum} et {maximum} caractères.": {
+    "en": "Password: between {minimum} and {maximum} characters.",
+    "de": "Passwort: zwischen {minimum} und {maximum} Zeichen."
+  }
+}

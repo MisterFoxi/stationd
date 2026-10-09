@@ -5,7 +5,7 @@ un clic ouvre et connecte la console, sans passer par le dashboard détaillé.
 La page d’une station propose aussi **Ouvrir la console de cette station** lorsque
 la console est activée et que le compte possède le rôle admin sur cette station.
 L’écran rappelle la station cible avant l’ouverture et pendant toute la session.
-La console exécute directement `stationd-tui --addr ENDPOINT_CONFIGURÉ` sous Linux.
+La console exécute directement `stationd-tui --addr ENDPOINT_CONFIGURÉ --lang LANGUE_VIEWER` sous Linux.
 
 ## Configuration
 
@@ -95,3 +95,20 @@ sa sortie ANSI observée et son redimensionnement vérifié. Le rendu navigateur
 Pour la recette sur l’installation HTTPS : activer la table console, ouvrir une
 station avec un compte admin existant, vérifier l’interaction clavier puis fermer
 la console. Un compte viewer/helper ne doit pas voir le lien ni accéder aux routes.
+
+## Langue du viewer
+
+Webmin négocie la langue depuis l’en-tête `Accept-Language` du navigateur,
+en respectant les priorités (`q`) et les variantes régionales (`de-DE` → `de`).
+Les langues disponibles sont le français, l’anglais et l’allemand ; le français
+est utilisé lorsqu’aucune préférence prise en charge n’est disponible.
+
+Cette langue est utilisée pour les pages de connexion, d’inscription, de réseau,
+de station et de console, leurs messages dynamiques et le format des heures.
+Elle est conservée dans la réservation de console et transmise à la TUI par
+`--lang`, indépendamment de la locale du serveur. Les noms de stations, comptes
+et médias restent les données originales. Après un changement de langue du
+navigateur, recharger la page et ouvrir une nouvelle console.
+
+Vérifications : `node tests/webmin-language.js`, `node tests/webmin-console.js`
+(également avec `WEBMIN_TEST_LANGUAGE=fr` ou `de`), et `make webmin-test`.
