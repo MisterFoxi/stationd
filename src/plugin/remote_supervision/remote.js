@@ -29,15 +29,20 @@ function renderNetwork(data){
   const keep=new Set();
   for(const station of data.stations){
     keep.add(station.id);let card=cards.get(station.id);
-    if(!card){const element=document.createElement('article');element.className='station';const title=document.createElement('h2'),link=document.createElement('a');link.href=`/station/${encodeURIComponent(station.id)}`;title.append(link);const status=document.createElement('p'),media=document.createElement('p'),audience=document.createElement('p'),observed=document.createElement('p'),warnings=document.createElement('ul');observed.className='muted';element.append(title,status,media,audience,observed,warnings);card={element,link,status,media,audience,observed,warnings};cards.set(station.id,card);document.getElementById('stations').append(element);}
+    if(!card){const element=document.createElement('tr'),title=document.createElement('th'),link=document.createElement('a');title.scope='row';title.append(link);const status=document.createElement('td'),media=document.createElement('td'),audience=document.createElement('td'),observed=document.createElement('td'),warningCell=document.createElement('td'),warnings=document.createElement('ul');audience.className='network-audience';observed.className='muted';warningCell.append(warnings);element.append(title,status,media,audience,observed,warningCell);card={element,link,status,media,audience,observed,warnings};cards.set(station.id,card);}
     card.link.href=`/station/${encodeURIComponent(station.id)}${consoleEnabled&&station.role==='admin'?'/console':''}`;
     card.link.textContent=station.label;card.element.classList.toggle('stale',station.stale||station.connection==='offline');
     card.status.textContent=`${connections[station.connection]||t('Connexion inconnue')} · ${station.stale?t('Dernier état : '):''}${states[station.state]||t('État inconnu')}`;
     card.media.textContent=mediaText(station.media,station.on_air_kind);card.audience.textContent=audienceText(station.audience);
     card.observed.textContent=station.observed_at?t('Antenne observée à {time}',{time:timeText(station.observed_at)}):t('Aucune donnée d’antenne reçue');
     list(card.warnings,station.alerts.map(code=>alerts[code]||code));
+    document.getElementById('stations').append(card.element);
   }
   for(const[id,card]of cards)if(!keep.has(id)){card.element.remove();cards.delete(id);}
+  const known=data.stations.filter(station=>station.audience!=null);
+  const total=known.reduce((sum,station)=>sum+station.audience,0);
+  document.getElementById('network-total').textContent=data.stations.length&&!known.length?'—':String(total);
+  document.getElementById('network-total-note').textContent=known.length<data.stations.length?t('Total partiel — audience indisponible pour {value} station(s).',{value:data.stations.length-known.length}):'';
   message.textContent=data.stations.length?'':t('Aucune station accessible.');
 }
 let detail;

@@ -31,6 +31,24 @@ for(const language of ['fr','en','de']){
   evaluate('consoleEnabled=false');
   evaluate('renderNetwork('+JSON.stringify({stations:[{id:'one',label:'One',role:'admin',connection:'online',state:'running',alerts:[]}]})+')');
   assert.equal(evaluate('cards.get("one").link.href'),'/station/one');
+  const network=stations=>evaluate('renderNetwork('+JSON.stringify({stations:stations.map((station,index)=>({id:String(index),label:'Station '+index,connection:'online',state:'running',alerts:[],...station}))})+')');
+  network([{audience:2},{audience:3},{audience:0}]);
+  assert.equal(elements.get('network-total').textContent,'5');
+  assert.equal(elements.get('network-total-note').textContent,'');
+  network([{audience:1},{audience:null}]);
+  assert.equal(elements.get('network-total').textContent,'1');
+  assert.equal(elements.get('network-total-note').textContent,translated('Total partiel — audience indisponible pour {value} station(s).').replace('{value}','1'));
+  assert.equal(evaluate('cards.get("1").audience.textContent'),translated('Audience inconnue'));
+  network([{audience:null}]);
+  assert.equal(elements.get('network-total').textContent,'—');
+  assert.equal(evaluate('cards.size'),1);
+  network([{audience:0}]);
+  assert.equal(elements.get('network-total').textContent,'0');
+  assert.equal(elements.get('network-total-note').textContent,'');
+  network([]);
+  assert.equal(elements.get('network-total').textContent,'0');
+  assert.equal(evaluate('cards.size'),0);
+  assert.equal(elements.get('message').textContent,translated('Aucune station accessible.'));
   for(const [source,entry]of Object.entries(catalog)){
     for(const target of ['en','de'])assert.ok(entry[target],source+' '+target);
     assert.deepEqual((entry[language]||source).match(/\{\{?[a-zA-Z_]+\}?\}/g),(source).match(/\{\{?[a-zA-Z_]+\}?\}/g),source);

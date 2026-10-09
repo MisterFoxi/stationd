@@ -581,5 +581,25 @@
   "Console déconnectée. Rechargez la page pour réessayer.": {
     "en": "Console disconnected. Reload the page to retry.",
     "de": "Konsole getrennt. Laden Sie die Seite neu, um es erneut zu versuchen."
+  },
+  "État": {
+    "en": "Status",
+    "de": "Status"
+  },
+  "Connexions": {
+    "en": "Connections",
+    "de": "Verbindungen"
+  },
+  "Observation": {
+    "en": "Observation",
+    "de": "Beobachtung"
+  },
+  "Total des connexions": {
+    "en": "Total connections",
+    "de": "Verbindungen insgesamt"
+  },
+  "Total partiel — audience indisponible pour {value} station(s).": {
+    "en": "Partial total — audience unavailable for {value} station(s).",
+    "de": "Teilsumme — Hörerzahl für {value} Station(en) nicht verfügbar."
   }
 }
