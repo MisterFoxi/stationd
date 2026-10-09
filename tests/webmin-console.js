@@ -7,7 +7,7 @@ let now=100,focused=true,interval,quota=false;
 const windowListeners={},documentListeners={},frames=[];
 element('terminal').contains=node=>node===document.activeElement&&node===Terminal.all.at(-1)?.textarea;
 const language=process.env.WEBMIN_TEST_LANGUAGE||'en';
-const document={documentElement:{lang:language},body:{dataset:{stationId:'one'}},getElementById:element,activeElement:null,visibilityState:'visible',hasFocus:()=>focused,addEventListener(type,fn){documentListeners[type]=fn;}};
+const document={documentElement:{lang:language},body:{dataset:{stationId:'one'}},getElementById:id=>{assert.ok(!['start','close','activate-keyboard'].includes(id));return element(id);},activeElement:null,visibilityState:'visible',hasFocus:()=>focused,addEventListener(type,fn){documentListeners[type]=fn;}};
 class Terminal{
   constructor(options){this.options=options;this.textarea=element('textarea-'+Terminal.all.length);this.textarea.getRootNode=()=>document;this.parser={registerOscHandler:(code,handler)=>{assert.equal(code,777);this.osc=handler;}};Terminal.all.push(this);}
   static all=[];
@@ -31,8 +31,11 @@ const translated=source=>vm.runInContext('t('+JSON.stringify(source)+')',context
 vm.runInContext(fs.readFileSync('src/plugin/remote_supervision/console.js','utf8'),context);
 async function flush(){await new Promise(resolve=>setImmediate(resolve));}
 (async()=>{
-  await flush();await element('start').listeners.click();
-  const socket=WebSocket.all.at(-1),terminal=Terminal.all.at(-1);socket.connect();
+  await flush();assert.equal(WebSocket.all.length,1);
+  const html=fs.readFileSync('src/plugin/remote_supervision/console.html','utf8');
+  assert.ok(html.includes('<a id="back" href="/">← Synthèse réseau</a>'));
+  for(const id of ['start','close','activate-keyboard'])assert.ok(!html.includes('id="'+id+'"'));
+  const socket=WebSocket.all.at(-1),terminal=Terminal.all.at(-1);socket.connect();assert.equal(element('message').textContent,'');
   assert.equal(element('connection-state').textContent,translated('CONNECTED'));
   assert.equal(element('focus-state').textContent,translated('FOCUSED'));
   assert.equal(element('application-state').textContent,translated('UNKNOWN'));
@@ -41,7 +44,7 @@ async function flush(){await new Promise(resolve=>setImmediate(resolve));}
   focused=false;interval();assert.equal(element('focus-state').textContent,translated('FOCUSED'));
   windowListeners.blur();interval();assert.equal(element('focus-state').textContent,translated('TERMINAL NOT FOCUSED'));assert.equal(element('focus-help').hidden,false);
   windowListeners.focus();assert.equal(element('focus-state').textContent,translated('FOCUSED'));
-  document.activeElement=element('start');terminal.textarea.listeners.blur();interval();assert.equal(element('focus-state').textContent,translated('TERMINAL NOT FOCUSED'));
+  document.activeElement=element('logout');terminal.textarea.listeners.blur();interval();assert.equal(element('focus-state').textContent,translated('TERMINAL NOT FOCUSED'));
   // Terminal-generated replies must not claim that the user's keyboard is focused.
   terminal.input('reply');assert.equal(element('focus-state').textContent,translated('TERMINAL NOT FOCUSED'));
   socket.receive({type:'input_ack',seq:1});socket.sent.length=0;
@@ -51,18 +54,18 @@ async function flush(){await new Promise(resolve=>setImmediate(resolve));}
   assert.equal(element('focus-state').textContent,translated('TERMINAL NOT FOCUSED'));
   frames.splice(0).forEach(fn=>fn());assert.equal(element('focus-state').textContent,translated('FOCUSED'));
   element('terminal').listeners.click({button:0});
-  document.activeElement=element('close');terminal.textarea.listeners.blur();
+  document.activeElement=element('logout');terminal.textarea.listeners.blur();
   frames.splice(0).forEach(fn=>fn());assert.equal(element('focus-state').textContent,translated('TERMINAL NOT FOCUSED')); // Do not steal focus from another control.
-  element('activate-keyboard').listeners.click();windowListeners.blur();
+  element('terminal').listeners.click({button:0});windowListeners.blur();
   frames.splice(0).forEach(fn=>fn());assert.equal(element('focus-state').textContent,translated('TERMINAL NOT FOCUSED'));
   windowListeners.focus();
-  element('activate-keyboard').listeners.click();assert.equal(element('focus-state').textContent,translated('FOCUSED'));
+  element('terminal').listeners.click({button:0});assert.equal(element('focus-state').textContent,translated('FOCUSED'));
   frames.splice(0).forEach(fn=>fn());
   document.visibilityState='hidden';documentListeners.visibilitychange();assert.equal(element('focus-state').textContent,translated('TERMINAL NOT FOCUSED'));
   document.visibilityState='visible';documentListeners.visibilitychange();assert.equal(element('focus-state').textContent,translated('FOCUSED'));
   terminal.textarea.listeners.blur();terminal.key();interval();assert.equal(element('focus-state').textContent,translated('FOCUSED'));
   focused=true;
-  terminal.input('z');assert.equal(element('input-activity').textContent,translated('INPUT SENT'));
+  terminal.input('z');assert.equal(element('input-activity').textContent,'');
   const input=socket.sent.find(data=>data.type==='input');assert.equal(input.seq,2);assert.equal(input.data,'z');
   assert.equal(fs.readFileSync('src/plugin/remote_supervision/console.html','utf8').includes('id="input-state"'),false);
   assert.equal(fs.readFileSync('src/plugin/remote_supervision/console.html','utf8').includes('id="tui-state"'),false);
@@ -74,13 +77,12 @@ async function flush(){await new Promise(resolve=>setImmediate(resolve));}
   terminal.osc('stationd;1');assert.equal(element('application-state').textContent,translated('READY'));
   now+=7000;interval();assert.equal(element('connection-state').textContent,translated('CONNECTION UNRESPONSIVE'));
   now+=4000;interval();assert.equal(element('connection-state').textContent,translated('DISCONNECTED'));assert.equal(interval,null);
-  await element('start').listeners.click();assert.equal(element('connection-state').textContent,translated('RECONNECTING'));
+  await vm.runInContext('open()',context);assert.equal(element('connection-state').textContent,translated('RECONNECTING'));
   const second=WebSocket.all.at(-1);second.connect();
   terminal.osc('stationd;99');assert.equal(element('application-state').textContent,translated('UNKNOWN')); // Old session telemetry ignored.
   terminal.textarea.listeners.blur();assert.equal(element('focus-state').textContent,translated('FOCUSED')); // Old session focus ignored.
   now+=6000;second.receive({type:'probe_ack'});interval();assert.equal(element('application-state').textContent,translated('UNKNOWN'));
   Terminal.all.at(-1).input('x');second.receive({type:'ended',reason:'io_error'});assert.equal(element('connection-state').textContent,translated('DISCONNECTED'));assert.match(element('message').textContent,/PTY/);assert.equal(interval,null);
-  assert.equal(element('activate-keyboard').disabled,true);
-  quota=true;await element('start').listeners.click();assert.equal(element('connection-state').textContent,translated('BUSY'));assert.equal(element('start').disabled,false);
+  quota=true;await vm.runInContext('open()',context);assert.equal(element('connection-state').textContent,translated('BUSY'));
   console.log('Webmin console: focus events despite false document.hasFocus, explicit click, window/tab blur, actual keys versus automatic replies, PTY acknowledgements, no-op keys, heartbeat delay/recovery, transport timeout, reconnect, stale telemetry and quota passed.');
 })().catch(error=>{console.error(error);process.exitCode=1;});

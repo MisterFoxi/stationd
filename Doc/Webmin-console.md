@@ -1,10 +1,14 @@
 # Webmin — console admin (phase D)
 
-La vue réseau propose directement **Ouvrir la TUI** sur chaque station autorisée :
-un clic ouvre et connecte la console, sans passer par le dashboard détaillé.
+Sur la vue réseau, le nom d’une station ouvre directement la TUI lorsque la
+console est activée et que le compte possède le rôle admin sur cette station.
+Pour les autres rôles, ce lien ouvre le dashboard détaillé.
 La page d’une station propose aussi **Ouvrir la console de cette station** lorsque
 la console est activée et que le compte possède le rôle admin sur cette station.
-L’écran rappelle la station cible avant l’ouverture et pendant toute la session.
+La console s’ouvre automatiquement à l’arrivée sur sa page. Le titre indique
+la station cible pendant toute la session. Le clavier est activé à la connexion
+et un clic dans le terminal lui redonne le focus. Fermer la page termine la
+session ; recharger la page permet une nouvelle ouverture après déconnexion.
 La console exécute directement `stationd-tui --addr ENDPOINT_CONFIGURÉ --lang LANGUE_VIEWER` sous Linux.
 
 ## Configuration

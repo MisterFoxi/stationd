@@ -4,11 +4,10 @@
 <link rel="stylesheet" href="/remote.css"><link rel="stylesheet" href="/terminal/xterm.css">
 <script src="/i18n.js" defer></script><script src="/terminal/xterm.js" defer></script><script src="/terminal/fit.js" defer></script><script src="/console.js" defer></script>
 <body data-station-id="{{STATION_ID}}" class="console-page"><main>
-<a id="back">← Retour à la station</a>
+<a id="back" href="/">← Synthèse réseau</a>
 <header><h1 id="station-name">Console de la station</h1><button id="logout">Se déconnecter</button></header>
-<p id="account"></p><p>Console d’administration StationD. Vos commandes agissent sur la station indiquée ci-dessus.</p>
-<p id="message" role="status">Chargement…</p>
-<p><button id="start" disabled>Ouvrir la console</button> <button id="close" disabled>Fermer la console</button> <button id="activate-keyboard" disabled>Activer le clavier</button></p>
+<p id="account"></p>
+<p id="message" role="status"></p>
 <div id="terminal-status" role="status" aria-live="polite">
 <span id="connection-state">DISCONNECTED</span>
 <span id="focus-state">TERMINAL NOT FOCUSED</span>

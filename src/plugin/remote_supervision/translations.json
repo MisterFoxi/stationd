@@ -115,25 +115,9 @@
     "en": "Station console",
     "de": "Stationskonsole"
   },
-  "Console d’administration StationD. Vos commandes agissent sur la station indiquée ci-dessus.": {
-    "en": "StationD administration console. Your commands affect the station shown above.",
-    "de": "StationD-Verwaltungskonsole. Ihre Befehle wirken auf die oben angezeigte Station."
-  },
   "Chargement…": {
     "en": "Loading…",
     "de": "Laden…"
-  },
-  "Ouvrir la console": {
-    "en": "Open console",
-    "de": "Konsole öffnen"
-  },
-  "Fermer la console": {
-    "en": "Close console",
-    "de": "Konsole schließen"
-  },
-  "Activer le clavier": {
-    "en": "Enable keyboard",
-    "de": "Tastatur aktivieren"
   },
   "Cliquez dans le terminal pour y diriger le clavier.": {
     "en": "Click inside the terminal to direct keyboard input there.",
@@ -351,14 +335,6 @@
     "en": "Unknown",
     "de": "Unbekannt"
   },
-  "Ouvrir la TUI": {
-    "en": "Open TUI",
-    "de": "TUI öffnen"
-  },
-  "Ouvrir la TUI de {name}": {
-    "en": "Open TUI for {name}",
-    "de": "TUI von {name} öffnen"
-  },
   "Connexion inconnue": {
     "en": "Unknown connection",
     "de": "Verbindung unbekannt"
@@ -467,10 +443,6 @@
     "en": "Connection lost — check displayed data. Reconnecting automatically…",
     "de": "Verbindung verloren — angezeigte Daten prüfen. Automatische Wiederverbindung…"
   },
-  "Le serveur ne répond plus. Rouvrez la console pour créer une nouvelle session.": {
-    "en": "The server is no longer responding. Reopen the console to create a new session.",
-    "de": "Der Server antwortet nicht mehr. Öffnen Sie die Konsole erneut, um eine neue Sitzung zu erstellen."
-  },
   "Quota atteint ou serveur occupé. Réessayez dans quelques secondes.": {
     "en": "Quota reached or server busy. Try again in a few seconds.",
     "de": "Kontingent erreicht oder Server beschäftigt. Versuchen Sie es in wenigen Sekunden erneut."
@@ -482,14 +454,6 @@
   "Accès refusé ou session expirée.": {
     "en": "Access denied or session expired.",
     "de": "Zugriff verweigert oder Sitzung abgelaufen."
-  },
-  "Ouverture de la console…": {
-    "en": "Opening console…",
-    "de": "Konsole wird geöffnet…"
-  },
-  "Console connectée. Fermez-la après utilisation.": {
-    "en": "Console connected. Close it after use.",
-    "de": "Konsole verbunden. Schließen Sie sie nach der Verwendung."
   },
   "Console fermée après inactivité.": {
     "en": "Console closed after inactivity.",
@@ -535,10 +499,6 @@
     "en": "Cannot connect to console.",
     "de": "Verbindung zur Konsole nicht möglich."
   },
-  "Console déconnectée. Une nouvelle ouverture crée une nouvelle session.": {
-    "en": "Console disconnected. Reopening creates a new session.",
-    "de": "Konsole getrennt. Erneutes Öffnen erstellt eine neue Sitzung."
-  },
   "Envoi interrompu : connexion saturée. Les caractères restants ne sont pas envoyés.": {
     "en": "Sending interrupted: connection saturated. Remaining characters were not sent.",
     "de": "Übertragung unterbrochen: Verbindung überlastet. Die übrigen Zeichen wurden nicht gesendet."
@@ -554,10 +514,6 @@
   "Console — {name}": {
     "en": "Console — {name}",
     "de": "Konsole — {name}"
-  },
-  "Prête à ouvrir.": {
-    "en": "Ready to open.",
-    "de": "Bereit zum Öffnen."
   },
   "DISCONNECTED": {
     "en": "DISCONNECTED",
@@ -583,11 +539,6 @@
     "en": "INPUT DELAYED",
     "de": "EINGABE VERZÖGERT",
     "fr": "ENTRÉE RETARDÉE"
-  },
-  "INPUT SENT": {
-    "en": "INPUT SENT",
-    "de": "EINGABE GESENDET",
-    "fr": "ENTRÉE ENVOYÉE"
   },
   "CONNECTED": {
     "en": "CONNECTED",
@@ -622,5 +573,13 @@
   "Mot de passe : entre {minimum} et {maximum} caractères.": {
     "en": "Password: between {minimum} and {maximum} characters.",
     "de": "Passwort: zwischen {minimum} und {maximum} Zeichen."
+  },
+  "Le serveur ne répond plus. Rechargez la page pour réessayer.": {
+    "en": "The server is no longer responding. Reload the page to retry.",
+    "de": "Der Server antwortet nicht mehr. Laden Sie die Seite neu, um es erneut zu versuchen."
+  },
+  "Console déconnectée. Rechargez la page pour réessayer.": {
+    "en": "Console disconnected. Reload the page to retry.",
+    "de": "Konsole getrennt. Laden Sie die Seite neu, um es erneut zu versuchen."
   }
 }
