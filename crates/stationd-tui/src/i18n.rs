@@ -59,6 +59,9 @@ fn current() -> &'static LanguageIdentifier {
     CURRENT.get_or_init(|| LANGUAGES[0].parse().expect("langue par défaut valide"))
 }
 
+/// Current supported language, also used by localized calendar widgets.
+pub fn language() -> &'static str { supported(current().language.as_str()) }
+
 /// Une variable passée à une traduction.
 pub type Arg = (&'static str, FluentValue<'static>);
 

@@ -102,17 +102,17 @@ pub async fn song_keys_since(pool: &SqlitePool, cutoff: i64) -> Result<HashSet<S
 }
 
 /// Liquidsoap really started the track logged as `id` at `at`.
-pub async fn mark_aired(pool: &SqlitePool, id: i64, at: Epoch) -> Result<(), sqlx::Error> {
+pub async fn mark_aired(pool: &SqlitePool, id: i64, at: Epoch) -> Result<bool, sqlx::Error> {
     let mut tx = pool.begin().await?;
-    sqlx::query("UPDATE broadcast_log SET aired_at = ?2 WHERE id = ?1 AND aired_at IS NULL")
+    let changed = sqlx::query("UPDATE broadcast_log SET aired_at = ?2 WHERE id = ?1 AND aired_at IS NULL")
         .bind(id)
         .bind(at.0)
         .execute(&mut *tx)
-        .await?;
+        .await?.rows_affected() != 0;
     sqlx::query("UPDATE shuffle_pick SET settled = 1 WHERE log_id = ?")
         .bind(id).execute(&mut *tx).await?;
     tx.commit().await?;
-    Ok(())
+    Ok(changed)
 }
 
 /// Our track logged as `id` left the air at `at` (migration 0022):
@@ -124,14 +124,14 @@ pub async fn record_left(
     id: i64,
     at: Epoch,
     played_to_end: Option<bool>,
-) -> Result<(), sqlx::Error> {
-    sqlx::query("UPDATE broadcast_log SET left_at = ?2, played_to_end = ?3 WHERE id = ?1 AND left_at IS NULL")
+) -> Result<bool, sqlx::Error> {
+    let changed = sqlx::query("UPDATE broadcast_log SET left_at = ?2, played_to_end = ?3 WHERE id = ?1 AND left_at IS NULL")
         .bind(id)
         .bind(at.0)
         .bind(played_to_end)
         .execute(pool)
-        .await?;
-    Ok(())
+        .await?.rows_affected() != 0;
+    Ok(changed)
 }
 
 /// One logged track with its provenance, its air stamps and what the media

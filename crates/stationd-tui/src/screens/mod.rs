@@ -9,6 +9,8 @@ mod media_tree;
 mod ops;
 pub(crate) mod picker;
 mod plugin_tabs;
+mod stats_period;
+mod stats_dashboard;
 mod plugin_config;
 mod metadata_rules;
 pub fn plugin_screen(name: String, tab: stationd_proto::plugin::PluginTab) -> Box<dyn Screen> {

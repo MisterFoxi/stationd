@@ -1336,3 +1336,53 @@ metadata-restart = Après enregistrement : redémarrer stationd, puis Liquidsoap
 
 note-boundary-no-fit = rendez-vous { $rule } de { $time } retardé : aucun titre admissible ne tient avant l'heure ; le morceau sera joué jusqu'au bout
 note-boundary-missed = rendez-vous { $rule } de { $time } manqué : aucun titre admissible ne tient avant l'heure et le morceau finit après son expiration ; aucune coupure
+
+## Statistical period picker
+stats-filters = Filtres
+stats-filter-fields = Période et regroupements
+stats-filter-all = Tous
+stats-filter-help = Filtres et période
+stats-date-auto = Automatique selon la période
+stats-hours = Heures
+stats-minutes = Minutes
+stats-seconds = Secondes
+stats-date-selected = Date sélectionnée
+stats-time-invalid = Saisir une valeur entre 0 et { $max }.
+stats-calendar-help = Flèches : jour/semaine · PgPréc/PgSuiv : mois · Ctrl+Pg : année · Tab : heure · t : aujourd’hui · n : maintenant · 0 : minuit · Entrée : choisir · Esc : annuler
+stats-calendar-end-help = Flèches : date · PgPréc/PgSuiv : mois · Ctrl+Pg : année · Tab : heure · e : inclure la journée (fin au lendemain à minuit) · Entrée : choisir · Esc : annuler
+stats-open-calendar = Entrée → ouvrir le calendrier
+stats-calendar-description = Choisir le jour avec les flèches ou la souris, puis régler l’heure. La période passe automatiquement en personnalisée.
+stats-open-text = Entrée pour modifier ce champ.
+stats-date-invalid = Date invalide : { $label }.
+stats-date-required = Choisir le début et la fin de la période.
+stats-date-order = La fin doit être après le début.
+stats-period-check = Période à vérifier
+stats-period-preview = Période qui sera appliquée · UTC
+stats-period-from = Du (inclus) :
+stats-period-to = Au (exclu) :
+stats-filter-keys = ↑/↓ ou Tab : champ · ←/→ ou 1…9 : choix · Entrée : modifier · Suppr : défaut · Ctrl+S : appliquer · Esc : annuler
+
+key-h = h
+
+stats-dashboard = Tableau de bord
+stats-table = Tableau détaillé
+stats-view-help = v : tableau / graphiques
+stats-panels-help = h : courbe / chaleur / classement
+stats-evolution = Évolution
+stats-ranking = Classement
+stats-heatmap = Jours × heures
+stats-samples = relevés
+stats-no-sample = Aucun relevé
+stats-heatmap-legend = · inconnu  _ zéro  ▁ faible → █ fort · flèches : case
+stats-dashboard-invalid = Données graphiques invalides ; v revient au tableau.
+stats-period-exclusive = fin exclue
+stats-dashboard-keys = ←/→ : point · ↑/↓ : classement · h : panneaux · v : tableau · f : filtres
+stats-mon = Lun
+stats-tue = Mar
+stats-wed = Mer
+stats-thu = Jeu
+stats-fri = Ven
+stats-sat = Sam
+stats-sun = Dim
+
+stats-no-dashboard = Cette vue ne déclare aucun graphique.

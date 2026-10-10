@@ -813,6 +813,10 @@ pub fn query_file(path: &Path, sql: &str, max_rows: u32) -> Result<Rows, DbError
 
 /// UI reads use their own deadline while keeping the CLI's existing 10 s limit.
 pub fn query_file_bounded(path: &Path, sql: &str, max_rows: u32, timeout_ms: u32) -> Result<Rows, DbError> {
+    query_file_filtered(path, sql, &Params::default(), max_rows, timeout_ms)
+}
+
+pub fn query_file_filtered(path: &Path, sql: &str, params: &Params, max_rows: u32, timeout_ms: u32) -> Result<Rows, DbError> {
     if !path.exists() {
         return Err(DbError::Open {
             path: path.display().to_string(),
@@ -825,7 +829,7 @@ pub fn query_file_bounded(path: &Path, sql: &str, max_rows: u32, timeout_ms: u32
         .map_err(|e| DbError::Sql(e.to_string()))?;
     *guard.deadline.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now() + timeout);
     guard.plugin_sql.store(true, Ordering::SeqCst);
-    run_query(&conn, sql, &Params::default(), max_rows).map_err(|e| match e {
+    run_query(&conn, sql, params, max_rows).map_err(|e| match e {
         StmtError::Sql(e) => map_sql_error(&guard, timeout_ms, e),
         StmtError::Db(e) => e,
     })

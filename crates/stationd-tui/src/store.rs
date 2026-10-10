@@ -72,6 +72,7 @@ pub struct Store {
     pub live: Sourced<live::LiveStatus>,
     pub overrides: Sourced<Vec<broadcast::Override>>,
     pub plugins: Sourced<Vec<plugin::PluginInfo>>,
+    pub plugin_filters: std::collections::HashMap<(String, String, String), String>,
     /// Fuseau de la station, résolu depuis `StatusReply.timezone`.
     pub tz: Option<TimeZone>,
     /// Nom du fuseau tel que reçu (affiché même s'il n'a pas pu être résolu).
@@ -106,6 +107,7 @@ impl Store {
             live: Sourced::default(),
             overrides: Sourced::default(),
             plugins: Sourced::default(),
+            plugin_filters: Default::default(),
             tz: None,
             tz_name: None,
             onair: None,

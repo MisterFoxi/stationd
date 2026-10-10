@@ -41,6 +41,11 @@ fn map_info(i: CoreInfo) -> PluginInfo {
                 title: t.title,
                 description: t.description,
                 kind: t.kind,
+                has_dashboard: !t.dashboard_sql.is_empty(),
+                filters: t.filters.into_iter().map(|f| plugin::PluginTabFilter {
+                    key: f.key, label: f.label, kind: f.kind,
+                    default_value: f.default_value, options: f.options, shared: f.shared,
+                }).collect(),
             })
             .collect(),
         operator_notice: i.operator_notice.map(|notice| match notice {
@@ -183,7 +188,7 @@ impl PluginService for PluginGrpc {
         let req = request.into_inner();
         let rows = self
             .handle
-            .read_tab(&req.name, &req.tab_id)
+            .read_tab_view(&req.name, &req.tab_id, &req.filters, req.dashboard)
             .await
             .map_err(db_status)?;
         Ok(Response::new(PluginDbQueryResponse {

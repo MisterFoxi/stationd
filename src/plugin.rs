@@ -177,9 +177,26 @@ pub trait Plugin: Send {
 /// `LiveEnded` (live DJs, `live::LiveHub`). Others
 /// from `Doc/plugin-events.md` (`TrackSkipped`, `LibraryScanned`, `GridApplied`,
 /// …) are added as their sources come online.
+/// Identity and metadata at a real air start. play_id is the persistent broadcast-log row.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MediaPlayback {
+    pub play_id: i64,
+    pub media_uuid: Option<String>,
+    pub media_path: String,
+    pub title: Option<String>,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+    pub playlist_ref: Option<String>,
+    pub at: i64,
+}
+
 #[non_exhaustive]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum PluginEvent {
+    /// Actual start, once per persistent play; never emitted by a preview.
+    TrackStarted { playback: MediaPlayback },
+    /// Inferred departure from air, once per play. aired_seconds excludes pauses.
+    TrackFinished { playback: MediaPlayback, at: i64, aired_seconds: i64, played_to_end: Option<bool> },
     /// A decision was just taken (`GridEngine::next_media`). `media_path` is
     /// `None` on a fallback. `origin` is the resolver origin, as a short label.
     TrackResolved {
@@ -226,7 +243,9 @@ fn journal(event: &PluginEvent) {
     use crate::events::{record, Code, Component, Level};
     use std::sync::atomic::Ordering;
     match event {
-        PluginEvent::ListenerSnapshot { .. } | PluginEvent::ConnectionsSampled { .. } => {},
+        // Actual air starts/ends already have durable broadcast_log records.
+        PluginEvent::TrackStarted { .. } | PluginEvent::TrackFinished { .. }
+        | PluginEvent::ListenerSnapshot { .. } | PluginEvent::ConnectionsSampled { .. } => {},
         PluginEvent::TrackResolved { media_path, playlist_ref, rule_id, origin } => record(
             Level::Info,
             Component::Grid,
@@ -886,7 +905,7 @@ enum Msg {
     TabLocate {
         name: String,
         tab_id: String,
-        reply: oneshot::Sender<Result<(DbLocation, String), DbAdminError>>,
+        reply: oneshot::Sender<Result<(DbLocation, crate::plugin_ui::UiTab), DbAdminError>>,
     },
     List(oneshot::Sender<Vec<PluginInfo>>),
     TagHints(oneshot::Sender<TagHints>),
@@ -1076,13 +1095,27 @@ impl PluginHandle {
 
     /// SQL stays server-side; only declared tabs of loaded plugins are readable.
     pub async fn read_tab(&self, name: &str, tab_id: &str) -> Result<Rows, DbAdminError> {
+        self.read_tab_filtered(name, tab_id, &std::collections::HashMap::new()).await
+    }
+
+    pub async fn read_tab_filtered(&self, name: &str, tab_id: &str, values: &std::collections::HashMap<String, String>) -> Result<Rows, DbAdminError> {
+        self.read_tab_view(name, tab_id, values, false).await
+    }
+
+    pub async fn read_tab_view(&self, name: &str, tab_id: &str, values: &std::collections::HashMap<String, String>, dashboard: bool) -> Result<Rows, DbAdminError> {
         let (reply, rx) = oneshot::channel();
         let gone = || DbAdminError::Precondition("plugin actor is no longer running".into());
         self.tx.send(Msg::TabLocate { name: name.into(), tab_id: tab_id.into(), reply })
             .await.map_err(|_| gone())?;
-        let (loc, sql) = rx.await.map_err(|_| gone())??;
+        let (loc, tab) = rx.await.map_err(|_| gone())??;
+        let sql = if dashboard {
+            if tab.dashboard_sql.is_empty() { return Err(DbAdminError::Precondition("this tab has no dashboard".into())); }
+            tab.dashboard_sql
+        } else { tab.sql };
+        let params = crate::plugin_ui::bind_filters(&tab.filters, values)
+            .map_err(|e| DbAdminError::Db(DbError::Params(e)))?;
         tokio::task::spawn_blocking(move || {
-            plugin_db::query_file_bounded(&loc.path, &sql, loc.limits.max_rows.min(1000), loc.limits.query_timeout_ms.min(1000))
+            plugin_db::query_file_filtered(&loc.path, &sql, &params, loc.limits.max_rows.min(1000), loc.limits.query_timeout_ms.min(1000))
         }).await.map_err(|e| DbAdminError::Db(DbError::Sql(e.to_string())))?
             .map_err(DbAdminError::Db)
     }
@@ -1273,7 +1306,7 @@ pub fn spawn_configured(mut decls: Vec<PluginDecl>, env: PluginEnv, config_path:
 }
 
 fn tab_location(slots: &[Slot], name: &str, tab_id: &str, env: &PluginEnv)
-    -> Result<(DbLocation, String), DbAdminError>
+    -> Result<(DbLocation, crate::plugin_ui::UiTab), DbAdminError>
 {
     let (loaded, loc) = db_location(slots, name, env)?;
     if !loaded { return Err(DbAdminError::Precondition(format!("plugin {name} is not loaded"))); }
@@ -1281,7 +1314,7 @@ fn tab_location(slots: &[Slot], name: &str, tab_id: &str, env: &PluginEnv)
         .find(|t| t.id == tab_id)
         .ok_or_else(|| DbAdminError::Precondition(format!("unknown tab {tab_id} for plugin {name}")))?;
     if tab.kind == "plugin_config" { return Err(DbAdminError::Precondition("this tab is a configuration editor".into())); }
-    Ok((loc, tab.sql.clone()))
+    Ok((loc, tab.clone()))
 }
 
 /// A plugin's database location: (loaded, location).
@@ -3212,7 +3245,7 @@ mod ui_tests {
         }
     }
     fn tab(sql: &str) -> UiTab {
-        UiTab { id: "sample".into(), title: "Sample".into(), description: "".into(), kind: String::new(), sql: sql.into() }
+        UiTab { id: "sample".into(), title: "Sample".into(), description: "".into(), kind: String::new(), filters: Vec::new(), dashboard_sql: String::new(), sql: sql.into() }
     }
     fn slot() -> Slot {
         let decl: PluginDecl = toml::from_str("name = 'table'\nenabled = true\ncapabilities = ['db']").unwrap();
@@ -3229,8 +3262,8 @@ mod ui_tests {
         assert_eq!(slot.info().state, "loaded");
         assert_eq!(slot.info().tabs.len(), 1);
         let slots = vec![slot];
-        let (loc, sql) = tab_location(&slots, "table", "sample", &env).unwrap();
-        let rows = plugin_db::query_file_bounded(&loc.path, &sql, 1000, 200).unwrap();
+        let (loc, tab) = tab_location(&slots, "table", "sample", &env).unwrap();
+        let rows = plugin_db::query_file_bounded(&loc.path, &tab.sql, 1000, 200).unwrap();
         assert_eq!(rows.rows, vec![vec![serde_json::json!(7)]]);
         assert!(tab_location(&slots, "missing", "sample", &env).is_err());
         assert!(tab_location(&slots, "table", "missing", &env).is_err());
@@ -3300,16 +3333,26 @@ mod ui_tests {
         let info = handle.list().await.remove(0);
         assert_eq!(info.state, "loaded", "{}", info.reason);
         assert_eq!(info.tabs[0].id, "plays");
+        assert!(!info.tabs[0].dashboard_sql.is_empty());
         let table = handle.read_tab("renamed-stats", "plays").await.unwrap();
-        assert_eq!(table.columns.len(), 3);
+        assert!(table.columns.len() >= 3);
         assert!(table.rows.is_empty());
         handle.emit(PluginEvent::TrackResolved { media_path: Some("song.mp3".into()), playlist_ref: None, rule_id: None, origin: "test".into() });
+        assert!(handle.read_tab("renamed-stats", "plays").await.unwrap().rows.is_empty());
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+        handle.emit(PluginEvent::TrackStarted { playback: MediaPlayback { play_id: 1,
+            media_uuid: None, media_path: "song.mp3".into(), title: None, artist: None, album: None,
+            playlist_ref: None, at: now } });
         let table = handle.read_tab("renamed-stats", "plays").await.unwrap();
         assert_eq!(table.rows[0][0], serde_json::json!("song.mp3"));
         assert_eq!(table.rows[0][1], serde_json::json!(1));
+        let dashboard = handle.read_tab_view("renamed-stats", "plays", &Default::default(), true).await.unwrap();
+        assert_eq!(dashboard.columns[0], "Section");
+        assert!(dashboard.rows.iter().any(|r| r[0] == serde_json::json!("summary") && r[2] == serde_json::json!("Diffusions") && r[4] == serde_json::json!(1)));
+        assert!(handle.read_tab_view("renamed-stats", "legacy", &Default::default(), true).await.is_err());
         assert!(handle.read_tab("renamed-stats", "unknown").await.is_err());
         handle.control("renamed-stats", Action::Stop).await.unwrap();
-        assert_eq!(handle.list().await[0].tabs.len(), 1);
+        assert_eq!(handle.list().await[0].tabs.len(), 4);
         assert!(handle.read_tab("renamed-stats", "plays").await.is_err());
         handle.control("renamed-stats", Action::Reload).await.unwrap();
         assert!(handle.read_tab("renamed-stats", "plays").await.is_ok());

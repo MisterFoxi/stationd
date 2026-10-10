@@ -172,7 +172,7 @@ on the same filesystem. This is not a cryptographic signature verification.
 Data attribution: [IP Geolocation by DB-IP](https://db-ip.com),
 [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
 A future statistics page must display that linked attribution wherever it
-uses these results. This patch includes no UI and redistributes no database.
+uses these results. The TUI statistics views retain this attribution and redistribute no database.
 See [DB-IP City Lite](https://db-ip.com/db/download/ip-to-city-lite).
 
 ## Temporary IP diagnostics
@@ -298,3 +298,19 @@ cargo build --manifest-path plugins/listener-stats-wasm/Cargo.toml --release --t
 These cover XML variants and failures, mount escaping, HTTP authentication,
 independent audience polling, capability gates, GeoIP input validation,
 aggregation, confined DB migrations, replay, rollback and retention.
+
+## Selectable statistics views
+
+The listener-stats guest now exposes Audience, Évolution, Habitudes d’écoute
+and Géographie in the TUI. Press **f** to select the period (today UTC,
+24 hours, 7/30/90/365 days, retained history, or custom UTC start/end), mount,
+time grouping and geographic level. Ctrl+S applies; Escape cancels.
+Period and mount are shared across this plugin’s tabs. Chronological hour,
+day, Monday-based week, month, year, hour-of-day and weekday aggregates can
+also be crossed with country, region or city. See [plugin-ui.md](plugin-ui.md)
+for keys, date boundaries, aggregation semantics and upgrade steps.
+
+These views use existing snapshot aggregates, without new migrations or raw
+client data. Cumulative audience observations are sampled counts, not sessions,
+unique listeners or listener-hours. Retention still defaults to 30 days and
+can be set up to 365 days; increasing it cannot recover deleted data.

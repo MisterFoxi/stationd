@@ -143,10 +143,22 @@ message PluginTab {
   string title = 2;
   string description = 3;
   string kind = 4; // empty/table or plugin_config
+  repeated PluginTabFilter filters = 5;
+  bool has_dashboard = 6; // Plugin also declares a read-only visual dataset.
+}
+message PluginTabFilter {
+  string key = 1;
+  string label = 2;
+  string kind = 3; // choice, text, datetime (UTC YYYY-MM-DD HH:MM:SS, or empty)
+  string default_value = 4;
+  repeated string options = 5;
+  bool shared = 6; // Share the selection between this plugin's tabs.
 }
 message PluginReadTabRequest {
   string name = 1;
   string tab_id = 2;
+  map<string, string> filters = 3;
+  bool dashboard = 4; // false keeps the original table for older clients.
 }
 
 message PluginConfigRequest { string name = 1; }

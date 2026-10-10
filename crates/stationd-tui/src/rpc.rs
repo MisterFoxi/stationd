@@ -26,11 +26,11 @@ pub async fn read_plugin_config(channel: Channel, name: String) -> Read<plugin::
 pub async fn update_plugin_config(channel: Channel, req: plugin::PluginConfigUpdateRequest) -> Read<plugin::PluginConfigResponse> {
     bounded(plugin::plugin_service_client::PluginServiceClient::new(channel).update_config(req)).await
 }
-pub async fn read_plugin_tab(channel: Channel, name: String, tab_id: String)
+pub async fn read_plugin_tab(channel: Channel, name: String, tab_id: String, filters: std::collections::HashMap<String, String>, dashboard: bool)
     -> Read<plugin::PluginDbQueryResponse>
 {
     bounded(plugin::plugin_service_client::PluginServiceClient::new(channel)
-        .read_tab(plugin::PluginReadTabRequest { name, tab_id })).await
+        .read_tab(plugin::PluginReadTabRequest { name, tab_id, filters, dashboard })).await
 }
 
 /// Complete host/IP shorthand with the stationd gRPC scheme and port.
@@ -547,5 +547,29 @@ mod address_tests {
         }
         let _ = stop.send(());
         server.await.unwrap().unwrap();
+    }
+}
+
+#[cfg(test)]
+mod live_visual_tabs {
+    #[tokio::test]
+    #[ignore = "read-only diagnostic against STATIOND_TEST_LIVE_STATS_ADDR"]
+    async fn live_graphical_tabs_are_readable() {
+        use stationd_proto::plugin::{PluginListRequest,PluginReadTabRequest,plugin_service_client::PluginServiceClient};
+        let addr=std::env::var("STATIOND_TEST_LIVE_STATS_ADDR").unwrap();
+        let channel=super::lazy_channel(&addr).unwrap();
+        let mut client=PluginServiceClient::new(channel);
+        let plugins=client.list(PluginListRequest {}).await.unwrap().into_inner().plugins;
+        for p in plugins.into_iter().filter(|p|p.name=="listener-stats"||p.name=="play-stats") {
+            for t in p.tabs {
+                println!("{}/{} dashboard={}",p.name,t.id,t.has_dashboard);
+                if t.has_dashboard {for dashboard in [false,true] {
+                    println!("  reading dashboard={dashboard}");
+                    let data=client.read_tab(PluginReadTabRequest {name:p.name.clone(),tab_id:t.id.clone(),dashboard,filters:Default::default()}).await.unwrap().into_inner();
+                    if dashboard {assert_eq!(data.columns.first().map(String::as_str),Some("Section"));}
+                    else {assert_ne!(data.columns.first().map(String::as_str),Some("Section"));}
+                }}
+            }
+        }
     }
 }

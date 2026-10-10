@@ -69,6 +69,8 @@ auditeurs = 0 » avant qu'Icecast ne soit branché.
 | Événement | Quand | Données | Usage typique |
 |---|---|---|---|
 | `TrackResolved` | une décision vient d'être prise (`next_media`) | `media_path`, `playlist_ref`, `rule_id`, `origin` | log, stats de rotation, « quoi et pourquoi » |
+| `TrackStarted` | première confirmation Liquidsoap de mise à l’antenne (`mark_aired`) | `playback` : `play_id`, `media_uuid?`, `media_path`, `title?`, `artist?`, `album?`, `playlist_ref?`, `at` (début UTC) | statistiques de diffusions réelles |
+| `TrackFinished` | première confirmation de sortie d’antenne (`record_left`) | même `playback`, `at` (fin UTC), `aired_seconds`, `played_to_end?` | durée réellement diffusée, complet/coupé/inconnu |
 | `TrackSkipped` | un candidat est écarté (fichier disparu, contrainte) | `media_path?`, `reason` | observabilité no-silent-failure |
 | `LibraryScanned` | un scan biblio se termine | `found`, `unavailable`, `skipped` | stats catalogue, invalidation de cache plugin |
 | `GridApplied` | la grille a été (ré)appliquée | `rule_count` | recalcul/cache plugin |
@@ -83,7 +85,13 @@ auditeurs = 0 » avant qu'Icecast ne soit branché.
 | `BroadcastStateChanged` | contrôle diffusion (A2) | `from`, `to` (running/paused/draining/sleeping), `by` (plugin, `cli`, `stop-when-idle`, `live`, `audience-unknown`, `connections-changed`, `connections-unknown`) | réaction à une veille / un réveil |
 | `LiveStarted` | DJ live (harbor, `live::LiveHub`) | `dj`, `rule_id` (vide si entré par une ouverture ponctuelle ou le droit urgent), `at` | annoncer le live, notifier, journaliser |
 | `LiveEnded` | DJ live | `dj`, `reason` (disconnected/silence/kicked), `at` | fin d'émission, alerte sur coupure pour silence |
-| `TrackStarted` / `TrackFinished` | Liquidsoap | `media_path`, `at` | *vraie* diffusion (vs simple résolution), scrobble, durée d'écoute |
+
+Les événements médias ne sont émis qu’après le premier horodatage durable de
+`broadcast_log`. Les appels répétés ne réémettent pas ; la simulation n’émet
+pas d’événements. Ils ne sont pas dupliqués dans le journal générique des
+plugins : `broadcast_log` conserve le fait canonique. La livraison au plugin
+reste best-effort, sans rattrapage automatique ; une erreur de préparation de
+notification ne fait pas échouer la confirmation d’antenne.
 
 ## Ce qui n'est délibérément PAS un événement
 
@@ -95,12 +103,6 @@ auditeurs = 0 » avant qu'Icecast ne soit branché.
 
 ## Encore ouvert
 
-- **`TrackStarted` / `TrackFinished` : définir maintenant ou avec LS ?**
-  Les figer tôt risque de mal deviner des champs qu'on ne peut pas encore
-  remplir ; le `#[non_exhaustive]` rend l'ajout ultérieur indolore. `TrackResolved`
-  (déjà réel) porte le « quoi/pourquoi » dont les stats de rotation ont besoin ;
-  la *vraie* diffusion (started/finished) n'a de sens qu'avec LS. **Défaut
-  proposé : ne pas les mettre au premier jet, les ajouter avec le câblage LS.**
 - **Granularité de `ListenersSampled`** : `count` global suffit au cas « = 0 » ;
   le détail par *mount*/source est un raffinement. **Défaut proposé : `count`
   global d'abord.**

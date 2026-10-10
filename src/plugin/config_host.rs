@@ -12,6 +12,8 @@ impl Plugin for ConfigPlugin {
             description: "Configuration des plugins et des métadonnées de diffusion".into(),
             sql: String::new(),
             kind: "plugin_config".into(),
+            filters: Vec::new(),
+            dashboard_sql: String::new(),
         }])
     }
 }

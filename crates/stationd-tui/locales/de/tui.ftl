@@ -1330,3 +1330,53 @@ metadata-restart = Nach dem Speichern: stationd und anschließend Liquidsoap neu
 
 note-boundary-no-fit = Termin { $rule } um { $time } verspätet: kein zulässiger Titel passt; der Titel wird vollständig gespielt
 note-boundary-missed = Termin { $rule } um { $time } verpasst: kein zulässiger Titel passt und der Titel endet nach Ablauf des Termins; kein Titel wird abgeschnitten
+
+## Statistical period picker
+stats-filters = Filter
+stats-filter-fields = Zeitraum und Gruppierung
+stats-filter-all = Alle
+stats-filter-help = Filter und Zeitraum
+stats-date-auto = Automatisch für den Zeitraum
+stats-hours = Stunden
+stats-minutes = Minuten
+stats-seconds = Sekunden
+stats-date-selected = Gewähltes Datum
+stats-time-invalid = Wert von 0 bis { $max } eingeben.
+stats-calendar-help = Pfeile: Tag/Woche · Bild↑/↓: Monat · Strg+Bild: Jahr · Tab: Uhrzeit · t: heute · n: jetzt · 0: Mitternacht · Enter: wählen · Esc: abbrechen
+stats-calendar-end-help = Pfeile: Datum · Bild↑/↓: Monat · Strg+Bild: Jahr · Tab: Uhrzeit · e: ganzen Tag einschließen (bis nächste Mitternacht) · Enter: wählen · Esc: abbrechen
+stats-open-calendar = Enter → Kalender öffnen
+stats-calendar-description = Tag mit Pfeilen oder Maus wählen, dann Uhrzeit einstellen. Der Zeitraum wird automatisch benutzerdefiniert.
+stats-open-text = Enter zum Bearbeiten.
+stats-date-invalid = Ungültiges Datum: { $label }.
+stats-date-required = Anfang und Ende des Zeitraums wählen.
+stats-date-order = Das Ende muss nach dem Anfang liegen.
+stats-period-check = Zeitraum prüfen
+stats-period-preview = Anzuwendender Zeitraum · UTC
+stats-period-from = Von (einschließlich):
+stats-period-to = Bis (ausschließlich):
+stats-filter-keys = ↑/↓ oder Tab: Feld · ←/→ oder 1…9: Auswahl · Enter: bearbeiten · Entf: Standard · Strg+S: anwenden · Esc: abbrechen
+
+key-h = h
+
+stats-dashboard = Dashboard
+stats-table = Detailtabelle
+stats-view-help = v: Tabelle / Diagramme
+stats-panels-help = h: Kurve / Heatmap / Rangliste
+stats-evolution = Verlauf
+stats-ranking = Rangliste
+stats-heatmap = Tage × Stunden
+stats-samples = Messungen
+stats-no-sample = Keine Messung
+stats-heatmap-legend = · unbekannt  _ null  ▁ niedrig → █ hoch · Pfeile: Zelle
+stats-dashboard-invalid = Ungültige Diagrammdaten; v öffnet die Tabelle.
+stats-period-exclusive = Ende ausgeschlossen
+stats-dashboard-keys = ←/→: Punkt · ↑/↓: Rang · h: Ansichten · v: Tabelle · f: Filter
+stats-mon = Mo
+stats-tue = Di
+stats-wed = Mi
+stats-thu = Do
+stats-fri = Fr
+stats-sat = Sa
+stats-sun = So
+
+stats-no-dashboard = Für diese Ansicht ist kein Diagramm definiert.

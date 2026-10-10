@@ -11,6 +11,15 @@ extern "ExtismHost" {
     fn geoip_lookup(input: String) -> String;
 }
 
+/// Retention is editable through the generic plugin configuration screen.
+#[plugin_fn]
+pub fn config_schema() -> FnResult<String> {
+    Ok(json!([{
+        "key": "retention_days", "label": "Historique conservé (jours)",
+        "kind": "integer", "default": "30", "minimum": 1, "maximum": 365
+    }]).to_string())
+}
+
 #[plugin_fn]
 pub fn db_migrations() -> FnResult<String> {
     Ok(serde_json::to_string(&[
@@ -51,30 +60,37 @@ pub fn on_event(input: String) -> FnResult<()> {
 /// Aggregated statistics owned by the plugin; the TUI stays generic.
 #[plugin_fn]
 pub fn ui_tabs() -> FnResult<String> {
-    Ok(json!([
-        {
-            "id": "audience",
-            "title": "Audience",
-            "description": "Synthèse 24 h par mount : dernier effectif, moyenne, pic et % de collectes réussies. NULL = collecte inconnue. Vérifier Dernier_UTC pour la fraîcheur. Moyennes par relevé, pas d'auditeurs uniques.",
-            "sql": include_str!("ui/audience.sql")
-        },
-        {
-            "id": "hourly",
-            "title": "Audience / heure",
-            "description": "Évolution sur 24 h, par heure UTC et mount : moyenne, pic, minimum, relevés valides et échecs. Zéros inclus ; échecs exclus des moyennes. Heures sans relevé absentes ; période courante partielle.",
-            "sql": include_str!("ui/hourly.sql")
-        },
-        {
-            "id": "daily",
-            "title": "Audience / jour",
-            "description": "Évolution sur 30 jours (selon rétention), par jour UTC et mount. Moyennes par relevé, zéros inclus et échecs exclus. Jours sans relevé absents ; périodes aux bornes partielles.",
-            "sql": include_str!("ui/daily.sql")
-        },
-        {
-            "id": "geography",
-            "title": "Géographie",
-            "description": "Répartition sur 24 h : moyenne, pic et part par lieu et mount. Moyenne sur tous les relevés valides, y compris les absences du lieu. Part = proportion des observations d'auditeurs, pas des personnes uniques. Lieux inconnus conservés ; top 200. GeoLite2 data created by MaxMind (https://www.maxmind.com). Historique DB-IP : IP Geolocation by DB-IP (https://db-ip.com).",
-            "sql": include_str!("ui/geography.sql")
+    let common = vec![
+        json!({"key":"period", "shared":true, "label":"Période", "kind":"choice", "default_value":"24 h",
+            "options":["Aujourd’hui", "24 h", "7 jours", "30 jours", "90 jours", "365 jours", "Tout", "Personnalisée"]}),
+        json!({"key":"from", "shared":true, "label":"Début UTC (inclus)", "kind":"datetime", "default_value":""}),
+        json!({"key":"to", "shared":true, "label":"Fin UTC (exclue)", "kind":"datetime", "default_value":""}),
+        json!({"key":"mount", "shared":true, "label":"Flux (vide = tous)", "kind":"text", "default_value":""}),
+    ];
+    let grouping = |default: &str| json!({"key":"grouping", "label":"Cumul", "kind":"choice", "default_value":default,
+        "options":["Total", "Heure", "Jour", "Semaine", "Mois", "Année", "Heure du jour", "Jour de semaine"]});
+    let definitions = [
+        ("audience", "Audience", "Total", include_str!("ui/audience.sql"),
+            "Synthèse de la période par flux : moyenne, pic, minimum, cumul des observations et qualité de collecte. Dernier_effectif = dernier relevé de la période, pas forcément le direct. UTC ; zéros inclus, échecs exclus des moyennes."),
+        ("hourly", "Évolution", "Heure", include_str!("ui/hourly.sql"),
+            "Cumuls chronologiques : heure, jour, semaine (lundi), mois ou année. Période réglable ; dates UTC. Observations_auditeurs = somme des effectifs relevés, pas des auditeurs uniques. Limite 1000 lignes ; bornes partielles."),
+        ("daily", "Habitudes d’écoute", "Jour de semaine", include_str!("ui/daily.sql"),
+            "Profil de la période : heure du jour ou jour de semaine (1=lundi, 7=dimanche), en UTC. Moyenne, pic, minimum et cumul des observations ; relevés valides et échecs. Aucun relevé = aucune ligne. Pas de sessions ni d’auditeurs uniques."),
+        ("geography", "Géographie", "Total", include_str!("ui/geography.sql"),
+            "Pays, région ou ville, croisés avec les cumuls temporels UTC. Moyenne sur tous les relevés valides du flux, absences incluses. Part des observations, pas des personnes. Top 1000. GeoLite2 data created by MaxMind (https://www.maxmind.com). Historique : IP Geolocation by DB-IP (https://db-ip.com)."),
+    ];
+    let tabs: Vec<Value> = definitions.into_iter().map(|(id, title, default, sql, description)| {
+        let mut filters = common.clone();
+        filters.push(grouping(default));
+        if id == "daily" { filters[0]["default_value"] = json!("30 jours"); }
+        if id == "geography" {
+            filters.push(json!({"key":"geography", "label":"Géographie", "kind":"choice",
+                "default_value":"Pays", "options":["Pays", "Région", "Ville"]}));
         }
-    ]).to_string())
+        json!({"id":id, "title":title, "description":description,
+            "sql":format!("{}{}", include_str!("ui/period.sql"), sql), "filters":filters,
+            "dashboard_sql":format!("{}{}",include_str!("ui/period.sql"),
+                if id == "geography" {include_str!("ui/dashboard.sql").replace("'Pays'",":geography")} else {include_str!("ui/dashboard.sql").to_string()})})
+    }).collect();
+    Ok(serde_json::to_string(&tabs)?)
 }

@@ -909,7 +909,11 @@ impl GridEngine {
         let duration_ms = crate::media_index::duration_ms_of(&self.pool, media).await?;
         let verdict = duration_ms.filter(|d| *d > 0).map(|d| played_to_end(aired_s, d));
         if let Some(id) = log_id {
-            crate::broadcast_log::record_left(&self.pool, id, now, verdict).await?;
+            if crate::broadcast_log::record_left(&self.pool, id, now, verdict).await? {
+                if let Err(error) = self.emit_playback(id, Some((now.0, aired_s.max(0), verdict))).await {
+                    tracing::warn!(%error, log_id = id, "could not notify plugins of track finish");
+                }
+            }
         }
         match verdict {
             None => {
@@ -1974,7 +1978,30 @@ impl GridEngine {
     /// Liquidsoap really started the track logged as `log_id` (stats: aired
     /// vs merely chosen).
     pub async fn mark_aired(&self, log_id: i64, at: Epoch) -> Result<(), EngineError> {
-        crate::broadcast_log::mark_aired(&self.pool, log_id, at).await?;
+        if crate::broadcast_log::mark_aired(&self.pool, log_id, at).await? {
+            if let Err(error) = self.emit_playback(log_id, None).await {
+                tracing::warn!(%error, log_id, "could not notify plugins of track start");
+            }
+        }
+        Ok(())
+    }
+
+    /// Read only after a successful first stamp. Delivery is best-effort, like other plugin events.
+    async fn emit_playback(&self, id: i64, finish: Option<(i64, i64, Option<bool>)>) -> Result<(), EngineError> {
+        let Some(plugins) = &self.plugins else { return Ok(()) };
+        let Some(row) = crate::broadcast_log::row(&self.pool, id).await? else { return Ok(()) };
+        let Some(at) = row.aired_at else { return Ok(()) };
+        let media_uuid: Option<String> = sqlx::query_scalar("SELECT media_uuid FROM broadcast_log WHERE id = ?")
+            .bind(id).fetch_one(&self.pool).await?;
+        let media_path = crate::broadcast_log::current_uri(&self.pool, id).await?.unwrap_or(row.rel_path);
+        let playback = crate::plugin::MediaPlayback { play_id: id, media_uuid, media_path,
+            title: row.title, artist: row.artist, album: row.album, playlist_ref: row.playlist_ref, at };
+        plugins.emit(match finish {
+            None => crate::plugin::PluginEvent::TrackStarted { playback },
+            Some((at, aired_seconds, played_to_end)) => crate::plugin::PluginEvent::TrackFinished {
+                playback, at, aired_seconds, played_to_end,
+            },
+        });
         Ok(())
     }
 
@@ -3026,6 +3053,37 @@ mode = "dynamic""#;
         assert!(!played_to_end(584, 600_000));
         assert!(!played_to_end(100, 600_000));
         assert!(played_to_end(0, 10_000), "a sting shorter than the slack");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires STATIOND_TEST_UI_WASM pointing to the rebuilt play-stats guest"]
+    async fn real_wasm_media_stats_count_only_first_real_air_stamps() {
+        let (_dir, eng) = hard_fixture(false).await;
+        let dir = tempfile::tempdir().unwrap();
+        let mut decl: crate::plugin::PluginDecl = toml::from_str("name = 'air-stats'\nenabled = true\ncapabilities = ['db']").unwrap();
+        decl.wasm = Some(std::env::var("STATIOND_TEST_UI_WASM").unwrap());
+        let handle = crate::plugin::spawn_env(vec![decl], crate::plugin::PluginEnv {
+            db_dir: Some(dir.path().into()), ..Default::default()
+        });
+        assert_eq!(handle.list().await[0].state, "loaded");
+        let eng = eng.with_plugins(handle.clone());
+        let r = eng.next_media(at(9,3)).await.unwrap();
+        let values = std::collections::HashMap::from([("period".into(), "Tout".into())]);
+        assert!(handle.read_tab_filtered("air-stats", "plays", &values).await.unwrap().rows.is_empty());
+        let id = r.log_id.unwrap(); let media = r.media_path.unwrap();
+        eng.mark_aired(id, at(9,3)).await.unwrap();
+        eng.mark_aired(id, at(9,4)).await.unwrap();
+        assert_eq!(handle.read_tab_filtered("air-stats", "plays", &values).await.unwrap().rows[0][1], serde_json::json!(1));
+        eng.track_left(Some(id), &media, None, 20, at(9,4)).await.unwrap();
+        eng.track_left(Some(id), &media, None, 999, at(9,5)).await.unwrap();
+        let rows = handle.read_tab_filtered("air-stats", "plays", &values).await.unwrap().rows;
+        assert_eq!(rows[0][3], serde_json::json!(20));
+        assert_eq!(rows[0][5], serde_json::json!(1));
+        let eng = eng.with_plugins(handle.simulation());
+        let next = eng.next_media(at(9,5)).await.unwrap();
+        eng.mark_aired(next.log_id.unwrap(), at(9,5)).await.unwrap();
+        let rows = handle.read_tab_filtered("air-stats", "plays", &values).await.unwrap().rows;
+        assert_eq!(rows.iter().map(|r| r[1].as_i64().unwrap()).sum::<i64>(), 1);
     }
 
     #[tokio::test]

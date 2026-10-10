@@ -1326,3 +1326,53 @@ metadata-restart = After saving: restart stationd, then Liquidsoap.
 
 note-boundary-no-fit = rendezvous { $rule } at { $time } delayed: no eligible track fits; the track will play to the end
 note-boundary-missed = rendezvous { $rule } at { $time } missed: no eligible track fits and the track ends after its expiry; no track is cut
+
+## Statistical period picker
+stats-filters = Filters
+stats-filter-fields = Period and grouping
+stats-filter-all = All
+stats-filter-help = Filters and period
+stats-date-auto = Automatic for the period
+stats-hours = Hours
+stats-minutes = Minutes
+stats-seconds = Seconds
+stats-date-selected = Selected date
+stats-time-invalid = Enter a value from 0 to { $max }.
+stats-calendar-help = Arrows: day/week · PgUp/PgDn: month · Ctrl+Pg: year · Tab: time · t: today · n: now · 0: midnight · Enter: choose · Esc: cancel
+stats-calendar-end-help = Arrows: date · PgUp/PgDn: month · Ctrl+Pg: year · Tab: time · e: include full day (end at next midnight) · Enter: choose · Esc: cancel
+stats-open-calendar = Enter → open calendar
+stats-calendar-description = Choose a day with arrows or mouse, then set the time. The period automatically becomes custom.
+stats-open-text = Enter to edit this field.
+stats-date-invalid = Invalid date: { $label }.
+stats-date-required = Choose the start and end of the period.
+stats-date-order = The end must follow the start.
+stats-period-check = Check the period
+stats-period-preview = Period to apply · UTC
+stats-period-from = From (inclusive):
+stats-period-to = To (exclusive):
+stats-filter-keys = ↑/↓ or Tab: field · ←/→ or 1…9: choice · Enter: edit · Delete: default · Ctrl+S: apply · Esc: cancel
+
+key-h = h
+
+stats-dashboard = Dashboard
+stats-table = Detailed table
+stats-view-help = v: table / charts
+stats-panels-help = h: chart / heatmap / ranking
+stats-evolution = Evolution
+stats-ranking = Ranking
+stats-heatmap = Days × hours
+stats-samples = samples
+stats-no-sample = No sample
+stats-heatmap-legend = · unknown  _ zero  ▁ low → █ high · arrows: cell
+stats-dashboard-invalid = Invalid chart data; v returns to the table.
+stats-period-exclusive = end excluded
+stats-dashboard-keys = ←/→: point · ↑/↓: rank · h: panels · v: table · f: filters
+stats-mon = Mon
+stats-tue = Tue
+stats-wed = Wed
+stats-thu = Thu
+stats-fri = Fri
+stats-sat = Sat
+stats-sun = Sun
+
+stats-no-dashboard = This view does not declare a chart.

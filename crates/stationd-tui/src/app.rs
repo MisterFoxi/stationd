@@ -784,6 +784,24 @@ mod plugin_tab_tests {
         assert_eq!(plugin_tab_direction(&KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL)), None);
     }
 
+    #[tokio::test]
+    async fn visual_toggle_reaches_the_screen_and_survives_descriptor_refresh() {
+        let args = crate::Args { addr:"http://127.0.0.1:50051".into(), lang:None, theme:"Imperial".into(), list_themes:false };
+        let channel=rpc::lazy_channel(&args.addr).unwrap();let mut ctx=Global::new(&args,channel.clone(),channel);let mut state=Scenery::new();
+        let mut p=plugin("stats","Audience");p.tabs[0].has_dashboard=true;
+        ctx.store.plugins.value=Some(vec![p]);state.sync_plugin_tabs(&mut ctx).unwrap();state.active=screens::BUILTIN_COUNT;
+        let area=Rect::new(0,0,100,24);
+        for expected in ["stats-dashboard","stats-table","stats-dashboard"] {
+            state.sync_plugin_tabs(&mut ctx).unwrap();
+            let mut buf=Buffer::empty(area);state.active().render(area,&mut buf,&mut ctx).unwrap();
+            let text:String=(0..24).flat_map(|y|(0..100).map(move|x|(x,y))).map(|pos|buf[pos].symbol()).collect();assert!(text.contains(&crate::i18n::text(expected,&[])),"{text}");
+            let key=AppEvent::Event(Event::Key(KeyEvent::new(KeyCode::Char('v'),KeyModifiers::NONE)));
+            let _=event(&key,&mut state,&mut ctx).unwrap();assert_eq!(state.active,screens::BUILTIN_COUNT);
+        }
+        ctx.store.plugins.value.as_mut().unwrap()[0].tabs[0].has_dashboard=false;state.sync_plugin_tabs(&mut ctx).unwrap();
+        assert!(!state.active().help().iter().any(|(k,_)|*k=="key-v"));
+        let key=AppEvent::Event(Event::Key(KeyEvent::new(KeyCode::Char('v'),KeyModifiers::NONE)));let _=event(&key,&mut state,&mut ctx).unwrap();
+    }
     #[test]
     fn tab_navigation_wraps_beyond_digit_shortcuts() {
         assert_eq!(cycle_screen(12, 13, false), 0);
