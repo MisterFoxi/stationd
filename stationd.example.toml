@@ -100,6 +100,8 @@ level = "info"
 # enabled = true
 # wasm = "plugins/listener-stats-wasm/target/wasm32-unknown-unknown/release/listener_stats_wasm.wasm"
 # capabilities = ["db", "listener_details", "geoip"]
+# [plugin.db]
+# query_timeout_ms = 1000                 # large statistics periods / migrations
 # [plugin.config]
 # retention_days = 90                     # optional: 1..365 days, default 30
 # Read: stationctl listeners stats --by day --since 7d

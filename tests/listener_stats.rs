@@ -16,8 +16,10 @@ fn snapshots_are_atomic_idempotent_and_pruned() {
     let migrations = vec![
         include_str!("../plugins/listener-stats-wasm/migrations/001_snapshots.sql").to_string(),
         include_str!("../plugins/listener-stats-wasm/migrations/002_regions.sql").to_string(),
+        include_str!("../plugins/listener-stats-wasm/migrations/003_stats_indexes.sql").to_string(),
+        include_str!("../plugins/listener-stats-wasm/migrations/004_stream_index.sql").to_string(),
     ];
-    assert_eq!(db.migrate(&migrations).unwrap().applied, 2);
+    assert_eq!(db.migrate(&migrations).unwrap().applied, 4);
     assert_eq!(db.migrate(&migrations).unwrap().applied, 0);
     let sample: model::Snapshot = serde_json::from_value(json!({
         "mount": "/radio", "at": 1000, "listeners": [{"ip": "192.0.2.1"}]
@@ -109,6 +111,8 @@ fn plugin_statistics_include_zero_exclude_failures_and_bound_windows() {
     let db = rusqlite::Connection::open_in_memory().unwrap();
     db.execute_batch(include_str!("../plugins/listener-stats-wasm/migrations/001_snapshots.sql")).unwrap();
     db.execute_batch(include_str!("../plugins/listener-stats-wasm/migrations/002_regions.sql")).unwrap();
+    db.execute_batch(include_str!("../plugins/listener-stats-wasm/migrations/003_stats_indexes.sql")).unwrap();
+    db.execute_batch(include_str!("../plugins/listener-stats-wasm/migrations/004_stream_index.sql")).unwrap();
     db.execute_batch("INSERT INTO listener_snapshot VALUES
         ('/radio',345610,9), ('/radio',345620,0),
         ('/radio',345630,3), ('/radio',345640,NULL),
@@ -171,7 +175,7 @@ fn selectable_periods_and_geographic_rollups_use_per_snapshot_totals() {
     let db = PluginDb::open(dir.path(), "rollups", DbLimits::default()).unwrap();
     db.migrate(&[
         include_str!("../plugins/listener-stats-wasm/migrations/001_snapshots.sql").into(),
-        include_str!("../plugins/listener-stats-wasm/migrations/002_regions.sql").into(),
+        include_str!("../plugins/listener-stats-wasm/migrations/002_regions.sql").into(), include_str!("../plugins/listener-stats-wasm/migrations/003_stats_indexes.sql").into(), include_str!("../plugins/listener-stats-wasm/migrations/004_stream_index.sql").into(),
     ]).unwrap();
     db.exec(&Statement { sql: "INSERT INTO listener_snapshot VALUES
         ('/r',1704067200,10), ('/r',1704070800,6), ('/r',1704074400,0),
@@ -217,7 +221,7 @@ fn selectable_periods_and_geographic_rollups_use_per_snapshot_totals() {
 #[test]
 fn audience_dashboard_preserves_zero_failures_and_per_snapshot_country_totals() {
     let dir=tempfile::tempdir().unwrap();let db=PluginDb::open(dir.path(),"dashboard",DbLimits::default()).unwrap();
-    db.migrate(&[include_str!("../plugins/listener-stats-wasm/migrations/001_snapshots.sql").into(),include_str!("../plugins/listener-stats-wasm/migrations/002_regions.sql").into()]).unwrap();
+    db.migrate(&[include_str!("../plugins/listener-stats-wasm/migrations/001_snapshots.sql").into(),include_str!("../plugins/listener-stats-wasm/migrations/002_regions.sql").into(), include_str!("../plugins/listener-stats-wasm/migrations/003_stats_indexes.sql").into(), include_str!("../plugins/listener-stats-wasm/migrations/004_stream_index.sql").into()]).unwrap();
     db.exec(&Statement {sql:"INSERT INTO listener_snapshot VALUES ('/r',1704067200,10),('/r',1704067210,0),('/r',1704070800,NULL),('/r',1704074400,2),('/other',1704067200,999)".into(),params:Params::default()}).unwrap();
     db.exec(&Statement {sql:"INSERT INTO listener_geo VALUES ('/r',1704067200,'found','FR','IDF','Paris',4),('/r',1704067200,'found','FR','ARA','Lyon',6),('/r',1704074400,'found','FR','IDF','Paris',2)".into(),params:Params::default()}).unwrap();
     let mut values=serde_json::Map::new();for (k,v) in [("period","Personnalisée"),("from","2024-01-01 00:00:00"),("to","2024-01-02 00:00:00"),("mount","/r"),("grouping","Total")] {values.insert(k.into(),json!(v));}
@@ -233,6 +237,8 @@ fn audience_dashboard_preserves_zero_failures_and_per_snapshot_country_totals() 
         values.insert("grouping".into(),json!(grouping));
         let rows=db.query(&sql,&Params::Named(values.clone())).unwrap().rows;
         assert_eq!(rows.iter().filter(|r|r[0]==json!("series")).filter_map(|r|r[6].as_i64()).sum::<i64>(),3);
+        let audience:f64=rows.iter().filter(|r|r[0]==json!("series")).map(|r|r[4].as_f64().unwrap_or(0.0)*r[6].as_f64().unwrap()).sum();
+        assert!((audience-12.0).abs()<1e-9, "hourly rollups must preserve weighted means: {grouping}");
     }
     values.insert("grouping".into(),json!("Total"));
     values.insert("geography".into(),json!("Ville"));

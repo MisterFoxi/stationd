@@ -566,6 +566,15 @@ mod live_visual_tabs {
                 if t.has_dashboard {for dashboard in [false,true] {
                     println!("  reading dashboard={dashboard}");
                     let data=client.read_tab(PluginReadTabRequest {name:p.name.clone(),tab_id:t.id.clone(),dashboard,filters:Default::default()}).await.unwrap().into_inner();
+                    if p.name=="listener-stats" && t.id=="geography" {
+                        for geography in ["Pays","Région","Ville"] {for grouping in ["Total","Heure","Jour","Semaine","Mois","Année","Heure du jour","Jour de semaine"] {
+                            let filters=[("period","Tout"),("geography",geography),("grouping",grouping)].into_iter().map(|(k,v)|(k.to_string(),v.to_string())).collect();
+                            let start=std::time::Instant::now();
+                            let response=client.read_tab(PluginReadTabRequest {name:p.name.clone(),tab_id:t.id.clone(),dashboard,filters}).await;
+                            println!("    {geography}/{grouping} dashboard={dashboard}: {} ms",start.elapsed().as_millis());
+                            response.unwrap();
+                        }}
+                    }
                     if dashboard {assert_eq!(data.columns.first().map(String::as_str),Some("Section"));}
                     else {assert_ne!(data.columns.first().map(String::as_str),Some("Section"));}
                 }}

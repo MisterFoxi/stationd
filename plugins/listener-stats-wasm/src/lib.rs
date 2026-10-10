@@ -25,6 +25,8 @@ pub fn db_migrations() -> FnResult<String> {
     Ok(serde_json::to_string(&[
         include_str!("../migrations/001_snapshots.sql"),
         include_str!("../migrations/002_regions.sql"),
+        include_str!("../migrations/003_stats_indexes.sql"),
+        include_str!("../migrations/004_stream_index.sql"),
     ])?)
 }
 

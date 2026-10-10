@@ -21,6 +21,8 @@ name = "listener-stats"
 enabled = true
 wasm = "plugins/listener-stats-wasm/target/wasm32-unknown-unknown/release/listener_stats_wasm.wasm"
 capabilities = ["db", "listener_details", "geoip"]
+[plugin.db]
+query_timeout_ms = 1000 # bounded statistics reads and index migrations
 ```
 
 Restart stationd after changing the Icecast configuration. Build/package the
@@ -314,3 +316,9 @@ These views use existing snapshot aggregates, without new migrations or raw
 client data. Cumulative audience observations are sampled counts, not sessions,
 unique listeners or listener-hours. Retention still defaults to 30 days and
 can be set up to 365 days; increasing it cannot recover deleted data.
+
+Statistics reads remain capped at 1000 rows and one second. The indexes added by
+migrations 3 and 4 cover period scans and exact stream/timestamp lookups.
+Dashboard rollups use sample-weighted hourly aggregates, preserving zeros,
+failed samples, peaks and partial period boundaries. Plugin DB limits are
+loaded by stationd at startup; changing `[plugin.db]` requires restarting the daemon.
