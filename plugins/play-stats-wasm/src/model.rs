@@ -69,10 +69,25 @@ pub fn statements(event: &Value, retention_days: u32) -> Result<Vec<Value>, Stri
         Some(s) => format!("uuid:{s}"),
         None => format!("path:{path}"),
     };
+    let genres = match play.get("genres") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::Array(items)) => items
+            .iter()
+            .map(|v| {
+                v.as_str()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .ok_or("invalid genre".to_string())
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+        _ => return Err("invalid genres".into()),
+    };
+    let genres_json = serde_json::to_string(&genres).map_err(|_| "invalid genres")?;
     let mut params = json!({"id":id,"key":key,"path":path,"title":optional(play,"title")?,
-        "artist":optional(play,"artist")?,"album":optional(play,"album")?,"playlist":optional(play,"playlist_ref")?,"at":at});
-    let insert = "INSERT INTO media_play (play_id, media_key, media_path, title, artist, album, playlist_ref, started_at)
-        VALUES (:id, :key, :path, :title, :artist, :album, :playlist, :at) ON CONFLICT(play_id) DO NOTHING";
+        "artist":optional(play,"artist")?,"album":optional(play,"album")?,"playlist":optional(play,"playlist_ref")?,"genres":genres_json,"at":at});
+    let insert = "INSERT INTO media_play (play_id, media_key, media_path, title, artist, album, playlist_ref, genres_json, started_at)
+        VALUES (:id, :key, :path, :title, :artist, :album, :playlist, :genres, :at) ON CONFLICT(play_id) DO NOTHING";
     if kind == "start" {
         out.push(statement(insert, params));
         out.push(statement(
@@ -95,8 +110,8 @@ pub fn statements(event: &Value, retention_days: u32) -> Result<Vec<Value>, Stri
         params["end"] = json!(end);
         params["seconds"] = json!(seconds);
         params["verdict"] = verdict;
-        out.push(statement("INSERT INTO media_play (play_id, media_key, media_path, title, artist, album, playlist_ref, started_at, ended_at, aired_seconds, played_to_end)
-            VALUES (:id,:key,:path,:title,:artist,:album,:playlist,:at,:end,:seconds,:verdict)
+        out.push(statement("INSERT INTO media_play (play_id, media_key, media_path, title, artist, album, playlist_ref, genres_json, started_at, ended_at, aired_seconds, played_to_end)
+            VALUES (:id,:key,:path,:title,:artist,:album,:playlist,:genres,:at,:end,:seconds,:verdict)
             ON CONFLICT(play_id) DO UPDATE SET media_path = excluded.media_path, title = excluded.title,
             artist = excluded.artist, album = excluded.album, playlist_ref = excluded.playlist_ref,
             ended_at = excluded.ended_at, aired_seconds = excluded.aired_seconds, played_to_end = excluded.played_to_end

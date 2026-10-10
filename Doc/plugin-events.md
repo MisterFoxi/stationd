@@ -116,3 +116,7 @@ notification ne fait pas échouer la confirmation d’antenne.
 - **Filtrage à l'abonnement** : un plugin déclare-t-il les types qui
   l'intéressent (le core ne lui pousse que ceux-là), ou reçoit-il tout et filtre
   lui-même ? Le second est plus simple ; le premier économise des réveils.
+
+MediaPlayback now includes an optional `genres` array (empty by default for older
+event payloads), populated from the catalogue for actual playback notifications.
+The media statistics plugin snapshots it at the first start for genre filtering.

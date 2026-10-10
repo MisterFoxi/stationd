@@ -63,3 +63,13 @@ Durée ou Audience) ; Regrouper par choisit média, artiste, album ou playlist.
 La carte de chaleur compte les passages, quels que soient le tri et le cumul.
 Les 600 dernières tranches et les 100 premières entrées sont affichées ;
 les indicateurs conservent les totaux de toute la période filtrée.
+
+Media statistics filters include shared `include_genres` and `exclude_genres` text fields.
+Enter exact genre names separated by commas (semicolons also work), for example
+`TOPH, Annonces` in the exclusion field. An empty field imposes no restriction.
+Inclusion matches any named genre; exclusion wins even on multi-genre media.
+The filters apply before all table and dashboard calculations, including audience.
+Genres are captured when playback starts, including catalogue genres contributed
+by custom-tags. Existing history has unknown genres and is preserved: it remains
+visible without an inclusion filter, but cannot match an included genre.
+The legacy selection counters have no genre filter.

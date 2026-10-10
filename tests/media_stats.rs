@@ -33,6 +33,7 @@ fn schema(db: &PluginDb) {
     db.migrate(&[
         model::LEGACY_MIGRATION.into(),
         include_str!("../plugins/play-stats-wasm/migrations/002_actual_plays.sql").into(),
+        include_str!("../plugins/play-stats-wasm/migrations/003_genres.sql").into(),
     ])
     .unwrap();
 }
@@ -43,6 +44,8 @@ fn values() -> serde_json::Map<String, Value> {
         ("from", "2024-01-01 00:00:00"),
         ("to", "2024-01-02 00:00:00"),
         ("media", ""),
+        ("include_genres", ""),
+        ("exclude_genres", ""),
         ("by", "Média"),
         ("grouping", "Total"),
         ("sorting", "Passages"),
@@ -258,4 +261,77 @@ fn media_dashboard_uses_full_period_totals_and_separates_unknown_durations() {
     assert_eq!(rows.iter().filter(|r| r[0] == json!("ranking")).count(), 1);
     v.insert("media".into(), json!("' OR 1=1 --"));
     assert!(db.query(sql, &Params::Named(v)).unwrap().rows.is_empty());
+}
+
+#[test]
+fn genre_filters_apply_to_tables_and_every_dashboard_section() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = PluginDb::open(dir.path(), "genres", DbLimits::default()).unwrap();
+    schema(&db);
+    for (id, genres, count) in [
+        (1, json!(["Rock", "Pop"]), 12),
+        (2, json!(["Rock", "TOPH"]), 999),
+        (3, json!(["Annonces"]), 999),
+        (4, json!([]), 5),
+        (5, json!(["TOPHOUR"]), 5),
+    ] {
+        let mut p = playback(
+            id,
+            1704067200 + id * 300,
+            &format!("uuid-{id}"),
+            &format!("{id}.mp3"),
+            "A",
+        );
+        p["genres"] = genres;
+        start(&db, &p);
+        sample(&db, 1704067200 + id * 300 + 1, count);
+        finish(&db, &p, 1704067200 + id * 300 + 120, 120, json!(true));
+    }
+    let mut v = values();
+    v.insert("include_genres".into(), json!(" rock , Pop "));
+    v.insert("exclude_genres".into(), json!(" toph ; annonces "));
+    let rows = query(&db, v.clone()).rows;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0][12], json!("1.mp3"));
+    assert_eq!(rows[0][8], json!(12.0));
+    for by in ["Média", "Artiste", "Album", "Playlist"] {
+        v.insert("by".into(), json!(by));
+        let rows = query(&db, v.clone()).rows;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][1], json!(1));
+    }
+    let dashboard = db
+        .query(
+            include_str!("../plugins/play-stats-wasm/src/ui/dashboard.sql"),
+            &Params::Named(v.clone()),
+        )
+        .unwrap()
+        .rows;
+    for section in ["series", "ranking", "heatmap"] {
+        let rows: Vec<_> = dashboard
+            .iter()
+            .filter(|r| r[0] == json!(section))
+            .collect();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][4], json!(1));
+    }
+    let summary: Vec<_> = dashboard
+        .iter()
+        .filter(|r| r[0] == json!("summary"))
+        .collect();
+    assert_eq!(summary[0][4], json!(1));
+    assert_eq!(summary[1][4], json!(120));
+    assert_eq!(summary[2][4], json!(12.0));
+    assert_eq!(summary[3][4], json!(12));
+    v.insert("by".into(), json!("Média"));
+    v.insert("include_genres".into(), json!(""));
+    assert_eq!(query(&db, v.clone()).rows.len(), 3); // unknown and TOPHOUR are retained; matching is exact.
+    v.insert("include_genres".into(), json!("does-not-exist' OR 1=1 --"));
+    assert!(query(&db, v.clone()).rows.is_empty());
+    v.insert("include_genres".into(), json!(""));
+    v.insert("exclude_genres".into(), json!(""));
+    assert_eq!(query(&db, v).rows.len(), 5);
+    let mut invalid = playback(6, 1704069000, "bad", "bad.mp3", "A");
+    invalid["genres"] = json!([42]);
+    assert!(model::statements(&json!({"TrackStarted":{"playback":invalid}}), 365).is_err());
 }

@@ -1994,8 +1994,10 @@ impl GridEngine {
         let media_uuid: Option<String> = sqlx::query_scalar("SELECT media_uuid FROM broadcast_log WHERE id = ?")
             .bind(id).fetch_one(&self.pool).await?;
         let media_path = crate::broadcast_log::current_uri(&self.pool, id).await?.unwrap_or(row.rel_path);
+        let genres: Vec<String> = sqlx::query_scalar("SELECT genre FROM media_genre WHERE (?1 IS NOT NULL AND media_uuid = ?1) OR (?1 IS NULL AND rel_path = ?2) ORDER BY genre")
+            .bind(media_uuid.as_deref()).bind(&media_path).fetch_all(&self.pool).await?;
         let playback = crate::plugin::MediaPlayback { play_id: id, media_uuid, media_path,
-            title: row.title, artist: row.artist, album: row.album, playlist_ref: row.playlist_ref, at };
+            title: row.title, artist: row.artist, album: row.album, playlist_ref: row.playlist_ref, genres, at };
         plugins.emit(match finish {
             None => crate::plugin::PluginEvent::TrackStarted { playback },
             Some((at, aired_seconds, played_to_end)) => crate::plugin::PluginEvent::TrackFinished {
@@ -3071,6 +3073,7 @@ mode = "dynamic""#;
         let values = std::collections::HashMap::from([("period".into(), "Tout".into())]);
         assert!(handle.read_tab_filtered("air-stats", "plays", &values).await.unwrap().rows.is_empty());
         let id = r.log_id.unwrap(); let media = r.media_path.unwrap();
+        sqlx::query("INSERT INTO media_genre (rel_path,genre,genre_key) VALUES (?,'TOPH','toph')").bind(&media).execute(&eng.pool).await.unwrap();
         eng.mark_aired(id, at(9,3)).await.unwrap();
         eng.mark_aired(id, at(9,4)).await.unwrap();
         assert_eq!(handle.read_tab_filtered("air-stats", "plays", &values).await.unwrap().rows[0][1], serde_json::json!(1));
@@ -3079,6 +3082,10 @@ mode = "dynamic""#;
         let rows = handle.read_tab_filtered("air-stats", "plays", &values).await.unwrap().rows;
         assert_eq!(rows[0][3], serde_json::json!(20));
         assert_eq!(rows[0][5], serde_json::json!(1));
+        let excluded = std::collections::HashMap::from([("period".into(),"Tout".into()),("exclude_genres".into(),"toph".into())]);
+        assert!(handle.read_tab_filtered("air-stats","plays",&excluded).await.unwrap().rows.is_empty());
+        let dashboard=handle.read_tab_view("air-stats","plays",&excluded,true).await.unwrap();
+        assert!(dashboard.rows.is_empty());
         let eng = eng.with_plugins(handle.simulation());
         let next = eng.next_media(at(9,5)).await.unwrap();
         eng.mark_aired(next.log_id.unwrap(), at(9,5)).await.unwrap();

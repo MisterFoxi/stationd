@@ -187,6 +187,8 @@ pub struct MediaPlayback {
     pub artist: Option<String>,
     pub album: Option<String>,
     pub playlist_ref: Option<String>,
+    #[serde(default)]
+    pub genres: Vec<String>,
     pub at: i64,
 }
 
@@ -3342,7 +3344,7 @@ mod ui_tests {
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
         handle.emit(PluginEvent::TrackStarted { playback: MediaPlayback { play_id: 1,
             media_uuid: None, media_path: "song.mp3".into(), title: None, artist: None, album: None,
-            playlist_ref: None, at: now } });
+            playlist_ref: None, genres: vec![], at: now } });
         let table = handle.read_tab("renamed-stats", "plays").await.unwrap();
         assert_eq!(table.rows[0][0], serde_json::json!("song.mp3"));
         assert_eq!(table.rows[0][1], serde_json::json!(1));

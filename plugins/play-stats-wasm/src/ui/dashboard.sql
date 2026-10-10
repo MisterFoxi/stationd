@@ -1,4 +1,9 @@
-WITH bounds AS (
+WITH RECURSIVE genre_filters(kind,genre,rest) AS (
+ SELECT 'include','',replace(:include_genres,';',',') || ','
+ UNION ALL SELECT 'exclude','',replace(:exclude_genres,';',',') || ','
+ UNION ALL SELECT kind,trim(substr(rest,1,instr(rest,',')-1)),substr(rest,instr(rest,',')+1)
+ FROM genre_filters WHERE rest!=''
+), bounds AS (
  SELECT CASE :period
   WHEN 'Personnalisée' THEN unixepoch(:from)
   WHEN 'Aujourd’hui' THEN unixepoch(date('now'))
@@ -25,6 +30,11 @@ WITH bounds AS (
  FROM media_play p, bounds WHERE started_at >= start_at AND started_at < end_at AND started_at <= unixepoch()
  AND (:media = '' OR instr(lower(media_path),lower(:media)) > 0 OR instr(lower(COALESCE(title,'')),lower(:media)) > 0
  OR instr(lower(COALESCE(artist,'')),lower(:media)) > 0 OR instr(lower(COALESCE(album,'')),lower(:media)) > 0)
+ AND (NOT EXISTS (SELECT 1 FROM genre_filters WHERE kind='include' AND genre!='')
+ OR EXISTS (SELECT 1 FROM json_each(p.genres_json) g JOIN genre_filters f
+ ON trim(g.value)=f.genre COLLATE NOCASE WHERE f.kind='include' AND f.genre!=''))
+ AND NOT EXISTS (SELECT 1 FROM json_each(p.genres_json) g JOIN genre_filters f
+ ON trim(g.value)=f.genre COLLATE NOCASE WHERE f.kind='exclude' AND f.genre!='')
 ), bucketed AS (SELECT *, CASE (CASE WHEN :grouping='Total' THEN CASE WHEN end_at-start_at<=172800 THEN 'Heure' WHEN end_at-start_at<=7776000 THEN 'Jour' ELSE 'Mois' END ELSE :grouping END)
  WHEN 'Heure' THEN strftime('%Y-%m-%d %H:00', started_at, 'unixepoch')
  WHEN 'Jour' THEN date(started_at, 'unixepoch')

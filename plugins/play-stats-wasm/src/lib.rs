@@ -11,6 +11,7 @@ pub fn db_migrations() -> FnResult<String> {
     Ok(serde_json::to_string(&[
         model::LEGACY_MIGRATION,
         include_str!("../migrations/002_actual_plays.sql"),
+        include_str!("../migrations/003_genres.sql"),
     ])?)
 }
 #[plugin_fn]
@@ -63,6 +64,8 @@ pub fn ui_tabs() -> FnResult<String> {
         json!({"key":"from", "label":"Début UTC (inclus)", "kind":"datetime", "default_value":"", "shared":true}),
         json!({"key":"to", "label":"Fin UTC (exclue)", "kind":"datetime", "default_value":"", "shared":true}),
         json!({"key":"media", "label":"Recherche média/artiste", "kind":"text", "default_value":"", "shared":true}),
+        json!({"key":"include_genres", "label":"Genres à inclure (virgules)", "kind":"text", "default_value":"", "shared":true}),
+        json!({"key":"exclude_genres", "label":"Genres à exclure (virgules)", "kind":"text", "default_value":"", "shared":true}),
     ];
     let mut tabs = Vec::new();
     for (id, title, by, grouping) in [
@@ -80,7 +83,7 @@ pub fn ui_tabs() -> FnResult<String> {
         filters.push(json!({"key":"sorting", "label":"Classement", "kind":"choice", "default_value":"Passages",
             "options":["Passages","Durée","Audience"]}));
         tabs.push(json!({"id":id,"title":title,
-            "description":"Diffusions réellement commencées dans la période UTC : passages, durée connue (hors pauses), complets/coupés et audience globale relevée. Durée entière rattachée au début du passage ; fins manquantes séparées. Moyenne d’audience par relevé, pas d’auditeurs uniques. 1000 lignes max. Statistiques best-effort depuis cette version.",
+            "description":"Diffusions réellement commencées dans la période UTC : passages, durée connue (hors pauses), complets/coupés et audience globale relevée. Durée entière rattachée au début du passage ; fins manquantes séparées. Moyenne d’audience par relevé, pas d’auditeurs uniques. 1000 lignes max. Genres exacts séparés par des virgules : inclusion = au moins un, exclusion prioritaire. Genres non connus des anciens passages : inclusion impossible. Statistiques best-effort depuis cette version.",
             "sql":include_str!("ui/media.sql"),"filters":filters,"dashboard_sql":include_str!("ui/dashboard.sql")}));
     }
     tabs.push(json!({"id":"legacy","title":"Sélections anciennes",
