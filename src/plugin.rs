@@ -1736,6 +1736,15 @@ impl Plugin for StopWhenIdlePlugin {
     }
 
     fn on_event(&mut self, event: &PluginEvent) {
+        // A safety wake starts a new idle period. Do not reset for an
+        // operator resume: its priority lasts until the audience changes.
+        if let PluginEvent::BroadcastStateChanged { from, to, by } = event {
+            if from == "sleeping" && to == "running"
+                && matches!(by.as_str(), "audience-unknown" | "connections-unknown") {
+                self.zero_streak = 0;
+            }
+            return;
+        }
         if let Some(age) = self.max_connection_age {
             let PluginEvent::ConnectionsSampled { connections, .. } = event else { return };
             if connections.as_ref().is_none_or(|clients| clients.iter().any(|c| c.connected_seconds < age)) {
@@ -2571,6 +2580,54 @@ mod tests {
         let mut p = StopWhenIdlePlugin::from_config(&cfg).unwrap();
         p.on_load(Host::new("p", &[Capability::Control], Some(control.clone()))).unwrap();
         assert_eq!(control.state(), crate::station_control::BroadcastState::Running);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires compiled stop-when-idle WASM"]
+    async fn idle_sleep_rearms_after_unknown_audience_wake() {
+        use crate::station_control::{BroadcastState, Gate};
+        let wasm = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("plugins/stop-when-idle-wasm/target/wasm32-unknown-unknown/release/stop_when_idle_wasm.wasm");
+        assert!(wasm.is_file());
+        for use_wasm in [false, true] {
+            for minimum in [1, 2] {
+                let control = StationControl::new_in_memory();
+                let mut cfg = toml::Table::new();
+                cfg.insert("min_zero_samples".into(), toml::Value::Integer(minimum));
+                let mut d = decl("stop-when-idle", true, cfg);
+                d.capabilities = vec![Capability::Control];
+                if use_wasm { d.wasm = Some(wasm.to_str().unwrap().into()); }
+                let h = spawn_with(vec![d], Some(control.clone()));
+                control.attach_plugins(h.clone());
+                assert_eq!(h.list().await[0].state, "loaded");
+                for cycle in 0..2 {
+                    for n in 1..=minimum {
+                        control.sample_listeners(0);
+                        h.list().await;
+                        if n < minimum { assert_eq!(control.state(), BroadcastState::Running); }
+                    }
+                    assert_eq!(control.gate(), Gate::Halt(BroadcastState::Sleeping), "wasm={use_wasm}, cycle={cycle}");
+                    h.list().await;
+                    // Keep sampling while asleep: the counter exceeds the threshold.
+                    for _ in 0..3 { control.sample_listeners(0); h.list().await; }
+                    for _ in 0..2 {
+                        control.clear_listeners(); h.list().await;
+                        assert_eq!(control.state(), BroadcastState::Sleeping);
+                    }
+                    control.clear_listeners(); h.list().await;
+                    assert_eq!(control.state(), BroadcastState::Running);
+                }
+                for _ in 0..minimum { control.sample_listeners(0); h.list().await; }
+                assert_eq!(control.gate(), Gate::Halt(BroadcastState::Sleeping));
+                h.list().await;
+                control.apply(ControlAction::Resume, "cli").unwrap(); h.list().await;
+                for _ in 0..3 { control.sample_listeners(0); h.list().await; }
+                assert_eq!(control.state(), BroadcastState::Running, "operator resume must retain priority");
+                control.apply(ControlAction::Pause, "cli").unwrap(); h.list().await;
+                control.sample_listeners(1); h.list().await;
+                assert_eq!(control.state(), BroadcastState::Paused);
+            }
+        }
     }
 
     #[test]

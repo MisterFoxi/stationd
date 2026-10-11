@@ -84,6 +84,15 @@ fn eligible(clients: &Value, age: u64) -> bool {
 #[plugin_fn]
 pub fn on_event(input: String) -> FnResult<()> {
     let event: Value = serde_json::from_str(&input)?;
+    // Reset after a core safety wake so fresh idle samples can arm sleep
+    // again. An operator resume deliberately keeps the existing streak.
+    if let Some(change) = event.get("BroadcastStateChanged") {
+        if change["from"] == "sleeping" && change["to"] == "running"
+            && matches!(change["by"].as_str(), Some("audience-unknown" | "connections-unknown")) {
+            var::set("idle_streak", 0u32)?;
+        }
+        return Ok(());
+    }
     let (min, age) = settings()?;
     if let Some(age) = age {
         let Some(sample) = event.get("ConnectionsSampled") else { return Ok(()) };
