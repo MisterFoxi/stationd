@@ -636,8 +636,6 @@ ed-discard-keep = Continuer l'édition
 ed-discard-yes = Abandonner les modifications
 ed-pick-media = Ajouter des médias
 ed-pick-member = Ajouter un membre
-ed-genres = genres : { $list }
-ed-genres-none = aucun genre connu ne commence ainsi
 ed-diags = { $errors } erreur(s), { $warnings } avertissement(s)
 ed-diags-none = Diagnostics
 ed-diags-ok = stationd ne voit aucun problème
@@ -1386,3 +1384,12 @@ stats-sat = Sam
 stats-sun = Dim
 
 stats-no-dashboard = Cette vue ne déclare aucun graphique.
+
+genre-picker-title = Genres
+genre-picker-search = Rechercher : { $query }
+genre-picker-selected = { $n } genre(s) sélectionné(s)
+genre-picker-empty = Aucun genre correspondant
+genre-picker-loading = Chargement des genres…
+genre-picker-help = ↑↓ naviguer · Espace cocher · Entrée valider · Échap annuler
+    Ctrl+A tout cocher · Ctrl+D décocher · Ctrl+U effacer la recherche
+genre-picker-open = Entrée : ouvrir le sélecteur de genres

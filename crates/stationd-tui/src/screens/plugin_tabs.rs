@@ -208,6 +208,7 @@ pub struct PluginTable {
     editing: Option<String>,
     filter_error: Option<String>,
     date_picker: Option<DatePicker>,
+    genre_picker: Option<super::genre_picker::GenrePicker>,
     date_defaults: Option<(String, String)>,
     last_preset: String,
     dashboard: bool,
@@ -234,6 +235,7 @@ impl PluginTable {
             editing: None,
             filter_error: None,
             date_picker: None,
+            genre_picker: None,
             date_defaults: None,
             last_preset: "30 jours".into(),
             dashboard,
@@ -437,7 +439,17 @@ impl Screen for PluginTable {
         Ok(())
     }
     fn event(&mut self, event: &AppEvent, ctx: &mut Global) -> Result<Control<AppEvent>, Error> {
+        if let AppEvent::GenreChoices(owner,result)=event {
+            if let Some(p)=&mut self.genre_picker {if p.owner==*owner {p.set(result.clone());return Ok(Control::Changed);}}
+        }
         if self.filter_open {
+            if let Some(p)=&mut self.genre_picker {
+                if let AppEvent::Event(e)=event {match p.handle(e) {
+                    super::genre_picker::Pick::Selected(value)=>{self.draft[self.filter_selected]=value;self.genre_picker=None;self.filter_error=None;},
+                    super::genre_picker::Pick::Cancel=>self.genre_picker=None,
+                    super::genre_picker::Pick::Pending=>{},
+                }return Ok(Control::Changed);}
+            }
             if let Some(picker) = &mut self.date_picker {
                 if let AppEvent::Event(event) = event {
                     match picker.handle(event) {
@@ -524,6 +536,11 @@ impl Screen for PluginTable {
                             }
                         }
                         KeyCode::Enter if f.kind == "datetime" => self.open_date_picker(),
+                        KeyCode::Enter if matches!(f.key.as_str(),"include_genres"|"exclude_genres"|"genres"|"genre") => {
+                            let picker=super::genre_picker::GenrePicker::new(&self.draft[self.filter_selected]);let owner=picker.owner;let channel=ctx.channel.clone();
+                            self.genre_picker=Some(picker);
+                            ctx.spawn_async(async move {Ok(Control::Event(AppEvent::GenreChoices(owner,rpc::genre_choices(channel).await)))});
+                        }
                         KeyCode::Enter if f.kind == "text" => {
                             self.editing = Some(self.draft[self.filter_selected].clone())
                         }
@@ -632,6 +649,7 @@ impl Screen for PluginTable {
     fn render(&mut self, area: Rect, buf: &mut Buffer, ctx: &mut Global) -> Result<(), Error> {
         let s = Styles(&ctx.theme);
         if self.filter_open {
+            if let Some(p)=&mut self.genre_picker {p.render(area,buf,&s);ctx.set_screen_cursor(None);return Ok(());}
             if let Some(picker) = &mut self.date_picker {
                 picker.render(area, buf, &s);
                 return Ok(());
@@ -1009,6 +1027,20 @@ impl Screen for PluginTable {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn genre_filter_popup_preserves_draft_on_cancel_and_rejects_stale_choices() {
+        let args=crate::Args {addr:"http://127.0.0.1:50051".into(),lang:Some("fr".into()),theme:"Imperial".into(),list_themes:false};
+        let channel=crate::rpc::lazy_channel(&args.addr).unwrap();let mut ctx=Global::new(&args,channel.clone(),channel);
+        let mut table=PluginTable::new("stats".into(),PluginTab{id:"table".into(),title:"Stats".into(),filters:vec![stationd_proto::plugin::PluginTabFilter {key:"exclude_genres".into(),label:"Genres".into(),kind:"text".into(),default_value:"TOPH".into(),..Default::default()}],..Default::default()});
+        table.filter_open=true;table.draft=vec!["TOPH".into()];
+        let key=|code|AppEvent::Event(Event::Key(ratatui_crossterm::crossterm::event::KeyEvent::new(code,KeyModifiers::NONE)));
+        table.genre_picker=Some(super::super::genre_picker::GenrePicker::new("TOPH"));let owner=table.genre_picker.as_ref().unwrap().owner;
+        table.loading=true;let _=table.event(&AppEvent::PluginTable(table.owner,table.request,Ok(PluginDbQueryResponse::default())),&mut ctx).unwrap();assert!(!table.loading);assert!(table.data.is_some());
+        let _=table.event(&AppEvent::GenreChoices(owner+1,Ok(vec![])),&mut ctx).unwrap();
+        let _=table.event(&key(KeyCode::Char(' ')),&mut ctx).unwrap();let _=table.event(&key(KeyCode::Esc),&mut ctx).unwrap();assert_eq!(table.draft[0],"TOPH");
+        table.genre_picker=Some(super::super::genre_picker::GenrePicker::new("TOPH"));let _=table.event(&key(KeyCode::Char(' ')),&mut ctx).unwrap();let _=table.event(&key(KeyCode::Enter),&mut ctx).unwrap();assert_eq!(table.draft[0],"");assert!(table.filter_open);
+    }
+
     #[test]
     fn discovers_tabs_by_plugin_identity_not_plugin_kind() {
         let tab = PluginTab {

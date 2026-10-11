@@ -73,3 +73,11 @@ Genres are captured when playback starts, including catalogue genres contributed
 by custom-tags. Existing history has unknown genres and is preserved: it remains
 visible without an inclusion filter, but cannot match an included genre.
 The legacy selection counters have no genre filter.
+
+Les champs de genres des playlists et des filtres de statistiques ouvrent un
+popup avec Entrée. Saisir recherche un genre ; ↑/↓ parcourt la liste, Espace
+coche/décoche, Entrée valide et Échap annule. Ctrl+A coche les résultats
+visibles, Ctrl+D les décoche, Ctrl+U efface la recherche. Les genres du
+catalogue portent leur nombre de médias ; les valeurs existantes sont conservées.
+Le popup ne sauvegarde pas la playlist et ne valide pas le formulaire de
+filtres : Ctrl+S applique ensuite le brouillon.

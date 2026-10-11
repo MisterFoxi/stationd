@@ -197,6 +197,10 @@ pub async fn save_playlist(
 
 /// `LibraryService.ListGenres` (médias disponibles) : valeurs proposées
 /// dans les filtres de genre.
+pub async fn genre_choices(channel: Channel) -> Read<Vec<library::GenreCount>> {
+    let mut cli=library::library_service_client::LibraryServiceClient::new(channel);
+    bounded(cli.list_genres(library::ListGenresRequest {only_available:false})).await.map(|r|r.genres)
+}
 pub async fn list_genres(channel: Channel) -> Read<library::ListGenresResponse> {
     let mut cli = library::library_service_client::LibraryServiceClient::new(channel);
     bounded(cli.list_genres(library::ListGenresRequest { only_available: true })).await

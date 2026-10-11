@@ -281,6 +281,7 @@ enum Overlay {
     Media(Box<Medias>),
     /// Sélecteur de playlist (membre d'un groupe).
     Members(Box<PlaylistPicker>),
+    Genres(super::genre_picker::GenrePicker),
 }
 
 /// Ce que l'éditeur dit à l'écran Playlists.
@@ -319,6 +320,7 @@ pub struct Editor {
     saving: bool,
     overlay: Option<Overlay>,
     genres: Vec<GenreCount>,
+    genres_loaded: bool,
     /// Liste des playlists (sélecteur de membres).
     playlists: Vec<PlaylistSummary>,
     /// Message en tête (résultat d'un enregistrement…), `true` = erreur.
@@ -379,6 +381,7 @@ impl Editor {
             saving: false,
             overlay: None,
             genres: Vec::new(),
+            genres_loaded: false,
             playlists,
             message: None,
             form_scroll: 0,
@@ -923,9 +926,10 @@ impl Editor {
             }
             PlEvent::Saved(o, r) if *o == self.owner => return Some(self.on_saved(r, ctx)),
             PlEvent::Genres(o, r) if *o == self.owner => {
-                if let Ok(g) = r {
-                    self.genres = g.genres.clone();
-                }
+                self.genres_loaded=true;
+                if let Ok(g) = r {self.genres=g.genres.clone();}
+                if let Some(Overlay::Genres(p))=&mut self.overlay {p.set(r.clone().map(|g|g.genres));}
+                if let Err(error)=r {self.message=Some((error.clone(),true));}
             }
             PlEvent::Compare(o, r) if *o == self.owner => match r {
                 Ok(x) => {
@@ -1008,6 +1012,11 @@ impl Editor {
                         None => {}
                     }
                 }
+                Overlay::Genres(p) => match p.handle(e) {
+                    super::genre_picker::Pick::Selected(value) => {self.overlay=None;self.apply_text(&value,ctx);self.input_for=None;self.bind_input();},
+                    super::genre_picker::Pick::Cancel => self.overlay=None,
+                    super::genre_picker::Pick::Pending => {},
+                },
                 Overlay::Members(p) => match p.handle(e) {
                     PickedPlaylist::Chosen(r) => {
                         self.overlay = None;
@@ -1081,6 +1090,11 @@ impl Editor {
             KeyCode::BackTab | KeyCode::Up => self.move_focus(-1),
             KeyCode::PageDown => self.move_focus(10),
             KeyCode::PageUp => self.move_focus(-10),
+            KeyCode::Enter if matches!(self.focus,Target::Filter(i,FilterPart::Value) if self.draft.filters().get(i).is_some_and(|f|f.field=="genre")) => {
+                let row=rows.iter().find(|r|r.target==Some(self.focus)).unwrap();
+                let mut picker=super::genre_picker::GenrePicker::new(&row.value);
+                if self.genres_loaded {picker.set(Ok(self.genres.clone()));}self.overlay=Some(Overlay::Genres(picker));
+            },
             KeyCode::Enter => match kind {
                 Some(Kind::Action) => self.add(ctx),
                 _ => self.move_focus(1),
@@ -1237,6 +1251,7 @@ impl Editor {
                 ctx.set_screen_cursor(None);
                 m.draw(inner, buf, ctx);
             }
+            Some(Overlay::Genres(p)) => {ctx.set_screen_cursor(None);p.render(area,buf,&s);},
             Some(Overlay::Members(p)) => {
                 let c = p.render(area, buf, &ctx.theme);
                 ctx.set_screen_cursor(c);
@@ -1381,17 +1396,9 @@ impl Editor {
         cursor
     }
 
-    /// Genres connus qui commencent par le mot en cours de frappe (tous).
+    /// Raccourci du sélecteur de genres.
     fn genre_hint(&self) -> String {
-        let typed = self.input.text();
-        let last = typed.rsplit(',').next().unwrap_or("").trim().to_lowercase();
-        let list: Vec<String> = self
-            .genres
-            .iter()
-            .filter(|g| last.is_empty() || g.genre.to_lowercase().starts_with(&last))
-            .map(|g| format!("{} ({})", g.genre, g.count))
-            .collect();
-        if list.is_empty() { tr!("ed-genres-none") } else { tr!("ed-genres", list = list.join(", ")) }
+        tr!("genre-picker-open")
     }
 
     fn render_toml(&mut self, area: Rect, buf: &mut Buffer, ctx: &Global) -> Option<(u16, u16)> {
@@ -1614,6 +1621,7 @@ impl Editor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
 
     #[test]
     fn suggested_files_are_safe_and_avoid_existing_refs() {

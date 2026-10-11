@@ -530,3 +530,11 @@ Chaque RPC ajouté a sa commande `stationctl` dans le même lot.
 - Capacités exactes par rôle (`Owner` / `Operator` / `Viewer`) : répartition RPC par RPC à fixer au lot A.
 - Durée de vie des jetons et renouvellement (session TUI longue).
 - Gestion des brouillons si la connexion est perdue longtemps : conservation en mémoire seulement, ou sauvegarde locale côté TUI ?
+
+Les champs de genres des playlists et des filtres de statistiques ouvrent un
+popup avec Entrée. Saisir recherche un genre ; ↑/↓ parcourt la liste, Espace
+coche/décoche, Entrée valide et Échap annule. Ctrl+A coche les résultats
+visibles, Ctrl+D les décoche, Ctrl+U efface la recherche. Les genres du
+catalogue portent leur nombre de médias ; les valeurs existantes sont conservées.
+Le popup ne sauvegarde pas la playlist et ne valide pas le formulaire de
+filtres : Ctrl+S applique ensuite le brouillon.

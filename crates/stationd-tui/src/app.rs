@@ -168,6 +168,7 @@ pub enum AppEvent {
     /// Écrans Tags et Système : réponses (voir `screens::tags`, `screens::systeme`).
     Tags(Box<crate::screens::TagsEvent>),
     System(Box<crate::screens::SysEvent>),
+    GenreChoices(u64, crate::rpc::Read<Vec<stationd_proto::library::GenreCount>>),
     PluginTable(u64, u64, crate::rpc::Read<stationd_proto::plugin::PluginDbQueryResponse>),
     PluginConfig(u64, u64, u8, crate::rpc::Read<stationd_proto::plugin::PluginConfigResponse>),
 }
@@ -535,7 +536,7 @@ pub fn event(event: &AppEvent, state: &mut Scenery, ctx: &mut Global) -> Result<
             let _ = state.active().event(event, ctx)?;
             return Ok(Control::Changed);
         }
-        AppEvent::PluginTable(..) | AppEvent::PluginConfig(..) | AppEvent::MediaFolders(..) => {
+        AppEvent::GenreChoices(..) | AppEvent::PluginTable(..) | AppEvent::PluginConfig(..) | AppEvent::MediaFolders(..) => {
             // Deliver replies even to inactive tabs; no stranded in-flight requests.
             for screen in &mut state.screens { let _ = screen.event(event, ctx)?; }
             return Ok(Control::Changed);

@@ -4,6 +4,7 @@ mod agenda;
 mod antenne;
 mod controle;
 mod editor;
+mod genre_picker;
 pub(crate) mod medias;
 mod media_tree;
 mod ops;

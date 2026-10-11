@@ -635,8 +635,6 @@ ed-discard-keep = Keep editing
 ed-discard-yes = Discard the changes
 ed-pick-media = Add media
 ed-pick-member = Add a member
-ed-genres = genres: { $list }
-ed-genres-none = no known genre starts like this
 ed-diags = { $errors } error(s), { $warnings } warning(s)
 ed-diags-none = Diagnostics
 ed-diags-ok = stationd sees no problem
@@ -1376,3 +1374,12 @@ stats-sat = Sat
 stats-sun = Sun
 
 stats-no-dashboard = This view does not declare a chart.
+
+genre-picker-title = Genres
+genre-picker-search = Search: { $query }
+genre-picker-selected = { $n } selected genre(s)
+genre-picker-empty = No matching genre
+genre-picker-loading = Loading genres…
+genre-picker-help = ↑↓ navigate · Space toggle · Enter apply · Esc cancel
+    Ctrl+A select all · Ctrl+D deselect · Ctrl+U clear search
+genre-picker-open = Enter: open the genre selector
