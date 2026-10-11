@@ -32,6 +32,13 @@ for(const language of ['fr','en','de']){
   evaluate('renderNetwork('+JSON.stringify({stations:[{id:'one',label:'One',role:'admin',connection:'online',state:'running',alerts:[]}]})+')');
   assert.equal(evaluate('cards.get("one").link.href'),'/station/one');
   const network=stations=>evaluate('renderNetwork('+JSON.stringify({stations:stations.map((station,index)=>({id:String(index),label:'Station '+index,connection:'online',state:'running',alerts:[],...station}))})+')');
+  for(const timezone of ['Europe/Paris','America/New_York']){
+    const last_listener_at=1700000000;
+    network([{audience:0,state:'sleeping',timezone,last_listener_at}]);
+    assert.equal(evaluate('cards.get("0").lastListener.textContent'),new Date(last_listener_at*1000).toLocaleString(language,{timeZone:timezone,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'})+' ('+timezone+')');
+  }
+  network([{audience:0,state:'sleeping'}]);
+  assert.equal(evaluate('cards.get("0").lastListener.textContent'),translated('Inconnue'));
   network([{audience:2},{audience:3},{audience:0}]);
   assert.equal(elements.get('network-total').textContent,'5');
   assert.equal(elements.get('network-total-note').textContent,'');

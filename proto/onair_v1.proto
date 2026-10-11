@@ -57,6 +57,7 @@ message OnAirSnapshot {
   uint32 pending_overrides = 15;
   bool liquidsoap = 16;             // false = pas de [liquidsoap] : rien n'est diffusé
   string timezone = 17;             // fuseau de la station (IANA)
+  optional int64 last_listener_at = 18; // epoch UTC (s), dernier relevé positif avant la veille
 }
 
 message Track {

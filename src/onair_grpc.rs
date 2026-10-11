@@ -102,6 +102,7 @@ fn to_proto(s: &Snapshot, cut: Cut) -> OnAirSnapshot {
         observed_at: s.observed_at,
         state: s.state.clone(),
         listeners: s.listeners,
+        last_listener_at: s.last_listener_at,
         on_air_kind: s.on_air_kind.clone(),
         on_air: s.on_air.as_ref().map(track),
         prefetched: s.prefetched.as_ref().map(track),

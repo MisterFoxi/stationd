@@ -273,6 +273,8 @@ struct Inner {
     /// Last listener sample (count, instant). `None` = never sampled: a
     /// draining station then never stops on its own (no audience signal).
     listeners: Option<(u32, Epoch)>,
+    /// Last positive raw audience sample before sleep (excluding reconnect leases).
+    last_listener_at: Option<Epoch>,
     connections: Option<(Vec<crate::listener_snapshot::Connection>, std::time::Instant, std::time::Duration)>,
     connection_age: Option<u64>,
     connection_sampling_enabled: bool,
@@ -322,7 +324,7 @@ pub struct StationControl {
     air: Arc<OnceLock<mpsc::UnboundedSender<AirEvent>>>,
     /// Ordered persistence of state changes (single consumer → writes land in
     /// order). `None` = in-memory only (tests).
-    persist: Option<mpsc::UnboundedSender<(BroadcastState, Epoch)>>,
+    persist: Option<mpsc::UnboundedSender<(BroadcastState, Epoch, Option<Epoch>)>>,
     /// Change counters for the on-air view (`onair`): who shows the air
     /// learns WHEN to look again, never what changed.
     revs: Arc<Revisions>,
@@ -346,12 +348,13 @@ impl StationControl {
 
     fn with_state(
         state: BroadcastState,
-        persist: Option<mpsc::UnboundedSender<(BroadcastState, Epoch)>>,
+        persist: Option<mpsc::UnboundedSender<(BroadcastState, Epoch, Option<Epoch>)>>,
     ) -> Self {
         Self {
             inner: Arc::new(Mutex::new(Inner {
                 state,
                 listeners: None,
+                last_listener_at: None,
                 connections: None,
                 connection_age: None,
                 connection_sampling_enabled: false,
@@ -386,6 +389,7 @@ impl StationControl {
             g.overrides = src.overrides.clone();
             g.next_id = src.next_id;
             g.listeners = src.listeners;
+            g.last_listener_at = src.last_listener_at;
         }
         copy
     }
@@ -477,13 +481,14 @@ impl StationControl {
     /// Load the persisted broadcast state (absent row → `running`) and start
     /// the ordered writer. An unreadable stored value is a loud error.
     pub async fn load(pool: SqlitePool) -> Result<Self, sqlx::Error> {
-        let row: Option<(String,)> =
-            sqlx::query_as("SELECT state FROM broadcast_state WHERE id = 1")
+        let row: Option<(String, Option<i64>)> =
+            sqlx::query_as("SELECT state, last_listener_at FROM broadcast_state WHERE id = 1")
                 .fetch_optional(&pool)
                 .await?;
+        let last_listener_at = row.as_ref().and_then(|(_, at)| *at).map(Epoch);
         let state = match row {
             None => BroadcastState::Running,
-            Some((s,)) => BroadcastState::parse(&s).ok_or_else(|| {
+            Some((s, _)) => BroadcastState::parse(&s).ok_or_else(|| {
                 sqlx::Error::Decode(format!("unknown broadcast_state `{s}`").into())
             })?,
         };
@@ -493,15 +498,17 @@ impl StationControl {
         // The halt intervals follow the restored state (normally already the
         // case: written together). A no-op unless a write was lost.
         crate::air_time::mark(&pool, state.halts(), wall_now().0).await?;
-        let (tx, mut rx) = mpsc::unbounded_channel::<(BroadcastState, Epoch)>();
+        let (tx, mut rx) = mpsc::unbounded_channel::<(BroadcastState, Epoch, Option<Epoch>)>();
         tokio::spawn(async move {
-            while let Some((state, at)) = rx.recv().await {
-                if let Err(e) = persist_state(&pool, state, at).await {
+            while let Some((state, at, last_listener_at)) = rx.recv().await {
+                if let Err(e) = persist_state(&pool, state, at, last_listener_at).await {
                     tracing::error!(%e, state = state.as_str(), "could not persist broadcast state");
                 }
             }
         });
-        Ok(Self::with_state(state, Some(tx)))
+        let control = Self::with_state(state, Some(tx));
+        control.lock().last_listener_at = last_listener_at;
+        Ok(control)
     }
 
     /// Wire the plugin system so state changes / samples are broadcast as
@@ -689,7 +696,7 @@ impl StationControl {
         let at = self.now();
         tracing::info!(from = t.from.as_str(), to = t.to.as_str(), by, "broadcast state changed");
         if let Some(tx) = &self.persist {
-            let _ = tx.send((t.to, at));
+            let _ = tx.send((t.to, at, self.last_listener_at()));
         }
         self.to_air(AirEvent::Transition(t));
         self.bump_air();
@@ -708,6 +715,9 @@ impl StationControl {
         let count = {
             let mut g = self.lock();
             g.listeners = Some((count, at));
+            if count > 0 && g.state != BroadcastState::Sleeping {
+                g.last_listener_at = Some(at);
+            }
             g.audience_failures = 0;
             g.listener_count().unwrap_or(count)
         };
@@ -745,6 +755,11 @@ impl StationControl {
     /// An unknown raw audience remains unknown; expired leases never add listeners.
     pub fn listeners(&self) -> Option<u32> {
         self.lock().listener_count()
+    }
+
+    /// Last observed listener before sleep; retained through zero or unknown samples.
+    pub fn last_listener_at(&self) -> Option<Epoch> {
+        self.lock().last_listener_at
     }
 
     /// Generic availability of the detailed Icecast sampler, independent of plugins.
@@ -1089,14 +1104,20 @@ pub fn normalize_media_ref(raw: &str) -> Result<String, String> {
 /// One state change: the state row and the halt intervals (`air_time`), in
 /// one transaction — the anti-repetition windows never see one without the
 /// other.
-async fn persist_state(pool: &SqlitePool, state: BroadcastState, at: Epoch) -> Result<(), sqlx::Error> {
+async fn persist_state(
+    pool: &SqlitePool,
+    state: BroadcastState,
+    at: Epoch,
+    last_listener_at: Option<Epoch>,
+) -> Result<(), sqlx::Error> {
     let mut tx = pool.begin().await?;
     sqlx::query(
-        "INSERT INTO broadcast_state (id, state, updated_at) VALUES (1, ?1, ?2) \
-         ON CONFLICT(id) DO UPDATE SET state = excluded.state, updated_at = excluded.updated_at",
+        "INSERT INTO broadcast_state (id, state, updated_at, last_listener_at) VALUES (1, ?1, ?2, ?3) \
+         ON CONFLICT(id) DO UPDATE SET state = excluded.state, updated_at = excluded.updated_at, last_listener_at = excluded.last_listener_at",
     )
     .bind(state.as_str())
     .bind(at.0)
+    .bind(last_listener_at.map(|at| at.0))
     .execute(&mut *tx)
     .await?;
     crate::air_time::mark(&mut *tx, state.halts(), at.0).await?;
@@ -1125,6 +1146,38 @@ mod tests {
             expiry: None,
             tracks: None,
         }
+    }
+
+    #[test]
+    fn last_listener_observation_survives_zero_unknown_and_sleep() {
+        let c = StationControl::new_in_memory();
+        assert_eq!(c.last_listener_at(), None);
+        c.set_clock(Some(Epoch(1000)));
+        c.sample_listeners(2);
+        c.set_clock(Some(Epoch(1100)));
+        c.sample_listeners(1);
+        c.set_clock(Some(Epoch(1200)));
+        c.sample_listeners(0);
+        c.clear_listeners();
+        assert_eq!(c.last_listener_at(), Some(Epoch(1100)));
+        c.sleep_now();
+        c.sample_listeners(1); // Age-based sleep may still have existing connections.
+        assert_eq!(c.last_listener_at(), Some(Epoch(1100)));
+        c.apply(ControlAction::Resume, "cli").unwrap();
+        c.sample_listeners(1);
+        assert_eq!(c.last_listener_at(), Some(Epoch(1200)));
+    }
+
+    #[tokio::test]
+    async fn last_listener_observation_is_restored_after_sleep() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = crate::db::init(&dir.path().join("station.db")).await.unwrap();
+        persist_state(&pool, BroadcastState::Sleeping, Epoch(1200), Some(Epoch(1100))).await.unwrap();
+        let c = StationControl::load(pool).await.unwrap();
+        assert_eq!(c.state(), BroadcastState::Sleeping);
+        assert_eq!(c.last_listener_at(), Some(Epoch(1100)));
+        c.sample_listeners(0);
+        assert_eq!(c.last_listener_at(), Some(Epoch(1100)));
     }
 
     #[test]

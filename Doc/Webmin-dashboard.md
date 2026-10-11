@@ -63,6 +63,14 @@ publication de ce port dans Traefik n'est nécessaire.
 
 ## Flux partagés et limites
 
+La synthèse réseau affiche aussi le **dernier auditeur observé**, avec la date
+et l'heure dans le fuseau IANA de la station. Il s'agit du dernier relevé
+d'audience positif avant la veille, pas de l'heure de mise en veille ni de
+l'heure exacte de déconnexion. Les relevés à zéro, inconnus ou reçus pendant
+la veille ne remplacent pas cette date. Elle est enregistrée avec les
+changements d'état et restaurée au redémarrage. En l'absence de relevé
+historique ou de fuseau station, l'affichage indique « Inconnue ».
+
 Le gateway utilise un seul `OnAirService.Watch` par station configurée.
 Les navigateurs partagent son dernier instantané : ils ne lancent pas de
 simulation supplémentaire. Les lectures de présence et de services sont

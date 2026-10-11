@@ -20,7 +20,8 @@ const alerts={station_unreachable:t('StationD inaccessible'),onair_unavailable:t
 const notes={1:t('La station est en pause.'),2:t('La station est en veille.'),3:t('Veille à la fin du morceau.'),4:t('Veille dès qu’il n’y aura plus d’auditeur.'),5:t('Un DJ tient l’antenne.'),6:t('Liquidsoap n’est pas configuré.'),7:t('La suite est simulée.'),8:t('Aucun média diffusable.'),9:t('Programme de secours.'),10:t('Relais : durée inconnue.'),11:t('Une durée de média est inconnue.'),12:t('La simulation a échoué.'),13:t('Un filtre de plugin a échoué.'),14:t('La projection du programme a échoué.'),15:t('L’historique est indisponible.'),16:t('Un rendez-vous ne pourra pas couper l’antenne.'),17:t('Une source prévue sera vide.'),18:t('Un rendez-vous n’a pas coupé l’antenne.'),19:t('Une source était vide.')};
 function mediaText(track,kind){if(track)return[track.title||t('Média sans titre'),track.artist].filter(Boolean).join(' — ');return({live:t('Direct DJ'),relay:t('Relais'),fallback:t('Secours'),halted:t('Fond d’arrêt'),unknown:t('Média non identifié')})[kind]||t('Aucun média signalé');}
 function audienceText(value){return value==null?t('Audience inconnue'):t(value===1?'{value} auditeur':'{value} auditeurs',{value});}
-function timeText(value,zone){if(!value)returnt('Inconnue');try{return new Date(value*1000).toLocaleTimeString(webminLanguage,{...(zone?{timeZone:zone}:{}),hour:'2-digit',minute:'2-digit',second:'2-digit'});}catch{return new Date(value*1000).toLocaleTimeString(webminLanguage);}}
+function timeText(value,zone){if(!value)return t('Inconnue');try{return new Date(value*1000).toLocaleTimeString(webminLanguage,{...(zone?{timeZone:zone}:{}),hour:'2-digit',minute:'2-digit',second:'2-digit'});}catch{return new Date(value*1000).toLocaleTimeString(webminLanguage);}}
+function listenerDateText(value,zone){if(value==null||!zone)return t('Inconnue');try{return new Date(value*1000).toLocaleString(webminLanguage,{timeZone:zone,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'})+' ('+zone+')';}catch{return t('Inconnue');}}
 function list(target,items){target.replaceChildren(...items.map(text=>{const item=document.createElement('li');item.textContent=text;return item;}));}
 function descriptionList(target,entries){target.replaceChildren(...entries.flatMap(([name,value])=>{const term=document.createElement('dt'),data=document.createElement('dd');term.textContent=name;data.textContent=value;return[term,data];}));}
 const cards=new Map();
@@ -29,12 +30,13 @@ function renderNetwork(data){
   const keep=new Set();
   for(const station of data.stations){
     keep.add(station.id);let card=cards.get(station.id);
-    if(!card){const element=document.createElement('tr'),title=document.createElement('th'),link=document.createElement('a');title.scope='row';title.append(link);const status=document.createElement('td'),media=document.createElement('td'),audience=document.createElement('td'),observed=document.createElement('td'),warningCell=document.createElement('td'),warnings=document.createElement('ul');audience.className='network-audience';observed.className='muted';warningCell.append(warnings);element.append(title,status,media,audience,observed,warningCell);card={element,link,status,media,audience,observed,warnings};cards.set(station.id,card);}
+    if(!card){const element=document.createElement('tr'),title=document.createElement('th'),link=document.createElement('a');title.scope='row';title.append(link);const status=document.createElement('td'),media=document.createElement('td'),audience=document.createElement('td'),lastListener=document.createElement('td'),observed=document.createElement('td'),warningCell=document.createElement('td'),warnings=document.createElement('ul');audience.className='network-audience';observed.className='muted';warningCell.append(warnings);element.append(title,status,media,audience,lastListener,observed,warningCell);card={element,link,status,media,audience,lastListener,observed,warnings};cards.set(station.id,card);}
     card.link.href=`/station/${encodeURIComponent(station.id)}${consoleEnabled&&station.role==='admin'?'/console':''}`;
     card.link.textContent=station.label;card.element.classList.toggle('stale',station.stale||station.connection==='offline');
     card.status.textContent=`${connections[station.connection]||t('Connexion inconnue')} · ${station.stale?t('Dernier état : '):''}${states[station.state]||t('État inconnu')}`;
     card.media.textContent=mediaText(station.media,station.on_air_kind);card.audience.textContent=audienceText(station.audience);
-    card.observed.textContent=station.observed_at?t('Antenne observée à {time}',{time:timeText(station.observed_at)}):t('Aucune donnée d’antenne reçue');
+    card.lastListener.textContent=listenerDateText(station.last_listener_at,station.timezone);
+    card.observed.textContent=station.observed_at?t('Antenne observée à {time}',{time:timeText(station.observed_at,station.timezone)}):t('Aucune donnée d’antenne reçue');
     list(card.warnings,station.alerts.map(code=>alerts[code]||code));
     document.getElementById('stations').append(card.element);
   }

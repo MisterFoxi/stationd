@@ -193,9 +193,9 @@ impl Live {
         let mut view = json!({"id":entry.station.id,"label":entry.station.label,"connection":connection,
             "stale":stale,"observed_at":current.map(|s|s.observed_at),"checked_at":cache.health.at,
             "state":current.map(|s|text(&s.state)),"audience":audience,
+            "timezone":current.map(|s|text(&s.timezone)),"last_listener_at":current.and_then(|s|s.last_listener_at),
             "on_air_kind":current.map(|s|text(&s.on_air_kind)),"media":current.and_then(|s|s.on_air.as_ref()).map(media),"alerts":alerts});
         if detail {
-            view["timezone"] = json!(current.map(|s| text(&s.timezone)));
             view["prefetched"] = json!(current.and_then(|s| s.prefetched.as_ref()).map(media));
             view["upcoming"] = json!(current
                 .map(|s| s.upcoming.iter().take(10).map(media).collect::<Vec<_>>())
@@ -358,6 +358,7 @@ mod tests {
             observed_at: now(),
             state: "running".into(),
             listeners: Some(0),
+            last_listener_at: Some(1700000000),
             on_air_kind: "track".into(),
             liquidsoap: true,
             timezone: "Europe/Paris".into(),
@@ -407,6 +408,8 @@ mod tests {
         assert_eq!(network["stations"].as_array().unwrap().len(), 1);
         assert!(!network.to_string().contains("Private Station Two"));
         assert!(!network.to_string().contains("grpc_endpoint"));
+        assert_eq!(network["stations"][0]["timezone"], "Europe/Paris");
+        assert_eq!(network["stations"][0]["last_listener_at"], 1700000000);
         entry
             .cache
             .send_modify(|cache| cache.snapshot.as_mut().unwrap().observed_at = now() - 90);

@@ -1,4 +1,8 @@
 {
+  "Dernier auditeur observé (heure station)": {
+    "en": "Last listener observed (station time)",
+    "de": "Zuletzt beobachteter Hörer (Stationszeit)"
+  },
   "StationD — Connexion": {
     "en": "StationD — Login",
     "de": "StationD — Anmeldung"
