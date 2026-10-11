@@ -554,6 +554,23 @@ mod address_tests {
 mod live_visual_tabs {
     #[tokio::test]
     #[ignore = "read-only diagnostic against STATIOND_TEST_LIVE_STATS_ADDR"]
+    async fn live_geography_table_is_readable() {
+        use stationd_proto::plugin::{PluginListRequest,PluginReadTabRequest,plugin_service_client::PluginServiceClient};
+        let addr=std::env::var("STATIOND_TEST_LIVE_STATS_ADDR").unwrap();
+        let mut client=PluginServiceClient::new(super::lazy_channel(&addr).unwrap());
+        let plugins=client.list(PluginListRequest {}).await.unwrap().into_inner().plugins;
+        let plugin=plugins.iter().find(|p|p.name=="listener-stats").unwrap();
+        let tab=plugin.tabs.iter().find(|t|t.id=="geography-live").unwrap();
+        assert!(!tab.has_dashboard);
+        assert_eq!(tab.filters.len(),1);assert_eq!(tab.filters[0].key,"mount");
+        let start=std::time::Instant::now();
+        let data=client.read_tab(PluginReadTabRequest {name:plugin.name.clone(),tab_id:tab.id.clone(),dashboard:false,filters:Default::default()}).await.unwrap().into_inner();
+        assert_eq!(&data.columns[..3],["Pays","Ville","Auditeurs"]);
+        println!("direct: {} rows, {} ms",data.rows.len(),start.elapsed().as_millis());
+    }
+
+    #[tokio::test]
+    #[ignore = "read-only diagnostic against STATIOND_TEST_LIVE_STATS_ADDR"]
     async fn live_graphical_tabs_are_readable() {
         use stationd_proto::plugin::{PluginListRequest,PluginReadTabRequest,plugin_service_client::PluginServiceClient};
         let addr=std::env::var("STATIOND_TEST_LIVE_STATS_ADDR").unwrap();

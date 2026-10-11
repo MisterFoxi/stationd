@@ -73,8 +73,9 @@ Entrée ouvre leur première vue ; `s/x/r/l` contrôlent leur cycle de vie.
   l'erreur seule s'affiche. Une vue retirée ramène au catalogue Plugins.
 
 `play-stats` fournit les vues [Diffusions médias, évolution et artistes/albums](media-stats.md),
-ainsi que les anciennes sélections ; `listener-stats` fournit quatre vues :
+ainsi que les anciennes sélections ; `listener-stats` fournit cinq vues :
 
+- **Géographie / direct** : tableau pays, ville, auditeurs du dernier relevé par flux, actualisé toutes les cinq secondes.
 - **Audience** : synthèse par flux, moyenne, pic, minimum, cumul des
   observations, relevés valides, échecs, pourcentage de collecte et premier/dernier relevé.
 - **Évolution** : regroupement chronologique par heure, jour, semaine (lundi),
@@ -215,3 +216,5 @@ géographiques suivent le choix Pays/Région/Ville. La bascule `v` indique
 explicitement « Tableau de bord » ou « Tableau détaillé », même sans données.
 L’aide ne propose la bascule que si le daemon annonce un jeu de données
 visuel pour la vue. Les anciennes sélections médias restent un tableau.
+
+Un plugin peut déclarer jusqu’à huit onglets.

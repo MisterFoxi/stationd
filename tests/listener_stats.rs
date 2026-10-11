@@ -249,3 +249,25 @@ fn audience_dashboard_preserves_zero_failures_and_per_snapshot_country_totals() 
     values.insert("mount".into(),json!("/missing"));assert!(db.query(&sql,&Params::Named(values.clone())).unwrap().rows.is_empty());
     values.insert("mount".into(),json!(""));let rows=db.query(&sql,&Params::Named(values)).unwrap().rows;assert!(rows.iter().all(|r|r[1]==json!("/other"))); // the chosen scope is explicit, never a sum of mount averages.
 }
+
+#[test]
+fn live_geography_uses_each_latest_snapshot_and_never_revives_old_listeners() {
+    let dir=tempfile::tempdir().unwrap();let db=PluginDb::open(dir.path(),"live",DbLimits::default()).unwrap();
+    db.migrate(&[
+        include_str!("../plugins/listener-stats-wasm/migrations/001_snapshots.sql").into(),
+        include_str!("../plugins/listener-stats-wasm/migrations/002_regions.sql").into(),
+        include_str!("../plugins/listener-stats-wasm/migrations/003_stats_indexes.sql").into(),
+        include_str!("../plugins/listener-stats-wasm/migrations/004_stream_index.sql").into(),
+    ]).unwrap();
+    for sql in "INSERT INTO listener_snapshot VALUES ('/a',10,50),('/a',20,4),('/b',10,99),('/b',21,0),('/c',10,99),('/c',22,NULL),('/a',999,999);
+        INSERT INTO listener_geo VALUES ('/a',10,'found','US','','Old',50),('/a',20,'found','FR','IDF','Paris',2),('/a',20,'found','FR','Other','Paris',1),('/a',20,'not_found','','','',1),('/b',10,'found','US','','Old',99),('/c',10,'found','US','','Old',99);".split(';').filter(|s| !s.trim().is_empty()) {db.exec(&Statement {sql:sql.into(),params:Params::default()}).unwrap();}
+    let sql=include_str!("../plugins/listener-stats-wasm/src/ui/geography_live.sql").replace("unixepoch()","100");
+    let read=|mount:&str|db.query(&sql,&Params::Named(serde_json::Map::from_iter([("mount".into(),json!(mount))]))).unwrap();
+    let rows=read("").rows;assert_eq!(rows.len(),4);
+    let paris=rows.iter().find(|r|r[1]==json!("Paris")).unwrap();assert_eq!(paris[2],json!(3));assert_eq!(paris[5],json!(80));
+    assert!(!rows.iter().any(|r|r[1]==json!("Old")));
+    let empty=rows.iter().find(|r|r[3]==json!("/b")).unwrap();assert_eq!(empty[2],json!(0));assert_eq!(empty[6],json!("Aucun auditeur"));
+    let failed=rows.iter().find(|r|r[3]==json!("/c")).unwrap();assert!(failed[2].is_null());assert_eq!(failed[6],json!("Collecte échouée"));
+    let selected=read("/a");assert_eq!(&selected.columns[..3],["Pays","Ville","Auditeurs"]);assert_eq!(selected.rows.len(),2);assert_eq!(selected.rows.iter().map(|r|r[2].as_i64().unwrap()).sum::<i64>(),4);
+    assert!(read("/missing").rows.is_empty());
+}

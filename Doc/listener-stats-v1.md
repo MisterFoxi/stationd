@@ -322,3 +322,10 @@ migrations 3 and 4 cover period scans and exact stream/timestamp lookups.
 Dashboard rollups use sample-weighted hourly aggregates, preserving zeros,
 failed samples, peaks and partial period boundaries. Plugin DB limits are
 loaded by stationd at startup; changing `[plugin.db]` requires restarting the daemon.
+
+La vue **Géographie / direct** affiche toujours le tableau **Pays / Ville /
+Auditeurs** du dernier relevé de chaque flux, avec sa date UTC et son âge.
+Elle se rafraîchit toutes les cinq secondes et propose le filtre Flux ; les
+périodes et cumuls historiques ne s’y appliquent pas. Un relevé vide affiche
+zéro ; une collecte échouée affiche un effectif inconnu, sans réutiliser la
+répartition précédente. La vue Géographie conserve les statistiques historiques.

@@ -67,8 +67,8 @@ pub fn bind_filters(filters: &[Filter], values: &std::collections::HashMap<Strin
     Ok(crate::plugin_db::Params::Named(params))
 }
 pub fn validate(tabs: &[UiTab], has_db: bool) -> Result<(), String> {
-    if tabs.len() > 4 {
-        return Err("ui_tabs: at most four tabs per plugin".into());
+    if tabs.len() > 8 {
+        return Err("ui_tabs: at most eight tabs per plugin".into());
     }
     if tabs.iter().any(|t| t.kind.is_empty() || t.kind == "table") && !has_db {
         return Err("ui_tabs: capability db required".into());
@@ -150,7 +150,9 @@ mod tests {
         assert!(validate(&[tab()], true).is_ok());
         assert!(validate(&[tab()], false).is_err());
         assert!(validate(&[tab(), tab()], true).is_err());
-        assert!(validate(&vec![tab(); 5], true).is_err());
+        let tabs:Vec<_>=(0..9).map(|i| {let mut t=tab();t.id=format!("tab-{i}");t}).collect();
+        assert!(validate(&tabs[..8],true).is_ok());
+        assert!(validate(&tabs,true).is_err());
         for (id, title) in [("../x", "valid"), ("x", ""), ("x", "bad\u{1b}")] {
             let mut t = tab();
             t.id = id.into();

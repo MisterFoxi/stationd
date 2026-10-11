@@ -81,7 +81,7 @@ pub fn ui_tabs() -> FnResult<String> {
         ("geography", "Géographie", "Total", include_str!("ui/geography.sql"),
             "Pays, région ou ville, croisés avec les cumuls temporels UTC. Moyenne sur tous les relevés valides du flux, absences incluses. Part des observations, pas des personnes. Top 1000. GeoLite2 data created by MaxMind (https://www.maxmind.com). Historique : IP Geolocation by DB-IP (https://db-ip.com)."),
     ];
-    let tabs: Vec<Value> = definitions.into_iter().map(|(id, title, default, sql, description)| {
+    let mut tabs: Vec<Value> = definitions.into_iter().map(|(id, title, default, sql, description)| {
         let mut filters = common.clone();
         filters.push(grouping(default));
         if id == "daily" { filters[0]["default_value"] = json!("30 jours"); }
@@ -94,5 +94,9 @@ pub fn ui_tabs() -> FnResult<String> {
             "dashboard_sql":format!("{}{}",include_str!("ui/period.sql"),
                 if id == "geography" {include_str!("ui/dashboard.sql").replace("'Pays'",":geography")} else {include_str!("ui/dashboard.sql").to_string()})})
     }).collect();
+    tabs.insert(0,json!({"id":"geography-live","title":"Géographie / direct",
+        "description":"Pays / ville / auditeurs du dernier relevé de chaque flux. Actualisation automatique toutes les 5 s ; date UTC et âge du relevé affichés. Aucun cumul historique. Collecte échouée = effectif inconnu, zéro = aucun auditeur. GeoLite2 data created by MaxMind (https://www.maxmind.com). Historique : IP Geolocation by DB-IP (https://db-ip.com).",
+        "sql":include_str!("ui/geography_live.sql"),
+        "filters":[json!({"key":"mount","shared":true,"label":"Flux (vide = tous)","kind":"text","default_value":""})]}));
     Ok(serde_json::to_string(&tabs)?)
 }
