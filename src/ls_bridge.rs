@@ -1038,6 +1038,19 @@ async fn live_silence_handler(State(state): State<AppState>, headers: HeaderMap)
     StatusCode::OK
 }
 
+#[derive(Deserialize)]
+struct LiveHealth { ready: bool, rms: f64, peak: f64 }
+async fn live_health_handler(State(state): State<AppState>, headers: HeaderMap, Json(health): Json<LiveHealth>) -> Result<Json<serde_json::Value>, StatusCode> {
+    if !authorized(&state, &headers) { return Err(StatusCode::UNAUTHORIZED); }
+    let on_air = state.live.as_ref().is_some_and(|hub| hub.input_health(health.ready, health.rms, health.peak));
+    Ok(Json(serde_json::json!({"on_air":on_air})))
+}
+async fn live_air_handler(State(state): State<AppState>, headers: HeaderMap) -> StatusCode {
+    if !authorized(&state, &headers) { return StatusCode::UNAUTHORIZED; }
+    if let Some(hub) = &state.live { hub.aired(); }
+    StatusCode::OK
+}
+
 /// The bridge routes, behind the shared token. `live` = the `[live]` hub.
 pub fn router(bridge: LsBridge, token: &str, live: Option<crate::live::LiveHub>) -> Router {
     Router::new()
@@ -1046,6 +1059,8 @@ pub fn router(bridge: LsBridge, token: &str, live: Option<crate::live::LiveHub>)
         .route("/ls/v1/discard", post(discard_handler))
         .route("/ls/v1/live/auth", post(live_auth_handler))
         .route("/ls/v1/live/connect", post(live_connect_handler))
+        .route("/ls/v1/live/health", post(live_health_handler))
+        .route("/ls/v1/live/air", post(live_air_handler))
         .route("/ls/v1/live/disconnect", post(live_disconnect_handler))
         .route("/ls/v1/live/silence", post(live_silence_handler))
         .with_state(AppState { bridge, token: Arc::from(token), live })

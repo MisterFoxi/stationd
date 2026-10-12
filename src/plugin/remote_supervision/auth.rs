@@ -56,7 +56,7 @@ pub(super) enum Role {
 impl Role {
     pub(super) fn permits(self, permission: &str) -> bool {
         match permission {
-            "station.read" | "queue.read" | "agenda.read" | "events.read" => true,
+            "station.read" | "queue.read" | "agenda.read" | "events.read" | "dj.control" => true,
             "player.skip" | "schedule.reload" | "alerts.acknowledge" => self != Self::Viewer,
             "console.open" | "engine.restart" | "station.restart" => self == Self::Admin,
             _ => false,
@@ -805,6 +805,10 @@ impl Auth {
         }
         result
     }
+    pub(super) fn dj_audit(&self, raw: &str, station: &str, action: &str, result: &str) -> Result<(), String> {
+        let (session, _) = self.session(raw)?;
+        self.console_audit(&session.user.to_string(), action, result, station)
+    }
     pub(super) fn console_audit(
         &self,
         actor: &str,
@@ -1291,6 +1295,91 @@ mod tests {
         .await;
         assert_eq!(oversized.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
+    #[tokio::test]
+    async fn webmin_dj_requires_own_credentials_csrf_and_an_authorized_session() {
+        use axum::{body::Body, http::{header, Request, StatusCode}};
+        use http_body_util::BodyExt;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tower::ServiceExt;
+        let (dir, mut auth, mut soft) = fixture();
+        let enroll = add(&mut auth, "Alice", Role::Viewer);
+        register(&mut auth, &mut soft, &enroll);
+        let (context, session) = login(&mut auth, &mut soft, "Alice");
+        let csrf = context["csrf_token"].as_str().unwrap();
+        let pool = crate::db::init(&dir.path().join("dj.db")).await.unwrap();
+        let engine = crate::grid_engine::GridEngine::new(pool.clone(), "UTC");
+        let base = now();
+        engine.set_clock(Some(crate::resolver::Epoch(base)));
+        let file = dir.path().join("djs.toml");
+        let hash = crate::live::hash_password("dj-password").unwrap();
+        std::fs::write(&file, format!("schema_version = 1\n[[dj]]\nid = \"marc\"\npassword_hash = \"{hash}\"\nurgent = true\n")).unwrap();
+        let hub = crate::live::LiveHub::new(&file, engine.clone(), pool).with_preparation(true, -40.);
+        let audio = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let harbor = audio.local_addr().unwrap().port();
+        let fake_audio = tokio::spawn(async move {
+            let (mut socket, _) = audio.accept().await.unwrap();
+            let mut request = [0; 4096];
+            let len = socket.read(&mut request).await.unwrap();
+            let request = String::from_utf8_lossy(&request[..len]);
+            assert!(request.starts_with("GET /__stationd_preview "));
+            assert!(request.contains("c3RhdGlvbmQ6cHJpdmF0ZS1zZWNyZXQ=")); // stationd:private-secret
+            socket.write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Type: audio/mpeg\r\n\r\n8\r\nDJ-AUDIO\r\n").await.unwrap();
+            let mut byte = [0; 1]; let _ = socket.read(&mut byte).await;
+        });
+        let cfg: crate::config::LiveConfig = toml::from_str(&format!("djs_path = '{}'\nharbor_port = {harbor}", file.display())).unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(tonic::transport::Server::builder()
+            .add_service(crate::proto::live::live_service_server::LiveServiceServer::new(
+                crate::live_grpc::LiveGrpc::new(hub.clone(), cfg, true).with_preview_secret("private-secret".into())))
+            .serve_with_incoming_shutdown(tokio_stream::wrappers::TcpListenerStream::new(listener), async { let _ = stopped.await; }));
+        let mut config = auth.config.clone();
+        config.stations[0].grpc_endpoint = format!("http://{address}");
+        config.stations[0].dj_source_host = "dj.example.test".into();
+        let auth = Arc::new(std::sync::Mutex::new(auth));
+        let app = super::super::web::routes(super::super::web::Web::new(auth.clone(), &config));
+        let request = |method: &str, path: &str, token: &str, body: &str| Request::builder()
+            .method(method).uri(path).header(header::ORIGIN, "https://remote.example.test")
+            .header(header::COOKIE, format!("__Host-stationd-session={session}"))
+            .header(header::CONTENT_TYPE, "application/json").header("x-csrf-token", token)
+            .body(Body::from(body.to_string())).unwrap();
+        let page = app.clone().oneshot(request("GET", "/station/one/dj", "", "")).await.unwrap();
+        assert_eq!(page.status(), StatusCode::OK);
+        assert_eq!(page.headers()["cache-control"], "no-store");
+        assert_eq!(app.clone().oneshot(request("GET", "/api/stations/one/dj", "", "")).await.unwrap().status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(app.clone().oneshot(request("GET", "/station/two/dj", "", "")).await.unwrap().status(), StatusCode::FORBIDDEN);
+        assert_eq!(app.clone().oneshot(request("POST", "/api/stations/one/dj/login", "wrong", r#"{"dj":"marc","password":"dj-password"}"#)).await.unwrap().status(), StatusCode::FORBIDDEN);
+        assert_eq!(app.clone().oneshot(request("POST", "/api/stations/one/dj/login", csrf, r#"{"dj":"marc","password":"wrong"}"#)).await.unwrap().status(), StatusCode::UNAUTHORIZED);
+        let logged = app.clone().oneshot(request("POST", "/api/stations/one/dj/login", csrf, r#"{"dj":"marc","password":"dj-password"}"#)).await.unwrap();
+        assert_eq!(logged.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(logged.into_body(), 65536).await.unwrap();
+        let view: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(view["state"], "waiting"); assert_eq!(view["host"], "dj.example.test");
+        let text = String::from_utf8_lossy(&body);
+        assert!(!text.contains("token") && !text.contains("password") && !text.contains("private-secret"));
+        assert!(hub.auth("marc", "dj-password", "encoder").await.allowed()); hub.connected();
+        for sec in 0..=3 { engine.set_clock(Some(crate::resolver::Epoch(base + sec))); hub.input_health(true, 0.1, 0.3); }
+        assert_eq!(app.clone().oneshot(request("POST", "/api/stations/one/dj/take", "wrong", "{}")).await.unwrap().status(), StatusCode::FORBIDDEN);
+        assert!(hub.status().on_air.is_none());
+        let taken = app.clone().oneshot(request("POST", "/api/stations/one/dj/take", csrf, "{}")).await.unwrap();
+        assert_eq!(taken.status(), StatusCode::OK);
+        let body: Value = serde_json::from_slice(&axum::body::to_bytes(taken.into_body(), 65536).await.unwrap()).unwrap();
+        assert_eq!(body["state"], "taking");
+        hub.aired();
+        let audio = app.clone().oneshot(request("GET", "/api/stations/one/dj/preview", "", "")).await.unwrap();
+        assert_eq!(audio.status(), StatusCode::OK); assert_eq!(audio.headers()["content-type"], "audio/mpeg");
+        let mut audio = audio.into_body();
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(3), audio.frame()).await.unwrap().unwrap().unwrap();
+        assert_eq!(frame.into_data().unwrap().as_ref(), b"DJ-AUDIO");
+        drop(audio);
+        assert_eq!(app.clone().oneshot(request("POST", "/api/stations/one/dj/stop", csrf, "{}")).await.unwrap().status(), StatusCode::OK);
+        hub.disconnected();
+        auth.lock().unwrap().logout(&session, csrf).unwrap();
+        assert_eq!(app.oneshot(request("GET", "/api/stations/one/dj/preview", "", "")).await.unwrap().status(), StatusCode::UNAUTHORIZED);
+        fake_audio.abort(); let _ = stop.send(()); server.await.unwrap().unwrap();
+    }
+
     #[tokio::test]
     async fn webmin_http_checks_origin_cookie_csrf_and_hides_unauthorized_stations() {
         use axum::{

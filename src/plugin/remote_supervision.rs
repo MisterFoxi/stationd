@@ -3,6 +3,7 @@
 //! when the plugin actor itself runs on a single-thread Tokio runtime.
 mod auth;
 mod console;
+mod dj;
 mod i18n;
 mod live;
 mod web;
@@ -33,6 +34,9 @@ struct Station {
     id: String,
     label: String,
     grpc_endpoint: String,
+    /// Public hostname entered in the DJ encoder (no protocol or port).
+    #[serde(default)]
+    dj_source_host: String,
     #[serde(default)]
     allow_plaintext_grpc: bool,
 }
@@ -167,6 +171,12 @@ impl Config {
                 || station.label.chars().any(char::is_control)
             {
                 return Err(format!("station {}: invalid label", station.id));
+            }
+            if !station.dj_source_host.is_empty() {
+                origin(&format!("http://{}", station.dj_source_host), &["http"])
+                    .map_err(|e| format!("station {}: dj_source_host: {e}", station.id))?;
+                let source: Uri = format!("http://{}", station.dj_source_host).parse().map_err(|_| "invalid DJ hostname")?;
+                if source.port().is_some() { return Err("dj_source_host must not include a port".into()); }
             }
             origin(&station.grpc_endpoint, &["http", "https"])
                 .map_err(|e| format!("station {}: grpc_endpoint: {e}", station.id))?;

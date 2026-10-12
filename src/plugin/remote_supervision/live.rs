@@ -72,7 +72,7 @@ fn media(track: &onair::Track) -> Media {
 fn playlist(slot: &onair::PlaylistSlot) -> Value {
     json!({"name":text(&slot.playlist_ref),"from":slot.from,"at_local":text(&slot.at_local),"issue":slot.issue})
 }
-fn transport(station: &Station) -> Result<Channel, String> {
+pub(super) fn transport(station: &Station) -> Result<Channel, String> {
     let mut endpoint = Endpoint::from_shared(station.grpc_endpoint.clone())
         .map_err(|_| "invalid endpoint")?
         .connect_timeout(READ_TIMEOUT)

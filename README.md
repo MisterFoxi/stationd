@@ -229,6 +229,12 @@ problem, each on its field (`rule[3].start`).
 
 ### Live DJ
 
+DJs can prepare their stream from Webmin's **Go live** page: StationD validates
+received audio, provides a private monitor, then waits for an explicit takeover.
+`[live] manual_takeover = true` is the default; set it to `false` for the former
+automatic takeover on connection. Restart both StationD and Liquidsoap after
+upgrading. See [Webmin DJ](Doc/Webmin-DJ.md) for configuration and access rules.
+
 A DJ streams to a harbor input of Liquidsoap (`[live]`, port 8005, mount
 `/live` by default) with any Icecast source client (butt, Mixxx…).
 
@@ -246,8 +252,8 @@ A DJ streams to a harbor input of Liquidsoap (`[live]`, port 8005, mount
      live on air.
 
   Otherwise the login is refused.
-- **On air:** stationd decides every login; the live takes the air with a
-  short fade (`fade`, 1.5 s), above everything — hard overrides and hard
+- **On air:** stationd decides every login. Once the DJ explicitly takes the
+  air (or on connection in automatic mode), the live uses a short fade (`fade`, 1.5 s), above everything — hard overrides and hard
   `at_clock` marks are held and air soft after the live.
 - **Back to the programme:** when the DJ disconnects, or after
   `silence_timeout` seconds of silence (30 s). A new track is chosen at that
@@ -255,7 +261,7 @@ A DJ streams to a harbor input of Liquidsoap (`[live]`, port 8005, mount
   or by `stationctl live kick` — loses the way it came in: a slot or an
   opening until its end; the urgent right for `urgent_cooldown` seconds
   (600 s). Another way in stays open (e.g. an opening during a cooldown).
-- An opening or a slot only gates the connection: a DJ already on air stays
+- An opening or a slot gates connection and manual takeover: a DJ already on air stays
   on air past its end (`live kick` ends a live).
 - `stationctl live status` shows who is on air and how it got in, the last
   live, the openings, the DJs holding the urgent right and their cooldowns,

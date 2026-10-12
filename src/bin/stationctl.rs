@@ -2124,6 +2124,10 @@ fn print_live_status(s: &live::LiveStatus) {
         return;
     }
     println!("harbor:    port {} mount {} — silence cut after {} s", s.harbor_port, s.mount, s.silence_timeout_s);
+    println!("takeover:  {}", if s.manual_takeover { "manual (prepare and take from Webmin)" } else { "automatic" });
+    if let Some(dj) = &s.preparing {
+        println!("preparing: {} — connected {} (not on air)", dj.dj, ago(dj.since));
+    }
     if s.djs_error.is_empty() {
         println!("DJ file:   {} ({} DJ)", s.djs_path, s.djs_count);
     } else {

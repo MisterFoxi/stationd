@@ -14,6 +14,12 @@ syntax = "proto3";
 package webradio.live.v1;
 
 service LiveService {
+  // Private DJ workspace. Credentials are exchanged for a 12-hour token.
+  rpc DjLogin(DjLoginRequest) returns (DjLoginResponse);
+  rpc DjStatus(DjRequest) returns (DjState);
+  rpc DjTake(DjRequest) returns (DjState);
+  rpc DjStop(DjRequest) returns (DjState);
+  rpc DjPreview(DjRequest) returns (stream PreviewChunk);
   rpc GetStatus(GetStatusRequest) returns (LiveStatus);
 
   // Termine le live en cours : le DJ est déconnecté ; la voie par laquelle il
@@ -67,6 +73,8 @@ message Refused {
 }
 
 message LiveStatus {
+  LiveSession preparing = 20;
+  bool manual_takeover = 21;
   bool   enabled       = 1;   // false = pas de section [live]
   string djs_path      = 2;
   uint32 harbor_port   = 3;
@@ -120,4 +128,24 @@ message HashPasswordRequest {
 }
 message HashPasswordResponse {
   string hash = 1;
+}
+
+message DjLoginRequest { string dj = 1; string password = 2; }
+message DjLoginResponse { string token = 1; }
+message DjRequest { string token = 1; }
+message PreviewChunk { bytes audio = 1; }
+message DjState {
+  bool enabled = 1;
+  string dj = 2;
+  uint32 port = 3;
+  string mount = 4;
+  string state = 5; // waiting | checking | silent | unstable | ready | taking | on_air | busy
+  bool can_take = 6;
+  bool can_preview = 7;
+  double level_db = 8;
+  double peak_db = 9;
+  bool clipping = 10;
+  string other_dj = 11;
+  double buffer_seconds = 12;
+  bool manual_takeover = 13;
 }

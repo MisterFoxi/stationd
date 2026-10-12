@@ -26,3 +26,6 @@ body[data-page="network"] main{max-width:1400px}
 .network-table ul{margin:0;padding-left:18px;color:#f4c478;min-width:170px}
 .network-table li{margin:0 0 6px}
 .network-table li:last-child{margin-bottom:0}
+
+/* DJ workspace */
+.dj-actions{display:flex;gap:12px;flex-wrap:wrap;margin:18px 0}.dj-level{display:flex;align-items:center;gap:12px;flex-wrap:wrap}.dj-level meter{flex:1;min-width:120px;height:24px}.dj-level span{font-variant-numeric:tabular-nums}#signal-panel[data-signal="ready"]{border-color:#80d9a0}#signal-panel[data-signal="ready"] h2{color:#9fe0b1}#signal-panel[data-signal="on_air"]{border-color:#e68a82}#signal-panel[data-signal="on_air"] h2{color:#ffa89f}.dj-copy{padding:5px 9px;margin-left:10px;font-size:.85rem}#encoder-settings dd{overflow-wrap:anywhere}#preview-audio{width:100%}#take{background:#296345}#stop{background:#614040}[hidden]{display:none!important}

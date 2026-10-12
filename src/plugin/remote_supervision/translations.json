@@ -113,7 +113,7 @@
   },
   "← Retour à la station": {
     "en": "← Back to station",
-    "de": "← Zurück zur Station"
+    "de": "← Zurück zum Sender"
   },
   "Console de la station": {
     "en": "Station console",
@@ -605,5 +605,257 @@
   "Total partiel — audience indisponible pour {value} station(s).": {
     "en": "Partial total — audience unavailable for {value} station(s).",
     "de": "Teilsumme — Hörerzahl für {value} Station(en) nicht verfügbar."
+  },
+  "Passer en direct": {
+    "en": "Go live",
+    "de": "Live gehen"
+  },
+  "StationD — Passer en direct": {
+    "en": "StationD — Go live",
+    "de": "StationD — Live gehen"
+  },
+  "Connectez votre logiciel, vérifiez votre son, puis prenez l’antenne.": {
+    "en": "Connect your encoder, check your audio, then go live.",
+    "de": "Verbinden Sie Ihre Software, prüfen Sie den Ton und gehen Sie live."
+  },
+  "Votre accès DJ": {
+    "en": "Your DJ access",
+    "de": "Ihr DJ-Zugang"
+  },
+  "Utilisez les identifiants DJ de votre logiciel de diffusion.": {
+    "en": "Use the DJ credentials from your streaming software.",
+    "de": "Verwenden Sie die DJ-Zugangsdaten Ihrer Streamingsoftware."
+  },
+  "Identifiant DJ": {
+    "en": "DJ username",
+    "de": "DJ-Benutzername"
+  },
+  "Mot de passe DJ": {
+    "en": "DJ password",
+    "de": "DJ-Passwort"
+  },
+  "Préparer mon direct": {
+    "en": "Prepare my live show",
+    "de": "Livesendung vorbereiten"
+  },
+  "ÉTAT DU FLUX": {
+    "en": "STREAM STATUS",
+    "de": "STREAMSTATUS"
+  },
+  "En attente de votre flux": {
+    "en": "Waiting for your stream",
+    "de": "Warten auf Ihren Stream"
+  },
+  "Niveau reçu": {
+    "en": "Received level",
+    "de": "Empfangspegel"
+  },
+  "Le niveau est proche de la saturation. Baissez le gain dans votre logiciel.": {
+    "en": "The level is close to clipping. Lower the gain in your encoder.",
+    "de": "Der Pegel ist nahe an der Übersteuerung. Senken Sie die Verstärkung in Ihrer Software."
+  },
+  "Cette station est en mode automatique : la connexion de votre logiciel prend immédiatement l’antenne.": {
+    "en": "This station uses automatic takeover: connecting your encoder immediately puts you on air.",
+    "de": "Dieser Sender schaltet automatisch um: Sobald Ihre Software verbunden ist, sind Sie auf Sendung."
+  },
+  "Prendre l’antenne": {
+    "en": "Go on air",
+    "de": "Auf Sendung gehen"
+  },
+  "Déconnecter mon flux": {
+    "en": "Disconnect my stream",
+    "de": "Meinen Stream trennen"
+  },
+  "Écouter mon flux": {
+    "en": "Listen to my stream",
+    "de": "Meinen Stream anhören"
+  },
+  "Écoutez le son reçu par StationD pour ajuster votre diffusion.": {
+    "en": "Listen to the audio received by StationD to adjust your broadcast.",
+    "de": "Hören Sie den von StationD empfangenen Ton ab, um Ihre Übertragung einzustellen."
+  },
+  "Arrêter l’écoute": {
+    "en": "Stop listening",
+    "de": "Abhören beenden"
+  },
+  "Préécoute du flux DJ": {
+    "en": "DJ stream preview",
+    "de": "DJ-Stream-Vorschau"
+  },
+  "Utilisez un casque. Ne renvoyez pas cette écoute dans votre logiciel de diffusion.": {
+    "en": "Use headphones. Do not feed this monitor back into your encoder.",
+    "de": "Verwenden Sie Kopfhörer. Speisen Sie diesen Rückkanal nicht in Ihre Streamingsoftware ein."
+  },
+  "Connexion du logiciel": {
+    "en": "Encoder connection",
+    "de": "Softwareverbindung"
+  },
+  "Dans BUTT ou Mixxx, choisissez le protocole Icecast et saisissez ces paramètres.": {
+    "en": "In BUTT or Mixxx, select the Icecast protocol and enter these settings.",
+    "de": "Wählen Sie in BUTT oder Mixxx das Icecast-Protokoll und geben Sie diese Einstellungen ein."
+  },
+  "Le mot de passe est celui de votre accès DJ.": {
+    "en": "Use your DJ access password.",
+    "de": "Verwenden Sie Ihr DJ-Zugangspasswort."
+  },
+  "Avec un logiciel sans champ utilisateur, utilisez source comme utilisateur et identifiant,motdepasse comme mot de passe.": {
+    "en": "If your encoder has no username field, use source as username and username,password as password.",
+    "de": "Bei Software ohne Benutzerfeld verwenden Sie source als Benutzername und benutzername,passwort als Passwort."
+  },
+  "Demandez à l’administrateur l’adresse publique du serveur DJ.": {
+    "en": "Ask your administrator for the public DJ server address.",
+    "de": "Fragen Sie den Administrator nach der öffentlichen Adresse des DJ-Servers."
+  },
+  "Vérification du flux en cours": {
+    "en": "Checking your stream",
+    "de": "Stream wird geprüft"
+  },
+  "Aucun son détecté": {
+    "en": "No audio detected",
+    "de": "Kein Ton erkannt"
+  },
+  "Flux indisponible ou instable": {
+    "en": "Stream unavailable or unstable",
+    "de": "Stream nicht verfügbar oder instabil"
+  },
+  "Votre flux est bon, vous pouvez prendre l’antenne": {
+    "en": "Your stream is ready, you can go on air",
+    "de": "Ihr Stream ist bereit, Sie können auf Sendung gehen"
+  },
+  "Prise d’antenne en cours": {
+    "en": "Going on air",
+    "de": "Umschaltung läuft"
+  },
+  "Vous êtes à l’antenne": {
+    "en": "You are on air",
+    "de": "Sie sind auf Sendung"
+  },
+  "Un autre DJ est connecté": {
+    "en": "Another DJ is connected",
+    "de": "Ein anderer DJ ist verbunden"
+  },
+  "Votre créneau de connexion est terminé": {
+    "en": "Your connection window has ended",
+    "de": "Ihr Verbindungszeitfenster ist abgelaufen"
+  },
+  "Lancez la diffusion dans votre logiciel. La programmation continue pendant votre préparation.": {
+    "en": "Start streaming from your encoder. The programme continues while you prepare.",
+    "de": "Starten Sie die Übertragung in Ihrer Software. Das Programm läuft während Ihrer Vorbereitung weiter."
+  },
+  "StationD vérifie plusieurs secondes de son continu avant de vous donner le feu vert.": {
+    "en": "StationD checks several seconds of continuous audio before giving you the green light.",
+    "de": "StationD prüft mehrere Sekunden kontinuierlichen Tons, bevor die Freigabe erfolgt."
+  },
+  "Vérifiez le gain, la sortie audio et la musique dans votre logiciel.": {
+    "en": "Check the gain, audio output and music in your encoder.",
+    "de": "Prüfen Sie die Verstärkung, den Audioausgang und die Musik in Ihrer Software."
+  },
+  "Vérifiez la connexion et attendez que StationD reçoive du son décodable.": {
+    "en": "Check the connection and wait for StationD to receive decodable audio.",
+    "de": "Prüfen Sie die Verbindung und warten Sie, bis StationD dekodierbaren Ton empfängt."
+  },
+  "Vous pouvez écouter votre flux et ajuster votre son avant de prendre l’antenne.": {
+    "en": "You can listen to your stream and adjust your audio before going on air.",
+    "de": "Sie können Ihren Stream abhören und den Ton einstellen, bevor Sie auf Sendung gehen."
+  },
+  "Attendez la confirmation de StationD.": {
+    "en": "Wait for StationD to confirm.",
+    "de": "Warten Sie auf die Bestätigung von StationD."
+  },
+  "Votre flux est diffusé aux auditeurs. Déconnectez-le pour rendre l’antenne.": {
+    "en": "Your stream is broadcast to listeners. Disconnect it to hand back the air.",
+    "de": "Ihr Stream wird an die Hörer übertragen. Trennen Sie ihn, um die Sendung zurückzugeben."
+  },
+  "La prise d’antenne est indisponible tant que ce DJ est connecté.": {
+    "en": "You cannot take the air while this DJ is connected.",
+    "de": "Solange dieser DJ verbunden ist, können Sie nicht auf Sendung gehen."
+  },
+  "Contactez l’administrateur pour obtenir une nouvelle ouverture.": {
+    "en": "Contact the administrator to request a new connection window.",
+    "de": "Kontaktieren Sie den Administrator für ein neues Verbindungszeitfenster."
+  },
+  "Le retour est décalé : {seconds} s de tampon serveur, plus le délai du lecteur.": {
+    "en": "The monitor is delayed: {seconds} s of server buffering, plus player latency.",
+    "de": "Der Rückkanal ist verzögert: {seconds} s Serverpuffer plus Verzögerung des Players."
+  },
+  "Serveur": {
+    "en": "Server",
+    "de": "Server"
+  },
+  "Port": {
+    "en": "Port",
+    "de": "Port"
+  },
+  "Point de montage": {
+    "en": "Mount point",
+    "de": "Mountpunkt"
+  },
+  "Utilisateur": {
+    "en": "Username",
+    "de": "Benutzername"
+  },
+  "Adresse à confirmer": {
+    "en": "Address to confirm",
+    "de": "Adresse bestätigen lassen"
+  },
+  "Copier": {
+    "en": "Copy",
+    "de": "Kopieren"
+  },
+  "Copier {field}": {
+    "en": "Copy {field}",
+    "de": "{field} kopieren"
+  },
+  "Paramètre copié.": {
+    "en": "Setting copied.",
+    "de": "Einstellung kopiert."
+  },
+  "Sélectionnez le paramètre pour le copier.": {
+    "en": "Select the setting to copy it.",
+    "de": "Wählen Sie die Einstellung zum Kopieren aus."
+  },
+  "Identifiez-vous avec votre accès DJ.": {
+    "en": "Sign in with your DJ access.",
+    "de": "Melden Sie sich mit Ihrem DJ-Zugang an."
+  },
+  "Le flux ou le créneau n’est plus prêt. Vérifiez l’état avant de réessayer.": {
+    "en": "The stream or connection window is no longer ready. Check the status before retrying.",
+    "de": "Der Stream oder das Verbindungszeitfenster ist nicht mehr bereit. Prüfen Sie den Status vor einem erneuten Versuch."
+  },
+  "Station indisponible. Nouvelle vérification en cours…": {
+    "en": "Station unavailable. Checking again…",
+    "de": "Sender nicht verfügbar. Erneute Prüfung…"
+  },
+  "Déconnexion indisponible. Réessayez.": {
+    "en": "Sign out unavailable. Please retry.",
+    "de": "Abmelden nicht möglich. Versuchen Sie es erneut."
+  },
+  "Identifiants DJ refusés.": {
+    "en": "DJ credentials refused.",
+    "de": "DJ-Zugangsdaten abgelehnt."
+  },
+  "Trop de tentatives. Patientez avant de réessayer.": {
+    "en": "Too many attempts. Wait before retrying.",
+    "de": "Zu viele Versuche. Warten Sie vor einem erneuten Versuch."
+  },
+  "Station indisponible. Réessayez.": {
+    "en": "Station unavailable. Please retry.",
+    "de": "Sender nicht verfügbar. Versuchen Sie es erneut."
+  },
+  "Connexion à la préécoute…": {
+    "en": "Connecting to preview…",
+    "de": "Verbindung zur Vorschau…"
+  },
+  "Vous écoutez votre flux reçu par StationD.": {
+    "en": "You are listening to your stream as received by StationD.",
+    "de": "Sie hören Ihren Stream, wie er von StationD empfangen wird."
+  },
+  "Préécoute indisponible. Vérifiez le flux et réessayez.": {
+    "en": "Preview unavailable. Check the stream and retry.",
+    "de": "Vorschau nicht verfügbar. Prüfen Sie den Stream und versuchen Sie es erneut."
+  },
+  "Préécoute interrompue. Relancez l’écoute.": {
+    "en": "Preview interrupted. Restart listening.",
+    "de": "Vorschau unterbrochen. Starten Sie das Abhören erneut."
   }
 }

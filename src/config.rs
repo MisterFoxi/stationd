@@ -81,7 +81,13 @@ pub struct LiveConfig {
     /// that right. 0 = may come back at once.
     #[serde(default = "default_live_urgent_cooldown")]
     pub urgent_cooldown: u32,
+    /// Connect to a private preparation stage, then explicitly take the air.
+    /// Set false to retain the legacy automatic takeover.
+    #[serde(default = "default_manual_takeover")]
+    pub manual_takeover: bool,
 }
+
+fn default_manual_takeover() -> bool { true }
 
 fn default_live_port() -> u16 {
     8005
@@ -118,6 +124,9 @@ impl LiveConfig {
         }
         if icecast_ports.contains(&self.harbor_port) {
             return Err(format!("harbor_port {} is Icecast's port", self.harbor_port));
+        }
+        if self.mount == "/__stationd_preview" {
+            return Err("mount /__stationd_preview is reserved for private DJ monitoring".into());
         }
         let m = &self.mount;
         if !m.starts_with('/') || m.len() < 2 || !m[1..].bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b)) {

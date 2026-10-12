@@ -211,6 +211,7 @@ async fn main() -> anyhow::Result<()> {
         }
         stationd::live::LiveHub::new(live.djs_path.clone(), engine.clone(), db_pool.clone())
             .with_urgent_cooldown(live.urgent_cooldown)
+            .with_preparation(live.manual_takeover, live.silence_threshold)
     });
 
     // Liquidsoap wiring (optional `[liquidsoap]`): write the generated script
@@ -337,7 +338,8 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let live_service = match (&cfg.live, &live_hub) {
-        (Some(live), Some(hub)) => LiveGrpc::new(hub.clone(), live.clone(), cfg.liquidsoap.is_some()),
+        (Some(live), Some(hub)) => LiveGrpc::new(hub.clone(), live.clone(), cfg.liquidsoap.is_some())
+            .with_preview_secret(cfg.liquidsoap.as_ref().map(|ls| ls.api_token.clone()).unwrap_or_default()),
         _ => LiveGrpc::disabled(),
     };
 

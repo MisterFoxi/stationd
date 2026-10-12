@@ -759,23 +759,24 @@ fn render_live(live: &LiveConfig) -> String {
                add(normalize=false, [fade.in(duration={fade}, b), fade.out(duration={fade}, a)])\n\
              end\n\
              def stationd.to_live(a, b) =\n  \
-               thread.run(fast=false, {{stationd.report([], \"live\")}})\n  \
+               stationd.live_started()\n  \
                stationd.fade_switch(a, b)\n\
              end\n"
         )
     } else {
         "def stationd.fade_switch(_, b) = b end\n\
          def stationd.to_live(_, b) =\n  \
-           thread.run(fast=false, {stationd.report([], \"live\")})\n  \
+           stationd.live_started()\n  \
            b\n\
-         end\n"
-            .to_string()
+         end\n".to_string()
     };
+    let gate = if live.manual_takeover {
+        "live_gate = switch(track_sensitive=false, [({stationd.live_permission()}, live)])\n"
+    } else { "" };
     format!(
         r##"
 # ─── live DJ (harbor, [live]) ───────────────────────────────────────────
-# stationd decides every login (DJ file, grid slot); Liquidsoap only asks and
-# reports. The live lays over everything (hard inserts included).
+# Source login is separate from the actual transition to the public air.
 def stationd.live_auth(login) =
   j = json()
   j.add("user", login.user)
@@ -791,20 +792,26 @@ def stationd.live_auth(login) =
       false
     end
   else
-    # stationd unreachable: nobody gets in.
     false
   end
 end
 
-# A DJ is connected. Guards the disconnection hook: after a `stop()` (kick)
-# the harbor calls it again when its feeding thread ends (seen on 2.2.4) —
-# a second return would skip the return track.
 let stationd.live_on = ref(false)
+let stationd.live_selected = ref(false)
+let stationd.live_permission = ref(false)
 
 def stationd.live_connected(_) =
   stationd.live_on := true
-  log.important(label="stationd", "live: DJ connected")
+  stationd.live_permission := false
   thread.run(fast=false, {{ignore(stationd.post("live/connect", "{{}}"))}})
+end
+
+def stationd.live_started() =
+  stationd.live_selected := true
+  thread.run(fast=false, fun () -> begin
+    ignore(stationd.post("live/air", "{{}}"))
+    stationd.report([], "live")
+  end)
 end
 
 def stationd.live_return() =
@@ -815,16 +822,11 @@ def stationd.live_return() =
         try
           let json.parse ({{flush}} : {{flush: bool}}) = null.get(resp)
           flush
-        catch _ do
-          true
-        end
-      else
-        true
-      end
+        catch _ do true end
+      else true end
     pull_raw = stationd.raw_pull()
     if flush then stationd.discard_queue(pull_raw) end
     if not stationd.paused() then
-      # the frozen track (if any) goes without a crossfade
       if pull_raw.is_ready() then stationd.no_cross := true end
       if list.length(pull_raw.queue()) == 0 then
         stationd.urgent := true
@@ -836,14 +838,18 @@ def stationd.live_return() =
   end)
 end
 
-# The DJ left (or was disconnected): drop the track the live froze and ask
-# for a new one now, chosen at the return time (like a skip). The prepared
-# track is dropped too unless stationd says it is an override.
+# Preview-only disconnection leaves the programme and prepared track intact.
+# The guard also prevents duplicate disconnect callbacks after stop().
 def stationd.live_disconnected() =
   if stationd.live_on() then
     stationd.live_on := false
-    log.important(label="stationd", "live: DJ disconnected, back to the programme")
-    stationd.live_return()
+    stationd.live_permission := false
+    if stationd.live_selected() then
+      stationd.live_selected := false
+      stationd.live_return()
+    else
+      thread.run(fast=false, {{ignore(stationd.post("live/disconnect", "{{}}"))}})
+    end
   end
 end
 
@@ -857,25 +863,55 @@ live_raw = input.harbor(
   on_disconnect=stationd.live_disconnected,
   {mount}
 )
-# {silence_s} s of silence ends the live (stationd disconnects the DJ).
+live_rms = rms(live_raw)
+live_meter = peak(live_rms)
+let stationd.live_frame_at = ref(0.)
+live_meter.on_frame(synchronous=true, {{stationd.live_frame_at := time()}})
+
+# {silence_s} s of silence ends an on-air live, but allows quiet preparation.
 def stationd.live_silence() =
-  log.important(label="stationd", "live: silence")
   thread.run(fast=false, {{ignore(stationd.post("live/silence", "{{}}"))}})
 end
-live = blank.detect(id="stationd_live_blank", max_blank={silence}, threshold={threshold}, live_raw)
+live = blank.detect(id="stationd_live_blank", max_blank={silence}, threshold={threshold}, live_meter)
 live.on_blank(synchronous=true, stationd.live_silence)
 
-{transitions}radio = fallback(
+# Private monitor: same decoded audio, prior to public switching/processing.
+# The bridge secret never leaves the daemon. This is not an Icecast mount.
+def stationd.preview_auth(~address, user, password) =
+  (address == "127.0.0.1" or address == "::1") and user == "stationd" and password == stationd.api_token
+end
+output.harbor(
+  id="stationd_dj_preview", port={port}, mount="/__stationd_preview",
+  auth=stationd.preview_auth, fallible=true, burst=0, chunk=1024,
+  %ffmpeg(format="mp3", %audio(codec="libmp3lame", ac=2, ar=44100, b="128k")), live_meter
+)
+thread.run(fast=false, every=1., fun () -> begin
+  j = json()
+  j.add("ready", stationd.live_on() and live_meter.is_ready() and time() - stationd.live_frame_at() < 2.)
+  j.add("rms", live_rms.rms())
+  j.add("peak", live_meter.peak())
+  resp = stationd.post("live/health", json.stringify(compact=true, j))
+  if {manual} then
+    if null.defined(resp) then
+      try
+        let json.parse ({{on_air}} : {{on_air: bool}}) = null.get(resp)
+        stationd.live_permission := on_air
+      catch _ do stationd.live_permission := false end
+    else stationd.live_permission := false end
+  end
+end)
+
+{transitions}{gate}radio = fallback(
   id="stationd_live_air",
   track_sensitive=false,
   transition_length={fade_len},
   transitions=[stationd.to_live, stationd.fade_switch],
-  [live, radio]
+  [{live_source}, radio]
 )
 
 def stationd.cmd_live_kick(_) =
+  stationd.live_permission := false
   live_raw.stop()
-  log.important(label="stationd", "live: DJ disconnected by stationd")
   "OK"
 end
 server.register(namespace="stationd", usage="live_kick", description="Disconnect the live DJ.", "live_kick", stationd.cmd_live_kick)
@@ -888,6 +924,8 @@ server.register(namespace="stationd", usage="live_kick", description="Disconnect
         silence_s = live.silence_timeout,
         threshold = liq_float(live.silence_threshold),
         fade_len = liq_float(live.fade.max(0.1)),
+        manual = if live.manual_takeover { "true" } else { "false" },
+        live_source = if live.manual_takeover { "live_gate" } else { "live" },
     )
 }
 
@@ -1124,6 +1162,7 @@ mod tests {
     fn live_cfg() -> LiveConfig {
         LiveConfig {
             djs_path: PathBuf::from("/srv/djs.toml"),
+            manual_takeover: false,
             harbor_port: 8005,
             mount: "/live".into(),
             fade: 1.5,
@@ -1147,7 +1186,7 @@ mod tests {
         assert!(s.contains("on_disconnect=stationd.live_disconnected"));
         assert!(s.contains("port=8005,") && s.contains("buffer=5.,") && s.contains("  \"live\"\n)"));
         // silence reported after the configured time
-        assert!(s.contains("blank.detect(id=\"stationd_live_blank\", max_blank=30., threshold=-40., live_raw)"));
+        assert!(s.contains("blank.detect(id=\"stationd_live_blank\", max_blank=30., threshold=-40., live_meter)"));
         assert!(s.contains("live.on_blank(synchronous=true, stationd.live_silence)"));
         // above the hard cut, before the outputs, with a short fade
         let live_air = s.find("id=\"stationd_live_air\"").unwrap();
@@ -1182,6 +1221,36 @@ mod tests {
         hard.fade = 0.0;
         let h = render(&cfg(), Some(&hard), "R");
         assert!(h.contains("def stationd.fade_switch(_, b) = b end") && !h.contains("fade.in("));
+    }
+
+    #[test]
+    #[ignore = "requires Liquidsoap installed"]
+    fn dj_preparation_script_in_liquidsoap() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("dj.liq");
+        for manual in [true, false] {
+            let mut live = live_cfg(); live.manual_takeover = manual;
+            std::fs::write(&file, render(&cfg(), Some(&live), "Radio")).unwrap();
+            let check = std::process::Command::new("liquidsoap").arg("--check").arg(&file).output().unwrap();
+            assert!(check.status.success(), "{}\n{}", String::from_utf8_lossy(&check.stdout), String::from_utf8_lossy(&check.stderr));
+        }
+    }
+    // Test fixture generator for tests/liquidsoap_dj_preview.py. Uses the real
+    // generator, with private ports and WAV capture in a temporary directory.
+    #[test]
+    #[ignore = "used by isolated DJ audio integration test"]
+    fn dj_audio_fixture() {
+        let dir = std::env::var("STATIOND_DJ_TEST_DIR").unwrap();
+        let mut cfg = cfg();
+        cfg.http_bind = std::env::var("STATIOND_DJ_BRIDGE").unwrap();
+        cfg.control_socket = PathBuf::from(format!("{dir}/control.sock"));
+        cfg.fallback_path = PathBuf::from(format!("{dir}/programme.wav"));
+        cfg.halted_path = cfg.fallback_path.clone();
+        cfg.outputs.clear(); cfg.crossfade.duration = 0.;
+        let mut live = live_cfg(); live.manual_takeover = true; live.fade = 0.; live.buffer = 0.5;
+        live.harbor_port = std::env::var("STATIOND_DJ_PORT").unwrap().parse().unwrap();
+        let script = format!("{}\noutput.file(%wav, {}, radio)\n", render(&cfg, Some(&live), "Radio"), liq_string(&format!("{dir}/air.wav")));
+        std::fs::write(format!("{dir}/radio.liq"), script).unwrap();
     }
 
     fn metadata_cfg() -> LiquidsoapConfig {

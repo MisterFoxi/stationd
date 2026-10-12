@@ -20,7 +20,9 @@
 //!   cannot set a user name connects as `source` with `dj,password` as the
 //!   password (not `dj:password`: Liquidsoap's harbor cuts a password at its
 //!   first `:` — seen on 2.2.4 — so a password never contains `:` nor `,`).
-//! - **connected** — the harbor took the stream: the live starts
+//! - **connected** — the harbor took the stream. With manual preparation,
+//!   audio is checked and privately monitored until an explicit DJ takeover.
+//!   In legacy automatic mode, the live starts
 //!   (`LiveStarted`, `StationControl::set_live` — no hard cut while a DJ holds
 //!   the air).
 //! - **silence** — `[live] silence_timeout` seconds of silence: the live ends
@@ -35,7 +37,8 @@
 //! argon2 hashes (PHC strings, `stationctl dj hash`), never a password.
 //!
 //! Session state is in memory: after a stationd restart a DJ still connected
-//! stays on air (Liquidsoap keeps it) but is unknown here until it leaves.
+//! in automatic mode stays on air but is unknown here until it leaves. In
+//! manual mode the gate closes; the DJ must reconnect to establish a session.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -264,6 +267,7 @@ impl AuthOutcome {
 #[derive(Debug, Clone, Default)]
 pub struct LiveStatus {
     pub on_air: Option<LiveSession>,
+    pub preparing: Option<LiveSession>,
     pub last: Option<EndedLive>,
     /// (dj, window occurrence) refused for the rest of that window.
     pub refused: Vec<(String, String)>,
@@ -280,6 +284,10 @@ struct State {
     /// Accepted by `auth`, waiting for the harbor's connection hook.
     pending: Option<LiveSession>,
     session: Option<LiveSession>,
+    air_requested: bool,
+    aired: bool,
+    health: InputHealth,
+    tickets: HashMap<String, DjTicket>,
     /// Set by `silence` / `kick`: the reason the coming disconnection gets.
     ending: Option<EndReason>,
     banned: VecDeque<(String, String)>,
@@ -289,10 +297,26 @@ struct State {
     last_refusal: Option<(String, String, Epoch)>,
 }
 
+#[derive(Debug, Clone, Default)]
+struct InputHealth {
+    observed: Option<Epoch>,
+    good_since: Option<Epoch>,
+    ready: bool,
+    seen_audio: bool,
+    level_db: f64,
+    peak_db: f64,
+}
+#[derive(Debug, Clone)]
+struct DjTicket { dj: String, password_hash: String, expires: Epoch }
+
 #[derive(Debug, thiserror::Error)]
 pub enum LiveError {
     #[error("no DJ on air")]
     NoLive,
+    #[error("DJ authentication required")]
+    Authentication,
+    #[error("the DJ stream is not ready or the connection window is closed")]
+    NotReady,
     #[error("{0}")]
     BadDuration(String),
     #[error("unknown DJ {0:?} (not in the DJ file)")]
@@ -317,6 +341,8 @@ pub struct LiveHub {
     pool: SqlitePool,
     /// `[live] urgent_cooldown`, seconds.
     urgent_cooldown: i64,
+    manual_takeover: bool,
+    silence_threshold: f64,
     inner: Arc<Mutex<State>>,
 }
 
@@ -327,6 +353,8 @@ impl LiveHub {
             engine,
             pool,
             urgent_cooldown: DEFAULT_URGENT_COOLDOWN_S as i64,
+            manual_takeover: false,
+            silence_threshold: -40.,
             inner: Arc::new(Mutex::new(State::default())),
         }
     }
@@ -334,6 +362,12 @@ impl LiveHub {
     /// `[live] urgent_cooldown` (seconds).
     pub fn with_urgent_cooldown(mut self, secs: u32) -> Self {
         self.urgent_cooldown = secs as i64;
+        self
+    }
+
+    pub fn with_preparation(mut self, manual: bool, threshold: f64) -> Self {
+        self.manual_takeover = manual;
+        self.silence_threshold = threshold;
         self
     }
 
@@ -459,7 +493,11 @@ impl LiveHub {
         address: &str,
         now: Epoch,
     ) -> AuthOutcome {
-        self.lock().pending = Some(LiveSession {
+        let mut st = self.lock();
+        if st.session.is_some() || st.pending.as_ref().is_some_and(|p| now.0 - p.since.0 <= PENDING_TTL_S) {
+            return AuthOutcome::Refused("another DJ is already connected or connecting".into());
+        }
+        st.pending = Some(LiveSession {
             dj: dj.to_string(),
             access,
             rule_id: rule_id.clone(),
@@ -492,8 +530,18 @@ impl LiveHub {
             };
             st.session = Some(session.clone());
             st.ending = None;
+            st.health = InputHealth::default();
+            st.air_requested = !self.manual_takeover;
+            st.aired = !self.manual_takeover;
             session
         };
+        if self.manual_takeover {
+            tracing::info!(dj = %session.dj, "live: DJ preparing, programme continues");
+            if session.access == Access::Unknown {
+                self.engine.control().send_air(AirEvent::LiveKick);
+            }
+            return;
+        }
         tracing::info!(
             dj = %session.dj,
             access = session.access.as_str(),
@@ -517,7 +565,11 @@ impl LiveHub {
         let ended = {
             let mut st = self.lock();
             let reason = st.ending.take().unwrap_or(EndReason::Disconnected);
-            let ended = st.session.take().map(|session| EndedLive { session, reason, at: now });
+            let was_aired = st.aired;
+            st.air_requested = false;
+            st.aired = false;
+            st.health = InputHealth::default();
+            let ended = st.session.take().filter(|_| was_aired).map(|session| EndedLive { session, reason, at: now });
             if let Some(e) = &ended {
                 st.last = Some(e.clone());
             }
@@ -541,6 +593,7 @@ impl LiveHub {
 
     /// `[live] silence_timeout` of silence on the live input: end it.
     pub async fn silence(&self) {
+        if self.manual_takeover && !self.lock().aired { return; }
         match self.end(EndReason::Silence).await {
             Ok(dj) => tracing::warn!(%dj, "live: silence, DJ disconnected and refused until the end of its way in"),
             Err(_) => tracing::info!("live: silence reported with no live on air, ignored"),
@@ -582,6 +635,150 @@ impl LiveHub {
         }
         self.engine.control().send_air(AirEvent::LiveKick);
         Ok(dj)
+    }
+
+    /// Receive measurements of decoded audio, not merely a source login.
+    /// A gap or missing/silent audio resets the three-second readiness window.
+    pub fn input_health(&self, ready: bool, rms: f64, peak: f64) -> bool {
+        let now = self.now();
+        let mut st = self.lock();
+        if st.session.is_none() || st.ending.is_some() { return false; }
+        let level = if rms.is_finite() && rms > 0. { (20. * rms.log10()).max(-90.) } else { -90. };
+        let peak_db = if peak.is_finite() && peak > 0. { (20. * peak.log10()).max(-90.) } else { -90. };
+        let continuous = st.health.observed.is_some_and(|at| now.0 - at.0 <= 3);
+        if !ready || level < self.silence_threshold || !continuous {
+            st.health.good_since = None;
+        }
+        if ready && level >= self.silence_threshold && st.health.good_since.is_none() {
+            st.health.good_since = Some(now);
+        }
+        st.health.observed = Some(now);
+        st.health.ready = ready;
+        st.health.seen_audio |= ready;
+        st.health.level_db = level;
+        st.health.peak_db = peak_db;
+        st.air_requested
+    }
+
+    /// Called only by the actual Liquidsoap transition to the DJ source.
+    pub fn aired(&self) {
+        let now = self.now();
+        let session = {
+            let mut st = self.lock();
+            if !st.air_requested || st.aired || st.ending.is_some() { return; }
+            let Some(session) = st.session.clone() else { return; };
+            st.aired = true;
+            session
+        };
+        let control = self.engine.control();
+        control.set_live(Some(session.dj.clone()));
+        control.emit_event(PluginEvent::LiveStarted { dj: session.dj, rule_id: session.rule_id, at: now.0 });
+    }
+
+    pub async fn dj_login(&self, dj: &str, password: String) -> Result<String, LiveError> {
+        use base64::Engine;
+        use rand::RngCore;
+        if dj.len() > 128 || password.len() > 256 { return Err(LiveError::Authentication); }
+        let entry = self.load().await.map_err(LiveError::DjFile)?.into_iter()
+            .find(|d| d.id == dj && d.enabled).ok_or(LiveError::Authentication)?;
+        let hash = entry.password_hash.clone();
+        if !tokio::task::spawn_blocking(move || verify_password(&hash, &password)).await.unwrap_or(false) {
+            return Err(LiveError::Authentication);
+        }
+        let now = self.now();
+        let mut st = self.lock();
+        st.tickets.retain(|_, ticket| ticket.expires.0 > now.0);
+        if st.tickets.len() >= 256 { return Err(LiveError::NotReady); }
+        let mut bytes = [0; 32];
+        rand::rngs::OsRng.fill_bytes(&mut bytes);
+        let token = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+        st.tickets.insert(token.clone(), DjTicket { dj: dj.into(), password_hash: entry.password_hash, expires: Epoch(now.0 + 43200) });
+        Ok(token)
+    }
+
+    pub async fn dj_identity(&self, token: &str) -> Result<String, LiveError> {
+        let ticket = self.lock().tickets.get(token).cloned().ok_or(LiveError::Authentication)?;
+        if ticket.expires.0 <= self.now().0 { return Err(LiveError::Authentication); }
+        if !self.load().await.map_err(LiveError::DjFile)?.iter().any(|d| d.id == ticket.dj && d.enabled && d.password_hash == ticket.password_hash) {
+            self.lock().tickets.remove(token);
+            return Err(LiveError::Authentication);
+        }
+        Ok(ticket.dj)
+    }
+
+    fn input_ready(st: &State, now: Epoch) -> bool {
+        st.health.ready && st.health.observed.is_some_and(|at| now.0 - at.0 <= 3)
+            && st.health.good_since.is_some_and(|at| now.0 - at.0 >= 3)
+    }
+
+    async fn access_valid(&self, session: &LiveSession) -> bool {
+        let now = self.now();
+        match session.access {
+            Access::Slot => self.engine.live_window(&session.dj, now).await.ok().flatten()
+                .is_some_and(|w| w.occurrence == session.occurrence && !self.lock().banned.contains(&(session.dj.clone(), w.occurrence))),
+            Access::Opening(id) => live_opening::active(&self.pool, &session.dj, now).await.ok().flatten()
+                .is_some_and(|o| o.id == id && !o.cut),
+            Access::Urgent => self.load().await.ok().is_some_and(|djs| djs.iter().any(|d| d.id == session.dj && d.enabled && d.urgent))
+                && !self.lock().urgent_cut.get(&session.dj).is_some_and(|at| now.0 - at.0 < self.urgent_cooldown),
+            Access::Unknown => false,
+        }
+    }
+
+    pub async fn dj_state(&self, dj: &str) -> crate::proto::live::DjState {
+        let now = self.now();
+        let own = self.lock().session.clone().filter(|s| s.dj == dj);
+        let access = match &own { Some(s) => self.access_valid(s).await, None => false };
+        let st = self.lock();
+        let own = st.session.as_ref().is_some_and(|s| s.dj == dj);
+        let fresh = st.health.observed.is_some_and(|at| now.0 - at.0 <= 3);
+        let ready = own && Self::input_ready(&st, now) && access && st.ending.is_none();
+        let state = if !own {
+            if st.session.is_some() { "busy" } else { "waiting" }
+        } else if st.aired {
+            if fresh && st.health.ready { "on_air" } else { "unstable" }
+        }
+        else if st.air_requested { "taking" }
+        else if !fresh || !st.health.ready {
+            if !st.health.seen_audio && st.session.as_ref().is_some_and(|s| now.0 - s.since.0 < 45) { "checking" } else { "unstable" }
+        }
+        else if st.health.level_db < self.silence_threshold { "silent" }
+        else if !access { "closed" }
+        else if ready { "ready" } else { "checking" };
+        crate::proto::live::DjState {
+            dj: dj.into(), state: state.into(), can_take: ready && !st.air_requested && self.manual_takeover,
+            can_preview: own && fresh && st.health.ready && st.ending.is_none(),
+            level_db: if own && fresh { st.health.level_db } else { -90. },
+            peak_db: if own && fresh { st.health.peak_db } else { -90. },
+            clipping: own && fresh && st.health.peak_db >= -0.2,
+            other_dj: st.session.as_ref().filter(|s| s.dj != dj).map(|s| s.dj.clone()).unwrap_or_default(),
+            ..Default::default()
+        }
+    }
+
+    pub async fn dj_take(&self, dj: &str) -> Result<(), LiveError> {
+        let session = self.lock().session.clone().filter(|s| s.dj == dj).ok_or(LiveError::NoLive)?;
+        if !self.access_valid(&session).await { return Err(LiveError::NotReady); }
+        let mut st = self.lock();
+        if !st.session.as_ref().is_some_and(|s| s == &session) || st.ending.is_some() || !Self::input_ready(&st, self.now()) {
+            return Err(LiveError::NotReady);
+        }
+        st.air_requested = true;
+        Ok(())
+    }
+
+    /// Voluntary end does not ban the DJ from reconnecting.
+    pub fn dj_stop(&self, dj: &str) -> Result<(), LiveError> {
+        let mut st = self.lock();
+        if !st.session.as_ref().is_some_and(|s| s.dj == dj) { return Err(LiveError::NoLive); }
+        st.ending = Some(EndReason::Disconnected);
+        st.air_requested = false;
+        self.engine.control().send_air(AirEvent::LiveKick);
+        Ok(())
+    }
+
+    pub fn preview_allowed(&self, dj: &str) -> bool {
+        let st = self.lock();
+        st.session.as_ref().is_some_and(|s| s.dj == dj) && st.ending.is_none()
     }
 
     /// `stationctl live open <dj> --for <duration>`: let the DJ connect from
@@ -632,7 +829,8 @@ impl LiveHub {
             .collect();
         cooldowns.sort();
         LiveStatus {
-            on_air: st.session.clone(),
+            on_air: st.session.clone().filter(|_| st.aired),
+            preparing: st.session.clone().filter(|_| !st.aired),
             last: st.last.clone(),
             refused: st.banned.iter().cloned().collect(),
             cooldowns,
@@ -720,6 +918,107 @@ mod tests {
             // 2026-09-25 (a Friday), UTC
             self.engine.set_clock(Some(Epoch(1_790_294_400 + h * 3600 + m * 60)));
         }
+    }
+
+    fn advance(hub: &LiveHub, base: Epoch, secs: i64) {
+        hub.engine.set_clock(Some(Epoch(base.0 + secs)));
+    }
+    #[tokio::test]
+    async fn preparing_requires_fresh_decoded_sound_and_explicit_takeover() {
+        let (_dir, hub, mut rx) = hub(true).await;
+        let hub = hub.with_preparation(true, -40.);
+        hub.at(20, 30);
+        let base = hub.now();
+        assert!(hub.auth("marc", "s3cret", "x").await.allowed());
+        hub.connected();
+        assert!(hub.status().on_air.is_none());
+        assert!(hub.status().preparing.is_some());
+        assert!(hub.engine.control().live_dj().is_none());
+        assert!(hub.dj_take("marc").await.is_err());
+        hub.input_health(true, 0., 0.);
+        assert_eq!(hub.dj_state("marc").await.state, "silent");
+        hub.silence().await;
+        assert!(rx.try_recv().is_err(), "quiet preparation must not kick/ban");
+        for sec in 1..=4 { advance(&hub, base, sec); assert!(!hub.input_health(true, 0.1, 0.3)); }
+        let state = hub.dj_state("marc").await;
+        assert_eq!(state.state, "ready");
+        assert!(state.can_take && state.can_preview);
+        assert!(hub.dj_take("someone-else").await.is_err());
+        hub.dj_take("marc").await.unwrap();
+        assert_eq!(hub.dj_state("marc").await.state, "taking");
+        assert!(hub.status().on_air.is_none(), "requested takeover is not actual air");
+        assert!(hub.input_health(true, 0.1, 0.3));
+        hub.aired();
+        assert_eq!(hub.dj_state("marc").await.state, "on_air");
+        assert_eq!(hub.engine.control().live_dj().as_deref(), Some("marc"));
+        assert!(hub.status().preparing.is_none());
+        assert!(hub.dj_stop("someone-else").is_err());
+        hub.dj_stop("marc").unwrap();
+        assert_eq!(rx.try_recv().unwrap(), AirEvent::LiveKick);
+        hub.disconnected();
+        assert!(hub.engine.control().live_dj().is_none());
+        assert!(hub.status().refused.is_empty(), "voluntary end must allow reconnection");
+        assert!(hub.auth("marc", "s3cret", "x").await.allowed());
+    }
+    #[tokio::test]
+    async fn readiness_resets_on_silence_missing_frames_and_stale_measurements() {
+        let (_dir, hub, _rx) = hub(true).await;
+        let hub = hub.with_preparation(true, -40.);
+        hub.at(20, 30); let base = hub.now();
+        assert!(hub.auth("marc", "s3cret", "x").await.allowed()); hub.connected();
+        for sec in 0..=3 { advance(&hub, base, sec); hub.input_health(true, 0.1, 0.999); }
+        assert!(hub.dj_state("marc").await.can_take);
+        assert!(hub.dj_state("marc").await.clipping);
+        advance(&hub, base, 7);
+        assert!(!hub.dj_state("marc").await.can_take);
+        assert!(!hub.dj_state("marc").await.can_preview);
+        assert!(hub.dj_take("marc").await.is_err());
+        hub.input_health(false, 0.1, 0.3);
+        assert_eq!(hub.dj_state("marc").await.state, "unstable");
+        for sec in 8..=11 { advance(&hub, base, sec); hub.input_health(true, 0.1, 0.3); }
+        assert!(hub.dj_state("marc").await.can_take);
+        hub.input_health(true, f64::NAN, f64::INFINITY);
+        assert_eq!(hub.dj_state("marc").await.state, "silent");
+        assert!(!hub.dj_state("marc").await.can_take);
+    }
+    #[tokio::test]
+    async fn preparation_does_not_extend_the_connection_window() {
+        let (_dir, hub, _rx) = hub(true).await;
+        let hub = hub.with_preparation(true, -40.);
+        hub.at(22, 59);
+        assert!(hub.auth("marc", "s3cret", "x").await.allowed()); hub.connected();
+        hub.at(23, 0); let base = hub.now();
+        for sec in 0..=3 { advance(&hub, base, sec); hub.input_health(true, 0.1, 0.3); }
+        assert_eq!(hub.dj_state("marc").await.state, "closed");
+        assert!(!hub.dj_state("marc").await.can_take);
+        assert!(hub.dj_take("marc").await.is_err());
+        assert!(hub.disconnected().is_none(), "preview-only departure is not a LiveEnded event");
+        assert!(hub.status().last.is_none());
+    }
+    #[tokio::test]
+    async fn dj_tickets_expire_and_password_changes_revoke_them() {
+        let (_dir, hub, _rx) = hub(true).await;
+        hub.at(20, 0);
+        assert!(hub.dj_login("marc", "wrong".into()).await.is_err());
+        let token = hub.dj_login("marc", "s3cret".into()).await.unwrap();
+        assert_eq!(hub.dj_identity(&token).await.unwrap(), "marc");
+        let base = hub.now(); advance(&hub, base, 43201);
+        assert!(hub.dj_identity(&token).await.is_err());
+        hub.at(20, 0);
+        let token = hub.dj_login("marc", "s3cret".into()).await.unwrap();
+        let text = std::fs::read_to_string(hub.djs_path()).unwrap();
+        let old = load_djs(hub.djs_path()).unwrap()[0].password_hash.clone();
+        std::fs::write(hub.djs_path(), text.replace(&old, &hash_password("new-password").unwrap())).unwrap();
+        assert!(hub.dj_identity(&token).await.is_err());
+    }
+    #[tokio::test]
+    async fn a_pending_source_login_cannot_be_replaced() {
+        let (_dir, hub, _rx) = hub(true).await;
+        hub.at(20, 30);
+        assert!(hub.auth("marc", "s3cret", "first").await.allowed());
+        assert!(!hub.auth("marc", "s3cret", "second").await.allowed());
+        hub.connected();
+        assert_eq!(hub.status().on_air.unwrap().address, "first");
     }
 
     #[test]

@@ -30,6 +30,7 @@ pub(super) struct Web {
     pub(super) auth: Arc<Mutex<Auth>>,
     pub(super) live: Live,
     pub(super) console: Console,
+    pub(super) dj: super::dj::Djs,
     streams: Arc<Semaphore>,
     jobs: Arc<Semaphore>,
     pub(super) origin: String,
@@ -42,6 +43,7 @@ impl Web {
     pub(super) fn new(auth: Arc<Mutex<Auth>>, config: &Config) -> Self {
         Self {
             console: Console::new(auth.clone(), config),
+            dj: super::dj::Djs::new(config),
             auth,
             live: Live::new(config),
             streams: Arc::new(Semaphore::new(config.max_event_streams)),
@@ -124,6 +126,7 @@ pub(super) fn routes(web: Web) -> Router {
             }),
         )
         .merge(super::console::routes())
+        .merge(super::dj::routes())
         .route("/auth/enroll/start", post(enroll_start))
         .route("/auth/enroll/finish", post(enroll_finish))
         .route("/auth/login/start", post(login_start))

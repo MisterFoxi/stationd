@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="fr"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>StationD — Passer en direct</title><link rel="stylesheet" href="/remote.css">
+<script src="/i18n.js" defer></script><script src="/dj.js" defer></script>
+<body data-station-id="{{STATION_ID}}"><main>
+<a href="/station/{{STATION_ID}}">← Retour à la station</a>
+<header><div><p class="muted" id="station-label">StationD</p><h1>Passer en direct</h1></div><button id="logout">Se déconnecter</button></header>
+<p id="account"></p><p class="muted">Connectez votre logiciel, vérifiez votre son, puis prenez l’antenne.</p>
+<section class="panel" id="dj-login"><h2>Votre accès DJ</h2><p>Utilisez les identifiants DJ de votre logiciel de diffusion.</p>
+<form id="login-form"><label for="dj-name">Identifiant DJ</label><input id="dj-name" name="dj" autocomplete="username" maxlength="128" required>
+<label for="dj-password">Mot de passe DJ</label><input id="dj-password" name="password" type="password" autocomplete="current-password" maxlength="256" required>
+<button id="login-button" type="submit">Préparer mon direct</button></form></section>
+<div id="workspace" hidden><section class="panel" id="signal-panel">
+<p class="muted">ÉTAT DU FLUX</p><h2 id="signal-state" role="status" aria-live="polite">En attente de votre flux</h2><p id="signal-help"></p>
+<div class="dj-level"><label for="level">Niveau reçu</label><meter id="level" min="-90" max="0" low="-40" high="-3" optimum="-12" value="-90"></meter><span id="level-text">— dBFS</span></div>
+<p id="clipping" class="warning" hidden>Le niveau est proche de la saturation. Baissez le gain dans votre logiciel.</p>
+<p id="legacy" class="warning" hidden>Cette station est en mode automatique : la connexion de votre logiciel prend immédiatement l’antenne.</p>
+<div class="dj-actions"><button id="take" disabled>Prendre l’antenne</button><button id="stop" disabled>Déconnecter mon flux</button></div></section>
+<div class="detail-grid"><section class="panel"><h2>Écouter mon flux</h2>
+<p>Écoutez le son reçu par StationD pour ajuster votre diffusion.</p>
+<div class="dj-actions"><button id="preview" disabled>Écouter mon flux</button><button id="preview-stop" disabled>Arrêter l’écoute</button></div>
+<audio id="preview-audio" controls preload="none" hidden aria-label="Préécoute du flux DJ"></audio>
+<p id="preview-status" role="status"></p><p class="muted" id="delay"></p>
+<p class="muted">Utilisez un casque. Ne renvoyez pas cette écoute dans votre logiciel de diffusion.</p></section>
+<section class="panel"><h2>Connexion du logiciel</h2><p>Dans BUTT ou Mixxx, choisissez le protocole Icecast et saisissez ces paramètres.</p>
+<dl id="encoder-settings"></dl><p class="muted">Le mot de passe est celui de votre accès DJ.</p>
+<p class="muted">Avec un logiciel sans champ utilisateur, utilisez source comme utilisateur et identifiant,motdepasse comme mot de passe.</p>
+<p id="host-help" class="warning" hidden>Demandez à l’administrateur l’adresse publique du serveur DJ.</p></section></div></div>
+<p id="message" role="status" aria-live="polite"></p></main></body></html>
