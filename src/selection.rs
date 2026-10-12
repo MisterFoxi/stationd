@@ -3446,8 +3446,13 @@ mod tests {
         // The played file, its `_1` version (same title tag) and the EpicBallad
         // copy (same file name) are all the same song: only b.mp3 is left.
         assert_eq!(resolve_ref_at(&pool, now, "rot").await.unwrap(), "Other/b.mp3");
-        // The remaining three copies stay in this cycle, but the title
-        // constraint bars them. Do not replay b to restart an incomplete bag.
+        // The three copies remain barred, but b is still eligible: renew the
+        // cycle and keep playing b rather than reporting a falsely empty pool.
+        assert_eq!(resolve_ref_at(&pool, now, "rot").await.unwrap(), "Other/b.mp3");
+        // Once b really plays, the title constraint bars every candidate.
+        // Renewal must not override that constraint.
+        crate::broadcast_log::record(&pool, "Other/b.mp3", None, crate::resolver::Epoch(now), Default::default())
+            .await.unwrap();
         assert!(matches!(resolve_ref_at(&pool, now, "rot").await, Err(SelectionError::PoolEmpty)));
         let later = now + 3600;
         let mut seen = std::collections::HashSet::new();

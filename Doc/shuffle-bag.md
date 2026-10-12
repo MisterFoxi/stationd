@@ -34,11 +34,14 @@ GROUP BY media_uuid;
 
 La sélection teste seulement l'existence d'un passage réel, avec l'index
 partiel `broadcast_log_aired_uuid`, sans recalculer tous les compteurs.
-Un membre momentanément interdit reste en attente. Si tous les membres
-restants sont interdits, la source est vide et le moteur utilise ses règles
-de repli habituelles ; il ne redémarre pas le cycle pour contourner les
-contraintes. Le cycle suivant commence uniquement quand tous les membres
-actuellement présents ont été réservés.
+Un membre momentanément interdit reste en attente tant qu’un autre membre
+restant est autorisé. Si aucun membre restant n’est autorisé mais que des titres
+déjà utilisés redeviennent admissibles, le sac commence un nouveau cycle : seuls
+les candidats autorisés par les plugins et les contraintes peuvent être choisis.
+Les fenêtres de répétition restent strictes. Si aucun média n’est autorisé, la
+source reste vide et le moteur utilise ses règles de repli. Une impossibilité
+liée au budget de durée ne renouvelle pas le sac ; la transaction et le RNG
+sont annulés pour permettre le repli de continuité existant.
 
 ## Pool dynamique
 
@@ -68,7 +71,17 @@ lors d'un flush à `/ls/v1/discard` : elles reviennent dans le sac. Le média
 courant n'appartient pas à cette file et ne peut pas être restitué ainsi.
 Les fichiers disparus avant la validation sont également restitués.
 Les annotations des demandes conservent leur log ID après redémarrage de
-StationD ; les réservations ne sont donc pas annulées au démarrage.
+StationD ; elles survivent donc au redémarrage du daemon seul.
+
+Un redémarrage complet de Liquidsoap perd en revanche sa file. Avant son
+premier pull, le nouveau processus annonce son identifiant d’instance et son
+instant de lancement au pont authentifié `/ls/v1/restart`. La migration 0039
+conserve la dernière instance et la date réelle des réservations. Les anciennes
+réservations jamais diffusées sont restituées, y compris celles restées sans
+journal ; les réservations récentes ou déjà diffusées sont conservées. Répéter
+la même annonce ne restitue rien de nouveau, même après un redémarrage du
+daemon. Une réservation abandonnée et jamais diffusée ne bloque plus les
+fenêtres anti-répétition ; son journal reste conservé pour les statistiques.
 
 La simulation copie les trois tables et les compteurs RNG, utilise le même
 algorithme et confirme ses démarrages dans sa copie. Le titre déjà préparé

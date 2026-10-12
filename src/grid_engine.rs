@@ -1969,6 +1969,11 @@ impl GridEngine {
         })
     }
 
+    /// Recover requests lost by a full Liquidsoap process restart.
+    pub async fn recover_liquidsoap_start(&self, instance: &str, started_at: i64) -> Result<u64, EngineError> {
+        Ok(crate::shuffle_bag::recover_liquidsoap_start(&self.pool, instance, started_at).await?)
+    }
+
     /// Only a request explicitly discarded by Liquidsoap is returned: pending
     /// requests may survive a stationd restart through their annotations.
     pub async fn cancel_prepared(&self, log_id: i64) -> Result<(), EngineError> {

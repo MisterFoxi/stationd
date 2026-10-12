@@ -251,6 +251,24 @@ def stationd.post(endpoint, payload) =
   end
 end
 
+# Stable for this Liquidsoap process; unchanged by a daemon-only restart.
+let stationd.streaming_started = time()
+let stationd.streaming_instance = json.stringify(compact=true, stationd.streaming_started)
+let stationd.streaming_ready = ref(false)
+def stationd.ensure_instance() =
+  if not stationd.streaming_ready() then
+    j = json()
+    j.add("instance", stationd.streaming_instance)
+    j.add("started_at", int_of_float(stationd.streaming_started))
+    response = stationd.post("restart", json.stringify(compact=true, j))
+    stationd.streaming_ready := null.defined(response)
+  end
+  stationd.streaming_ready()
+end
+# Run before sources/control commands can create fresh reservations.
+ignore(stationd.ensure_instance())
+
+
 def stationd.transition_log(kind, detail) =
   if stationd.last_kind() != kind then
     log.important(label="stationd", "next: #{{kind}} #{{detail}}")
@@ -260,50 +278,55 @@ end
 
 # Pull: stationd resolves the next track (grid, overrides, broadcast gate).
 def stationd.fetch_next() =
-  if not stationd.paused() and stationd.idle_on_air() then
-    stationd.resume_pending := true
-  end
-  j = json()
-  idle_left = stationd.idle_remaining()
-  j.add("idle_remaining", if stationd.resume_pending() then idle_left() else -1. end)
-  resp = stationd.post("next", json.stringify(compact=true, j))
-  stationd.loading := false
-  if null.defined(resp) then
-    try
-      let json.parse ({{kind, uri, state, reason}} : {{
-        kind: string, uri: string, state: string, reason: string
-      }}) = null.get(resp)
-      if kind == "file" then
-        # A running relay yields once this track is ready, stops when it starts.
+  if not stationd.ensure_instance() then
+    stationd.loading := false
+    null
+  else
+    if not stationd.paused() and stationd.idle_on_air() then
+      stationd.resume_pending := true
+    end
+    j = json()
+    idle_left = stationd.idle_remaining()
+    j.add("idle_remaining", if stationd.resume_pending() then idle_left() else -1. end)
+    resp = stationd.post("next", json.stringify(compact=true, j))
+    stationd.loading := false
+    if null.defined(resp) then
+      try
+        let json.parse ({{kind, uri, state, reason}} : {{
+          kind: string, uri: string, state: string, reason: string
+        }}) = null.get(resp)
+        if kind == "file" then
+          # A running relay yields once this track is ready, stops when it starts.
 
-        stationd.halted := false
-        stationd.transition_log(kind, "")
-        request.create(uri)
-      elsif kind == "relay" then
-        stationd.halted := false
-        stationd.transition_log(kind, uri)
-        relay_on = stationd.relay_on()
-        relay_on(uri)
-        null
-      elsif kind == "halted" then
-        relay_off = stationd.relay_off()
-        relay_off()
-        stationd.halted := true
-        stationd.transition_log(kind, "(#{{state}}): halted noise at the end of the current track")
-        null
-      else
-        relay_off = stationd.relay_off()
-        relay_off()
-        stationd.halted := false
-        stationd.transition_log(kind, "(#{{reason}}): safety fallback")
+          stationd.halted := false
+          stationd.transition_log(kind, "")
+          request.create(uri)
+        elsif kind == "relay" then
+          stationd.halted := false
+          stationd.transition_log(kind, uri)
+          relay_on = stationd.relay_on()
+          relay_on(uri)
+          null
+        elsif kind == "halted" then
+          relay_off = stationd.relay_off()
+          relay_off()
+          stationd.halted := true
+          stationd.transition_log(kind, "(#{{state}}): halted noise at the end of the current track")
+          null
+        else
+          relay_off = stationd.relay_off()
+          relay_off()
+          stationd.halted := false
+          stationd.transition_log(kind, "(#{{reason}}): safety fallback")
+          null
+        end
+      catch err do
+        log.severe(label="stationd", "next: bad reply: #{{error.kind(err)}}: #{{error.message(err)}}")
         null
       end
-    catch err do
-      log.severe(label="stationd", "next: bad reply: #{{error.kind(err)}}: #{{error.message(err)}}")
+    else
       null
     end
-  else
-    null
   end
 end
 

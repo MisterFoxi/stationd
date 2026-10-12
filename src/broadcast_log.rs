@@ -90,7 +90,8 @@ pub async fn song_keys_since(pool: &SqlitePool, cutoff: i64) -> Result<HashSet<S
         "SELECT DISTINCT coalesce(i.uri, b.rel_path), m.title FROM broadcast_log b
          LEFT JOIN media m ON m.media_uuid = b.media_uuid
          LEFT JOIN media_identity i ON i.uuid = b.media_uuid
-         WHERE b.played_at >= ?1",
+         WHERE b.played_at >= ?1 AND NOT EXISTS (
+             SELECT 1 FROM shuffle_pick p WHERE p.log_id = b.id AND p.settled = 2 AND b.aired_at IS NULL)",
     )
     .bind(cutoff)
     .fetch_all(pool)
@@ -294,7 +295,7 @@ pub async fn plays_of(
 /// to exclude for a `no_same_track_within` window (`cutoff = now - window`).
 pub async fn tracks_since(pool: &SqlitePool, cutoff: i64) -> Result<HashSet<String>, sqlx::Error> {
     let rows: Vec<(String,)> =
-        sqlx::query_as("SELECT DISTINCT i.uri FROM broadcast_log b JOIN media_identity i ON i.uuid = b.media_uuid WHERE b.played_at >= ?1")
+        sqlx::query_as("SELECT DISTINCT i.uri FROM broadcast_log b JOIN media_identity i ON i.uuid = b.media_uuid WHERE b.played_at >= ?1 AND NOT EXISTS (SELECT 1 FROM shuffle_pick p WHERE p.log_id = b.id AND p.settled = 2 AND b.aired_at IS NULL)")
             .bind(cutoff)
             .fetch_all(pool)
             .await?;
@@ -306,7 +307,8 @@ pub async fn tracks_since(pool: &SqlitePool, cutoff: i64) -> Result<HashSet<Stri
 /// are ignored: they never constrain anything.
 pub async fn artists_since(pool: &SqlitePool, cutoff: i64) -> Result<HashSet<String>, sqlx::Error> {
     let rows: Vec<(String,)> = sqlx::query_as(
-        "SELECT DISTINCT artist FROM broadcast_log WHERE artist IS NOT NULL AND played_at >= ?1",
+        "SELECT DISTINCT b.artist FROM broadcast_log b WHERE b.artist IS NOT NULL AND b.played_at >= ?1
+         AND NOT EXISTS (SELECT 1 FROM shuffle_pick p WHERE p.log_id = b.id AND p.settled = 2 AND b.aired_at IS NULL)",
     )
     .bind(cutoff)
     .fetch_all(pool)

@@ -938,6 +938,24 @@ async fn next_handler(
     Ok(Json(state.bridge.next_after_idle(body.and_then(|b| b.0.idle_remaining)).await))
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LiquidsoapStart { instance: String, started_at: i64 }
+async fn restart_handler(
+    State(state): State<AppState>, headers: HeaderMap, Json(start): Json<LiquidsoapStart>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    if !authorized(&state, &headers) { return Err(StatusCode::UNAUTHORIZED); }
+    if start.instance.is_empty() || start.instance.len() > 128 || start.started_at <= 0 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let recovered = state.bridge.engine.recover_liquidsoap_start(&start.instance, start.started_at).await
+        .map_err(|e| { tracing::error!(error = %e, "Liquidsoap startup recovery failed"); StatusCode::INTERNAL_SERVER_ERROR })?;
+    if recovered > 0 {
+        tracing::warn!(recovered, "Liquidsoap restarted: returned never-aired shuffle reservations");
+    }
+    Ok(Json(serde_json::json!({"recovered":recovered})))
+}
+
 async fn discard_handler(
     State(state): State<AppState>, headers: HeaderMap, Json(ev): Json<TrackEvent>,
 ) -> StatusCode {
@@ -1057,6 +1075,7 @@ pub fn router(bridge: LsBridge, token: &str, live: Option<crate::live::LiveHub>)
         .route("/ls/v1/next", post(next_handler))
         .route("/ls/v1/track", post(track_handler))
         .route("/ls/v1/discard", post(discard_handler))
+        .route("/ls/v1/restart", post(restart_handler))
         .route("/ls/v1/live/auth", post(live_auth_handler))
         .route("/ls/v1/live/connect", post(live_connect_handler))
         .route("/ls/v1/live/health", post(live_health_handler))
@@ -1160,6 +1179,26 @@ mod tests {
         assert_eq!(sqlx::query_scalar::<_, bool>("SELECT used FROM shuffle_member WHERE playlist_ref = 'music'")
             .fetch_one(&pool).await.unwrap(), true);
     }
+    #[tokio::test]
+    async fn cold_start_requires_token_and_does_not_cancel_picks_on_daemon_resync() {
+        let (_dir, b) = bridge().await;
+        let pool = b.engine.pool_for_tests();
+        b.next().await;
+        sqlx::query("UPDATE shuffle_pick SET reserved_at=1").execute(&pool).await.unwrap();
+        let app = router(b.clone(), "tok", None);
+        let request = |token: bool| {
+            let mut req = Request::post("/ls/v1/restart").header("content-type", "application/json");
+            if token { req = req.header(TOKEN_HEADER, "tok"); }
+            req.body(Body::from(r#"{"instance":"liquidsoap-a","started_at":20}"#)).unwrap()
+        };
+        assert_eq!(app.clone().oneshot(request(false)).await.unwrap().status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(app.clone().oneshot(request(true)).await.unwrap().status(), StatusCode::OK);
+        assert!(!sqlx::query_scalar::<_, bool>("SELECT used FROM shuffle_member").fetch_one(&pool).await.unwrap());
+        b.next().await;
+        assert_eq!(app.oneshot(request(true)).await.unwrap().status(), StatusCode::OK);
+        assert!(sqlx::query_scalar::<_, bool>("SELECT used FROM shuffle_member").fetch_one(&pool).await.unwrap());
+    }
+
     #[tokio::test]
     async fn metadata_policy_matches_tags_and_origins_in_order() {
         let (_dir, b) = bridge().await;

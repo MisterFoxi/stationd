@@ -99,10 +99,17 @@ pub async fn pick_reserved(
             .await?;
         }
     }
-    if ids
-        .iter()
-        .all(|id| known.get(*id).is_some_and(|(_, used)| *used))
-    {
+    // Eligibility already includes plugins and hard repetition constraints.
+    // A blocked last member must not hold the entire station silent when
+    // previously used members have become eligible again.
+    let cycle_complete = ids.iter().all(|id| known.get(*id).is_some_and(|(_, used)| *used));
+    let eligible_pending = eligible.iter().any(|c|
+        ids.contains(c.media_uuid.as_str()) && known.get(&c.media_uuid).is_some_and(|(_, used)| !used));
+    if cycle_complete || !eligible_pending {
+        if !cycle_complete {
+            tracing::info!(playlist = %reference, cycle, eligible = eligible.len(),
+                "shuffle: remaining members blocked, renewing cycle with eligible media");
+        }
         cycle += 1;
         let mut order: Vec<&str> = ids.iter().copied().collect();
         order.sort_unstable();
@@ -157,8 +164,8 @@ pub async fn pick_reserved(
             ))
     });
     let Some(chosen) = remaining.first() else {
-        // Reconcile even when pending members are temporarily blocked, but
-        // do not start a new cycle just to bypass constraints.
+        // No candidate survived reconciliation. Hard constraints stay
+        // authoritative even when a new cycle has been opened.
         tx.commit().await?;
         return Err(SelectionError::PoolEmpty);
     };
@@ -169,7 +176,7 @@ pub async fn pick_reserved(
         .execute(&mut *tx)
         .await?;
     let reservation =
-        sqlx::query("INSERT INTO shuffle_pick (playlist_ref, media_uuid, cycle) VALUES (?, ?, ?)")
+        sqlx::query("INSERT INTO shuffle_pick (playlist_ref, media_uuid, cycle, reserved_at) VALUES (?, ?, ?, CAST(strftime('%s', 'now') AS INTEGER))")
             .bind(reference)
             .bind(&chosen.media_uuid)
             .bind(cycle)
@@ -178,6 +185,32 @@ pub async fn pick_reserved(
     let reservation = reservation.last_insert_rowid();
     tx.commit().await?;
     Ok((path, reservation))
+}
+
+/// A cold Liquidsoap process has lost its predecessor's prepared requests.
+/// Reclaim only older, never-aired reservations. Repeated startup reports (or
+/// a daemon restart while the same Liquidsoap process survives) are harmless.
+pub async fn recover_liquidsoap_start(
+    pool: &SqlitePool, instance: &str, started_at: i64,
+) -> Result<u64, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    let changed = sqlx::query("INSERT INTO liquidsoap_instance (id, instance) VALUES (1, ?)
+        ON CONFLICT(id) DO UPDATE SET instance = excluded.instance WHERE instance != excluded.instance")
+        .bind(instance).execute(&mut *tx).await?.rows_affected();
+    if changed == 0 { tx.commit().await?; return Ok(0); }
+    let abandoned: Vec<(i64, String, String)> = sqlx::query_as(
+        "UPDATE shuffle_pick SET settled = 2 WHERE settled = 0 AND reserved_at < ?
+         AND (log_id IS NULL OR EXISTS (SELECT 1 FROM broadcast_log b WHERE b.id = log_id AND b.aired_at IS NULL))
+         RETURNING id, playlist_ref, media_uuid")
+        .bind(started_at).fetch_all(&mut *tx).await?;
+    for (id, playlist, uuid) in &abandoned {
+        sqlx::query("UPDATE shuffle_member SET used = 0 WHERE playlist_ref = ? AND media_uuid = ?
+            AND NOT EXISTS (SELECT 1 FROM shuffle_pick p WHERE p.playlist_ref = ? AND p.media_uuid = ?
+                AND p.id > ? AND p.settled != 2)")
+            .bind(playlist).bind(uuid).bind(playlist).bind(uuid).bind(id).execute(&mut *tx).await?;
+    }
+    tx.commit().await?;
+    Ok(abandoned.len() as u64)
 }
 
 /// Return a prepared track that Liquidsoap discarded. An already aired log
@@ -336,21 +369,76 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn temporary_exclusion_does_not_refill_or_lose_a_member() {
+    async fn blocked_remaining_members_renew_cycle_without_selecting_excluded_media() {
         let (_d, pool, members) = setup(3).await;
         let only = &members[..1];
         assert_eq!(
             pick(&pool, "music", &members, only, None).await.unwrap(),
             "0.mp3"
         );
-        assert!(matches!(
-            pick(&pool, "music", &members, only, None).await,
-            Err(SelectionError::PoolEmpty)
-        ));
+        assert_eq!(pick(&pool, "music", &members, only, None).await.unwrap(), "0.mp3");
+        assert_eq!(sqlx::query_scalar::<_, i64>("SELECT cycle FROM shuffle_cycle WHERE playlist_ref='music'")
+            .fetch_one(&pool).await.unwrap(), 1);
         let mut seen = HashSet::new();
         seen.insert(next(&pool, &members).await);
         seen.insert(next(&pool, &members).await);
         assert_eq!(seen, HashSet::from(["1.mp3".into(), "2.mp3".into()]));
+    }
+
+    #[tokio::test]
+    async fn no_eligible_media_keeps_cycle_and_returns_pool_empty() {
+        let (_d, pool, members) = setup(3).await;
+        next(&pool, &members).await;
+        assert!(matches!(pick(&pool, "music", &members, &[], None).await, Err(SelectionError::PoolEmpty)));
+        assert_eq!(sqlx::query_scalar::<_, i64>("SELECT cycle FROM shuffle_cycle WHERE playlist_ref='music'")
+            .fetch_one(&pool).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn renewal_with_no_fitting_track_rolls_back_cycle_and_rng() {
+        let (_d, pool, members) = setup(3).await;
+        pick(&pool, "music", &members, &members[..1], None).await.unwrap();
+        let before: (i64, i64) = sqlx::query_as("SELECT cycle, draws FROM shuffle_cycle JOIN rng_draws ON scope='bag:music' WHERE playlist_ref='music'")
+            .fetch_one(&pool).await.unwrap();
+        assert!(matches!(pick(&pool, "music", &members, &members[..1], Some(1)).await, Err(SelectionError::NoFit)));
+        assert_eq!(sqlx::query_as::<_, (i64, i64)>("SELECT cycle, draws FROM shuffle_cycle JOIN rng_draws ON scope='bag:music' WHERE playlist_ref='music'")
+            .fetch_one(&pool).await.unwrap(), before);
+    }
+
+    #[tokio::test]
+    async fn cold_restart_recovers_old_unheard_picks_once_and_keeps_aired_and_new_picks() {
+        let (_d, pool, members) = setup(4).await;
+        let mut logs = Vec::new();
+        for index in 0..4 {
+            pick_reserved(&pool, "music", &members, &members[index..index+1], None).await.unwrap();
+            if index != 2 { logs.push((index, log(&pool, &members[index].rel_path, index == 0).await)); }
+        }
+        sqlx::query("UPDATE shuffle_pick SET reserved_at = 10").execute(&pool).await.unwrap();
+        sqlx::query("UPDATE shuffle_pick SET reserved_at = 30 WHERE media_uuid = ?")
+            .bind(&members[3].media_uuid).execute(&pool).await.unwrap();
+        assert_eq!(recover_liquidsoap_start(&pool, "instance-a", 20).await.unwrap(), 2);
+        let flags: Vec<bool> = sqlx::query_scalar("SELECT used FROM shuffle_member ORDER BY media_uuid")
+            .fetch_all(&pool).await.unwrap();
+        assert_eq!(flags, vec![true, false, false, true]);
+        assert_eq!(recover_liquidsoap_start(&pool, "instance-a", 40).await.unwrap(), 0);
+        assert_eq!(recover_liquidsoap_start(&pool, "instance-b", 40).await.unwrap(), 1);
+        let excluded = broadcast_log::tracks_since(&pool, 0).await.unwrap();
+        assert!(excluded.contains(&members[0].rel_path));
+        assert!(!excluded.contains(&members[1].rel_path));
+        assert!(!excluded.contains(&members[3].rel_path));
+        // A late report of real airing remains authoritative for cooldowns.
+        broadcast_log::mark_aired(&pool, logs[1].1, Epoch(101)).await.unwrap();
+        assert!(broadcast_log::tracks_since(&pool, 0).await.unwrap().contains(&members[1].rel_path));
+    }
+
+    #[tokio::test]
+    async fn cold_restart_does_not_free_a_member_with_a_newer_aired_reservation() {
+        let (_d, pool, members) = setup(1).await;
+        next(&pool, &members).await; log(&pool, &members[0].rel_path, false).await;
+        next(&pool, &members).await; log(&pool, &members[0].rel_path, true).await;
+        sqlx::query("UPDATE shuffle_pick SET reserved_at=10").execute(&pool).await.unwrap();
+        assert_eq!(recover_liquidsoap_start(&pool, "instance-a", 20).await.unwrap(), 1);
+        assert!(sqlx::query_scalar::<_, bool>("SELECT used FROM shuffle_member").fetch_one(&pool).await.unwrap());
     }
 
     #[tokio::test]
