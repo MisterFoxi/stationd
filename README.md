@@ -292,6 +292,10 @@ Plugins add features; they do not process audio.
   `require-title-wasm`, `stop-when-idle-wasm`, `custom-tags-wasm`,
   `play-stats-wasm` (capability `db`).
 
+Public station pages are provided by the native `station-player` plugin: HTML5
+Icecast playback, real prefetch and separate forecasts, agenda, history, SSE,
+per-station themes and compact iframe mode. See [station-player](plugins/station-player/README.md).
+
 The contracts are in `Doc/plugin-{events,hooks,host}.md`.
 
 ### Liquidsoap integration

@@ -24,7 +24,8 @@ const PROTOS: &[(&str, bool)] = &[
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     for (file, optional) in PROTOS {
         let path = format!("{PROTO_DIR}/{file}");
-        let mut builder = tonic_build::configure().build_server(false);
+        let mut builder = tonic_build::configure()
+            .build_server(std::env::var_os("CARGO_FEATURE_SERVER").is_some());
         if *optional {
             builder = builder.protoc_arg("--experimental_allow_proto3_optional");
         }

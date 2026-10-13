@@ -4428,6 +4428,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
+name = "station-player"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "http-body-util",
+ "serde",
+ "serde_json",
+ "stationd-proto",
+ "tokio",
+ "tokio-stream",
+ "toml 1.1.6+spec-1.1.0",
+ "tonic",
+ "tower 0.5.3",
+ "tracing",
+]
+
+[[package]]
 name = "stationd"
 version = "0.1.5"
 dependencies = [
@@ -4458,6 +4475,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "sqlx",
+ "station-player",
  "stationd-client-config",
  "subtle",
  "tempfile",

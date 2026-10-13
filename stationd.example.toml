@@ -332,3 +332,20 @@ level = "info"
 # grpc_endpoint = "http://station.internal:50051"
 # allow_plaintext_grpc = true
 # One shared read-only gRPC watch per configured station; never expose operator gRPC publicly.
+## Player public (plugin Rust natif). Voir plugins/station-player/README.md pour multi-stations,
+## reverse proxy HTTPS, SSE et intégration iframe. Décommenter tout ce bloc :
+# [[plugin]]
+# name = "station-player"
+# enabled = true
+# [plugin.config]
+# bind = "127.0.0.1:8091"
+# max_event_streams = 128
+# [[plugin.config.stations]]
+# slug = "demo"
+# label = "Demo Radio"
+# stream_url = "https://radio.example.org/demo.mp3"
+# grpc_endpoint = "http://127.0.0.1:50051"
+# [plugin.config.stations.theme]
+# accent = "#a3e635"
+# background = "#111827"
+# foreground = "#f9fafb"

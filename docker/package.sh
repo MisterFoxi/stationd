@@ -64,6 +64,8 @@ dc exec -T -u dev station cargo build --release --locked --workspace --bins
 
 plugins=()
 for manifest in plugins/*/Cargo.toml; do
+  # Native station-player is linked into stationd by the workspace build above.
+  [ "$manifest" = "plugins/station-player/Cargo.toml" ] && continue
   dir="$(dirname "$manifest")"
   step "compilation plugin $dir"
   dc exec -T -u dev -w "/src/$dir" station \

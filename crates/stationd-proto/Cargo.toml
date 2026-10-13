@@ -8,6 +8,10 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 
+[features]
+# Test gateways against the real service contract without importing the daemon.
+server = []
+
 [dependencies]
 tonic = "0.12"
 prost = "0.13"

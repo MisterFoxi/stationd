@@ -9,13 +9,14 @@ default-run = "stationd"
 # Workspace : le daemon (ce paquet, racine) + les clients hors daemon.
 # `cargo build` / `cargo test` à la racine ne visent que stationd (paquet
 # racine = membre par défaut) ; la TUI se compile avec `-p stationd-tui`.
-# Les plugins WASM (plugins/*) restent des racines autonomes ([workspace] vide).
+# Les plugins WASM restent autonomes ; station-player est un crate natif du workspace.
 [workspace]
-members = [".", "crates/stationd-proto", "crates/stationd-tui", "crates/stationd-client-config"]
+members = [".", "crates/stationd-proto", "crates/stationd-tui", "crates/stationd-client-config", "plugins/station-player"]
 default-members = ["."]
 exclude = ["plugins"]
 
 [dependencies]
+station-player = { path = "plugins/station-player" }
 stationd-client-config = { path = "crates/stationd-client-config" }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }

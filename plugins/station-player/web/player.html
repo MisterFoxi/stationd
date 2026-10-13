@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="fr">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Station · Direct</title><link rel="stylesheet" href="/player/assets/player.css"><script src="/player/assets/player.js" defer></script></head>
+<body><main>
+<header><span class="eyebrow">LA RADIO, EN DIRECT</span><h1 id="station">Chargement de la station…</h1><p id="description"></p></header>
+<section class="player" aria-label="Lecteur radio">
+<div class="live"><span class="dot"></span><span id="status" role="status">Connexion…</span></div>
+<p class="eyebrow">À L’ANTENNE</p><h2 id="title">En attente du direct</h2><p id="artist"></p>
+<audio id="audio" controls preload="none" aria-label="Écouter la station"></audio>
+<p id="audio-status" role="status"></p><p id="freshness" class="muted"></p>
+</section>
+<div class="details">
+<section><h2>À suivre</h2><p class="muted">File réelle : titre préparé pour la diffusion.</p><ol id="next"></ol></section>
+<section><h2>Prévisions indicatives</h2><p class="muted">Simulation du scheduler, susceptible de changer.</p><ol id="indicative"></ol></section>
+<section><h2>Agenda</h2><p class="muted">Horaires de la station, programmation indicative.</p><ol id="agenda"></ol><h3>Sans horaire fixe</h3><ol id="indicative-agenda"></ol></section>
+<section><h2>Derniers titres diffusés</h2><ol id="history"></ol></section>
+</div><footer><a id="full" target="_blank" rel="noopener">Ouvrir le player complet ↗</a><span>StationD · Une radio à votre rythme</span></footer>
+</main></body></html>

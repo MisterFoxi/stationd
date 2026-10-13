@@ -1,0 +1,24 @@
+[package]
+name = "station-player"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Native plugin package; builds independently with `cargo test -p station-player`.
+
+[dependencies]
+stationd-proto = { path = "../../crates/stationd-proto" }
+axum = { version = "0.7", default-features = false, features = ["tokio", "http1", "json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "1"
+tokio = { version = "1", features = ["rt", "sync", "time", "net"] }
+tokio-stream = "0.1"
+tonic = { version = "0.12", features = ["tls-native-roots"] }
+tracing = "0.1"
+
+[dev-dependencies]
+stationd-proto = { path = "../../crates/stationd-proto", features = ["server"] }
+http-body-util = "0.1"
+tower = { version = "0.5", features = ["util"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

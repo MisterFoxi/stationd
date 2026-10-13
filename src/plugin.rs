@@ -558,6 +558,9 @@ pub fn validate_decls(decls: &[PluginDecl]) -> Result<(), String> {
         if d.wasm.is_none() && d.name == "remote-supervision" {
             remote_supervision::validate_config(&d.config)?;
         }
+        if d.wasm.is_none() && d.name == "station-player" {
+            station_player::validate_config(&d.config)?;
+        }
         if d.has_db() {
             plugin_db::validate_name(&d.name)?;
             d.db_limits()
@@ -663,6 +666,8 @@ pub enum Action {
 mod config_host;
 mod metadata_config;
 mod remote_supervision;
+#[path = "../plugins/station-player/src/daemon.rs"]
+mod station_player;
 use config_host::{ConfigPlugin, config_operation, validate_candidate};
 
 // ---------------------------------------------------------------------------
@@ -878,6 +883,9 @@ fn build_plugin(decl: &PluginDecl, host: &Host) -> Result<Box<dyn Plugin>, Strin
     if decl.wasm.is_none() {
         match decl.name.as_str() {
             "plugin-config" => return Ok(Box::new(ConfigPlugin)),
+            "station-player" => {
+                return Ok(Box::new(station_player::StationPlayer::from_config(&decl.config)?));
+            }
             "remote-supervision" => {
                 return Ok(Box::new(remote_supervision::RemoteSupervision::from_config(
                     &decl.config,

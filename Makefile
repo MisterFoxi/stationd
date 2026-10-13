@@ -45,7 +45,7 @@ EXEC_ROOT = $(DC) exec $(SVC)
 CTL       = $(EXEC) sh -c '"$$STATIOND_BIN/stationctl" "$$@"' stationctl
 
 .DEFAULT_GOAL := help
-.PHONY: help up down image logs shell build release test clippy fmt plugins webmin webmin-test \
+.PHONY: help up down image logs shell build release test clippy fmt plugins player-test webmin webmin-test \
         all restart restart-ls restart-icecast restart-air check-liq tui ctl \
         state stop start package dist mrproper
 
@@ -78,13 +78,16 @@ build: ## cargo build (stationd + stationctl + plugins natifs, dont Webmin) : re
 webmin: build ## Compile Webmin et stationd-tui (sans redémarrage)
 > $(EXEC) cargo build $(CARGO_PROFILE) -p stationd-tui
 
+player-test: ## Tests du plugin natif station-player dans le conteneur de dev
+> $(EXEC) cargo test --locked -p station-player
+
 webmin-test: ## Tests ciblés Webmin dans le conteneur de dev
 > $(EXEC) cargo test --locked --lib webmin_
 
 release: ## cargo build --release --locked
 > $(EXEC) cargo build --release --locked
 
-test: ## cargo test --locked
+test: player-test ## cargo test --locked (daemon et station-player)
 > $(EXEC) cargo test --locked
 
 clippy: ## cargo clippy --all-targets
@@ -98,6 +101,7 @@ plugins: ## Plugins WASM (tous, ou P=<dossier>)
 >   if [ -n "$(P)" ]; then set -- /src/plugins/$(P)/Cargo.toml; else set -- /src/plugins/*/Cargo.toml; fi; \
 >   for m in "$$@"; do \
 >     [ -f "$$m" ] || { echo "pas de plugin: $$m" >&2; exit 1; }; \
+>     case "$$m" in */station-player/Cargo.toml) if [ -n "$(P)" ]; then echo "plugin natif: utiliser make build ou make player-test" >&2; exit 1; fi; continue;; esac; \
 >     echo "== $${m%/Cargo.toml}"; \
 >     cargo build --release --locked --target $(WASM) --manifest-path "$$m"; \
 >   done; \
