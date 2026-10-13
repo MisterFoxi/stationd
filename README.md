@@ -229,7 +229,8 @@ problem, each on its field (`rule[3].start`).
 
 ### Live DJ
 
-DJs can prepare their stream from Webmin's **Go live** page: StationD validates
+DJs can log in directly to `/station/<id>/dj` with their existing DJ credentials,
+without a Webmin account, and prepare their stream from the **Go live** page: StationD validates
 received audio, provides a private monitor, then waits for an explicit takeover.
 `[live] manual_takeover = true` is the default; set it to `false` for the former
 automatic takeover on connection. Restart both StationD and Liquidsoap after

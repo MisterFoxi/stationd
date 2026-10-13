@@ -34,6 +34,7 @@ pub(super) struct Web {
     streams: Arc<Semaphore>,
     jobs: Arc<Semaphore>,
     pub(super) origin: String,
+    dj_origin: Option<String>,
     session_ttl: u64,
     rate: u32,
     password_min_length: usize,
@@ -52,6 +53,7 @@ impl Web {
                 .expect("validated origin")
                 .origin()
                 .ascii_serialization(),
+            dj_origin: config.dj_public_url.as_ref().map(|url| webauthn_rs::prelude::Url::parse(url).expect("validated DJ origin").origin().ascii_serialization()),
             session_ttl: config.session_ttl_seconds,
             rate: config.auth_requests_per_minute,
             password_min_length: config.password_min_length,
@@ -165,7 +167,7 @@ pub(super) fn cookie(headers: &HeaderMap, name: &str) -> Option<String> {
     }
     found
 }
-fn set_cookie(response: &mut Response, name: &str, value: &str, ttl: u64) {
+pub(super) fn set_cookie(response: &mut Response, name: &str, value: &str, ttl: u64) {
     let cookie =
         format!("{name}={value}; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age={ttl}");
     response.headers_mut().append(
@@ -193,15 +195,18 @@ async fn security(State(web): State<Web>, request: Request, next: Next) -> Respo
         .headers()
         .get(header::ORIGIN)
         .and_then(|h| h.to_str().ok());
-    if (!matches!(
-        *request.method(),
-        axum::http::Method::GET | axum::http::Method::HEAD
-    ) && origin != Some(web.origin.as_str()))
-        || origin.is_some_and(|o| o != web.origin)
-    {
+    let path = request.uri().path();
+    let dj_route = (path.starts_with("/api/stations/") && path.split('/').nth(4) == Some("dj"))
+        || (path.starts_with("/station/") && path.ends_with("/dj"))
+        || matches!(path, "/dj.js" | "/i18n.js" | "/remote.css");
+    let origin_allowed = origin.is_some_and(|o| o == web.origin || (dj_route && web.dj_origin.as_deref() == Some(o)));
+    if (!matches!(*request.method(), axum::http::Method::GET | axum::http::Method::HEAD) && !origin_allowed)
+        || (origin.is_some() && !origin_allowed) {
         return StatusCode::FORBIDDEN.into_response();
     }
-    if request.uri().path().starts_with("/auth/") {
+    if request.uri().path().starts_with("/auth/")
+        || (request.uri().path().starts_with("/api/stations/")
+            && (request.uri().path().ends_with("/dj/login") || request.uri().path().ends_with("/dj/context"))) {
         // Deliberately ignore forwarded IP headers: an untrusted client cannot
         // bypass the limit. A reverse proxy shares its peer-IP quota.
         let peer = request

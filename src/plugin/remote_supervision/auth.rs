@@ -28,7 +28,7 @@ pub(super) fn now() -> i64 {
         .unwrap_or_default()
         .as_secs() as i64
 }
-fn token() -> String {
+pub(super) fn token() -> String {
     let mut bytes = [0; 32];
     OsRng.fill_bytes(&mut bytes);
     URL_SAFE_NO_PAD.encode(bytes)
@@ -36,7 +36,7 @@ fn token() -> String {
 fn hash(value: &str) -> String {
     URL_SAFE_NO_PAD.encode(Sha256::digest(value.as_bytes()))
 }
-fn secret_eq(a: &str, b: &str) -> bool {
+pub(super) fn secret_eq(a: &str, b: &str) -> bool {
     bool::from(hash(a).as_bytes().ct_eq(hash(b).as_bytes()))
 }
 fn stmt(sql: &str, values: Vec<Value>) -> Statement {
@@ -805,10 +805,6 @@ impl Auth {
         }
         result
     }
-    pub(super) fn dj_audit(&self, raw: &str, station: &str, action: &str, result: &str) -> Result<(), String> {
-        let (session, _) = self.session(raw)?;
-        self.console_audit(&session.user.to_string(), action, result, station)
-    }
     pub(super) fn console_audit(
         &self,
         actor: &str,
@@ -1296,16 +1292,12 @@ mod tests {
         assert_eq!(oversized.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
     #[tokio::test]
-    async fn webmin_dj_requires_own_credentials_csrf_and_an_authorized_session() {
+    async fn webmin_dj_login_is_independent_and_restricts_access_to_own_stream() {
         use axum::{body::Body, http::{header, Request, StatusCode}};
         use http_body_util::BodyExt;
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tower::ServiceExt;
-        let (dir, mut auth, mut soft) = fixture();
-        let enroll = add(&mut auth, "Alice", Role::Viewer);
-        register(&mut auth, &mut soft, &enroll);
-        let (context, session) = login(&mut auth, &mut soft, "Alice");
-        let csrf = context["csrf_token"].as_str().unwrap();
+        let (dir, auth, _) = fixture(); // No Webmin user is enrolled.
         let pool = crate::db::init(&dir.path().join("dj.db")).await.unwrap();
         let engine = crate::grid_engine::GridEngine::new(pool.clone(), "UTC");
         let base = now();
@@ -1336,33 +1328,61 @@ mod tests {
             .serve_with_incoming_shutdown(tokio_stream::wrappers::TcpListenerStream::new(listener), async { let _ = stopped.await; }));
         let mut config = auth.config.clone();
         config.stations[0].grpc_endpoint = format!("http://{address}");
-        config.stations[0].dj_source_host = "dj.example.test".into();
+        config.stations[0].dj_source_host = "internal.example.test".into();
+        config.stations[0].dj_source_url = "http://dj.example.test/external-live".into();
+        config.dj_public_url = Some("https://dj.example.test".into());
         let auth = Arc::new(std::sync::Mutex::new(auth));
         let app = super::super::web::routes(super::super::web::Web::new(auth.clone(), &config));
+        let public_page = app.clone().oneshot(Request::builder().uri("/station/one/dj").body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(public_page.status(), StatusCode::OK);
+        let context = app.clone().oneshot(Request::builder().uri("/api/stations/one/dj/context").body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(context.status(), StatusCode::OK);
+        let cookie = context.headers()[header::SET_COOKIE].to_str().unwrap().to_string();
+        for flag in ["Secure", "HttpOnly", "SameSite=Strict", "Path=/"] { assert!(cookie.contains(flag)); }
+        let session = Arc::new(std::sync::Mutex::new(cookie.split(';').next().unwrap().to_string()));
+        let context: Value = serde_json::from_slice(&axum::body::to_bytes(context.into_body(), 65536).await.unwrap()).unwrap();
+        let csrf = context["csrf_token"].as_str().unwrap();
         let request = |method: &str, path: &str, token: &str, body: &str| Request::builder()
             .method(method).uri(path).header(header::ORIGIN, "https://remote.example.test")
-            .header(header::COOKIE, format!("__Host-stationd-session={session}"))
+            .header(header::COOKIE, session.lock().unwrap().clone())
             .header(header::CONTENT_TYPE, "application/json").header("x-csrf-token", token)
             .body(Body::from(body.to_string())).unwrap();
         let page = app.clone().oneshot(request("GET", "/station/one/dj", "", "")).await.unwrap();
         assert_eq!(page.status(), StatusCode::OK);
         assert_eq!(page.headers()["cache-control"], "no-store");
         assert_eq!(app.clone().oneshot(request("GET", "/api/stations/one/dj", "", "")).await.unwrap().status(), StatusCode::UNAUTHORIZED);
-        assert_eq!(app.clone().oneshot(request("GET", "/station/two/dj", "", "")).await.unwrap().status(), StatusCode::FORBIDDEN);
+        assert_eq!(app.clone().oneshot(request("GET", "/station/unknown/dj", "", "")).await.unwrap().status(), StatusCode::NOT_FOUND);
         assert_eq!(app.clone().oneshot(request("POST", "/api/stations/one/dj/login", "wrong", r#"{"dj":"marc","password":"dj-password"}"#)).await.unwrap().status(), StatusCode::FORBIDDEN);
         assert_eq!(app.clone().oneshot(request("POST", "/api/stations/one/dj/login", csrf, r#"{"dj":"marc","password":"wrong"}"#)).await.unwrap().status(), StatusCode::UNAUTHORIZED);
         let logged = app.clone().oneshot(request("POST", "/api/stations/one/dj/login", csrf, r#"{"dj":"marc","password":"dj-password"}"#)).await.unwrap();
         assert_eq!(logged.status(), StatusCode::OK);
+        let old_cookie = session.lock().unwrap().clone();
+        *session.lock().unwrap() = logged.headers()[header::SET_COOKIE].to_str().unwrap().split(';').next().unwrap().to_string();
+        assert_ne!(*session.lock().unwrap(), old_cookie);
+        assert_eq!(app.clone().oneshot(Request::builder().uri("/api/stations/one/dj").header(header::COOKIE, old_cookie).body(Body::empty()).unwrap()).await.unwrap().status(), StatusCode::UNAUTHORIZED);
+        for path in ["/api/session", "/api/stations", "/station/one", "/api/stations/two/dj"] {
+            assert_eq!(app.clone().oneshot(request("GET", path, "", "")).await.unwrap().status(), StatusCode::UNAUTHORIZED, "{path}");
+        }
+        let mut cross_origin = request("POST", "/api/stations/one/dj/take", csrf, "{}");
+        cross_origin.headers_mut().insert(header::ORIGIN, "https://evil.example.test".parse().unwrap());
+        assert_eq!(app.clone().oneshot(cross_origin).await.unwrap().status(), StatusCode::FORBIDDEN);
         let body = axum::body::to_bytes(logged.into_body(), 65536).await.unwrap();
         let view: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(view["state"], "waiting"); assert_eq!(view["host"], "dj.example.test");
+        assert_eq!(view["port"], 80); assert_eq!(view["mount"], "/external-live");
+        assert_eq!(view["source_url"], "http://dj.example.test/external-live");
         let text = String::from_utf8_lossy(&body);
         assert!(!text.contains("token") && !text.contains("password") && !text.contains("private-secret"));
         assert!(hub.auth("marc", "dj-password", "encoder").await.allowed()); hub.connected();
         for sec in 0..=3 { engine.set_clock(Some(crate::resolver::Epoch(base + sec))); hub.input_health(true, 0.1, 0.3); }
         assert_eq!(app.clone().oneshot(request("POST", "/api/stations/one/dj/take", "wrong", "{}")).await.unwrap().status(), StatusCode::FORBIDDEN);
         assert!(hub.status().on_air.is_none());
-        let taken = app.clone().oneshot(request("POST", "/api/stations/one/dj/take", csrf, "{}")).await.unwrap();
+        let mut dj_take = request("POST", "/api/stations/one/dj/take", csrf, "{}");
+        dj_take.headers_mut().insert(header::ORIGIN, "https://dj.example.test".parse().unwrap());
+        let mut admin = request("POST", "/auth/password/login", csrf, r#"{"name":"Alice","password":"anything"}"#);
+        admin.headers_mut().insert(header::ORIGIN, "https://dj.example.test".parse().unwrap());
+        assert_eq!(app.clone().oneshot(admin).await.unwrap().status(), StatusCode::FORBIDDEN);
+        let taken = app.clone().oneshot(dj_take).await.unwrap();
         assert_eq!(taken.status(), StatusCode::OK);
         let body: Value = serde_json::from_slice(&axum::body::to_bytes(taken.into_body(), 65536).await.unwrap()).unwrap();
         assert_eq!(body["state"], "taking");
@@ -1375,7 +1395,8 @@ mod tests {
         drop(audio);
         assert_eq!(app.clone().oneshot(request("POST", "/api/stations/one/dj/stop", csrf, "{}")).await.unwrap().status(), StatusCode::OK);
         hub.disconnected();
-        auth.lock().unwrap().logout(&session, csrf).unwrap();
+        assert_eq!(app.clone().oneshot(request("POST", "/api/stations/one/dj/logout", "wrong", "{}")).await.unwrap().status(), StatusCode::FORBIDDEN);
+        assert_eq!(app.clone().oneshot(request("POST", "/api/stations/one/dj/logout", csrf, "{}")).await.unwrap().status(), StatusCode::OK);
         assert_eq!(app.oneshot(request("GET", "/api/stations/one/dj/preview", "", "")).await.unwrap().status(), StatusCode::UNAUTHORIZED);
         fake_audio.abort(); let _ = stop.send(()); server.await.unwrap().unwrap();
     }

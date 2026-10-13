@@ -822,8 +822,10 @@ end
 let stationd.live_on = ref(false)
 let stationd.live_selected = ref(false)
 let stationd.live_permission = ref(false)
+let stationd.live_generation = ref(0)
 
 def stationd.live_connected(_) =
+  stationd.live_generation := stationd.live_generation() + 1
   stationd.live_on := true
   stationd.live_permission := false
   thread.run(fast=false, {{ignore(stationd.post("live/connect", "{{}}"))}})
@@ -893,7 +895,14 @@ live_meter.on_frame(synchronous=true, {{stationd.live_frame_at := time()}})
 
 # {silence_s} s of silence ends an on-air live, but allows quiet preparation.
 def stationd.live_silence() =
-  thread.run(fast=false, {{ignore(stationd.post("live/silence", "{{}}"))}})
+  generation = stationd.live_generation()
+  if stationd.live_on() and stationd.live_selected() then
+    thread.run(fast=false, fun () -> begin
+      if stationd.live_on() and stationd.live_selected() and generation == stationd.live_generation() then
+        ignore(stationd.post("live/silence", "{{}}"))
+      end
+    end)
+  end
 end
 live = blank.detect(id="stationd_live_blank", max_blank={silence}, threshold={threshold}, live_meter)
 live.on_blank(synchronous=true, stationd.live_silence)

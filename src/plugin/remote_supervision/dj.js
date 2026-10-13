@@ -17,7 +17,7 @@ async function request(url,body){
 }
 function stopPreview(){previewing=false;const audio=el('preview-audio');audio.pause();audio.removeAttribute('src');audio.load();audio.hidden=true;el('preview-stop').disabled=true;el('preview-status').textContent='';el('preview').disabled=!lastState?.can_preview||busy;}
 function render(state){
-  lastState=state;authenticated=true;el('dj-login').hidden=true;el('workspace').hidden=false;
+  el('account').textContent=state.dj;lastState=state;authenticated=true;el('dj-login').hidden=true;el('workspace').hidden=false;
   el('signal-state').textContent=t(labels[state.state]||labels.unstable);
   el('signal-help').textContent=t(help[state.state]||help.unstable)+(state.other_dj?` (${state.other_dj})`:'');
   el('signal-panel').dataset.signal=state.state;
@@ -27,7 +27,7 @@ function render(state){
   el('clipping').hidden=!state.clipping;el('legacy').hidden=state.manual_takeover;
   el('delay').textContent=t('Le retour est décalé : {seconds} s de tampon serveur, plus le délai du lecteur.',{seconds:state.buffer_seconds});
   if(previewing&&!state.can_preview)stopPreview();
-  const settings=[['Serveur',state.host||t('Adresse à confirmer')],['Port',String(state.port)],['Point de montage',state.mount],['Utilisateur',state.dj]];
+  const settings=[...(state.source_url?[['URL du flux',state.source_url]]:[]),['Serveur',state.host||t('Adresse à confirmer')],['Port',String(state.port)],['Point de montage',state.mount],['Utilisateur',state.dj]];
   const nextSettings=JSON.stringify(settings);
   if(settingsKey!==nextSettings){settingsKey=nextSettings;el('encoder-settings').replaceChildren(...settings.flatMap(([label,value])=>{
     const term=document.createElement('dt'),data=document.createElement('dd'),text=document.createElement('span');
@@ -55,10 +55,9 @@ async function action(name){
   catch(error){unavailable(error);}finally{busy=false;if(lastState)render(lastState);}
 }
 async function start(){
-  try{context=await request('/api/session');}catch{location.assign('/login');return;}
-  const station=context.stations.find(s=>s.id===stationId);if(!station){location.assign('/');return;}
-  el('station-label').textContent=station.label;el('account').textContent=context.name;
-  el('logout').addEventListener('click',async()=>{stopPreview();try{await request('/auth/logout',{});location.assign('/login');}catch{el('message').textContent=t('Déconnexion indisponible. Réessayez.');}});
+  try{context=await request(`${endpoint}/context`);}catch{el('message').textContent=t('Station indisponible. Réessayez.');return;}
+  el('station-label').textContent=context.label;
+  el('logout').addEventListener('click',async()=>{stopPreview();try{await request(`${endpoint}/logout`,{});location.assign(`/station/${encodeURIComponent(stationId)}/dj`);}catch{el('message').textContent=t('Déconnexion indisponible. Réessayez.');}});
   el('login-form').addEventListener('submit',async event=>{
     event.preventDefault();if(busy)return;busy=true;el('login-button').disabled=true;el('message').textContent='';
     const password=el('dj-password').value;el('dj-password').value='';

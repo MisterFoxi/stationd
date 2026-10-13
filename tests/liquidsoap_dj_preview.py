@@ -154,7 +154,32 @@ def main():
             stop(sender)
             wait_for(lambda: state["disconnects"] == 2)
             wait_for(lambda: has_tone(work / "air.wav", 440, 880))
-            print("DJ audio: private preview, no pre-air leakage, no preview skip, explicit takeover and programme return passed.")
+            # Reconnect after ending from the encoder, then disconnect through
+            # the exact control command used by the DJ page, and reconnect again.
+            sender = source()
+            wait_for(healthy)
+            state["take"] = True
+            wait_for(lambda: state["aired"] == 2)
+            wait_for(lambda: has_tone(work / "air.wav", 880, 440))
+            state["take"] = False
+            with socket.socket(socket.AF_UNIX) as control:
+                control.settimeout(5)
+                control.connect(str(work / "control.sock"))
+                control.sendall(b"stationd.live_kick\n")
+                reply = control.recv(4096)
+                assert b"OK" in reply, reply
+            wait_for(lambda: state["disconnects"] == 3)
+            stop(sender)
+            wait_for(lambda: has_tone(work / "air.wav", 440, 880))
+            sender = source()
+            wait_for(healthy)
+            state["take"] = True
+            wait_for(lambda: state["aired"] == 3)
+            wait_for(lambda: has_tone(work / "air.wav", 880, 440))
+            stop(sender)
+            wait_for(lambda: state["disconnects"] == 4)
+            print("DJ audio: preview, takeover, programme return and reconnection after encoder/page disconnect passed.")
+
         except Exception:
             log.flush()
             source_log.flush()

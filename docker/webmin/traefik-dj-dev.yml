@@ -1,0 +1,27 @@
+# HTTPS DJ access on the development station.
+http:
+  routers:
+    stationd-dj-dev:
+      entryPoints: [https]
+      rule: "Host(`dj-dev.homestone.rp-radio.live`) && (Path(`/`) || Path(`/station/homestoneDev/dj`) || Path(`/dj.js`) || Path(`/i18n.js`) || Path(`/remote.css`) || PathPrefix(`/api/stations/homestoneDev/dj`))"
+      middlewares: [stationd-dj-dev-home]
+      service: stationd-dj-dev
+      tls:
+        certResolver: cloudflare
+    stationd-dj-dev-http:
+      entryPoints: [http]
+      rule: "Host(`dj-dev.homestone.rp-radio.live`)"
+      middlewares: [https-redirectscheme]
+      service: noop@internal
+  middlewares:
+    stationd-dj-dev-home:
+      redirectRegex:
+        regex: '^https?://dj-dev\.homestone\.rp-radio\.live/?$'
+        replacement: 'https://dj-dev.homestone.rp-radio.live/station/homestoneDev/dj'
+        permanent: false
+  services:
+    stationd-dj-dev:
+      loadBalancer:
+        servers:
+          - url: "http://devstationd.lan:18090"
+        passHostHeader: true

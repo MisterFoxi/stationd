@@ -615,6 +615,9 @@ impl LiveHub {
         let (dj, access) = {
             let mut st = self.lock();
             let session = st.session.clone().ok_or(LiveError::NoLive)?;
+            // Preserve the first reason: a late blank callback must not turn
+            // voluntary departure into a cut or enqueue another disconnect.
+            if st.ending.is_some() { return Err(LiveError::NoLive); }
             st.ending = Some(reason);
             if session.access == Access::Slot && !session.occurrence.is_empty() {
                 let key = (session.dj.clone(), session.occurrence);
@@ -960,6 +963,24 @@ mod tests {
         assert!(hub.status().refused.is_empty(), "voluntary end must allow reconnection");
         assert!(hub.auth("marc", "s3cret", "x").await.allowed());
     }
+    #[tokio::test]
+    async fn voluntary_stop_ignores_late_silence_and_keeps_the_slot_open() {
+        let (_dir, hub, mut rx) = hub(true).await;
+        let hub = hub.with_preparation(true, -40.);
+        hub.at(20, 30); let base = hub.now();
+        assert!(hub.auth("marc", "s3cret", "x").await.allowed()); hub.connected();
+        for sec in 0..=3 { advance(&hub, base, sec); hub.input_health(true, 0.1, 0.3); }
+        hub.dj_take("marc").await.unwrap(); hub.aired();
+        hub.dj_stop("marc").unwrap();
+        assert_eq!(rx.try_recv().unwrap(), AirEvent::LiveKick);
+        // Liquidsoap can report blank audio as the source is being disconnected.
+        hub.silence().await;
+        assert!(rx.try_recv().is_err(), "late silence must not issue another kick");
+        assert_eq!(hub.disconnected().unwrap().reason, EndReason::Disconnected);
+        assert!(hub.status().refused.is_empty());
+        assert!(hub.auth("marc", "s3cret", "x").await.allowed());
+    }
+
     #[tokio::test]
     async fn readiness_resets_on_silence_missing_frames_and_stale_measurements() {
         let (_dir, hub, _rx) = hub(true).await;

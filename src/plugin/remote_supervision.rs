@@ -37,6 +37,9 @@ struct Station {
     /// Public hostname entered in the DJ encoder (no protocol or port).
     #[serde(default)]
     dj_source_host: String,
+    /// External encoder URL, including protocol, external port and mount.
+    #[serde(default)]
+    dj_source_url: String,
     #[serde(default)]
     allow_plaintext_grpc: bool,
 }
@@ -47,6 +50,8 @@ struct Config {
     #[serde(default = "default_bind")]
     bind: SocketAddr,
     public_url: String,
+    #[serde(default)]
+    dj_public_url: Option<String>,
     stations: Vec<Station>,
     #[serde(default = "default_max_requests")]
     max_requests: usize,
@@ -149,6 +154,9 @@ impl Config {
             return Err("bind must be a loopback IP with a nonzero port".into());
         }
         origin(&self.public_url, &["https"]).map_err(|e| format!("public_url: {e}"))?;
+        if let Some(url) = &self.dj_public_url {
+            origin(url, &["https"]).map_err(|e| format!("dj_public_url: {e}"))?;
+        }
         if !(1..=64).contains(&self.stations.len()) {
             return Err("stations must contain between 1 and 64 entries".into());
         }
@@ -171,6 +179,16 @@ impl Config {
                 || station.label.chars().any(char::is_control)
             {
                 return Err(format!("station {}: invalid label", station.id));
+            }
+            if !station.dj_source_url.is_empty() {
+                let value = &station.dj_source_url;
+                let uri: Uri = value.parse().map_err(|_| "invalid dj_source_url")?;
+                let scheme = uri.scheme_str().ok_or("dj_source_url requires a protocol")?;
+                let authority = uri.authority().ok_or("dj_source_url requires a host")?;
+                origin(&format!("{scheme}://{authority}"), &["http", "https"])?;
+                if value.len() > 2048 || value.contains(['#', '\\']) || uri.query().is_some() || uri.path().len() < 2 {
+                    return Err("dj_source_url requires a mount and no query or fragment".into());
+                }
             }
             if !station.dj_source_host.is_empty() {
                 origin(&format!("http://{}", station.dj_source_host), &["http"])
@@ -489,6 +507,19 @@ mod tests {
         config.bind = "[::1]:8090".parse().unwrap();
         config.public_url = "https://[::1]:443".into();
         config.validate().unwrap();
+    }
+
+    #[test]
+    fn webmin_encoder_url_validates_external_protocol_port_and_mount() {
+        let mut config = Config::parse(&table()).unwrap();
+        for url in ["http://dj.example.test/live", "https://dj.example.test:8443/live", "http://[::1]:8005/live"] {
+            config.stations[0].dj_source_url = url.into();
+            config.validate().unwrap();
+        }
+        for url in ["dj.example.test/live", "ftp://dj.example.test/live", "http://user:password@dj.example.test/live", "http://dj.example.test:0/live", "http://dj.example.test/", "http://dj.example.test/live?password=secret", "http://dj.example.test/live#fragment"] {
+            config.stations[0].dj_source_url = url.into();
+            assert!(config.validate().is_err(), "{url}");
+        }
     }
 
     #[test]

@@ -1,4 +1,8 @@
 {
+  "URL du flux": {
+    "en": "Stream URL",
+    "de": "Stream-URL"
+  },
   "Dernier auditeur observé (heure station)": {
     "en": "Last listener observed (station time)",
     "de": "Zuletzt beobachteter Hörer (Stationszeit)"

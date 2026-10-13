@@ -5,9 +5,10 @@ de station ou la console d’administration, sépare la réception du flux de sa
 
 ## Parcours
 
-1. Se connecter au Webmin avec un compte autorisé sur la station.
-2. Ouvrir « Passer en direct » et saisir les identifiants du fichier des DJ.
-   Ce sont les mêmes identifiants que dans BUTT/Mixxx, distincts du compte Webmin.
+1. Ouvrir directement `/station/<id>/dj`. Aucun compte Webmin n’est nécessaire.
+2. Saisir les identifiants du fichier des DJ, les mêmes que dans BUTT/Mixxx.
+   La session DJ est indépendante de la session d’administration et ne donne
+   accès qu’aux commandes de son propre flux.
 3. Copier les paramètres Icecast dans le logiciel et lancer la diffusion.
 4. StationD attend trois secondes de son décodable continu au-dessus du seuil
    `silence_threshold`. Les mesures viennent de Liquidsoap chaque seconde :
@@ -23,6 +24,8 @@ de station ou la console d’administration, sépare la réception du flux de sa
 7. « Déconnecter mon flux » ou la déconnexion du logiciel rend l’antenne à la
    programmation. Cette fin volontaire ne bannit pas le DJ. Une déconnexion
    avant la prise d’antenne ne saute pas le morceau ni la piste préchargée.
+   Le DJ peut se reconnecter pendant le même créneau après un départ volontaire ;
+   un signal de silence tardif ne transforme pas ce départ en bannissement.
 
 Un seul flux DJ peut se connecter à la fois, comme avant. La page signale un
 DJ déjà connecté et ne permet pas de le remplacer. Les créneaux de grille,
@@ -53,6 +56,11 @@ silence_timeout = 30
 immédiate à la connexion, fixer explicitement `manual_takeover = false`.
 La page affiche alors un avertissement et ne propose pas de prise manuelle.
 
+Une adresse HTTPS dédiée à la page DJ peut être déclarée dans `[plugin.config]`
+avec `dj_public_url = "https://dj-dev.homestone.rp-radio.live"`. Cette origine
+n’autorise que les routes DJ, pas les connexions ni les commandes Webmin.
+`public_url` conserve l’adresse d’administration existante.
+
 Dans le plugin Webmin, préciser le nom public utilisé par le logiciel DJ :
 
 ```toml
@@ -60,10 +68,15 @@ Dans le plugin Webmin, préciser le nom public utilisé par le logiciel DJ :
 id = "my-station"
 label = "My station"
 grpc_endpoint = "http://127.0.0.1:50051"
-dj_source_host = "dj.example.org" # sans protocole ni port
+dj_source_url = "http://dj.example.org/live" # URL externe, port public et mount
 ```
 
-Si `dj_source_host` est absent, la page demande l’adresse à l’administrateur ;
+`dj_source_url` fournit à la page l’URL complète, l’hôte, le port externe
+(80 pour HTTP, 443 pour HTTPS sauf port explicite) et le point de montage.
+C’est cette adresse qui doit atteindre le harbor via Traefik.
+L’ancien `dj_source_host` reste accepté avec le port et le mount internes.
+
+Si aucune adresse n’est renseignée, la page demande l’adresse à l’administrateur ;
 elle ne présente pas l’adresse gRPC interne comme une adresse de diffusion.
 Le port à ouvrir pour les logiciels reste `harbor_port`.
 
@@ -78,11 +91,13 @@ pendant un direct : le DJ devra se reconnecter après un redémarrage du daemon.
 - Les identifiants DJ sont vérifiés dans StationD contre les empreintes Argon2.
 - Les tickets opaques durent au maximum 12 heures, sont bornés à 256 par station
   et sont invalidés si le compte DJ est désactivé ou son mot de passe change.
-- Le gateway lie chaque ticket à la session Webmin et à la station ; les tickets
+- Le gateway lie chaque ticket à une session DJ dédiée et à la station ; les tickets
   et les mots de passe ne sont ni exposés au JavaScript ni placés dans une URL.
-- La lecture et l’écoute exigent toujours la permission de lecture de station.
-  Les commandes exigent aussi origine et CSRF valides, puis le ticket du DJ.
-  Même un viewer peut gérer **son propre** flux avec des identifiants DJ valides.
+- La lecture et l’écoute exigent un ticket DJ valide pour cette station.
+  Les commandes exigent aussi origine et CSRF valides. Le DJ ne peut gérer
+  que **son propre** flux et cette session n’ouvre aucune page d’administration.
+  « Se déconnecter » ferme la session web et la préécoute ; pour rendre
+  l’antenne, utiliser « Déconnecter mon flux » ou arrêter le logiciel.
 - Les demandes de prise/fin d’antenne sont auditées sans secrets. Les tentatives
   d’identification et les calculs Argon2 sont limités.
 - Liquidsoap encode la préécoute en MP3 128 kbit/s sur le même port harbor,

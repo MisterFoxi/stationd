@@ -1,9 +1,9 @@
 //! DJ credentials remain in stationd; the gateway retains only opaque tickets,
-//! bound to the existing Webmin session and station. Every route reauthorizes.
+//! bound to a dedicated DJ browser session and station. No Webmin account is required.
 use super::{
-    auth::now,
+    auth::{now, token as random_token, secret_eq},
     live::transport,
-    web::{answer, cookie, Web, SESSION},
+    web::{answer, cookie, set_cookie, Web},
     Config, Station,
 };
 use crate::proto::live::{self, live_service_client::LiveServiceClient};
@@ -24,8 +24,12 @@ use std::{
 };
 use tokio::sync::Semaphore;
 
+const DJ_SESSION: &str = "__Host-stationd-dj";
+#[derive(Clone)]
+struct BrowserSession { csrf: String, expires: i64 }
 #[derive(Clone)]
 struct Ticket {
+    dj: String,
     token: String,
     expires: i64,
 }
@@ -34,12 +38,14 @@ pub(super) struct Djs {
     stations: Arc<HashMap<String, Station>>,
     tickets: Arc<Mutex<HashMap<(String, String), Ticket>>>,
     previews: Arc<Semaphore>,
+    sessions: Arc<Mutex<HashMap<String, BrowserSession>>>,
 }
 impl Djs {
     pub(super) fn new(config: &Config) -> Self {
         Self {
             stations: Arc::new(config.stations.iter().map(|s| (s.id.clone(), s.clone())).collect()),
             tickets: Default::default(),
+            sessions: Default::default(),
             previews: Arc::new(Semaphore::new(16)),
         }
     }
@@ -58,13 +64,15 @@ impl Djs {
             .ok_or(StatusCode::UNAUTHORIZED)
     }
     fn view(&self, id: &str, state: live::DjState) -> Value {
-        let source_host = self
-            .stations
-            .get(id)
-            .map(|s| s.dj_source_host.as_str())
-            .unwrap_or_default();
-        json!({"dj":state.dj,"enabled":state.enabled,"host":source_host,"port":state.port,
-            "mount":state.mount,"state":state.state,"can_take":state.can_take,
+        let station = self.stations.get(id);
+        let source_url = station.map(|s| s.dj_source_url.as_str()).unwrap_or_default();
+        let external = webauthn_rs::prelude::Url::parse(source_url).ok();
+        let source_host = external.as_ref().and_then(|url| url.host_str())
+            .unwrap_or_else(|| station.map(|s| s.dj_source_host.as_str()).unwrap_or_default());
+        let port = external.as_ref().and_then(|url| url.port_or_known_default()).map(u32::from).unwrap_or(state.port);
+        let mount = external.as_ref().map(|url| url.path()).unwrap_or(&state.mount);
+        json!({"dj":state.dj,"enabled":state.enabled,"source_url":source_url,"host":source_host,"port":port,
+            "mount":mount,"state":state.state,"can_take":state.can_take,
             "can_preview":state.can_preview,"level_db":state.level_db,"peak_db":state.peak_db,
             "clipping":state.clipping,"other_dj":state.other_dj,"buffer_seconds":state.buffer_seconds,
             "manual_takeover":state.manual_takeover})
@@ -82,6 +90,8 @@ pub(super) fn routes() -> Router<Web> {
             }),
         )
         .route("/station/:id/dj", get(page))
+        .route("/api/stations/:id/dj/context", get(context))
+        .route("/api/stations/:id/dj/logout", post(logout))
         .route("/api/stations/:id/dj/login", post(login))
         .route("/api/stations/:id/dj", get(status))
         .route("/api/stations/:id/dj/take", post(take))
@@ -89,31 +99,43 @@ pub(super) fn routes() -> Router<Web> {
         .route("/api/stations/:id/dj/preview", get(preview))
 }
 async fn authorize(web: &Web, id: &str, headers: &HeaderMap, mutation: bool) -> Result<String, Response> {
-    let raw = cookie(headers, SESSION).unwrap_or_default();
-    let session = raw.clone();
-    let station = id.to_string();
-    let csrf = headers
-        .get("x-csrf-token")
-        .and_then(|h| h.to_str().ok())
-        .filter(|value| !value.is_empty())
-        .map(str::to_string);
-    web.work(move |a| {
-        a.authorize(
-            &session,
-            &station,
-            if mutation { "dj.control" } else { "station.read" },
-            csrf.as_deref(),
-        )
-    })
-    .await
-    .map_err(|e| answer(Err(e)))?;
+    if !web.dj.stations.contains_key(id) { return Err(StatusCode::NOT_FOUND.into_response()); }
+    let raw = cookie(headers, DJ_SESSION).unwrap_or_default();
+    let mut sessions = web.dj.sessions.lock().map_err(|_| StatusCode::SERVICE_UNAVAILABLE.into_response())?;
+    sessions.retain(|_, s| s.expires > now());
+    let session = sessions.get(&raw).ok_or_else(|| StatusCode::UNAUTHORIZED.into_response())?;
+    if mutation && !headers.get("x-csrf-token").and_then(|h| h.to_str().ok())
+        .is_some_and(|c| secret_eq(c, &session.csrf)) {
+        return Err(StatusCode::FORBIDDEN.into_response());
+    }
     Ok(raw)
 }
 async fn page(State(web): State<Web>, Path(id): Path<String>, headers: HeaderMap) -> Response {
-    if let Err(e) = authorize(&web, &id, &headers, false).await {
-        return e;
-    }
+    if !web.dj.stations.contains_key(&id) { return StatusCode::NOT_FOUND.into_response(); }
     Html(super::i18n::page(include_str!("dj.html"), &headers).replace("{{STATION_ID}}", &id)).into_response()
+}
+async fn context(State(web): State<Web>, Path(id): Path<String>, headers: HeaderMap) -> Response {
+    let station = match web.dj.stations.get(&id) { Some(s) => s, None => return StatusCode::NOT_FOUND.into_response() };
+    let mut sessions = match web.dj.sessions.lock() { Ok(s) => s, Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response() };
+    sessions.retain(|_, s| s.expires > now());
+    let previous = cookie(&headers, DJ_SESSION).filter(|raw| sessions.contains_key(raw));
+    let raw = if let Some(raw) = previous { raw } else {
+        if sessions.len() >= 512 { return StatusCode::TOO_MANY_REQUESTS.into_response(); }
+        let raw = random_token();
+        sessions.insert(raw.clone(), BrowserSession { csrf: random_token(), expires: now() + 43200 });
+        raw
+    };
+    let mut response = Json(json!({"csrf_token":sessions[&raw].csrf,"label":station.label})).into_response();
+    set_cookie(&mut response, DJ_SESSION, &raw, (sessions[&raw].expires - now()).max(0) as u64);
+    response
+}
+async fn logout(State(web): State<Web>, Path(id): Path<String>, headers: HeaderMap) -> Response {
+    let raw = match authorize(&web, &id, &headers, true).await { Ok(r) => r, Err(e) => return e };
+    if let Ok(mut sessions) = web.dj.sessions.lock() { sessions.remove(&raw); }
+    if let Ok(mut tickets) = web.dj.tickets.lock() { tickets.retain(|(s, _), _| s != &raw); }
+    let mut response = Json(json!({"authenticated":false})).into_response();
+    set_cookie(&mut response, DJ_SESSION, "", 0);
+    response
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -154,6 +176,7 @@ async fn login(
         Ok(c) => c,
         Err(e) => return e.into_response(),
     };
+    let dj = body.dj.clone();
     let result = tokio::time::timeout(
         Duration::from_secs(4),
         client.dj_login(live::DjLoginRequest {
@@ -167,24 +190,33 @@ async fn login(
         Ok(Err(e)) => return rpc_error(e),
         Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
     };
+    let rotated = random_token();
+    {
+        let mut sessions = match web.dj.sessions.lock() { Ok(s) => s, Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response() };
+        let previous = match sessions.remove(&raw) { Some(s) => s, None => return StatusCode::UNAUTHORIZED.into_response() };
+        sessions.insert(rotated.clone(), BrowserSession { csrf: previous.csrf, expires: now() + 43200 });
+    }
     {
         let mut tickets = match web.dj.tickets.lock() {
             Ok(t) => t,
             Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
         };
-        tickets.retain(|_, t| t.expires > now());
-        if tickets.len() >= 256 && !tickets.contains_key(&(raw.clone(), id.clone())) {
+        tickets.retain(|(s, _), t| t.expires > now() && s != &raw);
+        if tickets.len() >= 256 && !tickets.contains_key(&(rotated.clone(), id.clone())) {
             return StatusCode::TOO_MANY_REQUESTS.into_response();
         }
         tickets.insert(
-            (raw.clone(), id.clone()),
+            (rotated.clone(), id.clone()),
             Ticket {
+                dj,
                 token,
                 expires: now() + 43200,
             },
         );
     }
-    read_state(web, id, raw, "status").await
+    let mut response = read_state(web, id, rotated.clone(), "status").await;
+    set_cookie(&mut response, DJ_SESSION, &rotated, 43200);
+    response
 }
 async fn read_state(web: Web, id: String, raw: String, action: &str) -> Response {
     let token = match web.dj.ticket(&raw, &id) {
@@ -192,13 +224,11 @@ async fn read_state(web: Web, id: String, raw: String, action: &str) -> Response
         Err(e) => return e.into_response(),
     };
     if action != "status" {
-        let session = raw.clone();
+        let actor = web.dj.tickets.lock().ok().and_then(|t| t.get(&(raw.clone(), id.clone())).map(|t| format!("dj:{}", t.dj)));
+        let Some(actor) = actor else { return StatusCode::UNAUTHORIZED.into_response(); };
         let station = id.clone();
-        let audit_action = format!("dj.{action}");
-        if let Err(e) = web
-            .work(move |a| a.dj_audit(&session, &station, &audit_action, "requested"))
-            .await
-        {
+        let action = format!("dj.{action}");
+        if let Err(e) = web.work(move |a| a.console_audit(&actor, &action, "requested", &station)).await {
             return answer(Err(e));
         }
     }
@@ -273,8 +303,8 @@ async fn preview(State(web): State<Web>, Path(id): Path<String>, headers: Header
             tokio::select! {
                 _ = tx.closed() => break,
                 _ = check.tick() => {
-                    let session=raw.clone(); let station=id.clone();
-                    if web.work(move |a| a.authorize(&session, &station, "station.read", None)).await.is_err() { break; }
+                    if web.dj.ticket(&raw, &id).is_err() { break; }
+                    if !web.dj.sessions.lock().ok().is_some_and(|s| s.get(&raw).is_some_and(|s| s.expires > now())) { break; }
                 }
                 chunk = stream.message() => match chunk {
                     Ok(Some(chunk)) => if !matches!(tokio::time::timeout(Duration::from_secs(2), tx.send(Ok(bytes::Bytes::from(chunk.audio)))).await, Ok(Ok(()))) { break; },
