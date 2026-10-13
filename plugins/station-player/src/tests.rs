@@ -118,6 +118,22 @@ fn dns_hostname_starts_real_http_server_and_shutdown_releases_port() {
     assert!(std::net::TcpListener::bind(("localhost", port)).is_ok());
 }
 
+#[test]
+fn optional_station_artwork_is_validated_without_requiring_an_image() {
+    let mut config = config();
+    assert!(config.stations[0].artwork_url.is_none());
+    config.stations[0].artwork_url = Some("https://radio.example.test/visual.jpg".into());
+    assert!(config.validate().is_ok());
+    for invalid in [
+        "javascript:alert(1)",
+        "file:///secret",
+        "https://user:password@example.test/image",
+    ] {
+        config.stations[0].artwork_url = Some(invalid.into());
+        assert!(config.validate().is_err());
+    }
+}
+
 fn air() -> onair::OnAirSnapshot {
     onair::OnAirSnapshot {
         observed_at: now(),

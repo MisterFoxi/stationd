@@ -54,6 +54,9 @@ struct Station {
     #[serde(default)]
     description: String,
     stream_url: String,
+    /// Optional station visual. No image is needed for the default design.
+    #[serde(default)]
+    artwork_url: Option<String>,
     grpc_endpoint: String,
     #[serde(default)]
     allow_plaintext_grpc: bool,
@@ -212,6 +215,9 @@ impl Config {
                 return Err("invalid station label or description".into());
             }
             url(&station.stream_url)?;
+            if let Some(artwork) = &station.artwork_url {
+                url(artwork).map_err(|error| format!("artwork_url: {error}"))?;
+            }
             let endpoint = url(&station.grpc_endpoint)?;
             if !matches!(endpoint.path(), "" | "/") || endpoint.query().is_some() {
                 return Err("grpc_endpoint must be an origin".into());
@@ -399,7 +405,8 @@ fn view(entry: &Entry) -> serde_json::Value {
             .observed_at
             .is_some_and(|at| at > 0 && now().saturating_sub(at) <= STALE_SECONDS);
     serde_json::json!({"station":{"slug":entry.station.slug,"label":entry.station.label,
-        "description":entry.station.description,"stream_url":entry.station.stream_url,"theme":entry.station.theme},
+        "description":entry.station.description,"stream_url":entry.station.stream_url,
+        "artwork_url":entry.station.artwork_url,"theme":entry.station.theme},
         "status": if fresh {"online"} else if cache.received_at.is_none() {"connecting"} else {"offline"},
         "stale":!fresh,"received_at":cache.received_at,"air":cache.air})
 }
@@ -478,7 +485,7 @@ async fn security(request: Request, next: Next) -> Response {
     headers.insert(header::REFERRER_POLICY, "no-referrer".parse().unwrap());
     // frame-ancestors deliberately allows the requested public iframe embedding.
     headers.insert(header::CONTENT_SECURITY_POLICY,
-        "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; media-src https: http:; base-uri 'none'; form-action 'none'; frame-ancestors *".parse().unwrap());
+        "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; media-src https: http:; img-src https: http:; base-uri 'none'; form-action 'none'; frame-ancestors *".parse().unwrap());
     response
 }
 fn escape_html(value: &str) -> String {

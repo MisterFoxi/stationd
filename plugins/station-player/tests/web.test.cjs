@@ -6,17 +6,22 @@ const source = fs.readFileSync(require('node:path').join(__dirname, '../web/play
 function browser(compact = false) {
   const elements = new Map();
   class Element {
-    constructor() { this.children=[]; this.attributes={}; this.events={}; this.assignments=0; }
+    constructor() { this.children=[]; this.attributes={}; this.events={}; this.assignments=0; this.dataset={}; this.value='0.8'; this.paused=true; this.volume=1; this.muted=false; this.hidden=false; this.playCalls=0; }
     append(...items) { this.children.push(...items); }
     replaceChildren(...items) { this.children=items; }
     getAttribute(key) { return this.attributes[key] ?? null; }
+    setAttribute(key,value) { this.attributes[key]=String(value); }
+    removeAttribute(key) { delete this.attributes[key]; }
     set src(value) { this.assignments++; this.attributes.src=value; }
     addEventListener(event, callback) { this.events[event]=callback; }
+    async play() { this.playCalls++; this.paused=false; this.events.playing?.(); }
+    pause() { this.paused=true; this.events.pause?.(); }
+    load() { this.error=null; }
   }
   const document = {
     getElementById(id) { if (!elements.has(id)) elements.set(id, new Element()); return elements.get(id); },
     createElement() { return new Element(); },
-    body: {classList:{toggle(key,value){document.compact=value;}}},
+    body: {dataset:{},classList:{toggle(key,value){if(key==='compact')document.compact=value;}}},
     documentElement: {style:{setProperty(){}}}
   };
   let resolveFetch, stream;
@@ -57,4 +62,58 @@ test('stale snapshots and stream failure are visible',() => {
   b.stream.snapshot({data:JSON.stringify(snapshot)});
   assert.equal(b.elements.get('status').textContent,'Informations hors ligne');
   b.elements.get('audio').events.error(); assert.match(b.elements.get('audio-status').textContent,/Flux indisponible/);
+});
+
+test('custom controls play, pause, adjust volume and mute without changing source', async () => {
+  const b=browser(); b.stream.snapshot({data:JSON.stringify(data())});
+  const audio=b.elements.get('audio');
+  assert.equal(audio.controls,false); assert.equal(b.elements.get('custom-controls').hidden,false);
+  await b.elements.get('play').events.click();
+  assert.equal(audio.playCalls,1); assert.equal(audio.paused,false);
+  assert.equal(b.elements.get('play').attributes['aria-label'],'Mettre en pause');
+  await b.elements.get('play').events.click(); assert.equal(audio.paused,true);
+  b.elements.get('volume').value='0.25'; b.elements.get('volume').events.input();
+  assert.equal(audio.volume,0.25);
+  b.elements.get('mute').events.click(); assert.equal(audio.muted,true);
+  assert.equal(b.elements.get('mute').attributes['aria-label'],'Rétablir le son');
+  assert.equal(audio.assignments,1);
+});
+
+test('rejected playback is visible and keeps the listen action available', async () => {
+  const b=browser(); b.elements.get('audio').play=async()=>{throw Error('unavailable');};
+  await b.elements.get('play').events.click();
+  assert.match(b.elements.get('audio-status').textContent,/Flux indisponible/);
+  assert.equal(b.elements.get('play').attributes['aria-pressed'],'false');
+});
+
+test('artwork remains optional and failed images fall back to the typographic design', () => {
+  const b=browser(); const snapshot=data();
+  b.stream.snapshot({data:JSON.stringify(snapshot)}); assert.equal(b.elements.get('artwork').hidden,true);
+  snapshot.station.artwork_url='https://radio.example.test/visual.jpg';
+  b.stream.snapshot({data:JSON.stringify(snapshot)}); assert.equal(b.elements.get('artwork').hidden,false);
+  b.elements.get('artwork').events.error();
+  b.stream.snapshot({data:JSON.stringify(snapshot)}); assert.equal(b.elements.get('artwork').hidden,true);
+});
+
+test('pausing a connecting live stream releases it without showing a false failure', async () => {
+  const b=browser(); const audio=b.elements.get('audio'); let rejectPlay;
+  audio.play=()=>{audio.paused=false; audio.events.play(); return new Promise((_,reject)=>{rejectPlay=reject;});};
+  audio.load=()=>{if(rejectPlay)rejectPlay(Object.assign(new Error('cancelled'),{name:'AbortError'}));};
+  const pending=b.elements.get('play').events.click();
+  assert.equal(b.elements.get('play').attributes['aria-pressed'],'true');
+  await b.elements.get('play').events.click(); await pending;
+  assert.equal(audio.paused,true);
+  assert.doesNotMatch(b.elements.get('audio-status').textContent,/indisponible/);
+  assert.equal(b.elements.get('play').attributes['aria-pressed'],'false');
+});
+
+test('history expands on demand and a sleeping station has an explicit queue message', () => {
+  const b=browser(); const snapshot=data();
+  snapshot.air.state='sleeping'; snapshot.air.coming_next=[]; snapshot.air.indicative=[];
+  snapshot.air.history=Array.from({length:12},(_,i)=>({title:'Played '+i,artist:'Artist'}));
+  b.stream.snapshot({data:JSON.stringify(snapshot)});
+  assert.match(b.elements.get('next').children[0].textContent,/station est en veille/);
+  assert.equal(b.elements.get('history').children.length,8);
+  b.elements.get('history-more').events.click(); assert.equal(b.elements.get('history').children.length,12);
+  b.stream.snapshot({data:JSON.stringify(snapshot)}); assert.equal(b.elements.get('history').children.length,12);
 });

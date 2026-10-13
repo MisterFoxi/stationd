@@ -1,18 +1,70 @@
 <!doctype html>
 <html lang="fr">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Station · Direct</title><link rel="stylesheet" href="/player/assets/player.css"><script src="/player/assets/player.js" defer></script></head>
-<body><main>
-<header><span class="eyebrow">LA RADIO, EN DIRECT</span><h1 id="station">Chargement de la station…</h1><p id="description"></p></header>
-<section class="player" aria-label="Lecteur radio">
-<div class="live"><span class="dot"></span><span id="status" role="status">Connexion…</span></div>
-<p class="eyebrow">À L’ANTENNE</p><h2 id="title">En attente du direct</h2><p id="artist"></p>
-<audio id="audio" controls preload="none" aria-label="Écouter la station"></audio>
-<p id="audio-status" role="status"></p><p id="freshness" class="muted"></p>
-</section>
-<div class="details">
-<section><h2>À suivre</h2><p class="muted">File réelle : titre préparé pour la diffusion.</p><ol id="next"></ol></section>
-<section><h2>Prévisions indicatives</h2><p class="muted">Simulation du scheduler, susceptible de changer.</p><ol id="indicative"></ol></section>
-<section><h2>Agenda</h2><p class="muted">Horaires de la station, programmation indicative.</p><ol id="agenda"></ol><h3>Sans horaire fixe</h3><ol id="indicative-agenda"></ol></section>
-<section><h2>Derniers titres diffusés</h2><ol id="history"></ol></section>
-</div><footer><a id="full" target="_blank" rel="noopener">Ouvrir le player complet ↗</a><span>StationD · Une radio à votre rythme</span></footer>
-</main></body></html>
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Station · Direct</title>
+  <link rel="stylesheet" href="/player/assets/player.css"><script src="/player/assets/player.js" defer></script>
+</head>
+<body>
+<main class="shell">
+  <header class="masthead">
+    <a class="brand" href="/" aria-label="Accueil des stations">
+      <svg class="brand-mark" viewBox="0 0 40 40" aria-hidden="true"><path d="M5 17v6m7-13v20m8-26v32m8-26v20m7-13v6"/></svg>
+      <h1 id="station">Votre radio</h1>
+    </a>
+    <nav class="page-nav" aria-label="Dans cette page"><a href="#up-next">À suivre</a><a href="#schedule">Agenda</a><a href="#recent">Historique</a></nav>
+    <span class="masthead-tag">UNE RADIO À VOTRE RYTHME</span>
+  </header>
+
+  <section class="hero" aria-label="Lecteur radio">
+    <div class="hero-top"><span class="eyebrow">VOTRE FRÉQUENCE. VOTRE MOMENT.</span><span class="status-pill"><span class="status-dot"></span><span id="status" role="status">Connexion au direct…</span></span></div>
+    <div class="hero-content">
+      <div class="hero-copy">
+        <p id="onair-label" class="overline">À L’ANTENNE</p>
+        <h2 id="title">La musique commence ici.</h2>
+        <p id="artist" class="artist">Installez-vous. On s’occupe de la suite.</p>
+        <p id="description" class="description"></p>
+      </div>
+      <div class="hero-visual">
+        <div class="radio-orbit" aria-hidden="true"><div class="orbit-ring ring-one"></div><div class="orbit-ring ring-two"></div><div class="orbit-core"><svg viewBox="0 0 80 80"><path d="M16 34v12m12-22v32m12-44v56m12-44v32m12-22v12"/></svg></div><span class="orbit-caption">LE SON NOUS RASSEMBLE</span></div>
+        <img id="artwork" class="artwork" alt="Visuel de la station" hidden>
+      </div>
+    </div>
+    <audio id="audio" controls preload="none" aria-label="Écouter la station"></audio>
+    <div id="custom-controls" class="controls" hidden>
+      <button id="play" class="play-button" type="button" aria-label="Écouter le direct" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path class="play-symbol" d="M8 5v14l11-7z"/><path class="pause-symbol" d="M7 5h4v14H7zm6 0h4v14h-4z"/></svg></button>
+      <div class="play-copy"><span id="play-label">Écouter le direct</span><span id="audio-status" role="status">Votre rendez-vous avec le son.</span></div>
+      <div class="listening-mark" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><span>À L’ÉCOUTE</span></div>
+      <div class="volume-control"><button id="mute" class="icon-button" type="button" aria-label="Couper le son" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9v6h4l5 4V5L8 9H4z"/><path class="volume-waves" d="M16 8a6 6 0 0 1 0 8m3-11a10 10 0 0 1 0 14"/><path class="volume-slash" d="m16 9 5 6m0-6-5 6"/></svg></button><label class="sr-only" for="volume">Volume</label><input id="volume" type="range" min="0" max="1" step="0.01" value="0.8"></div>
+    </div>
+    <div class="hero-foot"><span><span class="small-dot"></span> RADIO EN DIRECT</span><span id="freshness" class="freshness"></span></div>
+  </section>
+
+  <div class="content-grid">
+    <div class="queue-column">
+      <section id="up-next" class="panel">
+        <div class="section-heading"><div><p class="eyebrow">LA SUITE DU PROGRAMME</p><h2>Juste après</h2></div><span id="next-count" class="count">0</span></div>
+        <p class="section-note">Le prochain titre préparé pour la diffusion.</p>
+        <ol id="next" class="track-list next-list"></ol>
+      </section>
+      <section class="panel forecast-panel">
+        <div class="section-heading"><div><p class="eyebrow">UN PEU PLUS LOIN</p><h2>À l’horizon</h2></div><span class="outline-tag">INDICATIF</span></div>
+        <p class="section-note">Une idée de la suite. La programmation peut évoluer.</p>
+        <ol id="indicative" class="track-list forecast-list"></ol>
+      </section>
+    </div>
+    <section id="schedule" class="panel schedule-panel">
+      <div class="section-heading"><div><p class="eyebrow">LES RENDEZ-VOUS</p><h2>Sur votre fréquence</h2></div><svg class="heading-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></div>
+      <p id="agenda-zone" class="section-note">Les horaires de la station.</p>
+      <ol id="agenda" class="track-list agenda-list"></ol>
+      <details id="agenda-more" class="secondary-agenda"><summary>Les autres rendez-vous</summary><ol id="agenda-rest" class="track-list agenda-list"></ol></details>
+      <div class="unclocked"><h3>Au fil des titres</h3><ol id="indicative-agenda" class="track-list agenda-list"></ol></div>
+    </section>
+  </div>
+  <section id="recent" class="panel history-panel">
+    <div class="section-heading"><div><p class="eyebrow">VOUS VENEZ DE LES ENTENDRE</p><h2>Derniers passages</h2></div><button id="history-more" class="text-button" type="button" aria-expanded="false">Voir plus <span aria-hidden="true">↗</span></button></div>
+    <ol id="history" class="track-list history-list"></ol>
+  </section>
+  <footer><span>Le son nous rassemble.</span><a id="full" target="_blank" rel="noopener">Ouvrir le player complet ↗</a><span class="footer-signature">PROPULSÉ PAR STATIOND <span aria-hidden="true">↗</span></span></footer>
+</main>
+</body></html>

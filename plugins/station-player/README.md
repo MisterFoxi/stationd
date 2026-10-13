@@ -68,6 +68,8 @@ max_event_streams = 128
 slug = "home-stone"
 label = "Home Stone"
 description = "Votre bande-son, toute la journée."
+# Visuel optionnel par station, absent par défaut (aucune pochette nécessaire) :
+# artwork_url = "https://radio.example.org/visual.jpg"
 stream_url = "https://radio.example.org/home-stone.mp3"
 grpc_endpoint = "http://127.0.0.1:50051"
 # allow_plaintext_grpc = true # uniquement sur un réseau privé de confiance
@@ -119,10 +121,32 @@ d'authentification nécessaire : ces données sont volontairement publiques.
         style="border:0" loading="lazy"></iframe>
 ```
 
-La lecture reste déclenchée par l'utilisateur, avec les contrôles audio natifs
-(clavier, volume). Les mises à jour de métadonnées ne rechargent pas le flux.
+La lecture reste déclenchée par l'utilisateur. Les boutons lecture/pause et
+silence ainsi que le curseur de volume sont accessibles au clavier. Si le
+JavaScript ne peut pas s'exécuter, les contrôles audio natifs restent visibles.
+Les mises à jour de métadonnées ne rechargent pas le flux.
+La pause ferme la connexion audio ; la prochaine lecture reprend au direct.
 Icecast doit fournir un format pris en charge par le navigateur. Sur une page
 HTTPS utiliser impérativement un `stream_url` HTTPS pour éviter le contenu mixte.
+
+## Présentation
+
+Le titre et l'artiste sont au centre d'une présentation typographique, sans
+pochette nécessaire. Les couleurs du thème sont reprises par les contrôles,
+les cartes et la signature SVG de la station. L'indicateur animé accompagne
+uniquement la lecture ; il est décoratif et ne mesure pas le signal audio.
+Les animations respectent la préférence de réduction des mouvements.
+
+`artwork_url` est une option de visuel **par station**, pas une pochette
+automatiquement associée au titre en cours. Il accepte une URL HTTP(S) sans
+identifiants. Sans visuel ou si l'image échoue, le design garde sa signature
+graphique et sa mise en page. Aucun visuel n'est configuré par défaut.
+
+La page affiche six prévisions, cinq rendez-vous et huit passages à l'ouverture.
+Les autres rendez-vous s'ouvrent dans un panneau et l'historique peut être
+déplié. Les données complètes restent dans l'API. Les états de veille, pause,
+reconnexion et erreurs audio sont explicites. Le mode compact conserve le
+lecteur et les contrôles, avec un lien vers la page complète.
 
 ## Vérité des données
 
