@@ -85,7 +85,10 @@ un contraste lisible. Les slugs sont uniques, minuscules, ASCII (lettres,
 chiffres, tirets), 64 caractères maximum. Entre 1 et 64 stations ; entre 1 et
 4096 connexions SSE simultanées. Les clés inconnues sont refusées.
 La configuration utilise les tables TOML existantes du dépôt. Après une
-modification du fichier, recharger la configuration selon le workflow stationd.
+modification du fichier, lancer `stationctl plugin reload station-player` : le plugin
+relit et valide le TOML avant de remplacer le lecteur en cours. Une configuration
+invalide conserve le lecteur existant. `restart` et `start` après un arrêt relisent
+également le fichier.
 
 `bind` attend toujours **hôte:port**, sans `http://` ni chemin. Il accepte une
 IP locale/réseau, `0.0.0.0` (toutes les interfaces IPv4), une IPv6 entre crochets
@@ -124,6 +127,8 @@ d'authentification nécessaire : ces données sont volontairement publiques.
 La lecture reste déclenchée par l'utilisateur. Les boutons lecture/pause et
 silence ainsi que le curseur de volume sont accessibles au clavier. Si le
 JavaScript ne peut pas s'exécuter, les contrôles audio natifs restent visibles.
+Le nom, la description, le thème, le flux et le visuel configurés sont inclus
+dès la réponse HTML, sans dépendre des mises à jour JavaScript ou du gRPC.
 Les mises à jour de métadonnées ne rechargent pas le flux.
 La pause ferme la connexion audio ; la prochaine lecture reprend au direct.
 Icecast doit fournir un format pris en charge par le navigateur. Sur une page

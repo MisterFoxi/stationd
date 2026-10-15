@@ -520,10 +520,37 @@ async fn home(State(web): State<Web>) -> Response {
 }
 
 async fn page(State(web): State<Web>, Path(slug): Path<String>) -> Response {
-    if !web.entries.contains_key(&slug) {
+    let Some(entry) = web.entries.get(&slug) else {
         return StatusCode::NOT_FOUND.into_response();
+    };
+    let station = &entry.station;
+    // Replace only template tokens, never text inserted from configuration.
+    let html = include_str!("../web/player.html");
+    let mut rendered = String::with_capacity(html.len());
+    let mut rest = html;
+    while let Some((before, token)) = rest.split_once("{{") {
+        rendered.push_str(before);
+        let (key, after) = token.split_once("}}").expect("closed template token");
+        let value = match key {
+            "LABEL" => escape_html(&station.label),
+            "DESCRIPTION" => escape_html(&station.description),
+            "STREAM_URL" => escape_html(&station.stream_url),
+            "ACCENT" => station.theme.accent.clone(),
+            "BACKGROUND" => station.theme.background.clone(),
+            "FOREGROUND" => station.theme.foreground.clone(),
+            "BODY_CLASS" if station.artwork_url.is_some() => " class=\"has-artwork\"".into(),
+            "BODY_CLASS" => String::new(),
+            "ARTWORK" => station.artwork_url.as_ref().map_or_else(
+                || " hidden".into(),
+                |url| format!(" src=\"{}\"", escape_html(url)),
+            ),
+            _ => unreachable!("unknown player template token"),
+        };
+        rendered.push_str(&value);
+        rest = after;
     }
-    Html(include_str!("../web/player.html")).into_response()
+    rendered.push_str(rest);
+    Html(rendered).into_response()
 }
 async fn snapshot(State(web): State<Web>, Path(slug): Path<String>) -> Response {
     match web.entries.get(&slug) {

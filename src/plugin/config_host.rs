@@ -602,3 +602,63 @@ mod config_editor_tests {
         assert!(!after_restart.pending);
     }
 }
+
+#[cfg(test)]
+mod player_reload_tests {
+    use super::*;
+    use std::io::{Read, Write};
+
+    fn response(port: u16) -> String {
+        let mut client = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+        client.set_read_timeout(Some(std::time::Duration::from_secs(3))).unwrap();
+        client.write_all(b"GET /api/public/player/demo HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").unwrap();
+        let mut response = String::new();
+        client.read_to_string(&mut response).unwrap();
+        response
+    }
+
+    #[tokio::test]
+    async fn player_lifecycle_rereads_toml_without_an_editor_schema() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stationd.toml");
+        let reservation = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = reservation.local_addr().unwrap().port();
+        drop(reservation);
+        let text = format!(r##"{}
+[[plugin]]
+name = "station-player"
+enabled = true
+[plugin.config]
+bind = "127.0.0.1:{port}"
+[[plugin.config.stations]]
+slug = "demo"
+label = "Original radio"
+stream_url = "https://radio.example.test/original.mp3"
+grpc_endpoint = "http://127.0.0.1:1"
+[plugin.config.stations.theme]
+accent = "#123456"
+"##, include_str!("../../stationd.example.toml"));
+        std::fs::write(&path, &text).unwrap();
+        let config: crate::config::Config = toml::from_str(&text).unwrap();
+        let handle = spawn_configured(config.plugins, PluginEnv::default(), Some(path.clone()));
+        assert_eq!(handle.control("station-player", Action::Start).await.unwrap().state, "loaded");
+        assert!(response(port).contains("Original radio"));
+        for (action, label) in [(Action::Reload, "Reloaded radio"), (Action::Restart, "Restarted radio"), (Action::Start, "Started radio")] {
+            if matches!(action, Action::Start) {
+                handle.control("station-player", Action::Stop).await.unwrap();
+            }
+            let updated = text.replace("Original radio", label)
+                .replace("original.mp3", "updated.mp3").replace("#123456", "#abcdef");
+            std::fs::write(&path, &updated).unwrap();
+            assert_eq!(handle.control("station-player", action).await.unwrap().state, "loaded");
+            let body = response(port);
+            assert!(body.contains(label), "{body}");
+            assert!(body.contains("updated.mp3"));
+            assert!(body.contains("#abcdef"));
+        }
+        std::fs::write(&path, text.replace("#123456", "invalid")).unwrap();
+        assert!(handle.control("station-player", Action::Reload).await.is_err());
+        assert!(response(port).contains("Started radio"), "invalid config must keep the running player");
+        handle.control("station-player", Action::Stop).await.unwrap();
+    }
+}

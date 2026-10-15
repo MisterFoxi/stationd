@@ -1270,7 +1270,10 @@ pub fn spawn_configured(mut decls: Vec<PluginDecl>, env: PluginEnv, config_path:
                         Some(slot) => {
                             let will_load = matches!(action, Action::Reload | Action::Restart)
                                 || (matches!(action, Action::Start) && !matches!(slot.state, PluginState::Loaded));
-                            if will_load && !slot.schema.is_empty() {
+                            // The player has nested TOML settings but no editor schema.
+                            let reads_config = !slot.schema.is_empty()
+                                || (slot.decl.wasm.is_none() && name == "station-player");
+                            if will_load && reads_config {
                                 if let Some(path) = config_path.as_deref() {
                                     let update = crate::plugin_config::read(path, &name).and_then(|(_, config)| { validate_candidate(slot, &env, &config)?; Ok(config) });
                                     match update { Ok(config) => slot.decl.config = config, Err(e) => { let _ = reply.send(Err(e)); continue; } }

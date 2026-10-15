@@ -473,3 +473,37 @@ async fn real_grpc_watch_fans_out_and_updates_without_extra_rpc_per_visitor() {
     server.abort();
     accept.abort();
 }
+
+#[tokio::test]
+async fn page_renders_station_config_without_waiting_for_javascript_or_grpc() {
+    let mut config = config();
+    let station = &mut config.stations[0];
+    station.label = "Radio <test> {{DESCRIPTION}}".into();
+    station.description = "Rock & \"live\"".into();
+    station.stream_url = "https://radio.example.test/live?a=1&b=2".into();
+    station.artwork_url = Some("https://radio.example.test/art?a=1&b=2".into());
+    station.theme.accent = "#123456".into();
+    station.theme.background = "#ffffff".into();
+    station.theme.foreground = "#000000".into();
+    let response = routes(Web::new(&config))
+        .oneshot(Request::builder().uri("/player/demo").body(axum::body::Body::empty()).unwrap())
+        .await.unwrap();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let html = String::from_utf8(bytes.to_vec()).unwrap();
+    assert!(html.contains("<title>Radio &lt;test&gt; {{DESCRIPTION}} · Direct</title>"));
+    assert!(html.contains("<h1 id=\"station\">Radio &lt;test&gt; {{DESCRIPTION}}</h1>"));
+    assert!(html.contains("Rock &amp; &quot;live&quot;"));
+    assert!(html.contains("src=\"https://radio.example.test/live?a=1&amp;b=2\""));
+    assert!(html.contains("--accent:#123456;--background:#ffffff;--foreground:#000000"));
+    assert!(html.contains("<body class=\"has-artwork\">"));
+    assert!(html.contains("src=\"https://radio.example.test/art?a=1&amp;b=2\""));
+
+    config.stations[0].artwork_url = None;
+    let response = routes(Web::new(&config))
+        .oneshot(Request::builder().uri("/player/demo").body(axum::body::Body::empty()).unwrap())
+        .await.unwrap();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let html = String::from_utf8(bytes.to_vec()).unwrap();
+    assert!(html.contains("<body>"));
+    assert!(html.contains("alt=\"Visuel de la station\" hidden>"));
+}
