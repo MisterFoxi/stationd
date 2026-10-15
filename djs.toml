@@ -10,3 +10,9 @@ id = "ramblaze"
 name = "ram"
 password_hash = "$argon2id$v=19$m=19456,t=2,p=1$G5o31TYgS0kfacebYJxamg$xAAMHdifvkgYRsEWRRb/u58Ti5pLdYZsqfv9JxGN9Ew" #scimi
 enabled = true
+
+[[dj]]
+id = "tuxis"
+name = "tuxis"
+password_hash = "$argon2id$v=19$m=19456,t=2,p=1$t1jNOaHcLd+JK0YYAqwmUA$tS6Kh+NbPB7I5cuEu+HR3IDigj+coIc+bPpkPM5mdwI" #scimiar
+enabled = true
