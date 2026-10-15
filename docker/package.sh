@@ -43,7 +43,8 @@ if [ -n "$vm" ]; then
 fi
 
 # --- Version ----------------------------------------------------------------
-version="$(sed -n 's/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -n1)"
+# Exclure tout suffixe après le guillemet fermant, notamment le CR des fichiers CRLF.
+version="$(sed -n 's/^version *= *"\([^"]*\)".*/\1/p' Cargo.toml | head -n1)"
 [ -n "$version" ] || die "version introuvable dans Cargo.toml"
 rev="$(git rev-parse --short=8 HEAD)"
 tag="$version-$rev"
