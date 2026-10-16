@@ -1,0 +1,33 @@
+syntax = "proto3";
+package stationd.admin.icecast.v1;
+
+// Administration centrale V1. Indépendante du service Icecast de StationD 0.5.
+// Authentification : metadata Authorization: Bearer <admin-api-token>.
+service IcecastAdmin {
+  rpc GetStatus(Empty) returns (ServerStatus);
+  rpc ListListeners(MountRequest) returns (ListenerList);
+  rpc SetMetadata(MetadataRequest) returns (ActionReply);
+  rpc KickListener(KickListenerRequest) returns (ActionReply);
+  rpc KickSource(MountRequest) returns (ActionReply);
+}
+message Empty {}
+message MountRequest { string mount = 1; }
+message MetadataRequest { string mount = 1; string title = 2; }
+message KickListenerRequest { string mount = 1; uint64 id = 2; }
+message ActionReply { string message = 1; }
+message ServerStatus { string server_id = 1; repeated MountStatus mounts = 2; }
+message MountStatus {
+  string mount = 1;
+  bool connected = 2;
+  uint64 listeners = 3;
+  string title = 4;
+  string content_type = 5;
+}
+message ListenerList { repeated Listener listeners = 1; }
+message Listener {
+  uint64 id = 1;
+  string ip = 2;
+  string user_agent = 3;
+  uint64 connected_seconds = 4;
+}
+

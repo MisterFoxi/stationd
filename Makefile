@@ -155,3 +155,40 @@ mrproper: ## Grand ménage : cargo clean (dépôt + plugins), puis conteneur, im
 package: ## Package release puis transfert et installation si VM=<cible SSH> (ARGS=--allow-dirty pour un arbre modifié)
 > docker/package.sh $(ARGS)
 dist: package ## Alias de package : make dist VM=<cible SSH>
+
+# --- V1 : Icecast commun, aucun démarrage de StationD -------------------------
+ICECAST_DC = docker compose -f docker/icecast/compose.yaml
+.PHONY: icecast-init icecast-up icecast-test icecast-logs icecast-down
+
+icecast-init: ## Initialise les secrets locaux Icecast (idempotent)
+> python3 docker/icecast/init-secrets.py
+
+icecast-up: ## Démarre Icecast et son administration V1, sans StationD
+> $(ICECAST_DC) up -d --build --wait admin
+
+icecast-test: ## Deux sources et deux auditeurs synthétiques, sans StationD
+> $(ICECAST_DC) --profile test run --build --rm smoke
+
+icecast-logs: ## Suit les logs du serveur Icecast commun
+> $(ICECAST_DC) logs -f icecast
+
+icecast-down: ## Arrête uniquement le banc Icecast V1
+> $(ICECAST_DC) down
+
+.PHONY: icecast-ctl icecast-reconfigure
+icecast-ctl: ## Administration centrale gRPC : make icecast-ctl A="status"
+> $(ICECAST_DC) exec -T admin stationctl icecast $(A)
+
+icecast-reconfigure: ## Applique le TOML central (recrée Icecast et son administration)
+> $(ICECAST_DC) up -d --force-recreate --wait icecast admin
+
+.PHONY: icecast-continuity-test
+icecast-continuity-test: ## Vérifie le flux pendant un arrêt/reprise de l'administration
+> python3 tests/icecast-admin-continuity.py
+
+.PHONY: icecast-live-up icecast-live-down
+icecast-live-up: ## Lance deux sources synthétiques continues, sans StationD
+> $(ICECAST_DC) --profile live up -d --build live-a live-b
+
+icecast-live-down: ## Arrête les deux sources continues, garde Icecast et admin
+> $(ICECAST_DC) --profile live stop live-a live-b

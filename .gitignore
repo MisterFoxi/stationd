@@ -19,3 +19,6 @@ playlist.schema.json
 /dist
 grid/grid.toml
 grid/grid.toml
+
+# Secrets et états locaux V1
+/.local/

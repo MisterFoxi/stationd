@@ -1,5 +1,9 @@
 # stationd
 
+> **V1 :** développement sur `v1-dev`, propagation sur `V1`. Première étape :
+> [Icecast commun sans StationD](Doc/v1-icecast.md). Le reste de ce README décrit encore la 0.5.
+
+
 A self-hosted webradio automation daemon written in Rust. It is a
 from-scratch rewrite of the *idea* of [AzuraCast](https://www.azuracast.com/),
 built for one use case: **a single, self-hosted station**, driven entirely

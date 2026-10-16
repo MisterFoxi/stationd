@@ -1,3 +1,8 @@
 # Scripts s6 et Dockerfile : fins de ligne LF même édités sous Windows
 # (un CRLF casse la ligne #! des scripts run).
 docker/** text eol=lf
+tools/icecast-config/** text eol=lf
+config/icecast/** text eol=lf
+tests/icecast-smoke.py text eol=lf
+crates/stationd-admin/** text eol=lf
+tests/icecast-admin-continuity.py text eol=lf

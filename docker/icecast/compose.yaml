@@ -1,0 +1,125 @@
+name: stationd-v1-icecast
+services:
+  icecast:
+    build:
+      context: ../..
+      dockerfile: docker/icecast/Dockerfile
+      target: server
+    image: stationd-v1-icecast:dev
+    ports:
+      - "${ICECAST_BIND:-192.168.1.118}:${ICECAST_PORT:-18000}:8000"
+    volumes:
+      - ../../config/icecast/icecast.toml:/etc/stationd/icecast.toml:ro
+    secrets:
+      - admin-password
+      - source-a-password
+      - source-b-password
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--output", "/dev/null", "http://127.0.0.1:8000/status-json.xsl"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+      start_period: 5s
+    restart: unless-stopped
+    stop_grace_period: 10s
+
+  admin:
+    build:
+      context: ../..
+      dockerfile: docker/icecast/Dockerfile
+      target: administration
+    image: stationd-v1-admin:dev
+    depends_on:
+      icecast:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${STATION_ADMIN_PORT:-50061}:50061"
+    volumes:
+      - ../../config/icecast/icecast.toml:/etc/stationd/icecast.toml:ro
+    secrets:
+      - admin-password
+      - admin-api-token
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: ["CMD", "stationctl", "icecast", "status"]
+      interval: 5s
+      timeout: 12s
+      retries: 6
+      start_period: 5s
+    restart: unless-stopped
+    stop_grace_period: 10s
+
+  smoke:
+    profiles: [test]
+    build:
+      context: ../..
+      dockerfile: docker/icecast/Dockerfile
+      target: test-tools
+    depends_on:
+      icecast:
+        condition: service_healthy
+      admin:
+        condition: service_healthy
+    environment:
+      ICECAST_URL: http://icecast:8000
+      STATION_ADMIN_URL: http://admin:50061
+    secrets:
+      - admin-password
+      - admin-api-token
+      - source-a-password
+      - source-b-password
+
+
+  live-a:
+    profiles: [live]
+    build:
+      context: ../..
+      dockerfile: docker/icecast/Dockerfile
+      target: test-tools
+    image: stationd-v1-icecast-live:dev
+    entrypoint: ["python3", "/test/live-source.py"]
+    environment:
+      SOURCE_LABEL: a
+    depends_on:
+      icecast:
+        condition: service_healthy
+    secrets:
+      - source-a-password
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: "no"
+
+  live-b:
+    profiles: [live]
+    image: stationd-v1-icecast-live:dev
+    entrypoint: ["python3", "/test/live-source.py"]
+    environment:
+      SOURCE_LABEL: b
+    depends_on:
+      icecast:
+        condition: service_healthy
+    secrets:
+      - source-b-password
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: "no"
+
+secrets:
+  admin-password:
+    file: ../../.local/icecast/secrets/admin-password
+  admin-api-token:
+    file: ../../.local/icecast/secrets/admin-api-token
+  source-a-password:
+    file: ../../.local/icecast/secrets/source-a-password
+  source-b-password:
+    file: ../../.local/icecast/secrets/source-b-password
+

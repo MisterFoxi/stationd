@@ -1,0 +1,12 @@
+# Le contexte V1 ne transporte ni secrets, ni médias, ni builds locaux.
+.git
+.worktrees
+.local
+.env
+**/target
+dist
+data
+media
+playlist
+stationd.toml
+

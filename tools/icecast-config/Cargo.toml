@@ -1,0 +1,18 @@
+[package]
+name = "station-icecast-config"
+version = "1.0.0"
+edition = "2021"
+publish = false
+
+# Outil autonome : ne compile ni StationD, ni ses plugins.
+[workspace]
+
+[dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+toml = "1"
+
+[dev-dependencies]
+roxmltree = "0.20"
+tempfile = "3"
+

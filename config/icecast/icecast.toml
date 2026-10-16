@@ -1,0 +1,18 @@
+# Configuration centrale du serveur commun. Aucun secret dans Git.
+# Chemins internes au conteneur ; bind LAN de test configurable dans Compose.
+location = "StationD — Icecast commun"
+hostname = "localhost"
+admin_email = "admin@localhost"
+port = 8000
+max_clients = 32
+admin_user = "admin"
+admin_password_file = "admin-password"
+
+[[mounts]]
+name = "/test-a.mp3"
+password_file = "source-a-password"
+
+[[mounts]]
+name = "/test-b.mp3"
+password_file = "source-b-password"
+
