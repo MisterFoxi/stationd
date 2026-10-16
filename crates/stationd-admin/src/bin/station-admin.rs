@@ -19,6 +19,12 @@ struct Args {
     secrets_dir: PathBuf,
     #[arg(long, default_value = "http://icecast:8000")]
     icecast_url: String,
+    #[arg(long, default_value = "http://router:50062")]
+    router_addr: String,
+    #[arg(long)]
+    settings: Option<PathBuf>,
+    #[arg(long, default_value = "/var/lib/station-admin/plugins")]
+    data_dir: PathBuf,
 }
 
 async fn shutdown_signal() {
@@ -38,7 +44,22 @@ async fn shutdown_signal() {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
-    let admin = Admin::load(&args.config, &args.secrets_dir, &args.icecast_url)?;
+    let admin = Admin::load(&args.config, &args.secrets_dir, &args.icecast_url)?.with_router(
+        args.router_addr,
+        read_secret(&args.secrets_dir.join("router-api-token"))?,
+    );
+    let admin = if let Some(path) = args.settings {
+        let geoip = admin.history_geoip();
+        let history = tokio::task::spawn_blocking(move || {
+            stationd_admin::history::History::load(&path, &args.data_dir, geoip)
+        })
+        .await??;
+        admin.with_history(history)
+    } else {
+        admin
+    };
+    let sampler = admin.clone();
+    let collection = tokio::spawn(async move { sampler.collect_history().await });
     let token = read_secret(&args.secrets_dir.join("admin-api-token"))?;
     let expected = format!("Bearer {token}");
     let service = IcecastAdminServer::with_interceptor(admin, move |req: tonic::Request<()>| {
@@ -57,5 +78,6 @@ async fn main() -> Result<()> {
         .add_service(service)
         .serve_with_shutdown(args.bind, shutdown_signal())
         .await?;
+    collection.abort();
     Ok(())
 }

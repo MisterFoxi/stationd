@@ -1,5 +1,8 @@
 # Listener stats V1
 
+Pour le daemon administratif autonome V1, voir [Historique et Traefik](v1-icecast-history.md).
+Le guide ci-dessous décrit l'hôte StationD existant et le contrat partagé du plugin.
+
 Small, opt-in extension to the existing plugin architecture. No core database
 migration, new HTTP dependency, public API, dashboard, or external GeoIP service.
 The host reads a local GeoLite2 City or DB-IP City Lite MMDB using the maxminddb crate.

@@ -1,0 +1,33 @@
+# Merge into Traefik's existing file provider; does not replace any 0.5 route.
+http:
+  routers:
+    stationd-v1-icecast-https:
+      entryPoints: [https]
+      rule: Host(`v1stream.homestone.rp-radio.live`)
+      middlewares: [stationd-v1-icecast-home]
+      service: stationd-v1-icecast
+      tls: {}
+    stationd-v1-icecast-http:
+      entryPoints: [http]
+      rule: Host(`v1stream.homestone.rp-radio.live`) && (Path(`/`) || Path(`/radio.mp3`))
+      middlewares: [stationd-v1-icecast-home]
+      service: stationd-v1-icecast
+    stationd-v1-icecast-http-other:
+      entryPoints: [http]
+      rule: Host(`v1stream.homestone.rp-radio.live`)
+      middlewares: [stationd-v1-icecast-https]
+      service: stationd-v1-icecast
+  services:
+    stationd-v1-icecast:
+      loadBalancer:
+        servers:
+          - url: http://192.168.1.118:18000
+  middlewares:
+    stationd-v1-icecast-home:
+      replacePathRegex:
+        regex: ^/$
+        replacement: /radio.mp3
+    stationd-v1-icecast-https:
+      redirectScheme:
+        scheme: https
+        permanent: true

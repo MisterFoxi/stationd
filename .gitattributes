@@ -6,3 +6,4 @@ config/icecast/** text eol=lf
 tests/icecast-smoke.py text eol=lf
 crates/stationd-admin/** text eol=lf
 tests/icecast-admin-continuity.py text eol=lf
+tests/icecast-switch.py text eol=lf

@@ -9,11 +9,13 @@ services:
     ports:
       - "${ICECAST_BIND:-192.168.1.118}:${ICECAST_PORT:-18000}:8000"
     volumes:
-      - ../../config/icecast/icecast.toml:/etc/stationd/icecast.toml:ro
+      - ../../config/icecast:/etc/stationd:ro
+      - ../../data/geoip:/data/geoip:ro
     secrets:
       - admin-password
       - source-a-password
       - source-b-password
+      - source-radio-password
     read_only: true
     tmpfs:
       - /tmp:mode=1777
@@ -25,6 +27,11 @@ services:
       timeout: 2s
       retries: 15
       start_period: 5s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     restart: unless-stopped
     stop_grace_period: 10s
 
@@ -34,16 +41,20 @@ services:
       dockerfile: docker/icecast/Dockerfile
       target: administration
     image: stationd-v1-admin:dev
+    command: ["--bind", "0.0.0.0:50061", "--settings", "/etc/stationd/admin.toml"]
     depends_on:
       icecast:
         condition: service_healthy
     ports:
       - "127.0.0.1:${STATION_ADMIN_PORT:-50061}:50061"
     volumes:
-      - ../../config/icecast/icecast.toml:/etc/stationd/icecast.toml:ro
+      - ../../config/icecast:/etc/stationd:ro
+      - ../../data/geoip:/data/geoip:ro
+      - admin-state:/var/lib/station-admin
     secrets:
       - admin-password
       - admin-api-token
+      - router-api-token
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
@@ -53,6 +64,11 @@ services:
       timeout: 12s
       retries: 6
       start_period: 5s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     restart: unless-stopped
     stop_grace_period: 10s
 
@@ -113,6 +129,36 @@ services:
     security_opt: [no-new-privileges:true]
     restart: "no"
 
+
+  router:
+    profiles: [switch]
+    build:
+      context: ../..
+      dockerfile: docker/icecast/Dockerfile
+      target: administration
+    image: stationd-v1-admin:dev
+    entrypoint: ["station-router"]
+    command: ["--bind", "0.0.0.0:50062"]
+    depends_on:
+      icecast:
+        condition: service_healthy
+    volumes:
+      - ../../config/icecast/router.toml:/etc/stationd/router.toml:ro
+      - router-state:/var/lib/station-router
+    secrets:
+      - source-radio-password
+      - router-api-token
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    restart: unless-stopped
+    stop_grace_period: 5s
+
 secrets:
   admin-password:
     file: ../../.local/icecast/secrets/admin-password
@@ -123,3 +169,12 @@ secrets:
   source-b-password:
     file: ../../.local/icecast/secrets/source-b-password
 
+
+  source-radio-password:
+    file: ../../.local/icecast/secrets/source-radio-password
+  router-api-token:
+    file: ../../.local/icecast/secrets/router-api-token
+
+volumes:
+  admin-state:
+  router-state:

@@ -1,0 +1,13 @@
+# Central administration: dynamically loaded existing WASM, no StationD process.
+sample_interval_seconds = 30
+
+[[plugin]]
+name = "listener-stats"
+wasm = "/opt/stationd/plugins/listener_stats_wasm.wasm"
+capabilities = ["db", "listener_details", "geoip"]
+[plugin.config]
+retention_days = 30
+[plugin.db]
+max_size_mb = 64
+max_rows = 1000
+query_timeout_ms = 1000

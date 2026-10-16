@@ -18,6 +18,8 @@ def compose(*args, **kwargs):
 
 
 def main():
+    running_router = subprocess.check_output([*DC, "ps", "--status", "running", "-q", "router"], cwd=ROOT, text=True).strip()
+    assert not running_router, "Stop switching fixtures first: make icecast-switch-down"
     name = "stationd-icecast-continuity-" + uuid.uuid4().hex[:12]
     created = False
     try:

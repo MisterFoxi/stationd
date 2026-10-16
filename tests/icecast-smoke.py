@@ -125,9 +125,9 @@ def ctl(*arguments, token_file="/run/secrets/admin-api-token", success=True):
     command = ["stationctl", "--addr", os.environ.get("STATION_ADMIN_URL", "http://admin:50061"),
                "--token-file", token_file, "icecast", *arguments]
     result = subprocess.run(command, capture_output=True, text=True, timeout=15)
-    if success:
+    if success is True:
         assert result.returncode == 0, f"stationctl failed: {result.stderr}"
-    else:
+    elif success is False:
         assert result.returncode != 0, "invalid administrative request accepted"
     return result
 
@@ -175,6 +175,8 @@ def continuity_source():
 
 def main():
     import threading
+    router = ctl("route", success=None)
+    assert router.returncode != 0, "Stop switching fixtures first: make icecast-switch-down"
     assert not source_names(), "test server already has active sources"
     expect_denied("/test-a.mp3", "wrong-password")
     expect_denied("/undeclared.mp3", password("source-a-password"))

@@ -179,8 +179,8 @@ icecast-down: ## Arrête uniquement le banc Icecast V1
 icecast-ctl: ## Administration centrale gRPC : make icecast-ctl A="status"
 > $(ICECAST_DC) exec -T admin stationctl icecast $(A)
 
-icecast-reconfigure: ## Applique le TOML central (recrée Icecast et son administration)
-> $(ICECAST_DC) up -d --force-recreate --wait icecast admin
+icecast-reconfigure: ## Valide et recharge Icecast, admin et les services de test actifs
+> python3 docker/icecast/apply-config.py --reload
 
 .PHONY: icecast-continuity-test
 icecast-continuity-test: ## Vérifie le flux pendant un arrêt/reprise de l'administration
@@ -192,3 +192,48 @@ icecast-live-up: ## Lance deux sources synthétiques continues, sans StationD
 
 icecast-live-down: ## Arrête les deux sources continues, garde Icecast et admin
 > $(ICECAST_DC) --profile live stop live-a live-b
+
+.PHONY: icecast-switch-up icecast-switch-down
+icecast-switch-up: icecast-init ## Lance A/B et le routeur sur /radio.mp3, sans StationD
+> $(ICECAST_DC) --profile live --profile switch up -d --build icecast admin live-a live-b router
+
+icecast-switch-down: ## Arrête le routeur de bascule et les deux sources de test
+> $(ICECAST_DC) --profile live --profile switch stop router live-a live-b
+
+.PHONY: icecast-switch-test
+icecast-switch-test: ## Valide A/B sur le même auditeur et la continuité du routeur
+> python3 tests/icecast-switch.py
+
+# CONFIG = optional candidate TOML, separate from the versioned canonical file.
+.PHONY: icecast-check icecast-apply icecast-geography
+icecast-check: ## Valide schéma, secrets et MMDB sans redémarrer
+> python3 docker/icecast/apply-config.py --check $(if $(CONFIG),--config "$(CONFIG)")
+
+icecast-apply: ## Applique le TOML avec sauvegarde et retour arrière sur échec
+> python3 docker/icecast/apply-config.py $(if $(CONFIG),--config "$(CONFIG)")
+
+icecast-geography: ## Répartition géographique courante des auditeurs publics
+> $(ICECAST_DC) exec -T admin stationctl icecast geography
+
+.PHONY: icecast-geoip-update icecast-geoip-reload
+icecast-geoip-update: ## Met à jour GeoLite2 City sous data/geoip (identifiants MaxMind interactifs)
+> sh scripts/update-geolite2.sh ./data/geoip/GeoLite2-City.mmdb
+> python3 docker/icecast/apply-config.py --reload
+
+icecast-geoip-reload: ## Valide la base MMDB et recharge les services concernés
+> python3 docker/icecast/apply-config.py --reload
+
+.PHONY: icecast-geography-test
+icecast-geography-test: ## Test proxy déclaré/non déclaré et GeoLite dans un projet isolé
+> python3 tests/icecast-geography.py
+
+.PHONY: icecast-traefik-test icecast-history
+icecast-traefik-test: ## DNS/TLS/Traefik réels, IP effective et décodage MP3
+> python3 tests/icecast-traefik.py
+
+icecast-history: ## Historique géographique du plugin administratif
+> $(ICECAST_DC) exec -T admin stationctl icecast history $(H)
+
+.PHONY: icecast-history-test
+icecast-history-test: ## Persistance réelle et continuité pendant une recréation administrative
+> python3 tests/icecast-history.py

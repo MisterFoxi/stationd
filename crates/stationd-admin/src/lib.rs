@@ -1,27 +1,29 @@
 // tonic 0.12 uses Status as its transport error, including generated RPC code.
 #![allow(clippy::result_large_err)]
 use anyhow::{bail, Context, Result};
-use serde::Deserialize;
+
 use std::path::Path;
 use tonic::{Request, Response, Status};
 
+pub mod history;
+pub mod router;
+#[rustfmt::skip]
+#[path = "../../../src/plugin_db.rs"]
+pub mod plugin_db;
+#[rustfmt::skip]
+#[path = "../../../src/listener_history.rs"]
+pub mod listener_history;
 pub mod rpc {
     tonic::include_proto!("stationd.admin.icecast.v1");
 }
 use rpc::icecast_admin_server::IcecastAdmin;
 use rpc::*;
 
-#[derive(Deserialize)]
-pub struct Config {
-    pub admin_user: String,
-    pub admin_password_file: String,
-    pub mounts: Vec<Mount>,
-}
-#[derive(Deserialize)]
-pub struct Mount {
-    pub name: String,
-}
-
+pub use station_icecast_config::Config;
+mod configuration;
+#[rustfmt::skip]
+#[path = "../../../src/listener_snapshot.rs"]
+pub mod listener_snapshot;
 pub fn read_secret(path: &Path) -> Result<String> {
     let raw = std::fs::read_to_string(path).context("cannot read secret file")?;
     let value = raw.trim_end_matches(['\r', '\n']);
@@ -40,11 +42,16 @@ pub fn authorized(expected: &str, received: &str) -> bool {
     difference == 0
 }
 
+#[derive(Clone)]
 pub struct Admin {
     client: reqwest::Client,
     upstream: reqwest::Url,
     config: Config,
+    raw_config: String,
+    geoip: Option<std::sync::Arc<station_icecast_config::geoip::Geoip>>,
     password: String,
+    router: Option<(String, String)>,
+    history: Option<std::sync::Arc<history::History>>,
 }
 
 fn child(node: roxmltree::Node<'_, '_>, name: &str) -> String {
@@ -56,10 +63,46 @@ fn child(node: roxmltree::Node<'_, '_>, name: &str) -> String {
 }
 
 impl Admin {
+    pub fn with_router(mut self, endpoint: String, token: String) -> Self {
+        self.router = Some((endpoint, token));
+        self
+    }
+    async fn router_client(
+        &self,
+    ) -> Result<stream_router_client::StreamRouterClient<tonic::transport::Channel>, Status> {
+        let (endpoint, _) = self
+            .router
+            .as_ref()
+            .ok_or_else(|| Status::failed_precondition("router not configured"))?;
+        let channel = tonic::transport::Endpoint::from_shared(endpoint.clone())
+            .map_err(|_| Status::internal("invalid router endpoint"))?
+            .connect_timeout(std::time::Duration::from_secs(2))
+            .timeout(std::time::Duration::from_secs(12))
+            .connect()
+            .await
+            .map_err(|_| Status::unavailable("router unavailable"))?;
+        Ok(stream_router_client::StreamRouterClient::new(channel))
+    }
+    fn router_request<T>(&self, body: T) -> Result<Request<T>, Status> {
+        let (_, token) = self
+            .router
+            .as_ref()
+            .ok_or_else(|| Status::failed_precondition("router not configured"))?;
+        let mut req = Request::new(body);
+        req.metadata_mut().insert(
+            "authorization",
+            format!("Bearer {token}")
+                .parse()
+                .map_err(|_| Status::internal("invalid router token"))?,
+        );
+        req.set_timeout(std::time::Duration::from_secs(12));
+        Ok(req)
+    }
+
     pub fn load(config: &Path, secrets: &Path, upstream: &str) -> Result<Self> {
         let text = std::fs::read_to_string(config).context("cannot read central Icecast TOML")?;
-        let config: Config =
-            toml::from_str(&text).map_err(|_| anyhow::anyhow!("invalid central Icecast TOML"))?;
+        let config = Config::parse(&text)?;
+        let geoip = config.open_geoip()?.map(std::sync::Arc::new);
         let name = &config.admin_password_file;
         if name.is_empty()
             || !name
@@ -89,7 +132,11 @@ impl Admin {
             client,
             upstream,
             config,
+            raw_config: text,
+            geoip,
             password,
+            router: None,
+            history: None,
         })
     }
 
@@ -157,6 +204,65 @@ impl Admin {
 
 #[tonic::async_trait]
 impl IcecastAdmin for Admin {
+    async fn get_history_status(&self, _: Request<Empty>) -> Result<Response<JsonReply>, Status> {
+        let h = self
+            .history
+            .as_ref()
+            .ok_or_else(|| Status::failed_precondition("history disabled"))?;
+        Ok(Response::new(JsonReply {
+            json: h.status().to_string(),
+        }))
+    }
+    async fn query_history(
+        &self,
+        req: Request<HistoryRequest>,
+    ) -> Result<Response<JsonReply>, Status> {
+        let h = self
+            .history
+            .clone()
+            .ok_or_else(|| Status::failed_precondition("history disabled"))?;
+        let request = req.into_inner();
+        let result = tokio::task::spawn_blocking(move || h.query(request))
+            .await
+            .map_err(|_| Status::internal("history worker failed"))??;
+        Ok(Response::new(JsonReply {
+            json: result.to_string(),
+        }))
+    }
+
+    async fn get_config(&self, _: Request<Empty>) -> Result<Response<ConfigDocument>, Status> {
+        Ok(Response::new(self.configuration()))
+    }
+    async fn check_config(
+        &self,
+        req: Request<ConfigText>,
+    ) -> Result<Response<ConfigCheck>, Status> {
+        Ok(Response::new(
+            self.validate_configuration(&req.into_inner().toml)?,
+        ))
+    }
+    async fn get_geography(
+        &self,
+        _: Request<Empty>,
+    ) -> Result<Response<GeographySnapshot>, Status> {
+        Ok(Response::new(self.geography_snapshot().await))
+    }
+
+    async fn get_route(&self, _: Request<Empty>) -> Result<Response<RouteStatus>, Status> {
+        let mut client = self.router_client().await?;
+        client.get_route(self.router_request(Empty {})?).await
+    }
+
+    async fn switch_route(
+        &self,
+        req: Request<SwitchRequest>,
+    ) -> Result<Response<RouteStatus>, Status> {
+        let mut client = self.router_client().await?;
+        client
+            .switch_route(self.router_request(req.into_inner())?)
+            .await
+    }
+
     async fn get_status(&self, _: Request<Empty>) -> Result<Response<ServerStatus>, Status> {
         let body = self.get("stats", &[]).await?;
         let doc = roxmltree::Document::parse(&body)
@@ -195,35 +301,9 @@ impl IcecastAdmin for Admin {
         &self,
         req: Request<MountRequest>,
     ) -> Result<Response<ListenerList>, Status> {
-        let mount = req.into_inner().mount;
-        self.mount(&mount)?;
-        let body = self.get("listclients", &[("mount", &mount)]).await?;
-        let doc = roxmltree::Document::parse(&body)
-            .map_err(|_| Status::internal("invalid Icecast listener list"))?;
-        let mut listeners = Vec::new();
-        for node in doc.descendants().filter(|n| n.has_tag_name("listener")) {
-            let id = child(node, "id")
-                .parse()
-                .or_else(|_| child(node, "ID").parse())
-                .map_err(|_| Status::internal("invalid Icecast listener ID"))?;
-            let ip = child(node, "ip");
-            let agent = child(node, "useragent");
-            let connected = child(node, "connected");
-            listeners.push(Listener {
-                id,
-                ip: if ip.is_empty() { child(node, "IP") } else { ip },
-                user_agent: if agent.is_empty() {
-                    child(node, "UserAgent")
-                } else {
-                    agent
-                },
-                connected_seconds: connected
-                    .parse()
-                    .or_else(|_| child(node, "Connected").parse())
-                    .unwrap_or(0),
-            });
-        }
-        Ok(Response::new(ListenerList { listeners }))
+        Ok(Response::new(
+            self.listeners_snapshot(&req.into_inner().mount).await?,
+        ))
     }
 
     async fn set_metadata(

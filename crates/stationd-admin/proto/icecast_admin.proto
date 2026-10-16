@@ -4,7 +4,14 @@ package stationd.admin.icecast.v1;
 // Administration centrale V1. Indépendante du service Icecast de StationD 0.5.
 // Authentification : metadata Authorization: Bearer <admin-api-token>.
 service IcecastAdmin {
+  rpc GetHistoryStatus(Empty) returns (JsonReply);
+  rpc QueryHistory(HistoryRequest) returns (JsonReply);
+  rpc GetConfig(Empty) returns (ConfigDocument);
+  rpc CheckConfig(ConfigText) returns (ConfigCheck);
+  rpc GetGeography(Empty) returns (GeographySnapshot);
   rpc GetStatus(Empty) returns (ServerStatus);
+  rpc GetRoute(Empty) returns (RouteStatus);
+  rpc SwitchRoute(SwitchRequest) returns (RouteStatus);
   rpc ListListeners(MountRequest) returns (ListenerList);
   rpc SetMetadata(MetadataRequest) returns (ActionReply);
   rpc KickListener(KickListenerRequest) returns (ActionReply);
@@ -29,5 +36,53 @@ message Listener {
   string ip = 2;
   string user_agent = 3;
   uint64 connected_seconds = 4;
+  string lookup_status = 5;
+  string country = 6;
+  string region = 7;
+  string city = 8;
 }
 
+
+service StreamRouter {
+  rpc GetRoute(Empty) returns (RouteStatus);
+  rpc SwitchRoute(SwitchRequest) returns (RouteStatus);
+}
+message SwitchRequest { string input = 1; }
+message RouteStatus {
+  string output_mount = 1;
+  string input = 2;
+  bool connected = 3;
+  repeated string inputs = 4;
+  string problem = 5;
+}
+
+message ConfigDocument { string toml = 1; string revision = 2; }
+message ConfigText { string toml = 1; }
+message ConfigCheck { string revision = 1; repeated string warnings = 2; }
+message GeographySnapshot {
+  uint64 observed_at = 1;
+  bool complete = 2;
+  string geoip_status = 3;
+  string database_type = 4;
+  uint64 database_build_epoch = 5;
+  string attribution = 6;
+  repeated GeographyMount mounts = 7;
+  repeated GeographyBucket buckets = 8;
+}
+message GeographyMount {
+  string mount = 1;
+  bool available = 2;
+  uint64 listeners = 3; // only meaningful if available=true; otherwise unknown
+  string problem = 4;
+}
+message GeographyBucket {
+  string mount = 1;
+  string lookup_status = 2;
+  string country = 3;
+  string region = 4;
+  string city = 5;
+  uint64 listeners = 6;
+}
+
+message JsonReply { string json = 1; }
+message HistoryRequest { string plugin = 1; uint64 since = 2; uint64 until = 3; string period = 4; string mount = 5; }

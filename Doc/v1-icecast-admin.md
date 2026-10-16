@@ -52,7 +52,9 @@ non appliquée donne un code de sortie non nul.
 
 Depuis un client Rust externe, utiliser le contrat
 `crates/stationd-admin/proto/icecast_admin.proto` :
-`GetStatus`, `ListListeners`, `SetMetadata`, `KickListener`, `KickSource`.
+`GetStatus`, `ListListeners`, `SetMetadata`, `KickListener`, `KickSource`,
+`GetRoute`, `SwitchRoute`, `GetConfig`, `CheckConfig`, `GetGeography`,
+`GetHistoryStatus`, `QueryHistory`.
 Le serveur exige la metadata `Authorization: Bearer <admin-api-token>`.
 Le client lit le jeton dans un fichier, jamais dans un argument de mot de passe.
 
@@ -196,3 +198,16 @@ make icecast-live-down
 Arrêter ces sources avant `make icecast-test` ou
 `make icecast-continuity-test`, qui utilisent les mêmes mounts.
 
+
+## Point d'écoute stable et bascule A/B
+
+Le banc de bascule immédiate est décrit dans [Bascule A/B](v1-icecast-switch.md).
+Lancer make icecast-switch-up puis utiliser stationctl icecast switch a ou b.
+Arrêter ce banc avec make icecast-switch-down avant les anciens tests automatiques.
+
+## Configuration et géographie
+
+Voir [Configuration centrale, Traefik et GeoLite](v1-icecast-config.md).
+Les commandes config show/revision/check et geography utilisent le même gRPC authentifié.
+
+L'historique et la route HTTPS sont décrits dans [Historique et Traefik](v1-icecast-history.md).

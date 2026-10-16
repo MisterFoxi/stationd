@@ -1,0 +1,14 @@
+# Banc de bascule immédiate MP3 : entrées de format identique, reservoir désactivé.
+icecast_url = "http://icecast:8000"
+output_mount = "/radio.mp3"
+output_password_file = "source-radio-password"
+default_input = "a"
+
+[[inputs]]
+id = "a"
+mount = "/test-a.mp3"
+
+[[inputs]]
+id = "b"
+mount = "/test-b.mp3"
+

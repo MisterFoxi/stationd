@@ -139,6 +139,8 @@ impl Geoip {
         Ok(Self { reader, debug_log: None })
     }
 
+    pub fn database_build_epoch(&self) -> u64 { self.reader.metadata.build_epoch }
+
     pub fn database_type(&self) -> &str {
         &self.reader.metadata.database_type
     }
@@ -221,6 +223,11 @@ fn non_public(ip: IpAddr) -> bool {
     }
 }
 
+/// Public-address classification shared with central Icecast administration.
+pub fn is_public(ip: IpAddr) -> bool {
+    let ip = match ip { IpAddr::V6(v6) => v6.to_ipv4_mapped().map(IpAddr::V4).unwrap_or(ip), _ => ip };
+    !non_public(ip)
+}
 #[cfg(test)]
 mod tests {
     use super::*;

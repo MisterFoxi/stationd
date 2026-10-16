@@ -15,7 +15,7 @@ target = f"icecast://source:{urllib.parse.quote(secret, safe='')}@icecast:8000/t
 args = [
     "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "quiet", "-re",
     "-f", "lavfi", "-i", f"sine=frequency={frequency}:sample_rate=44100",
-    "-af", "volume=0.15", "-ac", "1", "-c:a", "libmp3lame", "-b:a", "64k",
+    "-af", "volume=0.15", "-ac", "1", "-c:a", "libmp3lame", "-b:a", "64k", "-reservoir", "0",
     "-ice_name", f"StationD test {label.upper()} - {frequency} Hz",
     "-content_type", "audio/mpeg", "-f", "mp3", target,
 ]

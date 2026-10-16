@@ -1,7 +1,8 @@
 # stationd
 
 > **V1 :** développement sur `v1-dev`, propagation sur `V1`. Première étape :
-> [Icecast commun sans StationD](Doc/v1-icecast.md). Le reste de ce README décrit encore la 0.5.
+> [Icecast commun sans StationD](Doc/v1-icecast.md), avec
+> [historique géographique et Traefik](Doc/v1-icecast-history.md). Le reste de ce README décrit encore la 0.5.
 
 
 A self-hosted webradio automation daemon written in Rust. It is a

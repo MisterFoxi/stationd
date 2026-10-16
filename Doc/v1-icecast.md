@@ -32,8 +32,8 @@ Ce générateur ne dépend pas du workspace StationD. Le service Icecast
 fonctionne indépendamment du daemon administratif.
 Le premier socle du daemon administratif et son client gRPC sont décrits
 dans [Administration Icecast](v1-icecast-admin.md). La console egui et les
-bascules viendront ensuite. Les points `/test-a.mp3` et `/test-b.mp3` servent
-uniquement au banc de validation ; aucun point stable avec bascule ici.
+bascules ad hoc viendront ensuite. Les points `/test-a.mp3` et `/test-b.mp3` servent
+au banc de validation ; /radio.mp3 est le point stable du [banc de bascule immédiate](v1-icecast-switch.md).
 
 La dockerisation historique reste disponible via le Compose racine.
 Pour cette étape, utiliser exclusivement `docker/icecast/compose.yaml`
@@ -94,16 +94,8 @@ dans l'image ni dans Git. Le contexte Docker exclut `.local`, `.env`,
 les médias et les états locaux. Le conteneur tourne comme `icecast2`,
 sans capacités et avec une racine en lecture seule.
 
-Après modification du TOML, recréer le service pour appliquer la
-configuration et relancer la validation :
-
-```sh
-docker compose -f docker/icecast/compose.yaml up -d --force-recreate --wait icecast admin
-make icecast-test
-```
-
-Cette recréation coupe les connexions Icecast existantes. La gestion des
-reconfigurations en exploitation n'est pas traitée dans ce premier banc.
+La procédure de validation, d'application avec retour arrière et de suivi géographique
+est décrite dans [Configuration et GeoLite](v1-icecast-config.md).
 
 ## Validation
 
@@ -130,9 +122,9 @@ arrête uniquement ce projet Compose.
 
 ## Résultat vérifié le 16 octobre 2026
 
-Sur stationdev1, branche v1-dev : les trois tests Rust, fmt et Clippy
+Sur stationdev1, branche v1-dev : les tests Rust, fmt et Clippy
 passent. L'image Docker construit le générateur Rust avec le lockfile.
-Icecast 2.5.0 est healthy sur le loopback de la VM, port 18000.
+Icecast 2.5.0 est healthy sur le bind LAN de la VM, port 18000.
 Le banc complet a validé deux sources simultanées et deux auditeurs,
 16 384 octets MP3 reçus et décodés par auditeur, les compteurs d'audience,
 le refus des accès invalides et le nettoyage des connexions.

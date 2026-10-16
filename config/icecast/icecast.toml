@@ -1,18 +1,48 @@
-# Configuration centrale du serveur commun. Aucun secret dans Git.
-# Chemins internes au conteneur ; bind LAN de test configurable dans Compose.
+# Configuration centrale Icecast V1 — secrets et états hors Git.
 location = "StationD — Icecast commun"
-hostname = "localhost"
+hostname = "stationdev1.lan"
 admin_email = "admin@localhost"
+
+# Port INTERNE fixe du déploiement Docker. Publication : ICECAST_BIND/ICECAST_PORT.
 port = 8000
 max_clients = 32
 admin_user = "admin"
 admin_password_file = "admin-password"
 
+# Uniquement les IP exactes des reverse proxies, jamais les IP des auditeurs.
+# Traefik (traefik.lan), même adresse que le StationD existant.
+trusted_proxies = ["192.168.1.94"]
+
+[limits]
+queue_size = 524288
+burst_size = 8192
+client_timeout = 30
+header_timeout = 15
+source_timeout = 10
+
+[logging]
+level = "information"
+
+[geoip]
+# Base locale hors Git, montée en lecture seule depuis data/geoip.
+enabled = true
+database_file = "GeoLite2-City.mmdb"
+
 [[mounts]]
 name = "/test-a.mp3"
 password_file = "source-a-password"
+audience = false # entrée technique du routeur : pas d'agrégat public
+hidden = true
 
 [[mounts]]
 name = "/test-b.mp3"
 password_file = "source-b-password"
+audience = false
+hidden = true
+
+[[mounts]]
+name = "/radio.mp3"
+password_file = "source-radio-password"
+audience = true
+hidden = false
 

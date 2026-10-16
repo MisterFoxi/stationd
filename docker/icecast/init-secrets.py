@@ -7,7 +7,7 @@ import secrets
 root = Path(__file__).resolve().parents[2] / ".local/icecast/secrets"
 root.mkdir(parents=True, exist_ok=True, mode=0o700)
 root.chmod(0o700)
-for name in ("admin-password", "admin-api-token", "source-a-password", "source-b-password"):
+for name in ("admin-password", "admin-api-token", "source-a-password", "source-b-password", "source-radio-password", "router-api-token"):
     path = root / name
     try:
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -22,3 +22,5 @@ for name in ("admin-password", "admin-api-token", "source-a-password", "source-b
     path.chmod(0o644)
 print("Secrets locaux prêts (répertoire privé, valeurs non affichées).")
 
+
+(Path(__file__).resolve().parents[2] / "data/geoip").mkdir(parents=True, exist_ok=True, mode=0o755)
