@@ -1396,3 +1396,7 @@ genre-picker-open = Entrée : ouvrir le sélecteur de genres
 
 tags-preview-keys = Ctrl+P préécouter / arrêter
 tags-preview-error = Préécoute indisponible : { $reason }
+
+key-ctrl-p = Ctrl+P
+help-media-preview = préécouter / arrêter
+tags-preview-no-player = Préécoute : aucun lecteur Webmin connecté à ce terminal.

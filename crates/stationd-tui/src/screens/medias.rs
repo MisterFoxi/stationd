@@ -950,7 +950,11 @@ impl Medias {
             match f.handle(e) {
                 TagOutcome::Pending => {}
                 TagOutcome::Preview(path) => {
-                    if let Err(error) = crate::media_preview::request(Some(&path)) { ctx.set_status(tr!("tags-preview-error", reason = error.to_string())); }
+                    if let Err(error) = crate::media_preview::request(Some(&path)) {
+                        let message = if error.kind() == std::io::ErrorKind::Unsupported { tr!("tags-preview-no-player") }
+                            else { tr!("tags-preview-error", reason = error.to_string()) };
+                        ctx.set_status(message);
+                    }
                 }
                 TagOutcome::Cancel => { let _ = crate::media_preview::request(None); self.tagform = None; },
                 TagOutcome::Submit(action, lines) => {
@@ -1187,6 +1191,13 @@ impl Medias {
                 (k!("key-enter"), k!("help-media-type-write")),
                 (k!("key-esc"), k!("help-cancel")),
             ]
+        } else if self.tagform.as_ref().is_some_and(|form| form.can_preview()) {
+            &[
+                (k!("key-ctrl-p"), k!("help-media-preview")),
+                (k!("key-ctrl-s"), k!("help-tags-write")),
+                (k!("key-enter"), k!("help-tags-list")),
+                (k!("key-esc"), k!("help-close")),
+            ]
         } else if self.tagform.is_some() {
             &[
                 (k!("key-ctrl-s"), k!("help-tags-write")),
@@ -1324,6 +1335,23 @@ mod tests {
 
     fn page(media: Vec<Media>) -> Result<SearchMediaResponse, String> {
         Ok(SearchMediaResponse { total: media.len() as u64, media, ..Default::default() })
+    }
+
+    #[tokio::test]
+    async fn media_preview_is_visible_in_the_form_and_its_help_without_launcher_flags() {
+        let args=crate::Args { addr:"http://127.0.0.1:50051".into(),lang:None,theme:"Imperial".into(),list_themes:false };
+        let channel=crate::rpc::lazy_channel(&args.addr).unwrap();
+        let mut ctx=Global::new(&args,channel.clone(),channel);
+        let mut m=Medias::new(false);
+        let tags=stationd_proto::library::MediaTags {rel_path:"a.mp3".into(),..Default::default()};
+        m.tagform=Some(TagForm::new(tags.clone(),vec![],None));
+        assert!(m.keys().contains(&("key-ctrl-p","help-media-preview")));
+        let area=Rect::new(0,0,80,24);
+        let mut buf=Buffer::empty(area);m.draw(area,&mut buf,&mut ctx);
+        let text:String=(0..24).flat_map(|y|(0..80).map(move|x|(x,y))).map(|p|buf[p].symbol()).collect();
+        assert!(text.contains("Ctrl+P"),"{text}");
+        m.tagform=Some(TagForm::new(tags,vec![],Some(vec!["a.mp3".into(),"b.mp3".into()])));
+        assert!(!m.keys().contains(&("key-ctrl-p","help-media-preview")));
     }
 
     #[tokio::test]

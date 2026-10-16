@@ -1386,3 +1386,7 @@ genre-picker-open = Enter: open the genre selector
 
 tags-preview-keys = Ctrl+P listen / stop
 tags-preview-error = Preview unavailable: { $reason }
+
+key-ctrl-p = Ctrl+P
+help-media-preview = listen / stop
+tags-preview-no-player = Preview: no Webmin audio player is connected to this terminal.

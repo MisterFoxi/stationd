@@ -1390,3 +1390,7 @@ genre-picker-open = Eingabe: Genre-Auswahl öffnen
 
 tags-preview-keys = Ctrl+P vorhören / stoppen
 tags-preview-error = Vorhören nicht verfügbar: { $reason }
+
+key-ctrl-p = Ctrl+P
+help-media-preview = vorhören / stoppen
+tags-preview-no-player = Vorhören: Kein Webmin-Audioplayer ist mit diesem Terminal verbunden.

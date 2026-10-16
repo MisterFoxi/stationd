@@ -21,18 +21,37 @@ fn command(path: Option<&str>) -> io::Result<String> {
     };
     Ok(format!("\x1b]778;stationd-preview;{payload}\x07"))
 }
-pub fn request(path: Option<&str>) -> io::Result<()> {
-    if !available() {
-        return Ok(());
+fn write_request(path: Option<&str>, connected: bool, out: &mut impl Write) -> io::Result<()> {
+    if !connected {
+        return if path.is_none() {
+            Ok(())
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "no Webmin audio player connected",
+            ))
+        };
     }
     let data = command(path)?;
-    let mut out = io::stdout().lock();
     out.write_all(data.as_bytes())?;
     out.flush()
+}
+pub fn request(path: Option<&str>) -> io::Result<()> {
+    write_request(path, available(), &mut io::stdout().lock())
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn preview_without_a_browser_returns_an_error_instead_of_silent_success() {
+        let mut output = Vec::new();
+        let error = write_request(Some("song.mp3"), false, &mut output).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+        assert!(output.is_empty());
+        write_request(None, false, &mut output).unwrap();
+        write_request(Some("song.mp3"), true, &mut output).unwrap();
+        assert_eq!(output, command(Some("song.mp3")).unwrap().as_bytes());
+    }
     #[test]
     fn preview_command_cannot_inject_terminal_sequences() {
         let command = command(Some("été/evil\x1b]52;secret.mp3")).unwrap();

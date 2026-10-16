@@ -18,10 +18,13 @@ import time
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("address", help="gRPC endpoint of a running station with indexed MP3 media")
 parser.add_argument("--binary", default="target/active/stationd-tui")
+parser.add_argument("--plain-terminal", action="store_true", help="Check visible shortcut and explicit missing-player feedback without Webmin environment")
 args = parser.parse_args()
 master, slave = pty.openpty()
 fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 140, 0, 0))
-env = {"TERM": "xterm-256color", "LANG": "C.UTF-8", "STATIOND_WEBMIN_MEDIA_PREVIEW": "1"}
+env = {"TERM": "xterm-256color", "LANG": "C.UTF-8"}
+if not args.plain_terminal:
+    env["STATIOND_WEBMIN_MEDIA_PREVIEW"] = "1"
 process = subprocess.Popen(
     [args.binary, "--addr", args.address, "--lang", "fr"],
     stdin=slave, stdout=slave, stderr=slave, env=env, start_new_session=True,
@@ -52,11 +55,18 @@ try:
     assert b"Ctrl+P" in form, "Preview shortcut absent: check endpoint, indexed media and TUI binary"
     os.write(master, b"\x10")
     preview = read(1)
-    assert re.search(rb"\x1b\]778;stationd-preview;[0-9a-f]+\x07", preview), "Preview OSC missing after Ctrl+P"
+    if args.plain_terminal:
+        # Differential rendering omits unchanged spaces already on the screen.
+        text = re.sub(rb"\x1b\[[0-?]*[ -/]*[@-~]", b"", preview)
+        assert b"aucunlecteurWebmin" in text.replace(b" ", b""), "Missing-player feedback absent"
+        assert b"stationd-preview;" not in preview, "Plain terminal emitted audio controls"
+    else:
+        assert re.search(rb"\x1b\]778;stationd-preview;[0-9a-f]+\x07", preview), "Preview OSC missing after Ctrl+P"
     os.write(master, b"\x1b")
     closed = read(1)
-    assert b"\x1b]778;stationd-preview;stop\x07" in closed, "Closing form did not stop preview"
-    print("Real PTY: media form, Ctrl+P preview OSC and close/stop passed (read-only).")
+    if not args.plain_terminal:
+        assert b"\x1b]778;stationd-preview;stop\x07" in closed, "Closing form did not stop preview"
+    print("Real PTY: Ctrl+P visible; " + ("explicit missing-player feedback" if args.plain_terminal else "preview OSC and close/stop") + " passed (read-only).")
 finally:
     process.terminate()
     process.wait(timeout=5)

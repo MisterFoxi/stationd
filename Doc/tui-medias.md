@@ -50,3 +50,8 @@ ni la file ou l’antenne. Elle fonctionne aussi sur une station en lecture seul
 avec les médias partagés. Elle est disponible dans la console Webmin pour une
 fiche individuelle ; aucune sortie audio n’est ouverte sur le serveur.
 Le daemon et la TUI doivent être reconstruits ensemble, puis la console rouverte.
+
+Le raccourci est affiché dans la fiche individuelle et dans l’aide de l’écran,
+même dans un terminal sans lecteur Webmin. Dans ce cas, Ctrl+P affiche
+« Préécoute : aucun lecteur Webmin connecté à ce terminal. » plutôt que de
+rester silencieux. Une sélection multiple ne propose pas de préécoute.

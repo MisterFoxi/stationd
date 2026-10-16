@@ -360,7 +360,6 @@ pub enum TagOutcome {
 const KEEP: &str = "\u{0}keep";
 
 pub struct TagForm {
-    preview_available: bool,
     /// Lot : les fichiers ; un média : `None`.
     batch: Option<Vec<String>>,
     orig: MediaTags,
@@ -435,7 +434,6 @@ impl TagForm {
         let tempo = if single { tempo_opts.iter().position(|o| o.1 == t.tempo_manual).unwrap_or(0) } else { 0 };
         let total = batch.as_ref().map_or(1, |b| b.len());
         let mut f = Self {
-            preview_available: crate::media_preview::available(),
             batch,
             orig: t,
             known,
@@ -619,8 +617,10 @@ impl TagForm {
         self.picker = Some((which, picker));
     }
 
+    pub fn can_preview(&self) -> bool { self.batch.is_none() }
+
     pub fn handle(&mut self, e: &Event) -> TagOutcome {
-        if self.preview_available && self.batch.is_none() && matches!(e, Event::Key(k) if k.kind == KeyEventKind::Press && k.code == KeyCode::Char('p') && k.modifiers == KeyModifiers::CONTROL) {
+        if self.can_preview() && matches!(e, Event::Key(k) if k.kind == KeyEventKind::Press && k.code == KeyCode::Char('p') && k.modifiers == KeyModifiers::CONTROL) {
             return TagOutcome::Preview(self.orig.rel_path.clone());
         }
 
@@ -708,7 +708,7 @@ impl TagForm {
             None => tr!("form-tags-title", path = self.orig.rel_path.clone()),
             Some(p) => tr!("form-tags-many-title", n = p.len()),
         };
-        let keys = if self.preview_available && self.batch.is_none() {
+        let keys = if self.can_preview() {
             format!("{} · {}", tr!("tags-preview-keys"), tr!("tags-form-keys"))
         } else { tr!("tags-form-keys") };
         let block = frame(&title, &s, false).title_bottom(Span::styled(format!(" {keys} "), s.muted()));
@@ -825,12 +825,10 @@ mod tests {
     #[test]
     fn media_preview_does_not_submit_or_modify_tags_and_requires_one_media() {
         let mut f = TagForm::new(tags(), vec![], None);
-        f.preview_available = true;
         let preview_key = Event::Key(ratatui_crossterm::crossterm::event::KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL));
         assert!(matches!(f.handle(&preview_key), TagOutcome::Preview(path) if path == "a.mp3"));
         assert!(f.changes().is_err());
         let mut batch = TagForm::new(tags(), vec![], Some(vec!["a.mp3".into(),"b.mp3".into()]));
-        batch.preview_available = true;
         assert!(matches!(batch.handle(&preview_key), TagOutcome::Pending));
     }
 
