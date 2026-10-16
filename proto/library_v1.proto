@@ -19,6 +19,9 @@ package webradio.library.v1;
 
 // CLI-first : stationctl library scan|list passe directement par ce contrat.
 service LibraryService {
+  // Private read-only audition. Never queues, resolves or records a broadcast.
+  rpc PreviewAudio(MediaPreviewRequest) returns (stream MediaPreviewChunk);
+
   // Move available media to genre/style/basename using genre_ai (genre_top).
   // dry_run reports the plan without filesystem or database writes.
   rpc Reorganize(ReorganizeRequest) returns (ReorganizeResponse);
@@ -410,3 +413,12 @@ message ReorganizeResponse {
   uint64 failed = 5;
   uint64 planned = 6;
 }
+
+// length=0 means the remaining file; suffix_length is exclusive with offset/length.
+message MediaPreviewRequest {
+  string rel_path = 1;
+  uint64 offset = 2;
+  uint64 length = 3;
+  uint64 suffix_length = 4;
+}
+message MediaPreviewChunk { bytes data = 1; }

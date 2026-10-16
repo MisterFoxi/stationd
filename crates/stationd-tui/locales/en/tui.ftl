@@ -1383,3 +1383,6 @@ genre-picker-loading = Loading genres…
 genre-picker-help = ↑↓ navigate · Space toggle · Enter apply · Esc cancel
     Ctrl+A select all · Ctrl+D deselect · Ctrl+U clear search
 genre-picker-open = Enter: open the genre selector
+
+tags-preview-keys = Ctrl+P listen / stop
+tags-preview-error = Preview unavailable: { $reason }

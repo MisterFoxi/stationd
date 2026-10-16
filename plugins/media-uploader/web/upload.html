@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Importer des médias · StationD</title>
+  <link rel="stylesheet" href="upload.css">
+  <script src="upload.js" defer></script>
+</head>
+<body>
+  <main>
+    <header><span class="brand">STATIOND / MÉDIAS</span><h1>Importer des médias</h1>
+      <p>Déposez vos fichiers ici. Les fichiers sont préparés en MP3, sans réencodage des MP3 reçus. Ils recevront le type <strong>uploaded</strong> et seront disponibles pour classement dans la TUI.</p>
+    </header>
+    <section class="panel" aria-label="Accès et fichiers">
+      <label for="token">Clé d’upload</label>
+      <input id="token" type="password" autocomplete="off" spellcheck="false" placeholder="Clé fournie par votre administrateur">
+      <p class="hint">La clé reste dans cette page et n’est pas enregistrée.</p>
+      <label class="drop" id="drop" for="files"><span class="plus" aria-hidden="true">＋</span><strong>Choisir des fichiers ou les déposer ici</strong><span>MP3, WAV, FLAC, AIFF, Ogg, Opus, M4A, AAC, WMA · Sortie MP3</span>
+        <input id="files" type="file" multiple accept=".mp3,.wav,.aif,.aiff,.flac,.ogg,.oga,.opus,.m4a,.aac,.wma">
+      </label>
+      <div class="actions"><button id="send" type="button" disabled>Importer</button><button id="cancel" class="secondary" type="button" hidden>Arrêter les transferts</button><span id="count">Aucun fichier sélectionné</span></div>
+      <p id="message" role="status" aria-live="polite"></p>
+    </section>
+    <section class="queue" aria-label="Résultats des imports"><ul id="queue"></ul></section>
+    <footer>Après l’import, filtrez les médias par <strong>uploaded</strong> dans la TUI pour leur attribuer un type : song, jingle ou autre.</footer>
+  </main>
+</body>
+</html>

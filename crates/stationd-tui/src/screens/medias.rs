@@ -949,8 +949,12 @@ impl Medias {
         if let Some(f) = self.tagform.as_mut() {
             match f.handle(e) {
                 TagOutcome::Pending => {}
-                TagOutcome::Cancel => self.tagform = None,
+                TagOutcome::Preview(path) => {
+                    if let Err(error) = crate::media_preview::request(Some(&path)) { ctx.set_status(tr!("tags-preview-error", reason = error.to_string())); }
+                }
+                TagOutcome::Cancel => { let _ = crate::media_preview::request(None); self.tagform = None; },
                 TagOutcome::Submit(action, lines) => {
+                    let _ = crate::media_preview::request(None);
                     self.tagform = None;
                     let yes = tr!("confirm-tags-yes");
                     let c = crate::dialog::Confirm::new(tr!("confirm-tags-title"), lines, yes, *action);

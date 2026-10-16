@@ -40,6 +40,8 @@ pub enum LibraryError {
     ActorGone,
     #[error("media library is read-only; run this operation on the master")]
     ReadOnly,
+    #[error("audio range outside file ({size} bytes)")]
+    AudioRange { size: u64 },
     #[error("invalid filter: {0}")]
     BadFilter(String),
     #[error(transparent)]
@@ -67,6 +69,16 @@ pub struct ScanOutcome {
 }
 
 enum Command {
+    PreviewAudio {
+        request: crate::proto::library::MediaPreviewRequest,
+        reply: oneshot::Sender<Result<crate::media_preview::PreviewFile, LibraryError>>,
+    },
+    ImportUpload {
+        staged: crate::media_upload::StagedUpload,
+        inbox: String,
+        tag_field: String,
+        reply: oneshot::Sender<Result<crate::media_upload::UploadResult, LibraryError>>,
+    },
     Reorganize {
         dry_run: bool,
         reply: oneshot::Sender<Result<crate::library_reorganize::Report, LibraryError>>,
@@ -227,6 +239,13 @@ impl LibraryHandle {
         self.tx.send(Command::Reorganize { dry_run, reply }).await.map_err(|_| LibraryError::ActorGone)?;
         rx.await.map_err(|_| LibraryError::ActorGone)?
     }
+    /// Open indexed audio for private, read-only playback.
+    pub(crate) async fn preview_audio(&self, request: crate::proto::library::MediaPreviewRequest) -> Result<crate::media_preview::PreviewFile, LibraryError> {
+        let (reply, rx) = oneshot::channel();
+        self.tx.send(Command::PreviewAudio { request, reply }).await.map_err(|_| LibraryError::ActorGone)?;
+        rx.await.map_err(|_| LibraryError::ActorGone)?
+    }
+
     /// The scan's progress, current value then each change.
     pub fn watch_scan(&self) -> watch::Receiver<ScanStatus> {
         self.status.clone()
@@ -270,8 +289,20 @@ impl LibraryHandle {
         rx.await.map_err(|_| LibraryError::ActorGone)?
     }
 
-    /// Trigger a full scan + reconciliation. Serialised with every other
-    /// library command by the owning task.
+    /// Tag and publish a staged receipt, then scan through the owning actor.
+    pub(crate) async fn import_upload(
+        &self,
+        staged: crate::media_upload::StagedUpload,
+        inbox: String,
+        tag_field: String,
+    ) -> Result<crate::media_upload::UploadResult, LibraryError> {
+        let (reply, rx) = oneshot::channel();
+        self.tx.send(Command::ImportUpload { staged, inbox, tag_field, reply }).await
+            .map_err(|_| LibraryError::ActorGone)?;
+        rx.await.map_err(|_| LibraryError::ActorGone)?
+    }
+
+    /// Trigger a full scan + reconciliation, serialized with library mutations.
     pub async fn scan(&self) -> Result<ScanOutcome, LibraryError> {
         self.scan_with(false).await
     }
@@ -408,6 +439,28 @@ pub fn spawn_with_policy(
     tokio::spawn(async move {
         while let Some(cmd) = rx.recv().await {
             match cmd {
+                Command::PreviewAudio { request, reply } => {
+                    let _ = reply.send(crate::media_preview::open(&pool, &root, request).await);
+                }
+                Command::ImportUpload { staged, inbox, tag_field, reply } => {
+                    let result = async {
+                        if read_only { return Err(LibraryError::ReadOnly); }
+                        let lock = crate::library_lock::acquire(&root).await?;
+                        let upload_root = root.clone();
+                        let path = tokio::task::spawn_blocking(move || {
+                            let _lock = lock;
+                            staged.publish(&upload_root, &inbox, &tag_field)
+                        }).await.map_err(|e| LibraryError::Join(e.to_string()))??;
+                        // Publication succeeded. A scan failure must not invite a duplicate upload.
+                        let scan_error = match scan_journaled(&pool, &root, plugins.as_ref(), &status_tx, &analysis, false, false).await {
+                            Ok(scan) if scan.report.media.iter().any(|m| m.rel_path == path) => None,
+                            Ok(_) => Some("file saved but skipped by the scan; inspect the scan report".into()),
+                            Err(e) => Some(e.to_string()),
+                        };
+                        Ok(crate::media_upload::UploadResult { path, indexed: scan_error.is_none(), scan_error })
+                    }.await;
+                    let _ = reply.send(result);
+                }
                 Command::Reorganize { dry_run, reply } => {
                     let _ = reply.send(if read_only && !dry_run { Err(LibraryError::ReadOnly) } else { crate::library_reorganize::run(&pool, &root, dry_run).await });
                 }

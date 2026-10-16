@@ -11,6 +11,7 @@ mod action;
 mod agenda;
 mod app;
 mod webmin_diagnostics;
+mod media_preview;
 mod banner;
 mod operator_notice;
 mod dialog;

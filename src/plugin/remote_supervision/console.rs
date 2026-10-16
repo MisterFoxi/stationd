@@ -1,5 +1,6 @@
 //! Admin consoles: one-use reservations, fixed station target, bounded PTY/WS.
 mod pty;
+mod media;
 use super::{
     auth::Auth,
     web::{answer, cookie, Web, SESSION},
@@ -81,6 +82,7 @@ struct Reservation {
     expires: Instant,
     active: bool,
     cancel: watch::Sender<bool>,
+    preview_slots: Arc<tokio::sync::Semaphore>,
 }
 #[derive(Default)]
 struct Registry {
@@ -101,7 +103,7 @@ struct Lease {
 impl Drop for Lease {
     fn drop(&mut self) {
         if let Ok(mut registry) = self.console.registry.lock() {
-            registry.entries.remove(&self.id);
+            if let Some(entry) = registry.entries.remove(&self.id) { entry.cancel.send_replace(true); }
         }
     }
 }
@@ -198,6 +200,7 @@ impl Console {
                 expires: Instant::now() + Duration::from_secs(15),
                 active: false,
                 cancel: watch::channel(false).0,
+                preview_slots: Arc::new(tokio::sync::Semaphore::new(2)),
             },
         );
         Ok(id)
@@ -245,6 +248,7 @@ impl Size {
 }
 pub(super) fn routes() -> Router<Web> {
     Router::new()
+        .merge(media::routes())
         .route("/station/:id/console", get(page))
         .route("/api/stations/:id/console", post(create))
         .route("/api/stations/:id/console/:console/ws", get(upgrade))
@@ -620,9 +624,19 @@ grpc_endpoint="http://127.0.0.1:50051"
         assert!(reserve("charlie", "session-c").is_err());
         assert!(console.claim(&alice, "session-b", "one").is_err());
         assert!(console.claim(&alice, "session-a", "two").is_err());
+        assert!(media::entry(&console, &alice, "session-a", "one").is_err());
         let (_, lease) = console.claim(&alice, "session-a", "one").unwrap();
+        assert!(media::entry(&console, &alice, "session-b", "one").is_err());
+        assert!(media::entry(&console, &alice, "session-a", "two").is_err());
+        let preview = media::entry(&console, &alice, "session-a", "one").unwrap();
+        let slot_a = preview.preview_slots.clone().try_acquire_owned().unwrap();
+        let slot_b = preview.preview_slots.clone().try_acquire_owned().unwrap();
+        assert!(preview.preview_slots.clone().try_acquire_owned().is_err());
+        drop((slot_a, slot_b));
         assert!(console.claim(&alice, "session-a", "one").is_err());
         drop(lease);
+        assert!(*preview.cancel.borrow());
+        assert!(media::entry(&console, &alice, "session-a", "one").is_err());
         assert!(reserve("alice", "session-a").is_ok());
         // Expired pending reservations cannot attach and release quota on the next request.
         console

@@ -116,3 +116,30 @@ navigateur, recharger la page et ouvrir une nouvelle console.
 
 Vérifications : `node tests/webmin-language.js`, `node tests/webmin-console.js`
 (également avec `WEBMIN_TEST_LANGUAGE=fr` ou `de`), et `make webmin-test`.
+
+## Préécoute privée des médias
+
+Dans la fiche **Médias → Modification** de la TUI, **Ctrl+P** ouvre le lecteur audio
+local du navigateur. Voir [les commandes de préécoute](tui-medias.md#préécoute-dans-webmin).
+Le PTY autorise cette commande via `STATIOND_WEBMIN_MEDIA_PREVIEW=1` ; la TUI
+transmet le chemin relatif encodé dans OSC 778, distinct du diagnostic OSC 777.
+Le chemin est rendu comme texte et ne devient jamais une commande shell.
+
+Le lecteur utilise une route HTTP de la même origine, liée à la session admin,
+à la station et à une console active appartenant à ce compte. La fermeture ou
+révocation de la console coupe le flux. Les réponses sont privées, sans cache,
+et prennent en charge une seule plage `Range` pour la recherche dans le morceau.
+Le proxy accepte deux requêtes audio simultanées par console ; le service gRPC
+`LibraryService.PreviewAudio` limite à huit flux par station, avec tampon borné.
+Seuls les MP3 disponibles dans l’index et confinés dans la bibliothèque peuvent
+être lus, y compris sur une réplique en lecture seule. Aucun passage par la file
+de diffusion et aucune écriture sur les médias ou l’historique de diffusion.
+
+La console s’exécute sur la machine qui héberge Webmin, même lorsque la station
+sélectionnée est distante. Mettre à jour **le daemon Webmin et sa TUI locale**,
+ainsi que le daemon de la station écoutée. Reconstruire uniquement la TUI de la
+station distante ne change pas le terminal ouvert par Webmin. Après mise à jour,
+rouvrir la console et vérifier que « Ctrl+P préécouter / arrêter » apparaît dans
+la fiche individuelle. Le script `tests/webmin-media-preview.py ENDPOINT_GRPC`
+vérifie ce raccourci dans une vraie TUI sous PTY, sans valider la fiche ni agir
+sur l’antenne ; il nécessite une station joignable contenant au moins un MP3 indexé.

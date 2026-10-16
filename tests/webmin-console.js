@@ -2,14 +2,14 @@
 'use strict';
 const assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm');
 const elements=new Map();
-function element(id){if(!elements.has(id))elements.set(id,{textContent:'',dataset:{},hidden:false,disabled:false,listeners:{},addEventListener(type,fn){this.listeners[type]=fn;}});return elements.get(id);}
+function element(id){if(!elements.has(id))elements.set(id,{textContent:'',dataset:{},hidden:false,disabled:false,listeners:{},paused:true,ended:false,src:'',pause(){this.paused=true;},play(){this.paused=false;return Promise.resolve();},load(){},removeAttribute(name){if(name==='src')this.src='';},addEventListener(type,fn){this.listeners[type]=fn;}});return elements.get(id);}
 let now=100,focused=true,interval,quota=false;
 const windowListeners={},documentListeners={},frames=[];
 element('terminal').contains=node=>node===document.activeElement&&node===Terminal.all.at(-1)?.textarea;
 const language=process.env.WEBMIN_TEST_LANGUAGE||'en';
 const document={documentElement:{lang:language},body:{dataset:{stationId:'one'}},getElementById:id=>{assert.ok(!['start','close','activate-keyboard'].includes(id));return element(id);},activeElement:null,visibilityState:'visible',hasFocus:()=>focused,addEventListener(type,fn){documentListeners[type]=fn;}};
 class Terminal{
-  constructor(options){this.options=options;this.textarea=element('textarea-'+Terminal.all.length);this.textarea.getRootNode=()=>document;this.parser={registerOscHandler:(code,handler)=>{assert.equal(code,777);this.osc=handler;}};Terminal.all.push(this);}
+  constructor(options){this.options=options;this.textarea=element('textarea-'+Terminal.all.length);this.textarea.getRootNode=()=>document;this.parser={registerOscHandler:(code,handler)=>{assert.ok([777,778].includes(code));if(code===777)this.osc=handler;else this.preview=handler;}};Terminal.all.push(this);}
   static all=[];
   loadAddon(){} open(){} resize(){} dispose(){this.disposed=true;}
   focus(){document.activeElement=this.textarea;this.textarea.listeners.focus();}
@@ -25,7 +25,7 @@ class WebSocket{
   connect(){this.readyState=1;this.onopen();}
   receive(data){this.onmessage({data:JSON.stringify(data)});}
 }
-const context=vm.createContext({document,Terminal,WebSocket,FitAddon:{FitAddon:class{proposeDimensions(){return{cols:80,rows:24};}}},ResizeObserver:class{observe(){} disconnect(){}},window:{addEventListener(type,fn){windowListeners[type]=fn;}},location:{href:'https://example.test/console/one',search:'',pathname:'/console/one'},history:{replaceState(){}},URL,URLSearchParams,ArrayBuffer,Uint8Array,performance:{now:()=>now},requestAnimationFrame:fn=>(frames.push(fn),frames.length),setInterval:fn=>(interval=fn,1),clearInterval:()=>{interval=null;},fetch:async (url,options)=>({ok:!quota,status:quota?503:200,json:async()=>{if(url!=='/api/session')assert.equal(options.headers['Accept-Language'],language);return url==='/api/session'?{csrf_token:'csrf',name:'Admin',stations:[{id:'one',role:'admin',label:'One'}]}:{id:'reservation'};}})});
+const context=vm.createContext({document,Terminal,WebSocket,FitAddon:{FitAddon:class{proposeDimensions(){return{cols:80,rows:24};}}},ResizeObserver:class{observe(){} disconnect(){}},window:{addEventListener(type,fn){windowListeners[type]=fn;}},location:{href:'https://example.test/console/one',search:'',pathname:'/console/one'},history:{replaceState(){}},URL,URLSearchParams,ArrayBuffer,Uint8Array,TextDecoder,performance:{now:()=>now},requestAnimationFrame:fn=>(frames.push(fn),frames.length),setInterval:fn=>(interval=fn,1),clearInterval:()=>{interval=null;},fetch:async (url,options)=>({ok:!quota,status:quota?503:200,json:async()=>{if(url!=='/api/session')assert.equal(options.headers['Accept-Language'],language);return url==='/api/session'?{csrf_token:'csrf',name:'Admin',stations:[{id:'one',role:'admin',label:'One'}]}:{id:'reservation'};}})});
 vm.runInContext('const WEBMIN_TRANSLATIONS='+fs.readFileSync('src/plugin/remote_supervision/translations.json','utf8')+';'+fs.readFileSync('src/plugin/remote_supervision/i18n.js','utf8'),context);
 const translated=source=>vm.runInContext('t('+JSON.stringify(source)+')',context);
 vm.runInContext(fs.readFileSync('src/plugin/remote_supervision/console.js','utf8'),context);
@@ -39,6 +39,20 @@ async function flush(){await new Promise(resolve=>setImmediate(resolve));}
   assert.equal(element('connection-state').textContent,translated('CONNECTED'));
   assert.equal(element('focus-state').textContent,translated('FOCUSED'));
   assert.equal(element('application-state').textContent,translated('UNKNOWN'));
+  const encoded=Buffer.from('Uploaded/été & #.mp3').toString('hex');
+  assert.equal(terminal.preview('stationd-preview;'+encoded),true);
+  assert.equal(element('media-preview').hidden,false);
+  assert.match(element('media-preview-audio').src,/console\/reservation\/media\/Uploaded%2F/);
+  assert.equal(element('media-preview-name').textContent,'été & #.mp3');
+  assert.equal(element('media-preview-audio').paused,false);
+  terminal.preview('stationd-preview;'+encoded);
+  assert.equal(element('media-preview').hidden,true);
+  assert.equal(element('media-preview-audio').src,'');
+  assert.equal(terminal.preview('stationd-preview;zz'),false);
+  terminal.preview('stationd-preview;'+encoded);
+  element('media-preview-stop').listeners.click();assert.equal(element('media-preview').hidden,true);
+  terminal.preview('stationd-preview;'+encoded);
+  terminal.preview('stationd-preview;stop');assert.equal(element('media-preview-audio').src,'');
   terminal.osc('stationd;0');assert.equal(element('application-state').textContent,translated('READY'));
   // Reproduce an unreliable document.hasFocus(): real focus remains authoritative.
   focused=false;interval();assert.equal(element('focus-state').textContent,translated('FOCUSED'));
@@ -76,7 +90,9 @@ async function flush(){await new Promise(resolve=>setImmediate(resolve));}
   now+=6000;socket.receive({type:'probe_ack'});interval();assert.equal(element('connection-state').textContent,translated('CONNECTED'));assert.equal(element('application-state').textContent,translated('BUSY'));
   terminal.osc('stationd;1');assert.equal(element('application-state').textContent,translated('READY'));
   now+=7000;interval();assert.equal(element('connection-state').textContent,translated('CONNECTION UNRESPONSIVE'));
+  terminal.preview('stationd-preview;'+encoded);
   now+=4000;interval();assert.equal(element('connection-state').textContent,translated('DISCONNECTED'));assert.equal(interval,null);
+  assert.equal(element('media-preview-audio').src,'');
   await vm.runInContext('open()',context);assert.equal(element('connection-state').textContent,translated('RECONNECTING'));
   const second=WebSocket.all.at(-1);second.connect();
   terminal.osc('stationd;99');assert.equal(element('application-state').textContent,translated('UNKNOWN')); // Old session telemetry ignored.

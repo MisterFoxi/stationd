@@ -44,6 +44,8 @@ pub mod ls_grpc;
 pub mod ls_script;
 pub mod media;
 pub mod media_tags;
+mod media_preview;
+pub mod media_upload;
 pub mod scan_writeback;
 pub mod media_analysis;
 pub mod onair;

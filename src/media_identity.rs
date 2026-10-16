@@ -352,6 +352,18 @@ impl Drop for Staged {
     }
 }
 
+/// An upload is a new media, even when copied from this library. Assign its
+/// identity before publication, so read-only replicas never see a tagless file.
+pub(crate) fn initialize_upload(path: &Path, ty: FileType) -> Result<(), TagError> {
+    let id = uuid::Uuid::new_v4().to_string();
+    save_tag(path, ty, &id)?;
+    let (_, tags) = crate::media::read_tagged(path).map_err(io)?;
+    if from_tags(&tags)?.as_deref() != Some(id.as_str()) {
+        return Err(io("uploaded media identity did not persist"));
+    }
+    Ok(())
+}
+
 /// Preserve concrete tag containers (generic tags discard unknown user frames).
 fn save_tag(path: &Path, ty: FileType, id: &str) -> Result<(), TagError> {
     let opts = ParseOptions::new();
@@ -377,6 +389,11 @@ fn save_tag(path: &Path, ty: FileType, id: &str) -> Result<(), TagError> {
                     tag = seeded;
                 }
             }
+            let identity_names: Vec<_> = (&tag).into_iter().filter_map(|frame| match frame {
+                lofty::id3::v2::Frame::UserText(text) if text.description.trim().eq_ignore_ascii_case(UUID_TAG) => Some(text.description.to_string()),
+                _ => None,
+            }).collect();
+            for name in identity_names { tag.remove_user_text(&name); }
             tag.insert_user_text(UUID_TAG.into(), id.into());
             tag.save_to_path(
                 path,

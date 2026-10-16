@@ -46,6 +46,26 @@ path = "./grid"
 [logging]
 level = "info"
 
+# Unique media upload entry point: enable ONLY on the writable media node.
+# Native Rust plugin, embedded HTML UI: plugins/media-uploader/README.md.
+# Requires media.read_only = false. Generate the token with openssl rand -hex 32;
+# keep it directly in the private station TOML configuration.
+# [[plugin]]
+# name = "media-uploader"
+# enabled = true
+# [plugin.config]
+# bind = "127.0.0.1:8092"
+# token = "<generated-upload-secret>"
+# inbox = "Uploaded"
+# tag_field = "Type"             # must be a custom-tags source
+# max_file_mb = 256
+# max_uploads = 2
+# [plugin.config.conversion]
+# output_format = "mp3"          # only broadcast output enabled today
+# ffmpeg = "ffmpeg"
+# mp3_bitrate_kbps = 320
+# max_output_mb = 512
+# timeout_seconds = 900
 # Plugins (optional). `capabilities` = host calls the plugin may make on the
 # core ("control", "push_override", "db"); a call outside them is refused and
 # logged. "db" = the plugin's own SQLite file, `<database dir>/plugins/<name>.db`

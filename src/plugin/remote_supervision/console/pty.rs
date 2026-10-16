@@ -70,6 +70,7 @@ mod linux {
                 .env("TERM", "xterm-256color")
                 .env("LANG", "C.UTF-8")
                 .env("STATIOND_WEBMIN_DIAGNOSTICS", "1")
+                .env("STATIOND_WEBMIN_MEDIA_PREVIEW", "1")
                 .stdin(Stdio::from(slave.try_clone()?))
                 .stdout(Stdio::from(slave.try_clone()?))
                 .stderr(Stdio::from(slave));

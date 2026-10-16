@@ -16,5 +16,12 @@
 <span id="input-activity" aria-live="off"></span>
 </div>
 <p id="focus-help">Cliquez dans le terminal pour y diriger le clavier.</p>
+<section id="media-preview" class="private-listening" hidden aria-label="Préécoute privée">
+<strong>Préécoute privée — hors antenne</strong>
+<span id="media-preview-name"></span>
+<audio id="media-preview-audio" controls preload="none" aria-label="Écouter le média sélectionné"></audio>
+<button id="media-preview-stop" type="button">Arrêter la préécoute</button>
+<p id="media-preview-status" role="status" aria-live="polite"></p>
+</section>
 <div id="terminal" aria-label="Console StationD" aria-describedby="focus-help"></div>
 </main></body></html>

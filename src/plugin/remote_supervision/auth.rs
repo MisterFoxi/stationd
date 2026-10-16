@@ -2030,6 +2030,71 @@ mod tests {
     }
     #[cfg(target_os = "linux")]
     #[tokio::test]
+    async fn webmin_media_preview_http_session_range_and_disconnect() {
+        use axum::{body::Body, http::{Request, StatusCode}};
+        use std::os::unix::fs::PermissionsExt;
+        use tower::ServiceExt;
+        use tokio_tungstenite::{connect_async,tungstenite::client::IntoClientRequest};
+        let (dir,mut auth,mut soft)=fixture();
+        let enroll=add(&mut auth,"Alice",Role::Admin);
+        register(&mut auth,&mut soft,&enroll);
+        let (alice,session)=login(&mut auth,&mut soft,"Alice");
+        let media=dir.path().join("library");std::fs::create_dir(&media).unwrap();
+        std::fs::create_dir(media.join("été")).unwrap();
+        std::fs::write(media.join("été/selected.mp3"),b"0123456789").unwrap();
+        let pool=crate::db::init(&dir.path().join("library.db")).await.unwrap();
+        crate::media_index::replace_library(&pool,&[crate::media::ScannedMedia{
+            rel_path:"été/selected.mp3".into(),title:None,artist:None,album:None,year:None,genres:vec![],duration_ms:1000,size_bytes:10,mtime_ns:0,
+        }],0).await.unwrap();
+        let library=crate::library_actor::spawn_with_policy(pool,media,None,Default::default(),true);
+        let grpc_listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let grpc_addr=grpc_listener.local_addr().unwrap();
+        let grpc=tokio::spawn(async move{
+            tonic::transport::Server::builder().add_service(crate::proto::library::library_service_server::LibraryServiceServer::new(crate::library_grpc::LibraryGrpc::new(library)))
+            .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(grpc_listener)).await.unwrap();
+        });
+        let program=dir.path().join("stationd-tui");
+        std::fs::write(&program,"#!/usr/bin/python3\nimport time\ntime.sleep(60)\n").unwrap();
+        std::fs::set_permissions(&program,std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut config=auth.config.clone();config.console.enabled=true;
+        config.console.command=program.to_str().unwrap().into();
+        config.stations[0].grpc_endpoint=format!("http://{grpc_addr}");
+        let web=super::super::web::Web::new(Arc::new(std::sync::Mutex::new(auth)),&config);
+        let console=web.console.clone();console.start();
+        let app=super::super::web::routes(web);
+        let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr=listener.local_addr().unwrap();let server=tokio::spawn({let app=app.clone();async move{axum::serve(listener,app).await.unwrap();}});
+        let response=app.clone().oneshot(Request::builder().method("POST").uri("/api/stations/one/console")
+            .header("cookie",format!("__Host-stationd-session={session}"))
+            .header("origin","https://remote.example.test").header("x-csrf-token",alice["csrf_token"].as_str().unwrap())
+            .header("content-type","application/json").body(Body::from(r#"{"cols":80,"rows":24}"#)).unwrap()).await.unwrap();
+        assert_eq!(response.status(),StatusCode::OK);
+        let reservation:Value=serde_json::from_slice(&axum::body::to_bytes(response.into_body(),65536).await.unwrap()).unwrap();
+        let id=reservation["id"].as_str().unwrap();
+        let uri=format!("/api/stations/one/console/{id}/media/%C3%A9t%C3%A9%2Fselected.mp3");
+        let get=|token:&str,range:Option<&str>|{let mut req=Request::builder().uri(&uri).header("cookie",format!("__Host-stationd-session={token}"));if let Some(range)=range{req=req.header("range",range);}req.body(Body::empty()).unwrap()};
+        assert_eq!(app.clone().oneshot(get(&session,None)).await.unwrap().status(),StatusCode::FORBIDDEN);
+        let mut upgrade=format!("ws://{addr}/api/stations/one/console/{id}/ws").into_client_request().unwrap();
+        upgrade.headers_mut().insert("cookie",format!("__Host-stationd-session={session}").parse().unwrap());
+        upgrade.headers_mut().insert("origin","https://remote.example.test".parse().unwrap());
+        let (socket,_)=connect_async(upgrade).await.unwrap();
+        assert_eq!(app.clone().oneshot(get("wrong",None)).await.unwrap().status(),StatusCode::FORBIDDEN);
+        for (range,status,expected) in [(None,StatusCode::OK,"0123456789"),(Some("bytes=2-5"),StatusCode::PARTIAL_CONTENT,"2345"),(Some("bytes=-3"),StatusCode::PARTIAL_CONTENT,"789")] {
+            let response=app.clone().oneshot(get(&session,range)).await.unwrap();
+            assert_eq!(response.status(),status);assert_eq!(response.headers()["content-type"],"audio/mpeg");
+            assert_eq!(response.headers()["cache-control"],"no-store");
+            if range==Some("bytes=2-5"){assert_eq!(response.headers()["content-range"],"bytes 2-5/10");}
+            assert_eq!(axum::body::to_bytes(response.into_body(),65536).await.unwrap().as_ref(),expected.as_bytes());
+        }
+        let response=app.clone().oneshot(get(&session,Some("bytes=90-"))).await.unwrap();
+        assert_eq!(response.status(),StatusCode::RANGE_NOT_SATISFIABLE);assert_eq!(response.headers()["content-range"],"bytes */10");
+        drop(socket);console.shutdown();
+        assert_eq!(app.clone().oneshot(get(&session,None)).await.unwrap().status(),StatusCode::FORBIDDEN);
+        grpc.abort();server.abort();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
     async fn webmin_console_linux_ws_acl_resize_revocation_and_shutdown() {
         use axum::{
             body::Body,

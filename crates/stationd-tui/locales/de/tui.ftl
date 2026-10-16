@@ -1387,3 +1387,6 @@ genre-picker-loading = Genres laden…
 genre-picker-help = ↑↓ navigieren · Leertaste wählen · Eingabe bestätigen · Esc abbrechen
     Ctrl+A alle wählen · Ctrl+D abwählen · Ctrl+U Suche löschen
 genre-picker-open = Eingabe: Genre-Auswahl öffnen
+
+tags-preview-keys = Ctrl+P vorhören / stoppen
+tags-preview-error = Vorhören nicht verfügbar: { $reason }

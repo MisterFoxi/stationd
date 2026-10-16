@@ -244,6 +244,13 @@ pub(crate) fn read_tagged_snapshot(
 
     let mut f = std::fs::File::open(full)?;
     let probe = Probe::open(full)?;
+    // Upload receipts deliberately keep a non-audio suffix until tagged.
+    // They are only read explicitly by the import operation, never by a walk.
+    let probe = if full.extension().is_some_and(|ext| ext == "part") {
+        probe.guess_file_type()?
+    } else {
+        probe
+    };
     let Some(file_type) = probe.file_type() else {
         // Unknown to lofty by extension: let the generic path report it.
         let tagged = probe.read()?;

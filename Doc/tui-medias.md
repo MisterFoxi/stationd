@@ -35,3 +35,18 @@ clients gardent la recherche récursive existante.
 L’inventaire lit les chemins indexés et inclut leurs ancêtres. Il ne parcourt
 pas un chemin fourni par le client sur le disque. Les chemins comportant des
 espaces, des accents et des différences de casse sont conservés.
+
+## Préécoute dans Webmin
+
+Dans **Médias → Modification**, ouvrir la fiche d’un seul média puis presser
+**Ctrl+P** pour l’écouter dans le navigateur. Un lecteur « Préécoute privée — hors
+antenne » apparaît au-dessus du terminal : lecture/pause, déplacement dans le
+morceau et arrêt. Si le navigateur bloque le démarrage automatique, cliquer sur
+Lecture. **Ctrl+P** pendant la lecture ou **Arrêter la préécoute** coupe le lecteur.
+Fermer ou valider la fiche, ou déconnecter la console, arrête aussi la préécoute.
+
+La lecture concerne le MP3 sélectionné et ne modifie ni ses tags, ni les compteurs,
+ni la file ou l’antenne. Elle fonctionne aussi sur une station en lecture seule
+avec les médias partagés. Elle est disponible dans la console Webmin pour une
+fiche individuelle ; aucune sortie audio n’est ouverte sur le serveur.
+Le daemon et la TUI doivent être reconstruits ensemble, puis la console rouverte.

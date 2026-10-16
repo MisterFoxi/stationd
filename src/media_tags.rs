@@ -177,7 +177,11 @@ pub fn resolve(root: &Path, rel_path: &str) -> Result<PathBuf, TagError> {
 pub fn read(full: &Path) -> Result<(StandardTags, u64), TagError> {
     let io = |e: &dyn std::fmt::Display| TagError::Io(format!("cannot read {}: {e}", full.display()));
     let size = std::fs::metadata(full).map_err(|e| io(&e))?.len();
-    let tagged = lofty::read_from_path(full).map_err(|e| io(&e))?;
+    let tagged = if full.extension().is_some_and(|ext| ext == "part") {
+        Probe::open(full).and_then(|p| Ok(p.guess_file_type()?)).and_then(|p| p.read())
+    } else {
+        lofty::read_from_path(full)
+    }.map_err(|e| io(&e))?;
     let mut tags = match tagged.primary_tag().or_else(|| tagged.first_tag()) {
         Some(tag) => StandardTags {
             title: tag.title().map(|s| s.to_string()),

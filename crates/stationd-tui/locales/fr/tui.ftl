@@ -1393,3 +1393,6 @@ genre-picker-loading = Chargement des genres…
 genre-picker-help = ↑↓ naviguer · Espace cocher · Entrée valider · Échap annuler
     Ctrl+A tout cocher · Ctrl+D décocher · Ctrl+U effacer la recherche
 genre-picker-open = Entrée : ouvrir le sélecteur de genres
+
+tags-preview-keys = Ctrl+P préécouter / arrêter
+tags-preview-error = Préécoute indisponible : { $reason }

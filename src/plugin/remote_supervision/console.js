@@ -6,6 +6,35 @@ const focusHelp=document.getElementById('focus-help'),activity=document.getEleme
 let context,socket,terminal,fit,observer,ended=false,monitor,attempts=0;
 let lastTransport=0,lastTui=0,sequence=0;
 let terminalFocused=false,windowActive=true;
+const previewPanel=document.getElementById('media-preview'),previewAudio=document.getElementById('media-preview-audio'),previewName=document.getElementById('media-preview-name'),previewStatus=document.getElementById('media-preview-status');
+let consoleId=null,previewPath=null,previewEpoch=0,previewFailed=false;
+function stopPreview(){
+  ++previewEpoch;previewPath=null;previewFailed=false;
+  previewAudio.pause();previewAudio.removeAttribute('src');previewAudio.load();
+  previewPanel.hidden=true;previewName.textContent='';previewStatus.textContent='';
+}
+function previewFromTerminal(data){
+  const prefix='stationd-preview;';if(!data.startsWith(prefix))return false;
+  const payload=data.slice(prefix.length);
+  if(payload==='stop'){stopPreview();return true;}
+  if(!/^[0-9a-f]{2,8192}$/.test(payload)||payload.length%2)return false;
+  let path;try{path=new TextDecoder('utf-8',{fatal:true}).decode(Uint8Array.from(payload.match(/../g),hex=>parseInt(hex,16)));}catch{return false;}
+  if(!path||path.includes('\0')||!consoleId||socket?.readyState!==WebSocket.OPEN)return true;
+  if(path===previewPath&&!previewAudio.paused){stopPreview();return true;}
+  stopPreview();previewPath=path;previewFailed=false;
+  const epoch=previewEpoch;
+  previewPanel.hidden=false;previewName.textContent=path.split('/').pop();
+  previewStatus.textContent=t('Préparation de la préécoute…');
+  previewAudio.src=`${base}/console/${encodeURIComponent(consoleId)}/media/${encodeURIComponent(path)}`;
+  previewAudio.play().catch(()=>{if(epoch===previewEpoch&&previewPath&&!previewFailed)previewStatus.textContent=t('Cliquez sur Lecture pour démarrer la préécoute.');});
+  return true;
+}
+previewAudio.addEventListener('playing',()=>{if(previewPath&&!previewFailed)previewStatus.textContent=t('Lecture privée dans ce navigateur — hors antenne.');});
+previewAudio.addEventListener('pause',()=>{if(previewPath&&!previewAudio.ended&&!previewFailed)previewStatus.textContent=t('Préécoute en pause.');});
+previewAudio.addEventListener('ended',()=>{if(previewPath)previewStatus.textContent=t('Préécoute terminée.');});
+previewAudio.addEventListener('error',()=>{if(previewPath){previewFailed=true;previewStatus.textContent=t('Préécoute indisponible : média absent ou session expirée.');}});
+document.getElementById('media-preview-stop').addEventListener('click',stopPreview);
+
 const pending=new Map();
 function badge(element,label,ok=false){if(element.textContent!==label)element.textContent=label;element.dataset.level=ok?'ok':'warning';}
 function textareaFocused(){const input=terminal?.textarea;return !!input&&input.getRootNode().activeElement===input;}
@@ -52,7 +81,7 @@ async function request(url,body){const response=await fetch(url,{method:body===u
 function send(data){if(socket?.readyState!==WebSocket.OPEN)return false;try{socket.send(JSON.stringify(data));return true;}catch{return false;}}
 function dimensions(){const proposed=fit.proposeDimensions();return{cols:Math.max(20,Math.min(300,proposed?.cols||80)),rows:Math.max(5,Math.min(120,proposed?.rows||24))};}
 function resize(){if(!terminal)return;const size=dimensions();terminal.resize(size.cols,size.rows);send({type:'resize',...size});}
-function cleanup(){terminalFocused=false;clearInterval(monitor);monitor=null;observer?.disconnect();pending.clear();activity.textContent='';if(terminal)terminal.options.disableStdin=true;updateFocus();}
+function cleanup(){stopPreview();consoleId=null;terminalFocused=false;clearInterval(monitor);monitor=null;observer?.disconnect();pending.clear();activity.textContent='';if(terminal)terminal.options.disableStdin=true;updateFocus();}
 function stop(){const previous=socket;socket=null;previous?.close();cleanup();badge(connection,t('DISCONNECTED'));badge(application,t('UNKNOWN'));updateFocus();}
 async function open(){
   stop();message.textContent='';ended=false;
@@ -70,8 +99,10 @@ async function open(){
     const match=/^stationd;([0-9]{1,20})$/.exec(data);if(!match)return false;
     lastTui=performance.now();updateStatus();return true;
   });
+  terminal.parser.registerOscHandler(778,data=>terminal===target?previewFromTerminal(data):true);
   try{
     const reservation=await request(`${base}/console`,dimensions());
+    consoleId=reservation.id;
     const url=new URL(`${base}/console/${encodeURIComponent(reservation.id)}/ws`,location.href);url.protocol='wss:';
     const current=new WebSocket(url);socket=current;current.binaryType='arraybuffer';
     current.onopen=()=>{if(socket!==current){current.close();return;}lastTransport=performance.now();terminal.options.disableStdin=false;focusTerminal();message.textContent='';resize();send({type:'probe'});monitor=setInterval(()=>{send({type:'probe'});updateStatus();},1000);updateStatus();};

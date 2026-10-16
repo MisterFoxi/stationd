@@ -348,6 +348,7 @@ pub enum HostError {
 #[derive(Clone)]
 pub struct Host {
     operator_notice: Arc<Mutex<Option<OperatorNotice>>>,
+    media_upload: Option<Arc<crate::media_upload::UploadTarget>>,
     plugin: String,
     capabilities: Vec<Capability>,
     control: Option<StationControl>,
@@ -364,6 +365,7 @@ impl Host {
     pub fn new(plugin: &str, capabilities: &[Capability], control: Option<StationControl>) -> Self {
         Self {
             operator_notice: Arc::new(Mutex::new(None)),
+            media_upload: None,
             plugin: plugin.to_string(),
             capabilities: capabilities.to_vec(),
             control,
@@ -561,6 +563,9 @@ pub fn validate_decls(decls: &[PluginDecl]) -> Result<(), String> {
         if d.wasm.is_none() && d.name == "station-player" {
             station_player::validate_config(&d.config)?;
         }
+        if d.wasm.is_none() && d.name == "media-uploader" {
+            media_uploader::validate_config(&d.config)?;
+        }
         if d.has_db() {
             plugin_db::validate_name(&d.name)?;
             d.db_limits()
@@ -581,6 +586,7 @@ pub fn validate_decls(decls: &[PluginDecl]) -> Result<(), String> {
 /// `db` unavailable: such a plugin fails to start, visibly).
 #[derive(Clone, Default)]
 pub struct PluginEnv {
+    pub media_upload: Option<Arc<crate::media_upload::UploadTarget>>,
     pub control: Option<StationControl>,
     pub db_dir: Option<PathBuf>,
     pub geoip: Option<Arc<crate::geoip::Geoip>>,
@@ -668,6 +674,8 @@ mod metadata_config;
 mod remote_supervision;
 #[path = "../plugins/station-player/src/daemon.rs"]
 mod station_player;
+#[path = "../plugins/media-uploader/src/daemon.rs"]
+mod media_uploader;
 use config_host::{ConfigPlugin, config_operation, validate_candidate};
 
 // ---------------------------------------------------------------------------
@@ -732,6 +740,7 @@ impl Slot {
     fn open_host(&mut self, env: &PluginEnv) -> Option<Host> {
         let mut host = Host::new(&self.decl.name, &self.decl.capabilities, env.control.clone());
         host.geoip = env.geoip.clone();
+        host.media_upload = env.media_upload.clone();
         if !self.decl.has_db() {
             return Some(host);
         }
@@ -883,6 +892,7 @@ fn build_plugin(decl: &PluginDecl, host: &Host) -> Result<Box<dyn Plugin>, Strin
     if decl.wasm.is_none() {
         match decl.name.as_str() {
             "plugin-config" => return Ok(Box::new(ConfigPlugin)),
+            "media-uploader" => return Ok(Box::new(media_uploader::MediaUploader::from_config(&decl.config)?)),
             "station-player" => {
                 return Ok(Box::new(station_player::StationPlayer::from_config(&decl.config)?));
             }
@@ -1200,7 +1210,7 @@ pub fn spawn(decls: Vec<PluginDecl>) -> PluginHandle {
 
 /// Spawn with a station control and no plugin database directory.
 pub fn spawn_with(decls: Vec<PluginDecl>, control: Option<StationControl>) -> PluginHandle {
-    spawn_env(decls, PluginEnv { control, db_dir: None, geoip: None })
+    spawn_env(decls, PluginEnv { control, db_dir: None, geoip: None, ..Default::default() })
 }
 
 /// Spawn the owning task from the declared plugins and return a handle. Enabled
@@ -1272,7 +1282,7 @@ pub fn spawn_configured(mut decls: Vec<PluginDecl>, env: PluginEnv, config_path:
                                 || (matches!(action, Action::Start) && !matches!(slot.state, PluginState::Loaded));
                             // The player has nested TOML settings but no editor schema.
                             let reads_config = !slot.schema.is_empty()
-                                || (slot.decl.wasm.is_none() && name == "station-player");
+                                || (slot.decl.wasm.is_none() && matches!(name.as_str(), "station-player" | "media-uploader"));
                             if will_load && reads_config {
                                 if let Some(path) = config_path.as_deref() {
                                     let update = crate::plugin_config::read(path, &name).and_then(|(_, config)| { validate_candidate(slot, &env, &config)?; Ok(config) });
@@ -3008,7 +3018,7 @@ mod tests {
     }
 
     fn db_env(dir: &std::path::Path) -> PluginEnv {
-        PluginEnv { control: None, db_dir: Some(dir.to_path_buf()), geoip: None }
+        PluginEnv { control: None, db_dir: Some(dir.to_path_buf()), geoip: None, ..Default::default() }
     }
 
     fn resolved(media: &str) -> PluginEvent {

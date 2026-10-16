@@ -148,9 +148,11 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     });
+    let upload_target = stationd::media_upload::UploadTarget::new(cfg.media.library_path.clone(), cfg.media.read_only);
     let plugins = stationd::plugin::spawn_configured(
         cfg.plugins.clone(),
         stationd::plugin::PluginEnv {
+            media_upload: Some(upload_target.clone()),
             control: Some(control.clone()),
             db_dir: Some(plugin_db_dir),
             geoip,
@@ -374,6 +376,7 @@ async fn main() -> anyhow::Result<()> {
     // `Watch`, journal, scan progress) end, so the graceful shutdown does not
     // wait for their clients.
     let (stopping_tx, stopping_rx) = tokio::sync::watch::channel(false);
+    upload_target.attach_library(library.clone());
     let library_service = LibraryGrpc::new(library).with_stopping(stopping_rx.clone());
 
     let addr = cfg.server.grpc_bind.parse()?;

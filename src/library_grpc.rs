@@ -69,6 +69,7 @@ fn edit_of(r: &SetTagsRequest) -> TagEdit {
 
 pub struct LibraryGrpc {
     handle: LibraryHandle,
+    previews: std::sync::Arc<tokio::sync::Semaphore>,
     /// `true` once the daemon shuts down: open streams end. `None` (tests):
     /// they end when their client leaves.
     stopping: Option<tokio::sync::watch::Receiver<bool>>,
@@ -76,7 +77,7 @@ pub struct LibraryGrpc {
 
 impl LibraryGrpc {
     pub fn new(handle: LibraryHandle) -> Self {
-        Self { handle, stopping: None }
+        Self { handle, stopping: None, previews: std::sync::Arc::new(tokio::sync::Semaphore::new(8)) }
     }
 
     /// Streams (`WatchScan`) end when `stopping` turns `true`.
@@ -132,11 +133,16 @@ fn scan_status(s: &crate::library_actor::ScanStatus) -> library::ScanStatus {
 /// A missing media root is a deployment/config fault the operator must fix →
 /// `failed_precondition`; a bad request filter → `invalid_argument`;
 /// everything else is ours → `internal`.
-fn map_error(e: LibraryError) -> Status {
+pub(crate) fn map_error(e: LibraryError) -> Status {
     match e {
         LibraryError::BadRoot(p) => {
             Status::failed_precondition(format!("media root unavailable: {}", p.display()))
         }
+        LibraryError::AudioRange { size } => {
+            let mut status = Status::out_of_range("audio range outside file");
+            status.metadata_mut().insert("media-size", size.to_string().parse().unwrap());
+            status
+        },
         LibraryError::ReadOnly => Status::failed_precondition("media library is read-only; run this operation on the master"),
         LibraryError::BadFilter(m) => Status::invalid_argument(m),
         LibraryError::Tags(t) => match t {
@@ -199,6 +205,11 @@ fn search_field(v: i32) -> crate::media_index::SearchField {
 
 #[tonic::async_trait]
 impl LibraryService for LibraryGrpc {
+    type PreviewAudioStream = tokio_stream::wrappers::ReceiverStream<Result<library::MediaPreviewChunk, Status>>;
+    async fn preview_audio(&self, request: Request<library::MediaPreviewRequest>) -> Result<Response<Self::PreviewAudioStream>, Status> {
+        crate::media_preview::stream(&self.handle, request.into_inner(), self.stopping.clone(), self.previews.clone()).await
+    }
+
     async fn reorganize(&self, request: Request<library::ReorganizeRequest>) -> Result<Response<library::ReorganizeResponse>, Status> {
         let report = self.handle.reorganize(request.into_inner().dry_run).await.map_err(map_error)?;
         Ok(Response::new(library::ReorganizeResponse {

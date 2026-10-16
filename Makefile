@@ -45,7 +45,7 @@ EXEC_ROOT = $(DC) exec $(SVC)
 CTL       = $(EXEC) sh -c '"$$STATIOND_BIN/stationctl" "$$@"' stationctl
 
 .DEFAULT_GOAL := help
-.PHONY: help up down image logs shell build release test clippy fmt plugins player-test webmin webmin-test \
+.PHONY: help up down image logs shell build release test clippy fmt plugins player-test uploader-test webmin webmin-test \
         all restart restart-ls restart-icecast restart-air check-liq tui ctl \
         state stop start package dist mrproper
 
@@ -80,6 +80,9 @@ webmin: build ## Compile Webmin et stationd-tui (sans redémarrage)
 
 player-test: ## Tests du plugin natif station-player dans le conteneur de dev
 > $(EXEC) cargo test --locked -p station-player
+
+uploader-test: ## Tests de réception, tagging, scan et lecture seule du plugin média
+> $(EXEC) cargo test --locked --lib upload -- --include-ignored
 
 webmin-test: ## Tests ciblés Webmin dans le conteneur de dev
 > $(EXEC) cargo test --locked --lib webmin_

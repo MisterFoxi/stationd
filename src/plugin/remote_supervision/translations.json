@@ -861,5 +861,45 @@
   "Préécoute interrompue. Relancez l’écoute.": {
     "en": "Preview interrupted. Restart listening.",
     "de": "Vorschau unterbrochen. Starten Sie das Abhören erneut."
+  },
+  "Préécoute privée": {
+    "en": "Private preview",
+    "de": "Privates Vorhören"
+  },
+  "Préécoute privée — hors antenne": {
+    "en": "Private preview — off air",
+    "de": "Privates Vorhören — nicht auf Sendung"
+  },
+  "Écouter le média sélectionné": {
+    "en": "Listen to the selected media",
+    "de": "Ausgewählte Mediendatei anhören"
+  },
+  "Arrêter la préécoute": {
+    "en": "Stop preview",
+    "de": "Vorhören stoppen"
+  },
+  "Préparation de la préécoute…": {
+    "en": "Preparing preview…",
+    "de": "Vorhören wird vorbereitet…"
+  },
+  "Cliquez sur Lecture pour démarrer la préécoute.": {
+    "en": "Click Play to start the preview.",
+    "de": "Zum Vorhören auf Wiedergabe klicken."
+  },
+  "Lecture privée dans ce navigateur — hors antenne.": {
+    "en": "Private playback in this browser — off air.",
+    "de": "Private Wiedergabe in diesem Browser — nicht auf Sendung."
+  },
+  "Préécoute en pause.": {
+    "en": "Preview paused.",
+    "de": "Vorhören pausiert."
+  },
+  "Préécoute terminée.": {
+    "en": "Preview finished.",
+    "de": "Vorhören beendet."
+  },
+  "Préécoute indisponible : média absent ou session expirée.": {
+    "en": "Preview unavailable: media missing or session expired.",
+    "de": "Vorhören nicht verfügbar: Datei fehlt oder Sitzung abgelaufen."
   }
 }

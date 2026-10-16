@@ -292,6 +292,10 @@ Plugins add features; they do not process audio.
   `require-title-wasm`, `stop-when-idle-wasm`, `custom-tags-wasm`,
   `play-stats-wasm` (capability `db`).
 
+Media imports on the sole writable NFS node are provided by the native
+[media-uploader](plugins/media-uploader/README.md) plugin: embedded upload page,
+streamed staging, FFmpeg conversion to MP3 when needed, verified tagging as uploaded and the existing library scan.
+
 Public station pages are provided by the native `station-player` plugin: HTML5
 Icecast playback, real prefetch and separate forecasts, agenda, history, SSE,
 per-station themes and compact iframe mode. See [station-player](plugins/station-player/README.md).
