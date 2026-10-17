@@ -99,6 +99,7 @@ struct Loaded {
     db: Arc<PluginDb>,
     last_observation: Option<u64>,
     last_success: Option<u64>,
+    last_complete_collection: Option<u64>,
     failures: u64,
     problem: String,
 }
@@ -204,6 +205,7 @@ impl History {
                 db,
                 last_observation: None,
                 last_success: None,
+                last_complete_collection: None,
                 failures: 0,
                 problem: String::new(),
             });
@@ -217,6 +219,7 @@ impl History {
         let plugins = self.plugins.lock().unwrap_or_else(|e| e.into_inner());
         json!({"interval_seconds":self.settings.sample_interval_seconds,"attribution":DATA_ATTRIBUTION,"plugins":plugins.iter().map(|p| json!({
             "name":p.name,"last_observation":p.last_observation,"last_success":p.last_success,
+            "last_complete_collection":p.last_complete_collection,
             "failures":p.failures,"problem":p.problem,"database_limits":{"max_size_mb":p.db.limits().max_size_mb,"max_rows":p.db.limits().max_rows,"query_timeout_ms":p.db.limits().query_timeout_ms}
         })).collect::<Vec<_>>()})
     }
@@ -253,6 +256,9 @@ impl History {
             }
             if ok {
                 loaded.last_success = Some(now());
+                if complete_collection(events) {
+                    loaded.last_complete_collection = loaded.last_success;
+                }
                 loaded.problem.clear();
             }
         }
@@ -302,6 +308,13 @@ impl History {
         )
     }
 }
+// A successful guest write of NULL is a recorded gap, not a complete collection.
+fn complete_collection(events: &[(String, Value)]) -> bool {
+    !events.is_empty()
+        && events
+            .iter()
+            .all(|(_, event)| event["ListenerSnapshot"]["listeners"].is_array())
+}
 impl Admin {
     pub fn with_history(mut self, history: Arc<History>) -> Self {
         self.history = Some(history);
@@ -344,6 +357,25 @@ impl Admin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn complete_collection_includes_successful_zero_and_rejects_partial_gaps() {
+        let event = |mount: &str, listeners| {
+            (
+                mount.into(),
+                json!({"ListenerSnapshot":{"listeners":listeners}}),
+            )
+        };
+        assert!(!complete_collection(&[]));
+        assert!(complete_collection(&[
+            event("/one", json!([])),
+            event("/two", json!([{"ip":"127.0.0.1"}]))
+        ]));
+        assert!(!complete_collection(&[
+            event("/one", json!([])),
+            event("/two", Value::Null)
+        ]));
+    }
 
     #[test]
     #[ignore = "requires STATIOND_TEST_LISTENER_WASM"]

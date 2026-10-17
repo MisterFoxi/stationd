@@ -159,6 +159,39 @@ services:
     restart: unless-stopped
     stop_grace_period: 5s
 
+  monitor:
+    profiles: [monitor]
+    build:
+      context: ../..
+      dockerfile: docker/icecast/Dockerfile
+      target: monitoring
+    image: stationd-v1-monitor:dev
+    volumes:
+      - ../../config/icecast:/etc/stationd:ro
+      - ../../data/geoip:/data/geoip:ro
+      - ../../.local/icecast/backups:/central-backups:ro
+      - admin-state:/central-admin:ro
+      - router-state:/central-router:ro
+      - monitor-state:/var/lib/station-monitor
+    secrets:
+      - admin-api-token
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: ["CMD", "station-watch", "--check"]
+      interval: 30s
+      timeout: 5s
+      retries: 2
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    restart: unless-stopped
+    stop_grace_period: 10s
+
 secrets:
   admin-password:
     file: ../../.local/icecast/secrets/admin-password
@@ -178,3 +211,4 @@ secrets:
 volumes:
   admin-state:
   router-state:
+  monitor-state:

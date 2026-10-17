@@ -20,11 +20,15 @@ struct Args {
 }
 #[derive(Subcommand)]
 enum Command {
+    /// Query the independent monitoring gRPC endpoint directly (--addr required).
+    MonitorStatus,
     #[command(subcommand)]
     Icecast(Icecast),
 }
 #[derive(Subcommand)]
 enum Icecast {
+    /// Central monitoring status via administrative gRPC
+    Monitoring,
     #[command(subcommand)]
     Config(ConfigCommand),
     /// Current country/region/city aggregates on audience mounts only
@@ -79,6 +83,21 @@ async fn main() -> Result<()> {
         .timeout(std::time::Duration::from_secs(15))
         .connect()
         .await?;
+    if matches!(&args.command, Command::MonitorStatus) {
+        let mut request = tonic::Request::new(Empty {});
+        request.metadata_mut().insert("authorization", token);
+        request.set_timeout(std::time::Duration::from_secs(15));
+        let json = stationd_admin::rpc::monitoring_client::MonitoringClient::new(channel)
+            .get_status(request)
+            .await?
+            .into_inner()
+            .json;
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::from_str::<serde_json::Value>(&json)?)?
+        );
+        return Ok(());
+    }
     let mut client =
         IcecastAdminClient::with_interceptor(channel, move |mut req: tonic::Request<()>| {
             req.metadata_mut().insert("authorization", token.clone());
@@ -86,6 +105,18 @@ async fn main() -> Result<()> {
             Ok(req)
         });
     match args.command {
+        Command::MonitorStatus => unreachable!(),
+        Command::Icecast(Icecast::Monitoring) => {
+            let json = client
+                .get_monitoring_status(Empty {})
+                .await?
+                .into_inner()
+                .json;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::from_str::<serde_json::Value>(&json)?)?
+            );
+        }
         Command::Icecast(Icecast::HistoryStatus) => {
             let json = client.get_history_status(Empty {}).await?.into_inner().json;
             println!(

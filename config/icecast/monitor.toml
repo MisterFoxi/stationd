@@ -1,0 +1,16 @@
+# Independent central monitoring. No station count or source-container names.
+admin_url = "http://admin:50061"
+bind = "0.0.0.0:50063"
+token_file = "/run/secrets/admin-api-token"
+icecast_config = "/etc/stationd/icecast.toml"
+admin_config = "/etc/stationd/admin.toml"
+state_file = "/var/lib/station-monitor/status.json"
+interval_seconds = 30
+grace_seconds = 60
+collection_max_age_seconds = 120
+geolite_max_age_days = 45
+disk_min_available_bytes = 2147483648
+disk_min_available_percent = 10
+disk_paths = ["/central-backups", "/central-admin", "/central-router", "/data/geoip"]
+# Explicitly exclude mounts that are intentionally allowed to remain idle.
+ignored_mounts = []

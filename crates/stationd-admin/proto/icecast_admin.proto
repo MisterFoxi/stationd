@@ -4,6 +4,7 @@ package stationd.admin.icecast.v1;
 // Administration centrale V1. Indépendante du service Icecast de StationD 0.5.
 // Authentification : metadata Authorization: Bearer <admin-api-token>.
 service IcecastAdmin {
+  rpc GetMonitoringStatus(Empty) returns (JsonReply);
   rpc GetHistoryStatus(Empty) returns (JsonReply);
   rpc QueryHistory(HistoryRequest) returns (JsonReply);
   rpc GetConfig(Empty) returns (ConfigDocument);
@@ -16,6 +17,10 @@ service IcecastAdmin {
   rpc SetMetadata(MetadataRequest) returns (ActionReply);
   rpc KickListener(KickListenerRequest) returns (ActionReply);
   rpc KickSource(MountRequest) returns (ActionReply);
+}
+// Independent supervision remains queryable when central administration is down.
+service Monitoring {
+  rpc GetStatus(Empty) returns (JsonReply);
 }
 message Empty {}
 message MountRequest { string mount = 1; }

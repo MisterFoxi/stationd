@@ -129,3 +129,12 @@ Le banc complet a validé deux sources simultanées et deux auditeurs,
 16 384 octets MP3 reçus et décodés par auditeur, les compteurs d'audience,
 le refus des accès invalides et le nettoyage des connexions.
 StationD et Liquidsoap sont absents de l'image de ce service.
+
+## Sauvegarde et restauration
+
+La procédure et les commandes de contrôle sont décrites dans
+[Sauvegarde et restauration Icecast V1](v1-icecast-backup.md).
+
+Supervision centrale indépendante : voir [v1-icecast-monitor.md](v1-icecast-monitor.md).
+
+Déploiement sur VM : [paquet Icecast V1](v1-icecast-deploy.md), via `make icecast-dist VM=cible`.

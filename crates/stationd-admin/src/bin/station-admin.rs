@@ -21,6 +21,8 @@ struct Args {
     icecast_url: String,
     #[arg(long, default_value = "http://router:50062")]
     router_addr: String,
+    #[arg(long, default_value = "http://monitor:50063")]
+    monitor_addr: String,
     #[arg(long)]
     settings: Option<PathBuf>,
     #[arg(long, default_value = "/var/lib/station-admin/plugins")]
@@ -44,10 +46,15 @@ async fn shutdown_signal() {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
-    let admin = Admin::load(&args.config, &args.secrets_dir, &args.icecast_url)?.with_router(
-        args.router_addr,
-        read_secret(&args.secrets_dir.join("router-api-token"))?,
-    );
+    let admin = Admin::load(&args.config, &args.secrets_dir, &args.icecast_url)?
+        .with_router(
+            args.router_addr,
+            read_secret(&args.secrets_dir.join("router-api-token"))?,
+        )
+        .with_monitor(
+            args.monitor_addr,
+            read_secret(&args.secrets_dir.join("admin-api-token"))?,
+        );
     let admin = if let Some(path) = args.settings {
         let geoip = admin.history_geoip();
         let history = tokio::task::spawn_blocking(move || {

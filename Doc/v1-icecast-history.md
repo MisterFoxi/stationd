@@ -154,3 +154,14 @@ a confirmé HTTP 200 sans redirection, le type audio/mpeg et le décodage du
 MP3 sur les deux chemins. HTTPS reste fonctionnel et l'administration HTTP
 redirige vers HTTPS. Aucun redémarrage d'Icecast, du routeur ou de Traefik
 n'a été nécessaire. La lecture dans le viewer Second Life reste à essayer.
+
+
+## Diagnostic de supervision gRPC
+
+`GetHistoryStatus` expose aussi `last_complete_collection` par plugin : dernier
+lot non vide dont toutes les observations d'audience étaient disponibles et
+dont le traitement invité a réussi. Zéro auditeur est valide ; `NULL` reste
+une observation inconnue. `last_success` garde le sens d'écriture invitée
+réussie, y compris pour un relevé inconnu. Le superviseur indépendant vérifie
+les deux dates ; voir `v1-icecast-monitor.md`. Aucun schéma SQLite ni contrat
+d'événement WASM ne change. Ces diagnostics repartent au démarrage.

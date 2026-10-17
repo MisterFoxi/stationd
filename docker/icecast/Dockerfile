@@ -14,7 +14,13 @@ COPY crates/stationd-admin/ ./
 COPY tools/icecast-config/ /workspace/tools/icecast-config/
 COPY src/geoip.rs src/listener_snapshot.rs src/listener_history.rs src/plugin_db.rs /workspace/src/
 ENV CARGO_BUILD_JOBS=2
-RUN cargo build --release --locked
+# Rebuild local crates on source changes; retain compiled third-party dependencies.
+RUN --mount=type=cache,id=stationd-v1-admin-registry,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=stationd-v1-admin-target,target=/workspace/crates/stationd-admin/target,sharing=locked \
+    cargo clean --release -p stationd-admin -p station-icecast-config \
+ && cargo build --release --locked \
+ && mkdir -p /out \
+ && cp target/release/station-admin target/release/stationctl target/release/station-router target/release/station-watch /out/
 
 FROM rust:1.99-slim-bookworm AS plugin-build
 RUN rustup target add wasm32-unknown-unknown
@@ -39,16 +45,31 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
  && apt-get install -y --no-install-recommends python3 ffmpeg ca-certificates \
  && rm -rf /var/lib/apt/lists/*
-COPY --from=admin-build /workspace/crates/stationd-admin/target/release/stationctl /usr/local/bin/stationctl
+COPY --from=admin-build /out/stationctl /usr/local/bin/stationctl
 COPY tests/icecast-smoke.py /test/icecast-smoke.py
 COPY docker/icecast/live-source.py /test/live-source.py
 ENTRYPOINT ["python3", "/test/icecast-smoke.py"]
 
 FROM ubuntu:26.04 AS administration
-COPY --from=admin-build /workspace/crates/stationd-admin/target/release/station-admin /workspace/crates/stationd-admin/target/release/stationctl /workspace/crates/stationd-admin/target/release/station-router /usr/local/bin/
+COPY --from=admin-build /out/station-admin /out/stationctl /out/station-router /usr/local/bin/
 COPY --from=plugin-build /workspace/plugins/listener-stats-wasm/target/wasm32-unknown-unknown/release/listener_stats_wasm.wasm /opt/stationd/plugins/listener_stats_wasm.wasm
 RUN mkdir -p /var/lib/station-router /var/lib/station-admin/plugins && chown -R nobody:nogroup /var/lib/station-router /var/lib/station-admin
 ENV RUST_LOG=warn
 USER nobody
 ENTRYPOINT ["station-admin"]
 CMD ["--bind", "0.0.0.0:50061"]
+
+# Reusable recovery helper, independent of running station/source containers.
+FROM ubuntu:26.04 AS recovery-tools
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends python3 ffmpeg ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+
+# Independent read-only supervision with its own authenticated gRPC API.
+FROM ubuntu:26.04 AS monitoring
+COPY --from=admin-build /out/station-watch /out/stationctl /usr/local/bin/
+RUN mkdir -p /var/lib/station-monitor && chown nobody:nogroup /var/lib/station-monitor
+USER nobody
+ENTRYPOINT ["station-watch"]

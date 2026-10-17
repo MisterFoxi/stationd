@@ -52,6 +52,7 @@ pub struct Admin {
     password: String,
     router: Option<(String, String)>,
     history: Option<std::sync::Arc<history::History>>,
+    monitor: Option<(String, String)>,
 }
 
 fn child(node: roxmltree::Node<'_, '_>, name: &str) -> String {
@@ -63,6 +64,10 @@ fn child(node: roxmltree::Node<'_, '_>, name: &str) -> String {
 }
 
 impl Admin {
+    pub fn with_monitor(mut self, endpoint: String, token: String) -> Self {
+        self.monitor = Some((endpoint, token));
+        self
+    }
     pub fn with_router(mut self, endpoint: String, token: String) -> Self {
         self.router = Some((endpoint, token));
         self
@@ -137,6 +142,7 @@ impl Admin {
             password,
             router: None,
             history: None,
+            monitor: None,
         })
     }
 
@@ -204,6 +210,32 @@ impl Admin {
 
 #[tonic::async_trait]
 impl IcecastAdmin for Admin {
+    async fn get_monitoring_status(
+        &self,
+        _: Request<Empty>,
+    ) -> Result<Response<JsonReply>, Status> {
+        let (endpoint, token) = self
+            .monitor
+            .as_ref()
+            .ok_or_else(|| Status::failed_precondition("monitor not configured"))?;
+        let channel = tonic::transport::Endpoint::from_shared(endpoint.clone())
+            .map_err(|_| Status::internal("invalid monitor endpoint"))?
+            .connect_timeout(std::time::Duration::from_secs(2))
+            .timeout(std::time::Duration::from_secs(5))
+            .connect()
+            .await
+            .map_err(|_| Status::unavailable("monitor unavailable"))?;
+        let mut client = monitoring_client::MonitoringClient::new(channel);
+        let mut request = Request::new(Empty {});
+        request.metadata_mut().insert(
+            "authorization",
+            format!("Bearer {token}")
+                .parse()
+                .map_err(|_| Status::internal("invalid monitor token"))?,
+        );
+        request.set_timeout(std::time::Duration::from_secs(5));
+        client.get_status(request).await
+    }
     async fn get_history_status(&self, _: Request<Empty>) -> Result<Response<JsonReply>, Status> {
         let h = self
             .history

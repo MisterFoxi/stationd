@@ -237,3 +237,55 @@ icecast-history: ## Historique géographique du plugin administratif
 .PHONY: icecast-history-test
 icecast-history-test: ## Persistance réelle et continuité pendant une recréation administrative
 > python3 tests/icecast-history.py
+
+.PHONY: icecast-backup icecast-backup-test icecast-restore-test
+icecast-backup: ## Sauvegarde privée, SQLite cohérent, sans interruption
+> python3 docker/icecast/backup.py create
+
+icecast-backup-test: ## Tests de validation et d'extraction des archives
+> python3 -B tests/icecast-backup.py
+
+icecast-restore-test: ## Restauration isolée sans ports publiés (BACKUP=archive.tar.gz)
+> @test -n "$(BACKUP)" || { echo 'Fournir BACKUP=chemin/archive.tar.gz' >&2; exit 1; }
+> python3 docker/icecast/backup.py test "$(BACKUP)" $(if $(STREAM_PROBES),--stream-probes)
+
+.PHONY: icecast-recovery-image
+icecast-recovery-image: ## Construit l'auxiliaire de sauvegarde/restauration
+> docker build -f docker/icecast/Dockerfile --target recovery-tools -t stationd-v1-icecast-recovery:dev .
+
+
+.PHONY: icecast-monitor-up icecast-monitor-status icecast-monitor-logs icecast-monitor-test
+icecast-monitor-up: ## Construit et démarre uniquement la supervision centrale
+> $(ICECAST_DC) --profile monitor up -d --build --no-deps monitor
+
+icecast-monitor-status: ## État de supervision via gRPC administratif
+> $(ICECAST_DC) exec -T admin stationctl icecast monitoring
+
+icecast-monitor-logs: ## Alertes et retours à la normale JSON
+> $(ICECAST_DC) logs -f monitor
+
+icecast-monitor-test: ## Tests Rust de temporisation, reprise et seuils, sans daemon
+> cargo test --locked --manifest-path crates/stationd-admin/Cargo.toml --bin station-watch
+
+.PHONY: icecast-monitor-integration-test
+icecast-monitor-integration-test: ## Alertes Docker isolees, sans emetteurs ni ports publies
+> python3 -B tests/icecast-monitor.py
+
+.PHONY: icecast-monitor-direct-status
+icecast-monitor-direct-status: ## Supervision gRPC directe si admin est inaccessible
+> $(ICECAST_DC) exec -T monitor stationctl --addr http://127.0.0.1:50063 monitor-status
+
+
+.PHONY: icecast-package icecast-dist icecast-dist-test
+icecast-package: ## Paquet Icecast V1 ; livraison si VM=cible SSH (ARGS=--allow-dirty)
+> python3 docker/icecast/package.py $(ARGS)
+
+icecast-dist: icecast-package ## Alias de livraison Icecast V1 : make icecast-dist VM=cible
+
+icecast-dist-test: ## Tests du paquet et de la conservation des configurations V1
+> python3 -B tests/icecast-dist.py
+
+.PHONY: icecast-dist-install-test
+icecast-dist-install-test: ## Validation du vrai paquet sans lancer les services (BUNDLE=archive.tar)
+> @test -n "$(BUNDLE)" || { echo "Fournir BUNDLE=dist/stationd-icecast-....tar" >&2; exit 1; }
+> python3 -B tests/icecast-dist-install.py "$(BUNDLE)"
