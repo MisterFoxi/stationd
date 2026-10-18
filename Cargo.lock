@@ -5784,6 +5784,7 @@ dependencies = [
  "stationdeck-config-ui",
  "stationdeck-demo",
  "stationdeck-grpc",
+ "stationdeck-services",
  "stationdeck-ui",
  "wasm-bindgen",
  "wasm-bindgen-futures",
@@ -5868,8 +5869,10 @@ dependencies = [
 name = "stationdeck-services"
 version = "0.1.0"
 dependencies = [
+ "semver",
  "serde",
  "serde_json",
+ "toml 1.1.6+spec-1.1.0",
 ]
 
 [[package]]
@@ -5878,6 +5881,7 @@ version = "0.1.0"
 dependencies = [
  "egui",
  "stationdeck-services",
+ "web-sys",
 ]
 
 [[package]]

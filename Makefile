@@ -317,7 +317,7 @@ deck-down: ## Stop only the StationDeck web project
 > $(DECK_DC) --profile config-demo down
 
 deck-token: ## Show the gateway access token in your own terminal; keep it private
-> $(DECK_DC) exec -T gateway cat /secrets/access-token
+> @$(DECK_DC) exec -T gateway cat /secrets/access-token
 > @echo
 
 

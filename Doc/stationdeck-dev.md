@@ -107,6 +107,13 @@ server implementing the real StationD gRPC contract. Tests publish no host
 port and use an internal network without Internet egress. Their separate
 project and token volume are removed on completion. The fixture binary is
 feature-gated and excluded from the production gateway build.
+The isolated smoke image enables the `ui-test` feature. It exposes only current
+control rectangles and module lifecycle states as `data-qa-*` canvas attributes.
+Playwright uses these read-only markers to click actual egui controls; no module
+action or credential is exposed through a test API. The normal image has no DOM
+markers. The smoke recipe accounts for demo + overview enabled by default and
+checks provider binding, required-consumer blocking and credential cleanup.
+
 Compose 2.24.4+ is needed for the `!reset` test override.
 
 ## Browser behavior
@@ -127,13 +134,60 @@ Compose 2.24.4+ is needed for the `!reset` test override.
 
 ## Extension seam
 
-`stationdeck-ui::DeckModule` declares module metadata, views, rendering and stop.
-`ModuleCatalog` checks identifiers/namespaces/duplicates, orders views and owns
-activation/removal. `stationdeck/src/assembly.rs` is the only place that knows
-the concrete modules. `stationdeck-services` holds DTOs and request generations,
-independent of egui, tonic and the daemon. Full manifest parsing, dependency
-resolution, typed service injection, role attribution and active subscriptions
-remain later work; the example TOML manifests are still design documents.
+`stationdeck-services::manifest` parses the closed V1 TOML schema at runtime.
+The bundled manifests live in `Doc/stationdeck/` and select compiled constructors;
+there is no dynamic code loading. `stationdeck-services::registry` has no egui,
+tonic or daemon dependency. It resolves SemVer module/service requirements,
+optional dependencies, cycles and explicit per-consumer provider bindings.
+Invalid modules retain individual diagnostics; unrelated modules can run.
+
+Providers initialize/start before consumers, with ASCII module-id tie breaking.
+Publication is atomic after successful startup. Failure removes services and
+views, revokes retained handles, stops required consumers in reverse order and
+blocks them with a dependency chain. Optional consumers receive a dependency
+change notification. A failed provider requires an explicit retry. Disconnected
+gRPC remains running and its service reports idle/error until a successful read.
+
+`DeckModule` adds UI rendering to lifecycle hooks through an adapter. `ModuleCatalog`
+filters contributions by running state and current permissions. Module settings
+show state/diagnostics and offer an explicit retry. Activation intent is saved
+independently of availability: blocked modules remain in preferences.
+
+`assembly.rs` owns local grants and the typed service association. Role definitions
+never grant permissions automatically. The typed `OverviewService` is provided
+by demo or gRPC and injected into the same `OverviewModule`. Choose its provider
+in Modules, then enable that provider and Station overview. Both providers may
+coexist. Fresh preferences enable demo + overview. Rebinding restarts only the
+consumer and required dependents; configuration credentials/drafts stay available.
+Disabling the provider blocks the required consumer and removes its view.
+
+Service handles recheck provider and consumer leases on every call. Policy changes
+revoke old contexts; stopping cancels in-flight operations and clears credentials.
+Network grants name fixed logical profiles, not arbitrary URLs. Local grants do
+not confer remote identity, server roles, or authoring permissions: the existing
+configuration backend continues enforcing its own read/edit/publish scopes.
+
+Lifecycle hooks must be nonblocking on the UI thread. Existing stop hooks abort
+requests synchronously and invalidate late responses; they do not wait for remote
+work. The registry cannot preempt a blocking hook or isolate a panic in trusted
+compiled code. Awaiting future asynchronous resource cleanup with a global five
+second deadline is not implemented by this synchronous seam.
+
+## Registry validation pending (18 October 2026)
+
+Tests have been added, **not run**. Compilation and browser validation are also
+left to the user. Suggested targeted command in the existing Rust/container setup:
+
+```sh
+cargo test --locked -p stationdeck-services -p stationdeck-ui -p stationdeck-demo -p stationdeck-grpc -p stationdeck-config-ui -p stationdeck
+```
+
+Added cases cover bundled manifests, unknown fields, namespace/reference errors,
+cycles including optional edges, missing/incompatible dependencies, duplicates,
+startup failure/cleanup, dependency chains, ambiguous providers, typed interface
+mismatch, rebinding, optional provider loss, required provider failure/retry,
+and retained handle revocation. An assembly test uses the common consumer with
+both providers enabled and switches its binding. Rerun the browser recipe too.
 
 ## Validation on 17 October 2026
 

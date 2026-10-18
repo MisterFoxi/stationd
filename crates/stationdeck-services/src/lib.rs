@@ -17,7 +17,7 @@ pub enum StatusResponse {
     Unavailable { code: String, message: String },
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub enum RequestState<T> {
     #[default]
     Idle,
@@ -87,3 +87,7 @@ mod tests {
 }
 
 pub mod config;
+
+pub mod manifest;
+pub mod registry;
+pub mod overview;

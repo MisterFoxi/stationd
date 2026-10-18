@@ -14,8 +14,10 @@ enum Theme {
 }
 
 fn default_modules() -> Vec<String> {
-    vec!["demo".into()]
+    vec!["demo".into(), "overview".into()]
 }
+
+fn default_provider() -> String { "demo".into() }
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -25,6 +27,8 @@ struct Settings {
     zoom: f32,
     #[serde(default = "default_modules")]
     enabled_modules: Vec<String>,
+    #[serde(default = "default_provider")]
+    overview_provider: String,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -33,6 +37,7 @@ impl Default for Settings {
             theme: Theme::Dark,
             zoom: 1.0,
             enabled_modules: default_modules(),
+            overview_provider: default_provider(),
         }
     }
 }
@@ -42,6 +47,7 @@ impl Settings {
             && self.zoom.is_finite()
             && (0.9..=1.4).contains(&self.zoom)
             && self.enabled_modules.len() <= 64
+            && matches!(self.overview_provider.as_str(), "demo" | "grpc")
     }
 }
 
@@ -66,18 +72,14 @@ pub struct StationDeck {
 
 impl StationDeck {
     fn with_settings(settings: Settings, settings_error: bool) -> Self {
-        let (modules, module_error) =
-            match ModuleCatalog::new(crate::assembly::modules(), &settings.enabled_modules) {
-                Ok(catalog) => (catalog, None),
-                Err(error) => (ModuleCatalog::default(), Some(error)),
-            };
+        let modules = ModuleCatalog::new(crate::assembly::modules(), &settings.enabled_modules, crate::assembly::policy_with_provider(&settings.overview_provider));
         Self {
             settings,
             page: Page::Home,
             settings_error,
             preferences_dirty: false,
             persistence_error: false,
-            module_error,
+            module_error: None,
             modules,
         }
     }
@@ -139,6 +141,12 @@ impl StationDeck {
     }
 
     fn render(&mut self, ctx: &egui::Context) {
+        stationdeck_ui::test_ui::begin_frame();
+        for descriptor in self.modules.descriptors() {
+            if let Some((state, _)) = self.modules.status(descriptor.id) {
+                stationdeck_ui::test_ui::value(&format!("state-{}", descriptor.id), &format!("{state:?}"));
+            }
+        }
         if ctx.input_mut(|input| input.consume_key(Modifiers::CTRL, Key::Comma)) {
             self.page = Page::Settings;
         }
@@ -184,7 +192,9 @@ impl StationDeck {
                     ("Modules", Page::Modules),
                     ("Settings", Page::Settings),
                 ] {
-                    if ui.selectable_label(self.page == page, label).clicked() {
+                    let response = ui.selectable_label(self.page == page, label);
+                    stationdeck_ui::test_ui::control(&format!("nav-{}", label.to_ascii_lowercase()), &response);
+                    if response.clicked() {
                         self.page = page;
                     }
                 }
@@ -194,13 +204,9 @@ impl StationDeck {
                     ui.weak("MODULE VIEWS");
                     for view in views {
                         ui.push_id(view.id, |ui| {
-                            if ui
-                                .selectable_label(
-                                    self.page == Page::Contribution(view.id.into()),
-                                    view.title,
-                                )
-                                .clicked()
-                            {
+                            let response = ui.selectable_label(self.page == Page::Contribution(view.id.into()), view.title);
+                            stationdeck_ui::test_ui::control(&format!("nav-{}", view.id), &response);
+                            if response.clicked() {
                                 self.page = Page::Contribution(view.id.into());
                             }
                         });
@@ -266,11 +272,28 @@ impl StationDeck {
     fn module_settings(&mut self, ui: &mut egui::Ui) {
         ui.heading("Modules");
         ui.label("Enable trusted modules compiled into this application.");
+        let previous = self.settings.overview_provider.clone();
+        let provider = egui::ComboBox::from_id_salt("overview.provider")
+            .selected_text(if previous == "grpc" { "gRPC" } else { "Demo" })
+            .show_ui(ui, |ui| {
+                let _ = stationdeck_ui::test_ui::response("provider-demo", ui.selectable_value(&mut self.settings.overview_provider, "demo".into(), "Demo"));
+                let _ = stationdeck_ui::test_ui::response("provider-grpc", ui.selectable_value(&mut self.settings.overview_provider, "grpc".into(), "gRPC"));
+            });
+        stationdeck_ui::test_ui::control("provider", &provider.response);
+        ui.weak("Station overview provider. Enable the selected provider and the Station overview module.");
+        if previous != self.settings.overview_provider {
+            if let Err(error) = self.modules.set_binding("overview", "stationdeck.admin.overview", &self.settings.overview_provider) {
+                self.module_error = Some(error);
+            }
+            self.preferences_dirty = true;
+        }
         ui.add_space(16.0);
         for descriptor in self.modules.descriptors() {
             ui.push_id(descriptor.id, |ui| {
                 let mut enabled = self.modules.is_enabled(descriptor.id);
-                if ui.checkbox(&mut enabled, descriptor.title).changed() {
+                let checkbox = ui.checkbox(&mut enabled, descriptor.title);
+                stationdeck_ui::test_ui::control(&format!("module-{}", descriptor.id), &checkbox);
+                if checkbox.changed() {
                     if let Err(error) = self.modules.set_enabled(descriptor.id, enabled) {
                         self.module_error = Some(error);
                     }
@@ -278,6 +301,15 @@ impl StationDeck {
                     self.preferences_dirty = true;
                 }
                 ui.weak(descriptor.description);
+                if let Some((state, diagnostic)) = self.modules.status(descriptor.id).map(|(state, diagnostic)| (state, diagnostic.cloned())) {
+                    ui.label(format!("{state:?}"));
+                    if enabled && matches!(state, stationdeck_services::registry::State::Blocked | stationdeck_services::registry::State::Failed) && ui.button("Retry startup").clicked() {
+                        let _ = self.modules.set_enabled(descriptor.id, true);
+                    }
+                    if let Some(diagnostic) = diagnostic {
+                        show_state(ui, ViewState::Error(&format!("{} ({})", diagnostic.message, diagnostic.chain.join(" → "))));
+                    }
+                }
                 ui.add_space(12.0);
             });
         }
@@ -292,12 +324,8 @@ impl StationDeck {
         ui.push_id("stationdeck.settings", |ui| {
             ui.strong("Appearance");
             ui.horizontal_wrapped(|ui| {
-                changed |= ui
-                    .selectable_value(&mut self.settings.theme, Theme::Dark, "Dark")
-                    .changed();
-                changed |= ui
-                    .selectable_value(&mut self.settings.theme, Theme::Light, "Light")
-                    .changed();
+                changed |= stationdeck_ui::test_ui::response("theme-dark", ui.selectable_value(&mut self.settings.theme, Theme::Dark, "Dark")).changed();
+                changed |= stationdeck_ui::test_ui::response("theme-light", ui.selectable_value(&mut self.settings.theme, Theme::Light, "Light")).changed();
             });
             ui.add_space(12.0);
             ui.label("Interface size");

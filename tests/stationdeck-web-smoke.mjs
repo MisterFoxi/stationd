@@ -26,6 +26,60 @@ async function ready(target) {
   await target.waitForTimeout(300);
 }
 
+// The isolated image enables ui-test. Geometry comes from actual egui Responses;
+// Playwright still clicks the canvas and follows the production event path.
+let lastControl = null;
+async function animationFrame(target) {
+  await target.evaluate(() => new Promise(resolve => requestAnimationFrame(() => resolve())));
+}
+async function controlRect(target, id) {
+  // egui popups have a sizing/placement pass before becoming interactive. A marker
+  // from that first pass is not sufficient evidence that its rectangle is final.
+  await target.waitForFunction(async id => {
+    const read = () => document.getElementById('stationdeck')?.getAttribute(`data-qa-${id}`);
+    const first = read();
+    if (!first) return false;
+    for (let frame = 0; frame < 3; frame++) {
+      await new Promise(resolve => requestAnimationFrame(resolve));
+      if (read() !== first) return false;
+    }
+    return true;
+  }, id);
+  const rect = await target.locator('#stationdeck').evaluate((canvas, id) =>
+    canvas.getAttribute(`data-qa-${id}`).split(',').map(Number), id);
+  assert(rect.length === 4 && rect.every(Number.isFinite), `Invalid geometry: ${id}`);
+  const canvas = await target.locator('#stationdeck').boundingBox();
+  return { x: canvas.x + rect[0], y: canvas.y + rect[1], width: rect[2], height: rect[3] };
+}
+async function clickControl(target, id) {
+  let rect = await controlRect(target, id);
+  await target.mouse.move(rect.x + rect.width / 2, rect.y + rect.height / 2);
+  // Let egui register the pointer in the popup's foreground layer before pressing.
+  await animationFrame(target);
+  await animationFrame(target);
+  rect = await controlRect(target, id);
+  const x = rect.x + rect.width / 2;
+  const y = rect.y + rect.height / 2;
+  const viewport = target.viewportSize();
+  assert(x >= 0 && x < viewport.width && y >= 0 && y < viewport.height, `Control outside viewport: ${id}`);
+  lastControl = { id, x, y };
+  await target.mouse.move(x, y);
+  await target.mouse.down();
+  await animationFrame(target);
+  await animationFrame(target);
+  await target.mouse.up();
+  await animationFrame(target);
+  await animationFrame(target);
+}async function waitModules(...ids) {
+  await page.waitForFunction(ids => {
+    const saved = JSON.parse(localStorage.getItem('stationdeck.settings.v1'));
+    return saved?.enabled_modules.length === ids.length && ids.every(id => saved.enabled_modules.includes(id));
+  }, ids);
+}
+async function waitState(id, state) {
+  await page.waitForFunction(({ id, state }) =>
+    document.getElementById('stationdeck')?.getAttribute(`data-qa-state-${id}`) === state, { id, state });
+}
 async function capture(target, name) {
   const buffer = await target.screenshot({ path: `${output}/${name}.png` });
   const png = PNG.sync.read(buffer);
@@ -55,8 +109,7 @@ try {
   await page.keyboard.press('Control+,');
   await page.waitForTimeout(200);
   await capture(page, 'web-settings-dark');
-  // Fixture at default zoom, 760x560: click the visible Light selector.
-  await page.mouse.click(247, 190);
+  await clickControl(page, 'theme-light');
   await page.waitForTimeout(200);
   const light = await capture(page, 'web-settings-light');
   assert(brightness(light, 700, 20) > 200, 'light theme did not apply');
@@ -74,42 +127,48 @@ try {
   assert(requests.every(url => url.startsWith(new URL(base).origin) || url.startsWith('data:')), requests.join('\n'));
   assert.deepEqual(errors, [], 'browser errors');
 
-  // Exercise the test module first, then enable and use the gRPC provider.
-  await page.setViewportSize({ width: 1120, height: 760 });
+  // Fresh preferences include demo AND the common overview consumer.
+  await page.setViewportSize({ width: 1120, height: 1000 });
   await page.keyboard.press('Control+,');
-  await page.waitForTimeout(150);
-  await page.mouse.click(210, 190);
-  await page.waitForTimeout(150);
+  await clickControl(page, 'theme-dark');
   await page.keyboard.press('Control+Home');
-  await page.mouse.click(60, 278);
-  await page.waitForTimeout(150);
+  await clickControl(page, 'nav-demo.overview');
   await capture(page, 'test-station');
-  await page.mouse.click(60, 319);
-  await page.waitForTimeout(100);
-  await page.mouse.click(235, 175);
-  await page.waitForTimeout(100);
+  await clickControl(page, 'nav-demo.tasks');
+  await clickControl(page, 'demo-run');
   await capture(page, 'test-task-pending');
   await page.keyboard.press('Control+Home');
-  await page.mouse.click(60, 319);
+  await clickControl(page, 'nav-demo.tasks');
   await page.waitForTimeout(900);
   await capture(page, 'test-task-completed');
-  await page.mouse.click(193, 140);
-  await page.waitForTimeout(150);
+  await clickControl(page, 'demo-read-only');
   await capture(page, 'test-read-only');
-  await page.mouse.click(45, 154);
-  await page.waitForTimeout(150);
-  await page.mouse.click(193, 156);
-  await page.waitForFunction(() => JSON.parse(localStorage.getItem('stationdeck.settings.v1')).enabled_modules.length === 0);
+  await clickControl(page, 'nav-modules');
+  await clickControl(page, 'module-demo');
+  await waitModules('overview');
+  await waitState('overview', 'Blocked');
+  assert.equal(await page.locator('#stationdeck').getAttribute('data-qa-nav-overview.station'), null, 'blocked consumer kept its view');
+  await capture(page, 'overview-blocked');
+  await clickControl(page, 'module-overview');
+  await waitModules();
   await page.keyboard.press('Control+Home');
-  await page.waitForTimeout(100);
   await capture(page, 'no-modules');
-  await page.mouse.click(45, 154);
-  await page.waitForTimeout(100);
-  await page.mouse.click(193, 156);
-  await page.mouse.click(193, 231);
-  await page.waitForFunction(() => JSON.parse(localStorage.getItem('stationdeck.settings.v1')).enabled_modules.includes('grpc'));
+  await clickControl(page, 'nav-modules');
+  await clickControl(page, 'module-demo');
+  await waitModules('demo');
+  await clickControl(page, 'module-grpc');
+  await waitModules('demo', 'grpc');
+  await clickControl(page, 'module-overview');
+  await waitModules('demo', 'grpc', 'overview');
+  await waitState('overview', 'Running');
+  await clickControl(page, 'provider');
+  await clickControl(page, 'provider-grpc');
+  await page.waitForFunction(() => JSON.parse(localStorage.getItem('stationdeck.settings.v1')).overview_provider === 'grpc');
+  await waitState('overview', 'Running');
   await capture(page, 'modules-enabled');
-
+  // A disconnected provider remains locally available to the same consumer.
+  await clickControl(page, 'nav-overview.station');
+  await capture(page, 'overview-grpc-disconnected');
   const token = (await readFile(process.env.STATIONDECK_QA_TOKEN_FILE, 'utf8')).trim();
   const fixture = process.env.STATIONDECK_FIXTURE_URL;
   assert(token.length >= 32, 'test credential is missing');
@@ -122,14 +181,15 @@ try {
   assert.equal((await page.request.get(`${base}/api/station/quit`, { headers: { Authorization: `Bearer ${token}` } })).status(), 404);
   assert.equal(await metrics(), beforeAuth, 'unauthorized requests reached gRPC');
 
-  await page.mouse.click(60, 278);
+  await clickControl(page, 'nav-grpc.connection');
   await page.waitForTimeout(150);
-  await page.mouse.click(300, 177);
+  await clickControl(page, 'grpc-token');
   await page.waitForTimeout(100);
-  await page.keyboard.insertText(token);
+  // Terminal copy/paste may include surrounding whitespace.
+  await page.keyboard.insertText(`  ${token}  `);
   await page.waitForTimeout(100);
   const statusReply = page.waitForResponse(response => response.url().endsWith('/api/station/status'));
-  await page.mouse.click(235, 212);
+  await clickControl(page, 'grpc-refresh');
   const connected = await (await statusReply).json();
   assert.equal(connected.state, 'connected');
   assert.equal(connected.status.station_name, 'Fixture station');
@@ -141,7 +201,7 @@ try {
 
   await page.request.post(`${fixture}/fail`);
   const failedReply = page.waitForResponse(response => response.url().endsWith('/api/station/status'));
-  await page.mouse.click(235, 212);
+  await clickControl(page, 'grpc-refresh');
   const failed = await (await failedReply).json();
   assert.equal(failed.state, 'unavailable');
   assert(!failed.message.includes('fixture-only'), 'upstream diagnostics were exposed');
@@ -150,26 +210,32 @@ try {
 
   await page.request.post(`${fixture}/delay`);
   const pending = page.waitForRequest(request => request.url().endsWith('/api/station/status'));
-  await page.mouse.click(235, 212);
+  await clickControl(page, 'grpc-refresh');
   await pending;
-  await page.mouse.click(45, 154);
+  await clickControl(page, 'nav-modules');
   await page.waitForTimeout(100);
-  await page.mouse.click(193, 231);
+  await clickControl(page, 'module-grpc');
+  await waitModules('demo', 'overview');
+  await waitState('overview', 'Blocked');
   await page.waitForTimeout(2300);
-  await page.mouse.click(193, 231);
-  await page.waitForFunction(() => JSON.parse(localStorage.getItem('stationdeck.settings.v1')).enabled_modules.includes('grpc'));
+  await clickControl(page, 'module-grpc');
+  await waitModules('demo', 'grpc', 'overview');
+  await waitState('overview', 'Running');
   await page.waitForTimeout(150);
-  await page.mouse.click(60, 278);
+  await clickControl(page, 'nav-grpc.connection');
   await page.waitForTimeout(150);
   const cleared = await capture(page, 'grpc-reenabled-empty');
-  assert(brightness(cleared, 300, 177) <= 10, 'the connection input is not visible');
+  const input = await controlRect(page, 'grpc-token');
+  assert(brightness(cleared, Math.floor(input.x + input.width / 2), Math.floor(input.y + input.height / 2)) <= 10, 'the connection input is not visible');
   let credentialPixels = 0;
-  for (let y = 170; y < 185; y++) for (let x = 300; x < 450; x++) {
-    if (brightness(cleared, x, y) > 100) credentialPixels++;
+  for (let y = Math.ceil(input.y + 3); y < input.y + input.height - 3; y++) {
+    for (let x = Math.ceil(input.x + 107); x < Math.min(input.x + 257, input.x + input.width - 3); x++) {
+      if (brightness(cleared, x, y) > 100) credentialPixels++;
+    }
   }
   assert(credentialPixels < 5, 'the cleared password field still shows credential characters');
   const countAfterCancellation = await metrics();
-  await page.mouse.click(235, 212);
+  await clickControl(page, 'grpc-refresh');
   await page.waitForTimeout(150);
   assert.equal(await metrics(), countAfterCancellation, 'disabled module retained its access token');
   assert(!(await page.evaluate(() => JSON.stringify(localStorage))).includes(token), 'credentials must not be persisted after cancellation');
@@ -183,7 +249,22 @@ try {
   await broken.screenshot({ path: `${output}/web-startup-error.png` });
   await broken.close();
   await page.close();
-  console.log('PASS: browser WASM/WebGL, HTTP/MIME, resize, navigation, theme persistence/reload, same-origin assets, startup error, test module, authenticated real gRPC, upstream failure, cancellation and credential cleanup');
+  console.log('PASS: browser WASM/WebGL, HTTP/MIME, resize, navigation, theme persistence/reload, same-origin assets, startup error, module dependency blocking, provider binding, test module, authenticated real gRPC, upstream failure, cancellation and credential cleanup');
+} catch (error) {
+  await page.screenshot({ path: `${output}/web-failure.png` }).catch(() => {});
+  console.error('Browser page errors:', errors);
+  console.error('Last canvas interaction:', lastControl);
+  // Only allowlisted local preferences and read-only QA geometry/state. No tokens.
+  const snapshot = await page.locator('#stationdeck').evaluate(canvas => {
+    let saved = {};
+    try { saved = JSON.parse(localStorage.getItem('stationdeck.settings.v1')) || {}; } catch {}
+    return {
+      preferences: { enabled_modules: saved.enabled_modules, overview_provider: saved.overview_provider, theme: saved.theme },
+      controls: Object.fromEntries(Array.from(canvas.attributes).filter(a => a.name.startsWith('data-qa-')).map(a => [a.name, a.value])),
+    };
+  }).catch(() => null);
+  console.error('Canvas failure snapshot:', JSON.stringify(snapshot));
+  throw error;
 } finally {
   await context.close();
   await browser.close();

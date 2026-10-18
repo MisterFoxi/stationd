@@ -1,4 +1,4 @@
-# Spécification documentaire V1 ; pas encore chargée à exécution.
+# Manifeste V1 exécuté par le registre StationDeck (constructeur compilé).
 manifest_version = 1
 dependencies = []
 requires = []

@@ -15,6 +15,10 @@ services:
     image: stationdeck-grpc-fixture:dev
     init: true
   deck:
+    image: stationdeck-web-test:dev
+    build:
+      args:
+        STATIONDECK_CARGO_FEATURES: ui-test
     ports: !reset []
     restart: "no"
   browser:

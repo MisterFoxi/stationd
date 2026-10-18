@@ -16,15 +16,18 @@ FROM toolchain AS source
 COPY Cargo.toml Cargo.lock build.rs ./
 COPY src/ src/
 COPY crates/ crates/
+# Bundled manifests are embedded with include_str! by modules and registry tests.
+COPY Doc/stationdeck/ Doc/stationdeck/
 COPY plugins/station-player/ plugins/station-player/
 COPY proto/ proto/
 COPY migrations/ migrations/
 COPY config/stationdeck/ config/stationdeck/
 
 FROM source AS build
+ARG STATIONDECK_CARGO_FEATURES=""
 RUN --mount=type=cache,id=stationdeck-registry,target=/usr/local/cargo/registry \
     --mount=type=cache,id=stationdeck-web-target,target=/build,sharing=locked \
-    cargo build --locked --release --target wasm32-unknown-unknown -p stationdeck \
+    cargo build --locked --release --target wasm32-unknown-unknown -p stationdeck --features "$STATIONDECK_CARGO_FEATURES" \
  && mkdir -p /out/pkg \
  && wasm-bindgen --target web --out-dir /out/pkg --out-name stationdeck /build/wasm32-unknown-unknown/release/stationdeck.wasm \
  && cp crates/stationdeck/web/index.html crates/stationdeck/web/boot.js crates/stationdeck/web/style.css /out/

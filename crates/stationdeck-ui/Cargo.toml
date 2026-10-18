@@ -7,3 +7,9 @@ publish = false
 [dependencies]
 egui = { version = "=0.33.3", default-features = false }
 stationdeck-services = { path = "../stationdeck-services" }
+
+[features]
+ui-test = ["dep:web-sys"]
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-sys = { version = "0.3", optional = true, features = ["Window", "Document", "Element"] }

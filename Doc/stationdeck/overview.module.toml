@@ -1,0 +1,31 @@
+manifest_version = 1
+dependencies = []
+provides = []
+roles = []
+[module]
+id = "overview"
+version = "0.1.0"
+contract = "^1.0.0"
+entrypoint = "overview"
+[[requires]]
+id = "stationdeck.admin.overview"
+version = "^1.0.0"
+optional = false
+[[capabilities]]
+id = "overview.status"
+kind = "service"
+resource = "stationdeck.admin.overview"
+operations = ["read"]
+[[permissions]]
+id = "overview.consulter"
+description = "Consulter l'état fourni au consommateur local."
+resource = "overview.status"
+actions = ["read"]
+[[contributions]]
+id = "overview.station"
+kind = "view"
+title = "Station overview"
+slot = "navigation"
+order = 40
+services = ["stationdeck.admin.overview"]
+permissions = ["overview.consulter"]

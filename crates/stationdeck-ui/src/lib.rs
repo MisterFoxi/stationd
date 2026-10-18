@@ -1,4 +1,4 @@
-//! UI extension seam. Module registration and service injection arrive later.
+//! UI contributions backed by the transport-free module registry.
 use egui::{Color32, RichText, Ui};
 
 /// A stable, module-qualified id, never derived from a translated title.
@@ -115,6 +115,10 @@ pub struct ModuleDescriptor {
 /// Compiled, trusted module. The host owns enable/disable and view selection.
 /// stop must cancel outstanding work and revoke any in-memory credentials.
 pub trait DeckModule {
+    fn manifest(&self) -> &str;
+    fn initialize(&mut self, _context: &stationdeck_services::registry::Context) -> Result<(), String> { Ok(()) }
+    fn start(&mut self, _context: &stationdeck_services::registry::Context) -> Result<(), String> { Ok(()) }
+    fn dependencies_changed(&mut self, _context: &stationdeck_services::registry::Context) {}
     fn descriptor(&self) -> ModuleDescriptor;
     fn views(&self) -> Vec<ViewDescriptor>;
     fn ui(&mut self, id: &str, ui: &mut Ui);
@@ -138,113 +142,72 @@ pub fn show_station_status(ui: &mut Ui, status: &stationdeck_services::StationSt
             }
         });
 }
-/// Initial compiled-module catalog. Dependency/service resolution is a later layer.
-#[derive(Default)]
-pub struct ModuleCatalog {
-    modules: Vec<(Box<dyn DeckModule>, bool)>,
-}
-
-impl ModuleCatalog {
-    pub fn new(modules: Vec<Box<dyn DeckModule>>, enabled: &[String]) -> Result<Self, String> {
-        let mut module_ids = std::collections::BTreeSet::new();
-        let mut view_ids = std::collections::BTreeSet::new();
-        for module in &modules {
-            let descriptor = module.descriptor();
-            let valid = |id: &str| {
-                !id.is_empty()
-                    && id.len() <= 64
-                    && id.as_bytes()[0].is_ascii_lowercase()
-                    && id
-                        .bytes()
-                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
-            };
-            if !valid(descriptor.id) || !module_ids.insert(descriptor.id) {
-                return Err("Invalid or duplicate compiled module identifier.".into());
+/// The UI adapter delegates lifecycle and dependency resolution to the core registry.
+pub struct UiModule(Box<dyn DeckModule>);
+impl stationdeck_services::registry::Module for UiModule {
+    fn id(&self) -> &str { self.0.descriptor().id }
+    fn manifest(&self) -> &str { self.0.manifest() }
+    fn initialize(&mut self, context: &stationdeck_services::registry::Context) -> Result<(), String> {
+        let manifest = stationdeck_services::manifest::Manifest::parse(self.0.manifest())?;
+        let mut seen = std::collections::BTreeSet::new();
+        for view in self.0.views() {
+            if !seen.insert(view.id) || !manifest.contributions.iter().any(|c| c.id == view.id && c.kind == "view") {
+                return Err("Undeclared or duplicate UI view.".into());
             }
-            let prefix = format!("{}.", descriptor.id);
-            for view in module.views() {
-                if !view.id.strip_prefix(&prefix).is_some_and(valid) || !view_ids.insert(view.id) {
-                    return Err("Invalid or duplicate compiled view identifier.".into());
+        }
+        self.0.initialize(context)
+    }
+    fn start(&mut self, context: &stationdeck_services::registry::Context) -> Result<(), String> { self.0.start(context) }
+    fn stop(&mut self) { self.0.stop(); }
+    fn dependencies_changed(&mut self, context: &stationdeck_services::registry::Context) { self.0.dependencies_changed(context); }
+}
+pub struct ModuleCatalog {
+    registry: stationdeck_services::registry::Registry<UiModule>,
+}
+impl ModuleCatalog {
+    pub fn new(modules: Vec<Box<dyn DeckModule>>, enabled: &[String], policy: stationdeck_services::registry::Policy) -> Self {
+        Self { registry: stationdeck_services::registry::Registry::new(modules.into_iter().map(UiModule).collect(), enabled, policy) }
+    }
+    pub fn descriptors(&self) -> Vec<ModuleDescriptor> {
+        self.registry.entries().iter().map(|e| e.module.0.descriptor()).collect()
+    }
+    pub fn is_enabled(&self, id: &str) -> bool {
+        self.registry.entries().iter().any(|e| e.module.0.descriptor().id == id && e.requested)
+    }
+    pub fn enabled_ids(&self) -> Vec<String> {
+        self.registry.entries().iter().filter(|e| e.requested).map(|e| e.module.0.descriptor().id.into()).collect()
+    }
+    pub fn status(&self, id: &str) -> Option<(stationdeck_services::registry::State, Option<&stationdeck_services::registry::Diagnostic>)> {
+        self.registry.entries().iter().find(|e| e.module.0.descriptor().id == id).map(|e| (e.state, e.diagnostic.as_ref()))
+    }
+    pub fn set_enabled(&mut self, id: &str, enabled: bool) -> Result<(), String> { self.registry.set_enabled(id, enabled) }
+    pub fn set_binding(&mut self, consumer: &str, service: &str, provider: &str) -> Result<(), String> {
+        self.registry.set_binding(consumer, service, provider)
+    }
+    pub fn views(&self) -> Vec<ViewDescriptor> {
+        let mut views = vec![];
+        for entry in self.registry.entries() {
+            let Some(manifest) = &entry.manifest else { continue; };
+            for mut view in entry.module.0.views() {
+                if self.registry.contribution_allowed(entry.module.0.descriptor().id, view.id) {
+                    if let Some(c) = manifest.contributions.iter().find(|c| c.id == view.id) { view.order = c.order; }
+                    views.push(view);
                 }
             }
         }
-        Ok(Self {
-            modules: modules
-                .into_iter()
-                .map(|module| {
-                    let active = enabled.iter().any(|id| id == module.descriptor().id);
-                    (module, active)
-                })
-                .collect(),
-        })
-    }
-    pub fn descriptors(&self) -> Vec<ModuleDescriptor> {
-        self.modules
-            .iter()
-            .map(|(module, _)| module.descriptor())
-            .collect()
-    }
-    pub fn is_enabled(&self, id: &str) -> bool {
-        self.modules
-            .iter()
-            .any(|(module, enabled)| *enabled && module.descriptor().id == id)
-    }
-    pub fn enabled_ids(&self) -> Vec<String> {
-        self.modules
-            .iter()
-            .filter(|(_, enabled)| *enabled)
-            .map(|(module, _)| module.descriptor().id.to_owned())
-            .collect()
-    }
-    pub fn set_enabled(&mut self, id: &str, enabled: bool) -> Result<(), String> {
-        let Some((module, active)) = self
-            .modules
-            .iter_mut()
-            .find(|(module, _)| module.descriptor().id == id)
-        else {
-            return Err("Unknown compiled module.".into());
-        };
-        if *active && !enabled {
-            module.stop();
-        }
-        *active = enabled;
-        Ok(())
-    }
-    pub fn views(&self) -> Vec<ViewDescriptor> {
-        let mut views: Vec<_> = self
-            .modules
-            .iter()
-            .filter(|(_, enabled)| *enabled)
-            .flat_map(|(module, _)| module.views())
-            .collect();
-        views.sort_by_key(|view| {
-            (
-                view.order,
-                view.id.split('.').next().unwrap_or_default(),
-                view.id,
-            )
-        });
+        views.sort_by_key(|v| (v.order, v.id.split('.').next().unwrap_or_default(), v.id));
         views
     }
     pub fn render(&mut self, id: &str, ui: &mut Ui) -> bool {
-        for (module, enabled) in &mut self.modules {
-            if *enabled && module.views().iter().any(|view| view.id == id) {
-                ui.push_id(id, |ui| module.ui(id, ui));
-                return true;
-            }
+        if !self.views().iter().any(|v| v.id == id) { return false; }
+        let module = id.split('.').next().unwrap_or_default();
+        if let Some(module) = self.registry.module_mut(module) {
+            ui.push_id(id, |ui| module.0.ui(id, ui));
+            return true;
         }
         false
     }
 }
-
-impl Drop for ModuleCatalog {
-    fn drop(&mut self) {
-        for (module, _) in &mut self.modules {
-            module.stop();
-        }
-    }
-}
-
 #[cfg(test)]
 mod catalog_tests {
     use super::*;
@@ -255,6 +218,29 @@ mod catalog_tests {
         stopped: Rc<Cell<usize>>,
     }
     impl DeckModule for Sample {
+        fn manifest(&self) -> &str {
+            r#"manifest_version = 1
+ dependencies = []
+ provides = []
+ requires = []
+ capabilities = []
+ permissions = []
+ roles = []
+ [module]
+ id = "sample"
+ version = "0.1.0"
+ contract = "^1.0.0"
+ entrypoint = "sample"
+ [[contributions]]
+ id = "sample.view"
+ kind = "view"
+ title = "Sample"
+ slot = "navigation"
+ order = 10
+ services = []
+ permissions = []
+"#
+        }
         fn descriptor(&self) -> ModuleDescriptor {
             ModuleDescriptor {
                 id: self.id,
@@ -286,9 +272,8 @@ mod catalog_tests {
         let stopped = Rc::new(Cell::new(0));
         let mut catalog = ModuleCatalog::new(
             vec![sample("sample", "sample.view", stopped.clone())],
-            &["sample".into()],
-        )
-        .unwrap();
+            &["sample".into()], stationdeck_services::registry::Policy::default(),
+        );
         assert_eq!(catalog.views().len(), 1);
         catalog.set_enabled("sample", false).unwrap();
         assert!(catalog.views().is_empty());
@@ -300,14 +285,17 @@ mod catalog_tests {
     #[test]
     fn duplicate_modules_and_foreign_view_ids_are_rejected() {
         let stopped = Rc::new(Cell::new(0));
-        assert!(ModuleCatalog::new(
-            vec![
-                sample("sample", "sample.view", stopped.clone()),
-                sample("sample", "sample.other", stopped.clone())
-            ],
-            &[]
-        )
-        .is_err());
-        assert!(ModuleCatalog::new(vec![sample("sample", "foreign.view", stopped)], &[]).is_err());
+        let duplicate = ModuleCatalog::new(vec![
+            sample("sample", "sample.view", stopped.clone()),
+            sample("sample", "sample.other", stopped.clone()),
+        ], &["sample".into()], stationdeck_services::registry::Policy::default());
+        assert!(duplicate.views().is_empty());
+        assert!(matches!(duplicate.status("sample"), Some((stationdeck_services::registry::State::Failed, Some(_)))));
+        let foreign = ModuleCatalog::new(vec![sample("sample", "foreign.view", stopped)],
+            &["sample".into()], stationdeck_services::registry::Policy::default());
+        assert!(foreign.views().is_empty());
+        assert!(matches!(foreign.status("sample"), Some((stationdeck_services::registry::State::Failed, Some(_)))));
     }
 }
+
+pub mod test_ui;

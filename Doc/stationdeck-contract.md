@@ -17,7 +17,7 @@ Guide et recette : [configuration](stationdeck-config-dev.md).
 
 Décisions du 17 octobre 2026. Contrat documentaire `1.0.0`, à implémenter
 avec les tranches suivantes du [plan](stationdeck-plan.md). Les manifestes
-sont des spécifications ; aucun registre ne les charge encore.
+sont chargés à exécution par le registre ajouté le 18 octobre 2026. Ce code et ses nouveaux tests restent à valider ; voir le guide web.
 
 ## Principe de réutilisation de StationD (17 octobre 2026)
 
@@ -42,9 +42,7 @@ Le jeton de passerelle accorde cette seule lecture ; il n'est pas une identité
 utilisateur SD ni une attribution de rôle administrateur. Pas de jeton stocké
 dans le navigateur. Le rôle de lecture seule du module de test reste simulé.
 Les contrats internes SD décrits plus bas sont une cible conditionnelle, pas
-une extraction déjà réalisée ou un préalable à la WebUI. Manifestes TOML,
-dépendances, services typés, attributions de rôles et abonnements complets
-restent à implémenter. Le catalogue ne prétend pas offrir un sandbox aux
+une extraction déjà réalisée ou un préalable à la WebUI. Manifestes TOML, dépendances et services typés locaux sont codés, sans exécution des nouveaux tests. Les attributions de rôles distants et abonnements complets restent à implémenter. Le catalogue ne prétend pas offrir un sandbox aux
 modules de confiance compilés dans le même WASM.
 Messages et diagnostics : anglais au minimum. Guide : [modules web](stationdeck-dev.md).
 ## Cible web retenue (17 octobre 2026)
@@ -62,8 +60,7 @@ Modules Rust de confiance compilés ensemble dans le même WASM puis activés
 par configuration. Aucun chargement externe V1. Les plugins StationD restent
 côté daemon ; leurs vues distantes ne deviennent pas du code Rust chargé
 dans le navigateur. Préférences locales dans le localStorage, sans secrets ;
-taille du canvas liée à la page. Le résolveur complet, les services typés et les manifestes exécutables
-restent à implémenter. Guide : [StationDeck web](stationdeck-dev.md).
+taille du canvas liée à la page. Le registre local ajoute résolution, services typés et manifestes exécutables ; validation à effectuer. Ses hooks synchrones ne prennent pas en charge le nettoyage asynchrone avec délai global de cinq secondes. Guide : [StationDeck web](stationdeck-dev.md).
 
 ## Frontière navigateur / serveur
 

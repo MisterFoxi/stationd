@@ -19,6 +19,7 @@ fn report_age(observed_at: u64) -> u64 {
 }
 #[derive(Default)]
 pub struct ConfigModule {
+    context: Option<stationdeck_services::registry::Context>,
     token: String,
     catalog: Option<Rc<Catalog>>,
     selected: String,
@@ -31,8 +32,10 @@ pub struct ConfigModule {
     abort: Option<web_sys::AbortController>,
 }
 impl ConfigModule {
+    fn can_connect(&self) -> bool { self.context.as_ref().is_some_and(|c| c.authorize("configuration.connection", "configuration.connecter", "connect").is_ok()) }
     #[cfg(target_arch = "wasm32")]
     fn send(&mut self, ctx: egui::Context, method: &str, path: String, body: Option<String>) {
+        if !self.can_connect() { self.message = "Local module policy denies this connection.".into(); return; }
         let Some(generation) = self.request.borrow_mut().begin() else {
             return;
         };
@@ -113,7 +116,7 @@ impl ConfigModule {
     }
     #[cfg(not(target_arch = "wasm32"))]
     fn send(&mut self, _: egui::Context, _: &str, _: String, _: Option<String>) {
-        self.message = "Web transport requires the browser build.".into();
+        self.message = if self.can_connect() { "Web transport requires the browser build." } else { "Local module policy denies this connection." }.into();
     }
     fn select(&mut self, target: TargetView) {
         self.selected = target.id.clone();
@@ -177,6 +180,11 @@ impl ConfigModule {
     }
 }
 impl DeckModule for ConfigModule {
+    fn manifest(&self) -> &str { include_str!("../../../Doc/stationdeck/configuration.module.toml") }
+    fn start(&mut self, context: &stationdeck_services::registry::Context) -> Result<(), String> {
+        self.context = Some(context.clone());
+        Ok(())
+    }
     fn descriptor(&self) -> ModuleDescriptor {
         ModuleDescriptor {
             id: "configuration",

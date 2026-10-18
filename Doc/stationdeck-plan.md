@@ -26,7 +26,7 @@ Statut : socle web (0–1), module de test et première lecture gRPC livrés le 
 Contrat retenu : [StationDeck V1](stationdeck-contract.md), avec manifestes
 [démo](stationdeck/demo.module.toml) et [gRPC](stationdeck/grpc.module.toml).
 Les règles du contrat précisent les propositions ci-dessous. Le squelette
-graphique est livré ; le daemon reste inchangé et le registre reste à implémenter.
+graphique est livré ; le daemon reste inchangé. Le registre est codé le 18 octobre, validation à effectuer ; voir le guide web.
 
 ## Réalisation vérifiée le 17 octobre 2026
 
@@ -36,8 +36,7 @@ de Station.Status par passerelle authentifiée. DTO et rendu du statut partagés
 La passerelle ne propose aucune mutation et StationD 0.5 reste inchangé.
 Validation : 12 tests Rust, formatage/Clippy natif et WASM, recette Chromium
 avec véritable serveur gRPC de test, refus d'accès, panne amont, annulation et
-absence de persistance des jetons. Le résolveur de dépendances, le registre de
-services typés et la politique complète des manifestes restent à implémenter.
+absence de persistance des jetons. Cette validation précède le registre et sa politique locale ajoutés le 18 octobre ; leurs nouveaux tests ne sont pas exécutés.
 Guide et limites : [StationDeck web](stationdeck-dev.md).
 ## Cible retenue : navigateur web
 
@@ -95,9 +94,7 @@ On conserve la compatibilité des clients et la référence 0.5 telle quelle.
 2. Module de test autonome : données simulées, deux vues et tâche annulable.
 3. Module gRPC : lecture du statut par passerelle authentifiée, sans mutation.
 
-Le catalogue compilé et son activation sont un premier socle. Ils ne valent
-pas réalisation de toute la tranche 2 (résolution des dépendances, services
-typés, validation complète des manifestes et politique de droits).
+Le registre complète maintenant le catalogue compilé : manifestes exécutables, résolution, services typés révocables et politique locale. Validation à effectuer. Les hooks sont synchrones et non bloquants ; le nettoyage asynchrone avec délai global reste à prévoir.
 
 ## Objectif et règles d’architecture
 
@@ -517,5 +514,3 @@ C et D rendent ce socle immédiatement exploitable dans StationD.
 - Vérifier les mêmes autorisations avec gRPC et l’adaptateur en mémoire.
 Chaque tranche se termine par une démonstration de son critère de fin et une
 mise à jour du document avec les décisions effectivement retenues.
-
-

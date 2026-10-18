@@ -6,6 +6,7 @@ use stationdeck_ui::{
 
 #[derive(Default)]
 pub struct DemoModule {
+    context: Option<stationdeck_services::registry::Context>,
     task: RequestSlot<u32>,
     due: Option<(u64, f64)>,
     completed: u32,
@@ -14,7 +15,7 @@ pub struct DemoModule {
 
 impl DemoModule {
     fn start_task(&mut self, now: f64) -> bool {
-        if self.read_only {
+        if self.read_only || !self.context.as_ref().is_some_and(|c| c.authorize("demo.overview", "demo.simuler", "command").is_ok()) {
             return false;
         }
         let Some(generation) = self.task.begin() else {
@@ -25,6 +26,15 @@ impl DemoModule {
     }
 }
 impl DeckModule for DemoModule {
+    fn manifest(&self) -> &str { include_str!("../../../Doc/stationdeck/demo.module.toml") }
+    fn start(&mut self, context: &stationdeck_services::registry::Context) -> Result<(), String> {
+        self.context = Some(context.clone());
+        let mut slot = stationdeck_services::RequestSlot::default();
+        let generation = slot.begin().unwrap();
+        slot.finish(generation, Ok(StationStatus { station_name: "StationDeck Demo".into(), uptime_seconds: 3600, pid: 0, timezone: "Europe/Paris".into() }));
+        context.publish(&stationdeck_services::overview::OVERVIEW,
+            std::rc::Rc::new(stationdeck_services::overview::SharedOverview(std::rc::Rc::new(std::cell::RefCell::new(slot)))) as std::rc::Rc<dyn stationdeck_services::overview::OverviewService>)
+    }
     fn descriptor(&self) -> ModuleDescriptor {
         ModuleDescriptor {
             id: "demo",
@@ -68,14 +78,13 @@ impl DeckModule for DemoModule {
         }
         ui.heading("Test tasks");
         ui.label("Run a short local task while keeping navigation responsive.");
-        if ui
-            .checkbox(&mut self.read_only, "Read-only test role")
+        if stationdeck_ui::test_ui::response("demo-read-only", ui.checkbox(&mut self.read_only, "Read-only test role"))
             .changed()
             && self.read_only
         {
             self.stop();
         }
-        if self.read_only {
+        if self.read_only || !self.context.as_ref().is_some_and(|c| c.authorize("demo.overview", "demo.simuler", "command").is_ok()) {
             show_state(ui, ViewState::Forbidden);
         }
         let now = ui.input(|input| input.time);
@@ -90,12 +99,9 @@ impl DeckModule for DemoModule {
             }
         }
         let pending = matches!(self.task.state, RequestState::Pending);
-        if ui
-            .add_enabled(
-                !pending && !self.read_only,
-                egui::Button::new("Run test task"),
-            )
-            .clicked()
+        if stationdeck_ui::test_ui::response("demo-run", ui.add_enabled(
+            !pending && !self.read_only, egui::Button::new("Run test task"),
+        )).clicked()
             && self.start_task(now)
         {
             ui.ctx().request_repaint();
@@ -120,18 +126,41 @@ impl DeckModule for DemoModule {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{cell::RefCell, rc::Rc};
+    use stationdeck_services::registry::{Context, Grants, Module, Policy, Registry};
+    struct Hosted(Rc<RefCell<DemoModule>>);
+    impl Module for Hosted {
+        fn id(&self) -> &str { "demo" }
+        fn manifest(&self) -> &str { include_str!("../../../Doc/stationdeck/demo.module.toml") }
+        fn start(&mut self, context: &Context) -> Result<(), String> { self.0.borrow_mut().start(context) }
+        fn stop(&mut self) { self.0.borrow_mut().stop(); }
+    }
     #[test]
-    fn read_only_and_cancellation_are_enforced_below_the_button() {
-        let mut module = DemoModule {
-            read_only: true,
-            ..Default::default()
-        };
-        assert!(!module.start_task(0.0));
-        module.read_only = false;
-        assert!(module.start_task(0.0));
-        assert!(!module.start_task(0.1));
-        module.stop();
-        assert!(module.due.is_none());
-        assert!(matches!(module.task.state, RequestState::Idle));
+    fn read_only_cancellation_and_host_revocation_are_enforced_below_the_button() {
+        let module = Rc::new(RefCell::new(DemoModule::default()));
+        assert!(!module.borrow_mut().start_task(0.0));
+        let manifest = stationdeck_services::manifest::Manifest::parse(module.borrow().manifest()).unwrap();
+        let mut policy = Policy::default();
+        // This fixture explicitly grants only the known local demo permissions.
+        policy.grants.insert("demo".into(), Grants {
+            capabilities: manifest.capabilities,
+            permissions: ["demo.consulter".into(), "demo.simuler".into()].into_iter().collect(),
+        });
+        let mut registry = Registry::new(vec![Hosted(module.clone())], &["demo".into()], policy);
+        {
+            let mut module = module.borrow_mut();
+            module.read_only = true;
+            assert!(!module.start_task(0.0));
+            module.read_only = false;
+            assert!(module.start_task(0.0));
+            assert!(!module.start_task(0.1));
+            module.stop();
+            assert!(module.due.is_none());
+            assert!(matches!(module.task.state, RequestState::Idle));
+            assert!(module.start_task(1.0));
+        }
+        registry.set_enabled("demo", false).unwrap();
+        assert!(module.borrow().due.is_none());
+        assert!(!module.borrow_mut().start_task(2.0));
     }
 }

@@ -1,0 +1,36 @@
+manifest_version = 1
+dependencies = []
+provides = []
+requires = []
+[module]
+id = "configuration"
+version = "0.1.0"
+contract = "^1.0.0"
+entrypoint = "configuration"
+[[capabilities]]
+id = "configuration.connection"
+kind = "network"
+resource = "connection:configuration"
+operations = ["connect"]
+[[permissions]]
+id = "configuration.consulter"
+description = "Afficher l'interface locale de configuration."
+resource = "configuration.connection"
+actions = ["read"]
+[[permissions]]
+id = "configuration.connecter"
+description = "Contacter l'autorité configurée ; aucun droit serveur implicite."
+resource = "configuration.connection"
+actions = ["connect", "disconnect"]
+[[roles]]
+id = "configuration.operateur"
+description = "Accès local à la connexion de configuration."
+permissions = ["configuration.consulter", "configuration.connecter"]
+[[contributions]]
+id = "configuration.authoring"
+kind = "view"
+title = "Configuration"
+slot = "navigation"
+order = 30
+services = []
+permissions = ["configuration.consulter"]
