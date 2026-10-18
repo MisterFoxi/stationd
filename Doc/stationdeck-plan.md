@@ -1,6 +1,65 @@
 # StationDeck — plan de réalisation du socle d’administration
 
-Statut : proposition de découpage, avant implémentation.
+## Décision : configuration centrale et plugins
+
+StationDeck assure l'authoring pour les démons et leurs plugins ; un backend
+permanent conserve et distribue la configuration publiée par gRPC. Découverte
+automatique séparée, FQDN:port explicite prioritaire, cache valide côté cible et
+retour de version appliquée. Nom cible du service Icecast V1 : **icecastd**.
+Voir [le contrat de configuration](stationdeck-configuration.md) pour les frontières,
+les plugins et la recette. Première verticale livrée : backend persistant,
+authoring de champs de plugins, pull/report gRPC, broadcast IPv4 ou endpoint
+explicite, cache autonome et historique. Recette avec consommateur de démonstration ;
+premiers adaptateurs réels câblés le 18 octobre, recette à effectuer :
+[SD listener-stats et icecastd](stationdeck-daemon-adapters.md). Guide :
+[configuration en containers](stationdeck-config-dev.md).
+
+Travaux ajoutés : tranche 2, services typés et contrats de schémas ; tranche 4,
+backend permanent, identités, bootstrap, découverte et adaptateurs de récupération ;
+tranche 6, authoring des plugins selon leurs capacités d'application ; tranche 7,
+persistance centrale, publication, conflits et diagnostic souhaité/appliqué.
+Le renommage du service/DNS Docker V1 vers icecastd est réalisé ; commandes
+make icecast-* conservées. Préserver SD 0.5 via un adaptateur.
+
+Statut : socle web (0–1), module de test et première lecture gRPC livrés le 17 octobre 2026. Tranches 2 à 4 amorcées, non intégralement réalisées.
+
+Contrat retenu : [StationDeck V1](stationdeck-contract.md), avec manifestes
+[démo](stationdeck/demo.module.toml) et [gRPC](stationdeck/grpc.module.toml).
+Les règles du contrat précisent les propositions ci-dessous. Le squelette
+graphique est livré ; le daemon reste inchangé et le registre reste à implémenter.
+
+## Réalisation vérifiée le 17 octobre 2026
+
+Messages/diagnostics en anglais. Module de test autonome livré avant le module
+gRPC : catalogue compilé, deux vues de test et tâche annulable, puis lecture
+de Station.Status par passerelle authentifiée. DTO et rendu du statut partagés.
+La passerelle ne propose aucune mutation et StationD 0.5 reste inchangé.
+Validation : 12 tests Rust, formatage/Clippy natif et WASM, recette Chromium
+avec véritable serveur gRPC de test, refus d'accès, panne amont, annulation et
+absence de persistance des jetons. Le résolveur de dépendances, le registre de
+services typés et la politique complète des manifestes restent à implémenter.
+Guide et limites : [StationDeck web](stationdeck-dev.md).
+## Cible retenue : navigateur web
+
+StationDeck est une WebUI egui/eframe compilée en WebAssembly et servie par
+un container HTTP. La cible X11 initiale est remplacée, avec recette Chromium
+en container. Modules Rust compilés dans le WASM ; préférences navigateur.
+Les appels futurs passent par une passerelle web vers le gRPC existant, sans
+client tonic natif côté navigateur ni refonte obligatoire de StationD 0.5.
+Cette décision prévaut sur les mentions historiques de fenêtre native.
+Guide : [StationDeck web](stationdeck-dev.md).
+
+## Principe de réutilisation de StationD (17 octobre 2026)
+
+La 0.5 qui tourne est la référence ; StationD doit normalement être
+réutilisable tel quel dans la V1. StationDeck se raccorde en premier lieu
+aux interfaces existantes. La réécriture du daemon ou une extraction de ses
+composants ne constitue pas un prérequis au démarrage de StationDeck.
+Les séparations serveur décrites plus bas sont une cible architecturale :
+leur nécessité et leur périmètre doivent être établis à partir des besoins
+concrets, en préservant le comportement de la 0.5. La recette V1 distingue
+la réutilisation de StationD de la validation de son nouvel assemblage.
+Cette précision prévaut sur toute lecture imposant une refonte préalable.
 
 ## Nom proposé
 
@@ -9,51 +68,36 @@ la console de radio et une surface sur laquelle on assemble des outils.
 Nom du binaire proposé : `stationdeck`. Préfixe des crates : `stationdeck-`.
 Ce nom est une proposition interne ; sa disponibilité publique n’a pas été vérifiée.
 
-## Principe directeur corrigé : gRPC est découplé de SD
+## Raccordement retenu : préserver StationD 0.5
 
-Le module gRPC doit pouvoir être modifié ou remplacé sans toucher au cœur
- de StationD (SD). Le rendre facultatif dans le client graphique ne suffit
-pas à satisfaire cette exigence.
-
-Architecture cible :
+La WebUI utilise des services client indépendants du protocole. Un adaptateur
+web parle à une passerelle serveur, qui appelle le gRPC existant de StationD.
 
 ```text
-Modules egui → contrat client indépendant du protocole
-                         ↓
-                  adaptateur client gRPC
-                         ↕
-                  module serveur gRPC
-                         ↓
-              contrat interne de SD
-                         ↓
-                    cœur de SD
+Modules egui/WASM → contrat client → adaptateur HTTP navigateur
+                                            ↕
+                                   passerelle serveur
+                                            ↕ gRPC existant
+                                       StationD 0.5
 ```
 
-Le contrat interne de SD expose commandes, lectures, événements, erreurs
-et contexte d’autorisation avec des types indépendants de tonic/protobuf.
-SD implémente ce contrat ; le module serveur traduit gRPC vers ce contrat.
-Les règles métier restent dans SD. L’assemblage branche le module choisi
-sans ajouter de connaissance du protocole dans le cœur.
+Les règles métier restent dans SD. Le navigateur ne reçoit ni tonic natif,
+ni secrets de station, ni accès SQLite. Changer le transport web concerne
+les adaptateurs. Le premier module gRPC est limité à Station.Status ; les
+commandes de contrôle et les comptes utilisateurs restent à implémenter.
+La séparation interne de SD en stationd-admin-contract/stationd-grpc reste
+une option à justifier par un besoin concret, pas un préalable à StationDeck.
+On conserve la compatibilité des clients et la référence 0.5 telle quelle.
 
-Changer la bibliothèque, la sérialisation ou le transport concerne les
-adaptateurs. Ajouter une fonctionnalité métier peut nécessiter de faire
-évoluer le contrat et SD. La modularité ne signifie pas nécessairement
-chargement dynamique : le mode de livraison reste à choisir.
+## Ordre demandé pour les premiers modules
 
-**Complément à la tranche 0 :** cartographier les dépendances actuelles,
-définir le contrat interne de SD et distinguer cœur, adaptateur serveur,
-adaptateur client et assemblage. Dans le dépôt actuel, `src/lib.rs` expose
-les services `*_grpc` et `src/main.rs` assemble tonic : cette séparation
-est à réaliser, elle ne découle pas de la seule existence de `stationd-proto`.
+1. Messages et diagnostics au minimum en anglais ; finaliser la cible web.
+2. Module de test autonome : données simulées, deux vues et tâche annulable.
+3. Module gRPC : lecture du statut par passerelle authentifiée, sans mutation.
 
-**Composants supplémentaires proposés :** `stationd-admin-contract` pour
-le contrat interne sans protocole et `stationd-grpc` pour le module serveur.
-`stationdeck-grpc` désigne seulement l’adaptateur client de l’interface.
-
-Cette règle remplace les formulations ci-dessous qui réduisaient l’objectif
-à un module gRPC facultatif côté GUI. Elle fait partie du jalon B et de la
-recette : vérifier que le cœur SD compile sans tonic/protobuf, puis vérifier
-la compatibilité des clients gRPC existants.
+Le catalogue compilé et son activation sont un premier socle. Ils ne valent
+pas réalisation de toute la tranche 2 (résolution des dépendances, services
+typés, validation complète des manifestes et politique de droits).
 
 ## Objectif et règles d’architecture
 
@@ -63,7 +107,7 @@ apportent les fonctionnalités, y compris la communication gRPC.
 
 - Le socle gère le registre des modules, leur cycle de vie, les dépendances,
   les services et les points d’intégration de l’interface.
-- L’hôte graphique utilise egui ; eframe est proposé pour la fenêtre native.
+- Le pupitre utilise egui/eframe compilé en WebAssembly pour le navigateur.
 - gRPC est un module facultatif. Le socle ne dépend ni de tonic, ni des types
   protobuf, ni des services métier de StationD.
 - Les modules fonctionnels déclarent les services dont ils ont besoin. Le
@@ -193,11 +237,16 @@ service explicite avec leur propre périmètre, sans contournement implicite.
   les données devenues interdites sont retirées des vues et caches locaux.
 - Les refus et changements de droits sont diagnostiqués sans exposer de secrets.
 
-Les modules natifs V1 restent de confiance : les contrôles des services
+Les modules compilés V1 restent de confiance : les contrôles des services
 n’offrent pas un sandbox au code exécuté dans le même processus. Le
 confinement de code non fiable relève de la tranche 9.
 
 ## Tranche 0 — fixer le contrat et les frontières
+
+**Réalisée le 17 octobre 2026.** Cartographie du daemon historique et du
+serveur Icecast V1, contrats client/interne séparés, manifeste commun,
+droits, cycle de vie et cible navigateur en container fixés dans le
+[contrat V1](stationdeck-contract.md). Les tranches suivantes portent le code.
 
 **But :** transformer l’intention en décisions explicites avant le code.
 
@@ -220,24 +269,28 @@ Livrable : document de contrat et exemple de manifeste.
 **Critère de fin :** un module de démonstration et le module gRPC peuvent
 être décrits avec le même mécanisme, sans exception dans le socle.
 
-## Tranche 1 — créer le squelette egui
+## Tranche 1 — créer le squelette egui web
 
-**But :** disposer d’une application native qui démarre sans serveur.
+**Cible corrigée le 17 octobre 2026 : WebUI, remplaçant le lancement X11.**
+
+**But :** disposer du pupitre dans un navigateur sans serveur métier.
 
 Actions :
-- Ajouter les crates au workspace sans modifier ses membres par défaut.
-- Installer la fenêtre egui/eframe et la structure commune : navigation,
-  zone principale, barre d’état, accueil et paramètres locaux.
-- Prévoir les états vide, chargement, erreur et indisponibilité.
-- Définir thème, raccourcis et identifiants persistants des widgets.
-- Préparer un point d’entrée pour les contributions des modules.
+- Ajouter les crates au workspace sans changer ses membres par défaut.
+- Compiler egui/eframe en WASM et servir HTML/JS/CSS/WASM dans un container.
+- Installer navigation, contenu, barre de statut, accueil et préférences.
+- Préparer vide, chargement, erreur, indisponible, non connecté et refus.
+- Définir thèmes, raccourcis compatibles navigateur et identifiants stables.
+- Préparer les contributions des modules sans encore implémenter le registre.
+- Persister les préférences versionnées dans le navigateur, sans secrets.
+- Tester dans un vrai navigateur en container : MIME WASM, échecs de
+  chargement, rechargement, redimensionnement et persistance.
 
-- Prévoir les états utilisateur non connecté et accès refusé dans la GUI.
+Livrable : WebUI StationDeck et container HTTP indépendant de StationD.
 
-Livrable : exécutable StationDeck avec interface vide utilisable.
-
-**Critère de fin :** l’application se lance sans gRPC, se redimensionne,
-se ferme proprement et affiche un accueil cohérent sans module métier.
+**Critère de fin :** une URL ouvre un accueil cohérent sans gRPC ni module
+métier ; la page se redimensionne et conserve les préférences après rechargement.
+Guide : [StationDeck web en container](stationdeck-dev.md).
 
 ## Tranche 2 — implémenter le registre et le cycle de vie
 
@@ -286,38 +339,32 @@ Livrable : contrat UI et module de démonstration complet.
 **Critère de fin :** activer ou désactiver la démonstration change l’interface
 par configuration ; ses tâches ne bloquent pas le rendu.
 
-## Tranche 4 — découpler gRPC de SD et raccorder l’interface
+## Tranche 4 — raccorder la WebUI au gRPC existant
 
-**But :** modifier ou remplacer le module gRPC sans toucher au cœur de SD.
+**But :** connecter le navigateur à StationD 0.5 réutilisé tel quel.
 
 Actions :
-- Extraire un contrat interne : commandes, lectures, événements, erreurs
-  et contexte d’autorisation, sans tonic ni protobuf.
-- Faire implémenter ce contrat par les services de SD.
-- Déplacer handlers, conversions protobuf et hébergement du serveur dans
-  le module gRPC ; séparer son assemblage de la logique du cœur.
-- Préserver le comportement des services utilisés par les clients existants.
-- Fournir un adaptateur en mémoire sur le même contrat pour vérifier
-  l’indépendance de SD par rapport au transport.
-- Côté egui, réutiliser `stationd-proto` dans l’adaptateur client uniquement
-  et publier aux modules des services indépendants du protocole.
-- Gérer paramètres de connexion, TLS/authentification selon le serveur,
-  délais, reconnexion temporisée et annulation des tâches.
-- Identifier les sessions pour ignorer les réponses anciennes ; ne pas
-  rejouer une mutation dont le résultat est incertain après une coupure.
+- Définir les contrats client indépendants du transport et leurs DTO web.
+- Choisir HTTP/WebSocket ou gRPC-Web et une passerelle serveur vers le gRPC
+  existant ; tonic/protobuf hors du socle et des vues navigateur.
+- Réutiliser stationd-proto et client-config côté serveur lorsque compatibles.
+- Garder les règles métier dans SD ; traduire commandes et erreurs.
+- Gérer sessions/authentification, droits, TLS, limites, délais, reconnexion
+  temporisée et annulation sans bloquer le rendu.
+- Ignorer les réponses des anciennes sessions ; aucun rejeu de mutation
+  dont le résultat est inconnu après coupure.
+- Fournir des services simulés du même contrat pour tester sans serveur.
+- Préserver les clients CLI/TUI existants. Toute modification de SD répond
+  à un besoin concret ; extraction interne conditionnelle, distincte du
+  raccordement web et non nécessaire pour commencer.
 
-- Introduire un contexte d’identité vérifié dans le contrat interne ;
-  appliquer dans SD le contrôle périmètre du module et permissions utilisateur,
-  indépendamment de gRPC. Tester le refus via les deux adaptateurs.
+Livrable : passerelle serveur, adaptateur web, panneau de connexion et recette
+avec fournisseur simulé puis serveur réel. Secrets côté serveur.
 
-Livrable : contrat interne SD, module serveur gRPC séparé, adaptateur
-client StationDeck, panneau de connexion et adaptateur de test en mémoire.
-
-**Critère de fin :** le même cœur SD fonctionne derrière gRPC et derrière
-l’adaptateur de test sans changement de son code. Le cœur ne dépend plus
-de tonic/protobuf. Une modification limitée au protocole reste dans le
-module gRPC. Les clients actuels continuent à fonctionner. Une perte du
-serveur laisse egui utilisable et la reconnexion ne mélange pas les sessions.
+**Critère de fin :** même vue avec simulation et serveur réel, sans tonic ou
+protobuf dans le rendu ; coupure sans gel, reconnexion sans mélange de sessions.
+Autorisations contrôlées côté serveur : un jeton partagé ne prouve pas une
+identité utilisateur vérifiée.
 
 ## Tranche 5 — valider une première tranche métier complète
 
@@ -459,7 +506,7 @@ C et D rendent ce socle immédiatement exploitable dans StationD.
 - Vérifier réactivité egui pendant un abonnement et pendant une commande réseau.
 - Compiler le daemon avec ses commandes habituelles pour vérifier son indépendance.
 - Vérifier les contrats du registre et les adaptations gRPC par des tests ciblés ;
-  compléter par une recette visuelle egui et une intégration sur serveur de développement.
+  compléter par une recette visuelle navigateur et une intégration serveur.
 
 - Vérifier qu’une capacité déclarée mais non accordée reste inutilisable.
 - Vérifier qu’un rôle déclaré ne crée aucune attribution automatique.

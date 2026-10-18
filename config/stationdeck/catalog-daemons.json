@@ -1,0 +1,27 @@
+{
+  "authority": "stationdeck-dev",
+  "schemas": [
+    {"plugin":"demo.settings","version":1,"fields":[
+      {"key":"message","kind":"string","minimum":null,"maximum":null},
+      {"key":"interval_seconds","kind":"integer","minimum":1,"maximum":3600}
+    ],"requires":[],"apply_mode":"hot"},
+    {"plugin":"sd.listener-stats","version":1,"fields":[
+      {"key":"retention_days","kind":"integer","minimum":1,"maximum":365}
+    ],"requires":[],"apply_mode":"reload"},
+    {"plugin":"icecast.settings","version":1,"fields":[
+      {"key":"location","kind":"string","minimum":null,"maximum":null},
+      {"key":"hostname","kind":"string","minimum":null,"maximum":null},
+      {"key":"admin_email","kind":"string","minimum":null,"maximum":null},
+      {"key":"max_clients","kind":"integer","minimum":1,"maximum":32768}
+    ],"requires":[],"apply_mode":"restart"}
+  ],
+  "targets": [
+    {"id":"demo-1","token_file":"demo-1","plugins":["demo.settings"]},
+    {"id":"sd-listener-stats-1","token_file":"sd-listener-stats-1","plugins":["sd.listener-stats"]},
+    {"id":"icecastd-1","token_file":"icecastd-1","plugins":["icecast.settings"]}
+  ],
+  "operators": [
+    {"token_file":"editor","targets":["demo-1","sd-listener-stats-1","icecastd-1"],"permissions":["read","edit","publish"]},
+    {"token_file":"reader","targets":["demo-1","sd-listener-stats-1","icecastd-1"],"permissions":["read"]}
+  ]
+}

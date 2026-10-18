@@ -1,0 +1,28 @@
+[package]
+name = "stationdeck-gateway"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+stationdeck-services = { path = "../stationdeck-services" }
+stationd-proto = { path = "../stationd-proto" }
+axum = "0.7"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "signal"] }
+tonic = { version = "0.12", features = ["tls-native-roots"] }
+serde_json = "1"
+sha2 = "0.10"
+subtle = "2"
+
+[dev-dependencies]
+stationd-proto = { path = "../stationd-proto", features = ["server"] }
+tokio-stream = { version = "0.1", features = ["net"] }
+tower = { version = "0.5", features = ["util"] }
+
+[features]
+test-fixture = ["stationd-proto/server"]
+
+[[bin]]
+name = "stationdeck-grpc-fixture"
+path = "src/bin/stationdeck-grpc-fixture.rs"
+required-features = ["test-fixture"]

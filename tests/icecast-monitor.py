@@ -60,7 +60,7 @@ def main():
         (config / 'wrong-token').write_text('invalid-test-token')
         deployment = copy.deepcopy(original)
         deployment['name'] = project
-        deployment['services'] = {name: deployment['services'][name] for name in ('icecast', 'admin', 'monitor')}
+        deployment['services'] = {name: deployment['services'][name] for name in ('icecastd', 'admin', 'monitor')}
         deployment['networks'] = {'default': {'name': project + '-default'}}
         for name, service in deployment['services'].items():
             service.pop('build', None)
@@ -79,7 +79,7 @@ def main():
         path.write_text(json.dumps(deployment))
         dc = ['docker', 'compose', '-p', project, '-f', str(path)]
         try:
-            run([*dc, 'up', '-d', '--wait', 'icecast', 'admin'], check=True, timeout=120)
+            run([*dc, 'up', '-d', '--wait', 'icecastd', 'admin'], check=True, timeout=120)
             run([*dc, 'up', '-d', '--no-deps', 'monitor'], check=True, timeout=30)
 
             def snapshot():

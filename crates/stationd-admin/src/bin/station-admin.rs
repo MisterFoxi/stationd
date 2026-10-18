@@ -15,9 +15,12 @@ struct Args {
     bind: std::net::SocketAddr,
     #[arg(long, default_value = "/etc/stationd/icecast.toml")]
     config: PathBuf,
+    /// Read the managed effective TOML for GetConfig; credentials/mounts stay local.
+    #[arg(long)]
+    effective_config: Option<PathBuf>,
     #[arg(long, default_value = "/run/secrets")]
     secrets_dir: PathBuf,
-    #[arg(long, default_value = "http://icecast:8000")]
+    #[arg(long, default_value = "http://icecastd:8000")]
     icecast_url: String,
     #[arg(long, default_value = "http://router:50062")]
     router_addr: String,
@@ -55,6 +58,11 @@ async fn main() -> Result<()> {
             args.monitor_addr,
             read_secret(&args.secrets_dir.join("admin-api-token"))?,
         );
+    let admin = if let Some(path) = args.effective_config {
+        admin.with_effective_config(path)
+    } else {
+        admin
+    };
     let admin = if let Some(path) = args.settings {
         let geoip = admin.history_geoip();
         let history = tokio::task::spawn_blocking(move || {

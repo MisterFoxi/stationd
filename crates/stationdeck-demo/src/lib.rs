@@ -1,0 +1,137 @@
+//! Offline test module: two views and a cancellable, nonblocking simulated task.
+use stationdeck_services::{RequestSlot, RequestState, StationStatus};
+use stationdeck_ui::{
+    show_state, show_station_status, DeckModule, ModuleDescriptor, ViewDescriptor, ViewState,
+};
+
+#[derive(Default)]
+pub struct DemoModule {
+    task: RequestSlot<u32>,
+    due: Option<(u64, f64)>,
+    completed: u32,
+    read_only: bool,
+}
+
+impl DemoModule {
+    fn start_task(&mut self, now: f64) -> bool {
+        if self.read_only {
+            return false;
+        }
+        let Some(generation) = self.task.begin() else {
+            return false;
+        };
+        self.due = Some((generation, now + 0.75));
+        true
+    }
+}
+impl DeckModule for DemoModule {
+    fn descriptor(&self) -> ModuleDescriptor {
+        ModuleDescriptor {
+            id: "demo",
+            title: "Test module",
+            description: "Offline sample data and a cancellable simulated task.",
+        }
+    }
+    fn views(&self) -> Vec<ViewDescriptor> {
+        vec![
+            ViewDescriptor {
+                id: "demo.overview",
+                title: "Test station",
+                order: 100,
+            },
+            ViewDescriptor {
+                id: "demo.tasks",
+                title: "Test tasks",
+                order: 110,
+            },
+        ]
+    }
+    fn stop(&mut self) {
+        self.task.cancel();
+        self.due = None;
+    }
+    fn ui(&mut self, id: &str, ui: &mut egui::Ui) {
+        if id == "demo.overview" {
+            ui.heading("Test station");
+            ui.label("Simulated data. No server is contacted and no real station is changed.");
+            ui.add_space(16.0);
+            show_station_status(
+                ui,
+                &StationStatus {
+                    station_name: "StationDeck Demo".into(),
+                    uptime_seconds: 3600,
+                    pid: 0,
+                    timezone: "Europe/Paris".into(),
+                },
+            );
+            return;
+        }
+        ui.heading("Test tasks");
+        ui.label("Run a short local task while keeping navigation responsive.");
+        if ui
+            .checkbox(&mut self.read_only, "Read-only test role")
+            .changed()
+            && self.read_only
+        {
+            self.stop();
+        }
+        if self.read_only {
+            show_state(ui, ViewState::Forbidden);
+        }
+        let now = ui.input(|input| input.time);
+        if let Some((generation, due)) = self.due {
+            if now >= due {
+                self.completed += 1;
+                self.task.finish(generation, Ok(self.completed));
+                self.due = None;
+            } else {
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_millis(50));
+            }
+        }
+        let pending = matches!(self.task.state, RequestState::Pending);
+        if ui
+            .add_enabled(
+                !pending && !self.read_only,
+                egui::Button::new("Run test task"),
+            )
+            .clicked()
+            && self.start_task(now)
+        {
+            ui.ctx().request_repaint();
+        }
+        if pending && ui.button("Cancel task").clicked() {
+            self.stop();
+        }
+        match &self.task.state {
+            RequestState::Idle => show_state(ui, ViewState::Empty("No test task has run.")),
+            RequestState::Pending => show_state(
+                ui,
+                ViewState::Loading("Simulated work is in progress. You can continue navigating."),
+            ),
+            RequestState::Ready(count) => {
+                ui.label(format!("Test task completed. Completed tasks: {count}"));
+            }
+            RequestState::Failed(error) => show_state(ui, ViewState::Error(error)),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn read_only_and_cancellation_are_enforced_below_the_button() {
+        let mut module = DemoModule {
+            read_only: true,
+            ..Default::default()
+        };
+        assert!(!module.start_task(0.0));
+        module.read_only = false;
+        assert!(module.start_task(0.0));
+        assert!(!module.start_task(0.1));
+        module.stop();
+        assert!(module.due.is_none());
+        assert!(matches!(module.task.state, RequestState::Idle));
+    }
+}

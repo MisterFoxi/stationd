@@ -1,0 +1,2 @@
+# Compatibility alias: StationDeck management is now the default in compose.yaml.
+services: {}

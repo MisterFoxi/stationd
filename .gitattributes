@@ -1,9 +1,13 @@
-# Scripts s6 et Dockerfile : fins de ligne LF même édités sous Windows
-# (un CRLF casse la ligne #! des scripts run).
+# Fins de ligne LF pour les scripts Linux et leurs sources de configuration.
 docker/** text eol=lf
 tools/icecast-config/** text eol=lf
 config/icecast/** text eol=lf
-tests/icecast-smoke.py text eol=lf
 crates/stationd-admin/** text eol=lf
+tests/icecast-smoke.py text eol=lf
 tests/icecast-admin-continuity.py text eol=lf
 tests/icecast-switch.py text eol=lf
+
+# StationDeck : frontend, backend, bootstrap et recettes en containers.
+crates/stationdeck*/** text eol=lf
+config/stationdeck/** text eol=lf
+tests/stationdeck-* text eol=lf

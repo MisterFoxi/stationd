@@ -1,0 +1,7 @@
+{
+  "authority":"stationdeck-dev", "target":"demo-1",
+  "endpoint":"http://control:50070", "discovery_address":"invalid-discovery-address",
+  "allow_plaintext":true, "tls_server_name":null, "ca_file":null,
+  "token_file":"/credential/token", "catalog_file":"/bootstrap/catalog.json",
+  "state_dir":"/data", "apply_program":null
+}

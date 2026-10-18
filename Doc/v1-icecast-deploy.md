@@ -34,7 +34,7 @@ GeoLite configurée si activée, les installateurs et les sommes SHA-256.
 Le WASM existant reste embarqué dans l'image d'administration et chargé
 dynamiquement. Aucune toolchain n'est nécessaire sur la VM cible.
 
-Les seuls services livrés sont `icecast`, `admin`, `router` et `monitor`.
+Les seuls services livrés sont `icecastd`, `admin`, `router` et `monitor`.
 Les sources synthétiques, smoke tests, StationD et Liquidsoap ne sont pas livrés.
 Aucune sauvegarde, image de récupération, archive d'état ou secret existant
 n'est inclus. Le Compose livré retire le montage et le contrôle disque des
@@ -64,7 +64,7 @@ Pour choisir ensuite l'adresse : relancer le même installateur avec `--bind`,
 ou modifier `/opt/stationd-icecast/.env`, puis :
 
 ```sh
-sudo /opt/stationd-icecast/compose up -d --no-build --pull never icecast
+sudo /opt/stationd-icecast/compose up -d --no-build --pull never icecastd
 sudo /opt/stationd-icecast/ctl status
 sudo /opt/stationd-icecast/ctl monitoring
 sudo /opt/stationd-icecast/ctl route

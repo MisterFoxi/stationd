@@ -64,7 +64,7 @@ def validate_router(candidate, services):
 
 
 def restart_services(services):
-    compose("up", "-d", "--force-recreate", "--wait", "icecast", "admin")
+    compose("up", "-d", "--force-recreate", "--wait", "icecastd", "admin")
     fixtures = [s for s in ("live-a", "live-b", "router") if s in services]
     if fixtures:
         compose("up", "-d", "--no-deps", "--force-recreate", *fixtures)
@@ -109,6 +109,13 @@ def main():
     args = parser.parse_args()
     if os.name != "posix":
         parser.error("run this script on stationdev1")
+    managed = compose('ps', '-q', 'icecastd', capture_output=True, text=True).stdout.strip()
+    if managed:
+        label = subprocess.run(
+            ['docker', 'inspect', '--format', '{{ index .Config.Labels "stationdeck.configuration.managed" }}', managed],
+            check=True, capture_output=True, text=True).stdout.strip()
+        if label == 'true':
+            parser.error('icecastd is managed by StationDeck; publish there or explicitly leave managed mode first')
     WORK.mkdir(parents=True, exist_ok=True, mode=0o700)
     WORK.chmod(0o700)
     with (WORK / "apply.lock").open("a") as lock:
@@ -124,7 +131,7 @@ def main():
             atomic_write(Path(staged), candidate)
             compose("run", "--rm", "--no-deps", "--entrypoint", "station-icecast-config",
                     "--volume", f"{staged}:/run/candidate.toml:ro",
-                    "icecast", "check", "/run/candidate.toml", "/run/secrets")
+                    "icecastd", "check", "/run/candidate.toml", "/run/secrets")
         finally:
             Path(staged).unlink(missing_ok=True)
         if args.check:

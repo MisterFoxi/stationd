@@ -16,7 +16,7 @@ import tempfile
 import tomllib
 
 ROOT = Path(__file__).resolve().parents[2]
-ROLES = ('icecast', 'admin', 'router', 'monitor')
+ROLES = ('icecastd', 'admin', 'router', 'monitor')
 
 
 def run(args):
@@ -44,7 +44,7 @@ def runtime_compose(original, images):
                 volume['source'] = binds[volume['target']]
             else:
                 used_volumes.add(volume['source'])
-        if name == 'icecast':
+        if name == 'icecastd':
             service['ports'] = ['${ICECAST_BIND:-127.0.0.1}:${ICECAST_PORT:-18000}:8000']
         elif name == 'admin':
             service['ports'] = ['127.0.0.1:${STATION_ADMIN_PORT:-50061}:50061']
@@ -82,11 +82,11 @@ def main():
     dist.mkdir(exist_ok=True)
     dc = ['docker', 'compose', '-f', str(ROOT / 'docker/icecast/compose.yaml')]
     if not args.skip_build:
-        subprocess.run([*dc, '--profile', 'monitor', 'build', 'icecast', 'admin', 'monitor'], check=True)
+        subprocess.run([*dc, '--profile', 'monitor', 'build', 'icecastd', 'admin', 'monitor'], check=True)
     images = {}
     identifiers = {}
-    for role in ('icecast', 'admin', 'monitor'):
-        repository = 'stationd-v1-' + ('icecast' if role == 'icecast' else role)
+    for role in ('icecastd', 'admin', 'monitor'):
+        repository = 'stationd-v1-' + ('icecast' if role == 'icecastd' else role)
         image = f'{repository}:{tag}'
         subprocess.run(['docker', 'image', 'tag', repository + ':dev', image], check=True)
         images[role] = image

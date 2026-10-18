@@ -64,7 +64,7 @@ def tone(stream, expected, seconds=15):
 def main():
     wait(lambda: route_ready(), "router ready")
     ctl("switch", "a")
-    first_container = subprocess.check_output([*DC, "ps", "-q", "icecast"], text=True).strip()
+    first_container = subprocess.check_output([*DC, "ps", "-q", "icecastd"], text=True).strip()
     started = subprocess.check_output(
         ["docker", "inspect", "-f", "{{.State.StartedAt}}", first_container], text=True)
     try:

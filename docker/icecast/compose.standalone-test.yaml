@@ -1,0 +1,26 @@
+# Explicit isolated/local compatibility only. Never used by normal icecast-up.
+services:
+  icecastd:
+    build:
+      target: standalone
+    image: stationd-v1-icecast-standalone:dev
+    entrypoint: [/usr/local/bin/start-icecast]
+    labels:
+      stationdeck.configuration.managed: 'false'
+    environment: !reset {}
+    networks: !override [default]
+    volumes: !override
+      - ../../config/icecast:/etc/stationd:ro
+      - ../../data/geoip:/data/geoip:ro
+  admin:
+    command: ["--bind", "0.0.0.0:50061", "--settings", "/etc/stationd/admin.toml"]
+    volumes: !override
+      - ../../config/icecast:/etc/stationd:ro
+      - ../../data/geoip:/data/geoip:ro
+      - admin-state:/var/lib/station-admin
+volumes: !override
+  admin-state:
+  router-state:
+  monitor-state:
+networks: !override
+  default:

@@ -1,0 +1,14 @@
+{
+  "authority": "stationdeck-dev",
+  "schemas": [
+    {"plugin":"demo.settings","version":1,"fields":[
+      {"key":"message","kind":"string","minimum":null,"maximum":null},
+      {"key":"interval_seconds","kind":"integer","minimum":1,"maximum":3600}
+    ],"requires":[],"apply_mode":"hot"}
+  ],
+  "targets": [{"id":"demo-1","token_file":"demo-1","plugins":["demo.settings"]}],
+  "operators": [
+    {"token_file":"editor","targets":["demo-1"],"permissions":["read","edit","publish"]},
+    {"token_file":"reader","targets":["demo-1"],"permissions":["read"]}
+  ]
+}

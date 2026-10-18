@@ -40,7 +40,7 @@ def secret_plan(deployment, icecast, router):
         raise ValueError('API tokens cannot be used as audio passwords')
     if names & {'admin-api-token', 'router-api-token'}:
         raise ValueError('API tokens cannot be used as audio passwords')
-    result['services']['icecast']['secrets'] = sorted(names)
+    result['services']['icecastd']['secrets'] = sorted(names)
     result['services']['admin']['secrets'] = [icecast['admin_password_file'], 'admin-api-token', 'router-api-token']
     result['services']['router']['secrets'] = [router['output_password_file'], 'router-api-token']
     result['services']['monitor']['secrets'] = ['admin-api-token']
@@ -135,12 +135,20 @@ def main():
                    '--mount', f'type=bind,src={geo},dst=/data/geoip,readonly']
         for name in deployment['secrets']:
             command += ['--mount', f'type=bind,src={secret_dir / name},dst=/run/secrets/{name},readonly']
-        command += ['--entrypoint', 'station-icecast-config', deployment['services']['icecast']['image'],
+        command += ['--entrypoint', 'station-icecast-config', deployment['services']['icecastd']['image'],
                     'render', '/etc/stationd/icecast.toml', '/run/secrets', '/tmp/icecast.xml']
         invoke(command)
         compose = node / 'compose.yaml'
         env_file = node / '.env'
         previous = compose.read_bytes() if compose.exists() else None
+        if previous is not None:
+            old_services = json.loads(subprocess.check_output(
+                ['docker', 'compose', '-p', project, '-f', str(compose), 'config', '--format', 'json'], text=True))['services']
+            if 'icecast' in old_services:
+                old_container = subprocess.check_output(
+                    ['docker', 'compose', '-p', project, '-f', str(compose), 'ps', '-q', 'icecast'], text=True).strip()
+                if old_container:
+                    raise ValueError('Stop the previous V1 icecast service before upgrading to icecastd; see the migration guide')
         previous_env = env_file.read_bytes() if env_file.exists() else None
         env = env_file.read_text() if env_file.exists() else 'ICECAST_BIND=127.0.0.1\nICECAST_PORT=18000\n'
         for key, value in (('ICECAST_BIND', args.bind), ('ICECAST_PORT', args.port)):
@@ -161,7 +169,7 @@ def main():
                 shutil.copyfile(here / name, node / name)
                 (node / name).chmod(0o755)
             if not args.no_start:
-                invoke([*dc, '-f', str(compose), 'up', '-d', '--no-build', '--pull', 'never', '--wait', 'icecast', 'admin'])
+                invoke([*dc, '-f', str(compose), 'up', '-d', '--no-build', '--pull', 'never', '--wait', 'icecastd', 'admin'])
                 invoke([*dc, '-f', str(compose), 'up', '-d', '--no-build', '--pull', 'never', '--no-deps', 'router', 'monitor'])
         except BaseException:
             candidate.unlink(missing_ok=True)

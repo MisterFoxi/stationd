@@ -31,7 +31,7 @@ def wait_for(fn, seconds=50):
         time.sleep(.5)
 
 
-first_container = subprocess.check_output([*DC, "ps", "-q", "icecast"], text=True).strip()
+first_container = subprocess.check_output([*DC, "ps", "-q", "icecastd"], text=True).strip()
 started = subprocess.check_output(["docker", "inspect", "-f", "{{.State.StartedAt}}", first_container], text=True)
 request = urllib.request.Request("https://v1stream.homestone.rp-radio.live/", headers={"User-Agent": UA})
 with urllib.request.urlopen(request, timeout=10) as stream:

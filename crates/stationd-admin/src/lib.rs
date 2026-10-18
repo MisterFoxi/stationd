@@ -48,6 +48,7 @@ pub struct Admin {
     upstream: reqwest::Url,
     config: Config,
     raw_config: String,
+    effective_config: Option<std::path::PathBuf>,
     geoip: Option<std::sync::Arc<station_icecast_config::geoip::Geoip>>,
     password: String,
     router: Option<(String, String)>,
@@ -64,6 +65,11 @@ fn child(node: roxmltree::Node<'_, '_>, name: &str) -> String {
 }
 
 impl Admin {
+    pub fn with_effective_config(mut self, path: std::path::PathBuf) -> Self {
+        self.effective_config = Some(path);
+        self
+    }
+
     pub fn with_monitor(mut self, endpoint: String, token: String) -> Self {
         self.monitor = Some((endpoint, token));
         self
@@ -138,6 +144,7 @@ impl Admin {
             upstream,
             config,
             raw_config: text,
+            effective_config: None,
             geoip,
             password,
             router: None,
@@ -263,7 +270,7 @@ impl IcecastAdmin for Admin {
     }
 
     async fn get_config(&self, _: Request<Empty>) -> Result<Response<ConfigDocument>, Status> {
-        Ok(Response::new(self.configuration()))
+        Ok(Response::new(self.configuration()?))
     }
     async fn check_config(
         &self,

@@ -1,0 +1,47 @@
+# Disposable authority, author credentials and agent state; no published ports.
+services:
+  deck:
+    ports: !reset []
+    restart: "no"
+  control:
+    restart: "no"
+  config-demo-agent:
+    restart: "no"
+    environment:
+      STATIONDECK_CONFIG_ENDPOINT: ""
+  discovery-duplicate:
+    profiles: [discovery-test]
+    image: stationdeck-qa:dev
+    entrypoint: [node, /test/discovery.mjs]
+    volumes: [../../tests/stationdeck-discovery-fixture.mjs:/test/discovery.mjs:ro]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: [CMD, test, -f, /tmp/discovery-ready]
+      interval: 1s
+      timeout: 1s
+      retries: 10
+  config-browser:
+    build:
+      context: ../..
+      dockerfile: docker/stationdeck/Dockerfile
+      target: qa
+    image: stationdeck-qa:dev
+    entrypoint: [node, /test/stationdeck-config-smoke.mjs]
+    volumes:
+      - ../../tests/stationdeck-config-smoke.mjs:/test/stationdeck-config-smoke.mjs:ro
+      - config-author-secrets:/author-secrets:ro
+      - config-demo-state:/agent-state:ro
+    environment:
+      STATIONDECK_URL: http://deck:8080
+    shm_size: 256mb
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+networks:
+  default:
+    internal: true
+
+  configuration:
+    internal: true

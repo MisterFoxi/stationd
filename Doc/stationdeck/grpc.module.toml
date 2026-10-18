@@ -1,0 +1,85 @@
+# Spécification documentaire V1 ; pas encore chargée à exécution.
+manifest_version = 1
+dependencies = []
+requires = []
+
+[module]
+id = "grpc"
+version = "0.1.0"
+contract = "^1.0.0"
+entrypoint = "grpc"
+
+[[provides]]
+id = "stationdeck.admin.overview"
+version = "1.0.0"
+
+[[capabilities]]
+id = "grpc.connection"
+kind = "network"
+resource = "connection:station"
+operations = ["connect"]
+
+[[capabilities]]
+id = "grpc.overview"
+kind = "service"
+resource = "stationdeck.admin.overview"
+operations = ["read", "watch", "command"]
+
+[[permissions]]
+id = "grpc.consulter"
+description = "Consulter les informations locales sans secrets."
+resource = "grpc.connection"
+actions = ["read"]
+
+[[permissions]]
+id = "grpc.connecter"
+description = "Simulation locale ou gestion de connexion ; aucun droit distant implicite."
+resource = "grpc.connection"
+actions = ["connect", "disconnect"]
+
+[[roles]]
+id = "grpc.observateur"
+description = "Lecture locale seule."
+permissions = ["grpc.consulter"]
+
+[[roles]]
+id = "grpc.operateur"
+description = "Lecture et actions locales."
+permissions = ["grpc.consulter", "grpc.connecter"]
+
+[[contributions]]
+id = "grpc.connection"
+kind = "view"
+title = "Connexion à la station"
+slot = "navigation"
+order = 20
+services = []
+permissions = ["grpc.consulter"]
+
+[[contributions]]
+id = "grpc.connect"
+kind = "action"
+title = "Connecter"
+slot = "toolbar"
+order = 20
+services = []
+permissions = ["grpc.connecter"]
+
+[[contributions]]
+id = "grpc.menu"
+kind = "menu"
+title = "Module"
+slot = "main-menu"
+order = 20
+services = []
+permissions = ["grpc.connecter"]
+action = "grpc.connect"
+
+[[contributions]]
+id = "grpc.status"
+kind = "indicator"
+title = "État du module"
+slot = "status"
+order = 20
+services = []
+permissions = ["grpc.consulter"]

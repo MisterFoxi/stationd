@@ -38,7 +38,7 @@ def main():
                 time.sleep(0.2)
         with stream:
             assert len(stream.read(8192)) == 8192
-            container = subprocess.check_output([*DC, "ps", "-q", "icecast"], cwd=ROOT, text=True).strip()
+            container = subprocess.check_output([*DC, "ps", "-q", "icecastd"], cwd=ROOT, text=True).strip()
             started = subprocess.check_output(
                 ["docker", "inspect", "-f", "{{.State.StartedAt}}", container], text=True)
             compose("stop", "admin")

@@ -35,7 +35,7 @@ class DeploymentTests(unittest.TestCase):
         original = {'services': {name: copy.deepcopy(service) for name in (*package.ROLES, 'smoke', 'live-a', 'stationd')},
                     'volumes': {'admin-state': {'name': 'development-admin-state'}},
                     'networks': {'default': {'name': 'development-network'}}}
-        images = {'icecast': 'server:version', 'admin': 'admin:version', 'monitor': 'monitor:version'}
+        images = {'icecastd': 'server:version', 'admin': 'admin:version', 'monitor': 'monitor:version'}
         result = package.runtime_compose(original, images)
         self.assertEqual(set(result['services']), set(package.ROLES))
         self.assertEqual(result['services']['router']['image'], images['admin'])
@@ -52,7 +52,7 @@ class DeploymentTests(unittest.TestCase):
     def test_unexpected_host_bind_is_refused(self):
         original = {'services': {name: {'volumes': [{'type': 'bind', 'source': '/media', 'target': '/media'}]} for name in package.ROLES}}
         with self.assertRaisesRegex(ValueError, 'unexpected central bind'):
-            package.runtime_compose(original, dict.fromkeys(('icecast', 'admin', 'monitor'), 'image:version'))
+            package.runtime_compose(original, dict.fromkeys(('icecastd', 'admin', 'monitor'), 'image:version'))
 
     def test_secret_plan_follows_target_mounts(self):
         for count in (0, 1, 7, 100):
@@ -60,7 +60,7 @@ class DeploymentTests(unittest.TestCase):
                 deployment = {'services': {name: {} for name in package.ROLES}}
                 config = {'admin_password_file': 'site-admin', 'mounts': [{'password_file': f'local-source-{n}'} for n in range(count)]}
                 result = installer.secret_plan(deployment, config, {'output_password_file': 'site-output'})
-                self.assertEqual(set(result['services']['icecast']['secrets']), {'site-admin', *(f'local-source-{n}' for n in range(count))})
+                self.assertEqual(set(result['services']['icecastd']['secrets']), {'site-admin', *(f'local-source-{n}' for n in range(count))})
                 self.assertEqual(len(result['secrets']), count + 4)
                 self.assertEqual(result['services']['admin']['secrets'][0], 'site-admin')
                 self.assertTrue(all(v['file'].startswith('./.local/icecast/secrets/') for v in result['secrets'].values()))
@@ -115,13 +115,17 @@ class InstallerFailureTests(unittest.TestCase):
             (bundle / name).write_text('#!/bin/sh\n')
         return bundle
 
-    def call(self, bundle, node, fail=False, no_start=False):
+    def call(self, bundle, node, fail=False, no_start=False, old_running=False):
         def invoke(args):
             if fail and 'up' in args:
                 raise subprocess.CalledProcessError(1, args)
 
         def output(args, **kwargs):
-            return '' if 'ps' in args else 'sha256:test\n'
+            if args[:2] == ['docker', 'ps']:
+                return ''
+            if 'config' in args:
+                return (node / 'compose.yaml').read_text()
+            return ('old-v1-container' if old_running else '') if 'ps' in args else 'sha256:test\n'
 
         argv = ['install.py', '--dir', str(node), '--project', 'dist-unit-test']
         if no_start:
@@ -133,6 +137,18 @@ class InstallerFailureTests(unittest.TestCase):
              mock.patch.object(installer.subprocess, 'run'), \
              mock.patch.object(sys, 'argv', argv):
             installer.main()
+
+    def test_running_old_service_requires_explicit_migration(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            bundle = self.fixture(root)
+            node = root / 'node'
+            self.call(bundle, node, no_start=True)
+            previous = b'{"services":{"icecast":{"image":"previous:version"}}}'
+            (node / 'compose.yaml').write_bytes(previous)
+            with self.assertRaisesRegex(ValueError, 'Stop the previous V1'):
+                self.call(bundle, node, old_running=True)
+            self.assertEqual((node / 'compose.yaml').read_bytes(), previous)
 
     def test_first_start_failure_retains_files_for_diagnosis(self):
         with tempfile.TemporaryDirectory() as folder:

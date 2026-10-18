@@ -1,0 +1,11 @@
+syntax = "proto3";
+package stationdeck.config.v1;
+service Configuration {
+  rpc Pull(PullRequest) returns (PullReply);
+  rpc Report(ReportRequest) returns (ReportReply);
+}
+message PullRequest {}
+// JSON carries the versioned transport-free Bundle. Empty means unpublished.
+message PullReply { string bundle_json = 1; }
+message ReportRequest { uint64 revision = 1; bool applied = 2; string code = 3; }
+message ReportReply {}

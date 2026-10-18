@@ -11,7 +11,7 @@ frequency = 440 if label == "a" else 880
 secret = (Path("/run/secrets") / f"source-{label}-password").read_text().strip()
 if not secret:
     raise SystemExit("Missing source secret")
-target = f"icecast://source:{urllib.parse.quote(secret, safe='')}@icecast:8000/test-{label}.mp3"
+target = f"icecast://source:{urllib.parse.quote(secret, safe='')}@icecastd:8000/test-{label}.mp3"
 args = [
     "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "quiet", "-re",
     "-f", "lavfi", "-i", f"sine=frequency={frequency}:sample_rate=44100",

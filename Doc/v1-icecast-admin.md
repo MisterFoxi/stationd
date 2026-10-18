@@ -1,5 +1,17 @@
 # Administrer Icecast V1
 
+## Évolution retenue : configuration par StationDeck
+
+Le service/DNS Icecast V1 est désormais **icecastd** dans le Compose. `station-admin` reste le service administratif
+distinct. StationDeck sera l'autorité d'authoring, avec backend permanent et
+récupération gRPC par les démons/adaptateurs. Le backend et l'agent de démonstration
+sont livrés ; le premier adaptateur Icecast réel est câblé, recette à faire :
+[câblage SD/icecastd](stationdeck-daemon-adapters.md). Ce protocole reste distinct
+de l'API d'administration existante sur 50061.
+Voir [configuration, découverte et plugins](stationdeck-configuration.md).
+La console retenue est une WebUI egui/WASM ; elle complète l'interface web native
+Icecast conservée pour le dépannage.
+
 Deux accès sont disponibles sur stationdev1, indépendamment de StationD :
 
 - `stationctl` V1 → daemon Rust `station-admin` en gRPC → API native Icecast ;
@@ -22,7 +34,7 @@ make icecast-test
 ```
 
 `icecast-init` crée désormais aussi `admin-api-token`, sans remplacer les
-secrets existants. `icecast-up` lance les deux services `icecast` et `admin`.
+secrets existants. `icecast-up` lance les deux services `icecastd` et `admin`.
 Icecast ne dépend pas du daemon administratif. L'arrêter ne redémarre pas
 Icecast et ne coupe pas ses connexions.
 
@@ -84,7 +96,7 @@ Si l'adresse LAN change, fournir la nouvelle adresse dans ICECAST_BIND.
 Pour revenir au loopback :
 
 ```sh
-ICECAST_BIND=127.0.0.1 docker compose -f docker/icecast/compose.yaml up -d --wait icecast
+ICECAST_BIND=127.0.0.1 docker compose -f docker/icecast/compose.yaml up -d --wait icecastd
 ```
 
 Le gRPC administratif reste publié sur le loopback de la VM.

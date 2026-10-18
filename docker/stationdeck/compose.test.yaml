@@ -1,0 +1,43 @@
+# Disposable gRPC fixture and browser, with no host ports or Internet egress.
+services:
+  gateway:
+    environment:
+      STATIONDECK_GRPC_ADDR: http://station-fixture:50051
+    depends_on:
+      station-fixture:
+        condition: service_started
+    restart: "no"
+  station-fixture:
+    build:
+      context: ../..
+      dockerfile: docker/stationdeck/Dockerfile
+      target: fixture
+    image: stationdeck-grpc-fixture:dev
+    init: true
+  deck:
+    ports: !reset []
+    restart: "no"
+  browser:
+    build:
+      context: ../..
+      dockerfile: docker/stationdeck/Dockerfile
+      target: qa
+    image: stationdeck-qa:dev
+    init: true
+    environment:
+      STATIONDECK_URL: http://deck:8080
+      STATIONDECK_FIXTURE_URL: http://station-fixture:8081
+      STATIONDECK_QA_TOKEN_FILE: /secrets/access-token
+    volumes: [gateway-secrets:/secrets:ro]
+    depends_on:
+      deck:
+        condition: service_healthy
+    shm_size: 256mb
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+networks:
+  default:
+    internal: true
+
+  configuration:
+    internal: true

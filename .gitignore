@@ -18,7 +18,14 @@ playlist.schema.json
 # Paquets d'exploitation (docker/package.sh)
 /dist
 grid/grid.toml
-grid/grid.toml
 
 # Secrets et états locaux V1
 /.local/
+
+# Caches et fichiers temporaires de développement
+__pycache__/
+*.py[cod]
+/.worktrees/
+*~
+*.swp
+*.swo

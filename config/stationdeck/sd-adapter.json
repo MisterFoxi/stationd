@@ -1,0 +1,10 @@
+{
+  "endpoint": "",
+  "allow_plaintext": true,
+  "tls_server_name": null,
+  "ca_file": null,
+  "token_file": null,
+  "plugin": "sd.listener-stats",
+  "instance": "default",
+  "daemon_plugin": "listener-stats"
+}

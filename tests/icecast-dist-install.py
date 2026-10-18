@@ -47,9 +47,9 @@ with tempfile.TemporaryDirectory(prefix='stationd-icecast-dist-test-') as folder
     assert config.read_text() == modified
     assert (node / '.env').read_bytes() == env
     deployment = json.loads((node / 'compose.yaml').read_text())
-    assert 'dist-extra-password' in deployment['services']['icecast']['secrets']
+    assert 'dist-extra-password' in deployment['services']['icecastd']['secrets']
     assert (secret.parent / 'dist-extra-password').is_file()
-    assert set(deployment['services']) == {'icecast', 'admin', 'router', 'monitor'}
+    assert set(deployment['services']) == {'icecastd', 'admin', 'router', 'monitor'}
     assert '/central-backups' not in (node / 'config/icecast/monitor.toml').read_text()
     assert not subprocess.check_output(['docker', 'ps', '-aq', '--filter', 'label=com.docker.compose.project=' + project], text=True).strip()
 assert live() == before

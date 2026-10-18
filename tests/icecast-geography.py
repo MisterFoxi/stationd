@@ -28,8 +28,8 @@ assert 1024 < len(data) < 2 * 1024 * 1024, "invalid fixture size"
 (GEO / "GeoLite2-City.mmdb").write_bytes(data)
 override = WORK / "compose.json"
 # Compose !reset removes inherited host publication rather than merging an empty list.
-override.write_text("services:\n  icecast:\n    ports: !reset []\n    volumes:\n      - " + str(CONFIG) + ":/etc/stationd:ro\n      - " + str(GEO) + ":/data/geoip:ro\n  admin:\n    ports: !reset []\n    volumes:\n      - " + str(CONFIG) + ":/etc/stationd:ro\n      - " + str(GEO) + ":/data/geoip:ro\n  smoke:\n    image: stationd-v1-icecast-live:dev\n    pull_policy: never\n")
-DC = ["docker", "compose", "-p", PROJECT, "-f", str(ROOT / "docker/icecast/compose.yaml"), "-f", str(override), "--profile", "test", "--profile", "live"]
+override.write_text("services:\n  icecastd:\n    ports: !reset []\n    volumes:\n      - " + str(CONFIG) + ":/etc/stationd:ro\n      - " + str(GEO) + ":/data/geoip:ro\n  admin:\n    ports: !reset []\n    volumes:\n      - " + str(CONFIG) + ":/etc/stationd:ro\n      - " + str(GEO) + ":/data/geoip:ro\n  smoke:\n    image: stationd-v1-icecast-live:dev\n    pull_policy: never\n")
+DC = ["docker", "compose", "-p", PROJECT, "-f", str(ROOT / "docker/icecast/compose.yaml"), "-f", str(ROOT / "docker/icecast/compose.standalone-test.yaml"), "-f", str(override), "--profile", "test", "--profile", "live"]
 
 def run(*args, **kw):
     return subprocess.run(args, check=True, capture_output=True, text=True, **kw).stdout
@@ -54,12 +54,12 @@ try:
     text = text.replace('audience = false', 'audience = true', 1).replace('audience = true\nhidden = false', 'audience = false\nhidden = false')
     (CONFIG / "icecast.toml").write_text(text)
     (CONFIG / "admin.toml").write_text((ROOT / "config/icecast/admin.toml").read_text().replace("sample_interval_seconds = 30", "sample_interval_seconds = 5"))
-    dc("up", "-d", "--no-build", "--wait", "icecast", "admin", "live-a")
+    dc("up", "-d", "--no-build", "--wait", "icecastd", "admin", "live-a")
     deadline = time.monotonic() + 20
     while not any(m["connected"] and m["mount"] == "/test-a.mp3" for m in ctl("status")["mounts"]):
         assert time.monotonic() < deadline, "source not ready"
         time.sleep(.3)
-    listen = "import urllib.request; r=urllib.request.urlopen(urllib.request.Request('http://icecast:8000/test-a.mp3',headers={'X-Forwarded-For':'81.2.69.160'}),timeout=120); exec('while r.read(4096): pass')"
+    listen = "import urllib.request; r=urllib.request.urlopen(urllib.request.Request('http://icecastd:8000/test-a.mp3',headers={'X-Forwarded-For':'81.2.69.160'}),timeout=120); exec('while r.read(4096): pass')"
     for name in clients:
         run("docker", "exec", "-d", name, "python3", "-c", listen)
     deadline = time.monotonic() + 10
@@ -86,7 +86,7 @@ try:
         assert time.monotonic() < deadline, history
         time.sleep(.5)
     assert ctl("history-status")["plugins"][0]["problem"] == ""
-    native_code = "import urllib.request,base64; from pathlib import Path; p=Path('/run/secrets/admin-password').read_text().strip(); q=urllib.request.Request('http://icecast:8000/admin/listclients?mount=/test-a.mp3'); q.add_header('Authorization','Basic '+base64.b64encode(('admin:'+p).encode()).decode()); print(urllib.request.urlopen(q).read().decode())"
+    native_code = "import urllib.request,base64; from pathlib import Path; p=Path('/run/secrets/admin-password').read_text().strip(); q=urllib.request.Request('http://icecastd:8000/admin/listclients?mount=/test-a.mp3'); q.add_header('Authorization','Basic '+base64.b64encode(('admin:'+p).encode()).decode()); print(urllib.request.urlopen(q).read().decode())"
     native = run("docker", "exec", clients[0], "python3", "-c", native_code)
     root = ET.fromstring(native)
     assert "81.2.69.160" in [e.text for e in root.iter() if e.tag.split('}')[-1] == "ip"], native

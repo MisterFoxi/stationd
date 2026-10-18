@@ -1,5 +1,8 @@
 # stationd
 
+StationDeck (V1) : [interface et recette en container](Doc/stationdeck-dev.md),
+[authoring, backend et découverte](Doc/stationdeck-config-dev.md).
+
 > **V1 :** développement sur `v1-dev`, propagation sur `V1`. Première étape :
 > [Icecast commun sans StationD](Doc/v1-icecast.md), avec
 > [historique géographique et Traefik](Doc/v1-icecast-history.md). Le reste de ce README décrit encore la 0.5.
@@ -874,3 +877,4 @@ media filesystem; moves between different mounts fail without changing the sourc
 Empty source directories remain. Playlist TOML folder filters and explicit media
 paths are not rewritten, so review those references when changing the disk layout.
 Run while playout is stopped to avoid invalidating paths already sent to Liquidsoap.
+Adaptateurs de configuration SD/icecastd : [câblage en containers](Doc/stationdeck-daemon-adapters.md).

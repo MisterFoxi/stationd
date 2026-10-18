@@ -1,0 +1,9 @@
+[package]
+name = "stationdeck-ui"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+egui = { version = "=0.33.3", default-features = false }
+stationdeck-services = { path = "../stationdeck-services" }

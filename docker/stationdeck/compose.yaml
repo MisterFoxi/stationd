@@ -1,0 +1,127 @@
+name: stationdeck
+services:
+  gateway-init:
+    build:
+      context: ../..
+      dockerfile: docker/stationdeck/Dockerfile
+      target: gateway
+    image: stationdeck-gateway:dev
+    command: [init-token]
+    volumes: [gateway-secrets:/secrets]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: "no"
+  gateway:
+    build:
+      context: ../..
+      dockerfile: docker/stationdeck/Dockerfile
+      target: gateway
+    image: stationdeck-gateway:dev
+    environment:
+      STATIONDECK_GRPC_ADDR: ${STATIONDECK_GRPC_ADDR:-}
+    volumes: [gateway-secrets:/secrets:ro]
+    extra_hosts: [host.docker.internal:host-gateway]
+    depends_on:
+      gateway-init:
+        condition: service_completed_successfully
+    init: true
+    read_only: true
+    tmpfs: [/tmp:mode=1777]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+  config-init:
+    build:
+      context: ../..
+      dockerfile: docker/stationdeck/Dockerfile
+      target: control
+    image: stationdeck-control:dev
+    command: [init]
+    environment:
+      STATIONDECK_CONTROL_CATALOG: /bootstrap/catalog-daemons.json
+    volumes: [config-author-secrets:/author-secrets, config-agent-secrets:/agent-secrets, ../../config/stationdeck:/bootstrap:ro]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      disable: true
+    restart: "no"
+  control:
+    build:
+      context: ../..
+      dockerfile: docker/stationdeck/Dockerfile
+      target: control
+    image: stationdeck-control:dev
+    environment:
+      STATIONDECK_CONTROL_CATALOG: /bootstrap/catalog-daemons.json
+    networks: [default, configuration]
+    volumes:
+      - ../../config/stationdeck:/bootstrap:ro
+      - config-state:/data
+      - config-author-secrets:/secrets/authors:ro
+      - config-agent-secrets:/secrets/agents:ro
+    depends_on:
+      config-init:
+        condition: service_completed_successfully
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+  config-demo-agent:
+    profiles: [config-demo]
+    image: stationdeck-control:dev
+    command: [agent]
+    environment:
+      STATIONDECK_CONFIG_ENDPOINT: ${STATIONDECK_CONFIG_ENDPOINT:-}
+    volumes:
+      - ../../config/stationdeck:/bootstrap:ro
+      - config-demo-state:/data
+      - type: volume
+        source: config-agent-secrets
+        target: /credential
+        read_only: true
+        volume:
+          subpath: demo-1
+    depends_on:
+      control:
+        condition: service_healthy
+    init: true
+    healthcheck:
+      disable: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+  deck:
+    build:
+      context: ../..
+      dockerfile: docker/stationdeck/Dockerfile
+      target: runtime
+    image: stationdeck:dev
+    init: true
+    depends_on:
+      gateway:
+        condition: service_healthy
+      control:
+        condition: service_healthy
+    ports:
+      - "${STATIONDECK_BIND:-0.0.0.0}:${STATIONDECK_PORT:-18081}:8080"
+    read_only: true
+    tmpfs: [/tmp:mode=1777]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+    stop_grace_period: 5s
+volumes:
+  gateway-secrets:
+  config-author-secrets:
+  config-agent-secrets:
+  config-state:
+  config-demo-state:
+
+networks:
+  configuration:
+    name: ${STATIONDECK_CONFIGURATION_NETWORK:-${COMPOSE_PROJECT_NAME}-configuration}
+    driver: bridge

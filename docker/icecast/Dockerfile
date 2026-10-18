@@ -28,7 +28,7 @@ WORKDIR /workspace/plugins/listener-stats-wasm
 COPY plugins/listener-stats-wasm/ ./
 RUN cargo build --release --locked --target wasm32-unknown-unknown
 
-FROM ubuntu:26.04 AS server
+FROM ubuntu:26.04 AS standalone
 ARG ICECAST_VERSION=2.5.0-1
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
@@ -73,3 +73,35 @@ COPY --from=admin-build /out/station-watch /out/stationctl /usr/local/bin/
 RUN mkdir -p /var/lib/station-monitor && chown nobody:nogroup /var/lib/station-monitor
 USER nobody
 ENTRYPOINT ["station-watch"]
+
+# Agent compiled from this checkout: no prebuilt local image is required.
+FROM rust:1.99-slim-bookworm AS control-build
+ENV CARGO_BUILD_JOBS=2 CARGO_TARGET_DIR=/build
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends protobuf-compiler pkg-config libssl-dev \
+ && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+COPY Cargo.toml Cargo.lock build.rs ./
+COPY crates/ crates/
+COPY src/ src/
+COPY plugins/station-player/ plugins/station-player/
+COPY proto/ proto/
+COPY migrations/ migrations/
+COPY config/stationdeck/ config/stationdeck/
+RUN --mount=type=cache,id=stationdeck-registry,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=stationdeck-control-target,target=/build,sharing=locked \
+    cargo build --locked --release -p stationdeck-control \
+ && mkdir -p /control-out && cp /build/release/stationdeck-control /control-out/
+
+# Normal V1 server always contains and starts its configuration agent.
+FROM standalone AS server
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends python3 \
+ && rm -rf /var/lib/apt/lists/* \
+ && mkdir -p /data /managed /usr/local/lib/stationdeck \
+ && chown 1000:1000 /data /managed
+COPY --from=control-build /control-out/stationdeck-control /usr/local/bin/
+COPY docker/stationdeck/icecast-managed.py /usr/local/lib/stationdeck/
+COPY --chmod=0755 docker/stationdeck/apply-icecast /usr/local/bin/stationdeck-apply-icecast
+USER 1000:1000
+ENTRYPOINT ["python3", "/usr/local/lib/stationdeck/icecast-managed.py"]

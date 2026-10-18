@@ -7,11 +7,18 @@ use std::collections::BTreeMap;
 use tonic::Status;
 
 impl Admin {
-    pub(crate) fn configuration(&self) -> ConfigDocument {
-        ConfigDocument {
-            toml: self.raw_config.clone(),
-            revision: revision(&self.raw_config),
-        }
+    pub(crate) fn configuration(&self) -> Result<ConfigDocument, Status> {
+        let text = match &self.effective_config {
+            Some(path) => std::fs::read_to_string(path)
+                .map_err(|_| Status::unavailable("effective Icecast configuration unavailable"))?,
+            None => self.raw_config.clone(),
+        };
+        Config::parse(&text)
+            .map_err(|_| Status::unavailable("effective Icecast configuration is invalid"))?;
+        Ok(ConfigDocument {
+            revision: revision(&text),
+            toml: text,
+        })
     }
     pub(crate) fn validate_configuration(&self, text: &str) -> Result<ConfigCheck, Status> {
         let config = Config::parse(text).map_err(|e| Status::invalid_argument(e.to_string()))?;

@@ -1,7 +1,55 @@
 # V1 — première étape : Icecast commun
 
+## Décision actuelle : icecastd et StationDeck
+
+Le service/container Icecast **V1** est désormais nommé **icecastd** dans
+le Compose et le DNS interne pour le distinguer de l'Icecast 0.5. Les commandes
+`make icecast-*`, les chemins, tags d'images et l'identité du projet/volumes restent
+inchangés. La procédure de migration ci-dessous concerne uniquement le banc V1.
+StationDeck assure l'authoring ;
+son backend permanent distribue la configuration à son agent icecastd par gRPC.
+Cet agent fait partie du démarrage normal (`make icecast-up`), sans overlay.
+Démarrer StationDeck une première fois pour initialiser le réseau et le jeton.
+Sans publication ni cache validé, Icecast attend ; aucun fallback sur le TOML local.
+Guide : [démarrage et cache](stationdeck-daemon-adapters.md).
+Voir [configuration et plugins](stationdeck-configuration.md).
+La console retenue est maintenant une **WebUI egui/WASM**, servie en container,
+et non une console native : cette décision remplace la formulation initiale ci-dessous.
+
 Développement sur `v1-dev`, propagation des versions validées sur `V1`.
 `main` et `dev` restent consacrées à la version 0.5.
+
+## Migration du service V1 vers icecastd
+
+Sur un nouveau banc, les commandes habituelles lancent directement `icecastd`.
+Sur un banc déjà démarré avec le service V1 `icecast`, arrêter d'abord ce service
+avec l'ancien Compose **avant de mettre à jour les fichiers**, puis lancer le
+nouveau Compose. Ne pas supprimer les volumes. Les connexions audio sont coupées
+pendant cette migration ; sources et auditeurs doivent se reconnecter.
+
+```sh
+# Avant la mise à jour, dans le checkout V1 uniquement :
+docker compose -f docker/icecast/compose.yaml stop icecast
+# Après la mise à jour :
+make icecast-up
+# Si les sources synthétiques et le routeur étaient actifs :
+make icecast-switch-up
+```
+
+Si les fichiers sont déjà à jour, identifier l'ancien container uniquement par
+les labels `com.docker.compose.project=stationd-v1-icecast` et
+`com.docker.compose.service=icecast`, puis arrêter ce container avant le lancement.
+Ne pas toucher au service `icecast` du Compose racine de la référence 0.5.
+Le container V1 obtenu se nomme `stationd-v1-icecast-icecastd-1`.
+L'ancien container arrêté peut ensuite être retiré sans supprimer de volume.
+
+Pour un paquet déjà installé, arrêter `icecast` avec le wrapper `compose` de
+l'installation avant la mise à niveau. L'installateur refuse un ancien service
+encore actif. Dans le `router.toml` conservé de cette installation, remplacer
+uniquement l'ancienne URL interne `http://icecast:8000` par
+`http://icecastd:8000` ; conserver les autres paramètres locaux. Reprendre les
+services avec le nouveau paquet. Les archives de sauvegarde précédentes restent
+restaurables dans leur environnement isolé avec leur nom DNS d'origine.
 
 ## Cap retenu
 

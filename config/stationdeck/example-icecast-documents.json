@@ -1,0 +1,8 @@
+[
+  {"plugin":"icecast.settings","instance":"default","version":1,"values":{
+    "location":"StationD - Icecast commun",
+    "hostname":"stationdev1.lan",
+    "admin_email":"admin@localhost",
+    "max_clients":32
+  }}
+]

@@ -1,0 +1,37 @@
+# Optional external adapter for an existing StationD daemon.
+services:
+  config-sd-agent:
+    profiles: [sd-config]
+    image: stationdeck-control:dev
+    command: [agent]
+    environment:
+      STATIONDECK_AGENT_CONFIG: /bootstrap/sd-agent.json
+      STATIONDECK_CONFIG_ENDPOINT: ${STATIONDECK_CONFIG_ENDPOINT:-}
+      STATIONDECK_SD_ENDPOINT: ${STATIONDECK_SD_ENDPOINT:-}
+    volumes:
+      - ../../config/stationdeck:/bootstrap:ro
+      - config-sd-state:/data
+      - type: volume
+        source: config-agent-secrets
+        target: /credential
+        read_only: true
+        volume:
+          subpath: sd-listener-stats-1
+    networks: [configuration]
+    extra_hosts: [host.docker.internal:host-gateway]
+    depends_on:
+      control:
+        condition: service_healthy
+    init: true
+    healthcheck:
+      disable: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+volumes:
+  config-sd-state:
+networks:
+  configuration:
+    name: ${STATIONDECK_CONFIGURATION_NETWORK:-${COMPOSE_PROJECT_NAME}-configuration}
+    driver: bridge

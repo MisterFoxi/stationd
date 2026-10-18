@@ -11,7 +11,7 @@ default-run = "stationd"
 # racine = membre par défaut) ; la TUI se compile avec `-p stationd-tui`.
 # Les plugins WASM restent autonomes ; station-player est un crate natif du workspace.
 [workspace]
-members = [".", "crates/stationd-proto", "crates/stationd-tui", "crates/stationd-client-config", "plugins/station-player"]
+members = [".", "crates/stationd-proto", "crates/stationd-tui", "crates/stationd-client-config", "plugins/station-player", "crates/stationdeck-ui", "crates/stationdeck", "crates/stationdeck-services", "crates/stationdeck-demo", "crates/stationdeck-grpc", "crates/stationdeck-gateway", "crates/stationdeck-control", "crates/stationdeck-config-ui"]
 default-members = ["."]
 exclude = ["plugins"]
 

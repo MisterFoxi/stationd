@@ -21,7 +21,7 @@ class ApplicationTest(unittest.TestCase):
             active = b"active-before-edit"
             with patch.object(app, "CANONICAL", canonical), patch.object(app, "restart_services", side_effect=[RuntimeError("unhealthy"), None]) as restart:
                 with self.assertRaisesRegex(RuntimeError, "unhealthy"):
-                    app.apply_with_rollback(b"candidate", active, {"icecast","admin"}, backup)
+                    app.apply_with_rollback(b"candidate", active, {"icecastd","admin"}, backup)
             self.assertEqual(canonical.read_bytes(), active)
             self.assertEqual(backup.read_bytes(), active)
             self.assertEqual(restart.call_count, 2)

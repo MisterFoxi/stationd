@@ -13,7 +13,7 @@ import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 
-BASE = os.environ.get("ICECAST_URL", "http://icecast:8000").rstrip("/")
+BASE = os.environ.get("ICECAST_URL", "http://icecastd:8000").rstrip("/")
 SECRETS = Path("/run/secrets")
 
 

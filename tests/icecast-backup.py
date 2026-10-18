@@ -65,10 +65,28 @@ class ExtractionTests(unittest.TestCase):
 
 
 class CentralScopeTests(unittest.TestCase):
+    def test_old_and_new_archive_service_names(self):
+        for service in ("icecast", "icecastd"):
+            self.assertEqual(backup.archived_icecast_service({service: {}, "admin": {}}), service)
+        for services in ({"admin": {}}, {"icecast": {}, "icecastd": {}}):
+            with self.assertRaisesRegex(RuntimeError, "exactly one"):
+                backup.archived_icecast_service(services)
+
+    def test_legacy_stream_probe_uses_archived_dns(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "icecast.toml").write_text('[[mounts]]\nname="/test.mp3"\npassword_file="source-password"\n')
+            for service in ("icecast", "icecastd"):
+                deployment = {"services": {service: {"secrets": [{"source": "source-password"}]}, "admin": {}}}
+                backup.add_stream_probes(deployment, root, "fixture:image")
+                probe = deployment["services"]["restore-probe-0"]
+                self.assertEqual(probe["environment"]["ICECAST_HOST"], service)
+                self.assertEqual(set(probe["depends_on"]), {service})
+
     def test_station_count_does_not_define_central_services(self):
-        deployment = {"services": {"icecast":{},"admin":{},"router":{}, **{f"station-{i}":{} for i in range(100)}}, "volumes":{}}
-        result = backup.central_deployment(deployment, ("icecast","admin","router"))
-        self.assertEqual(set(result["services"]), {"icecast","admin","router"})
+        deployment = {"services": {"icecastd":{},"admin":{},"router":{}, **{f"station-{i}":{} for i in range(100)}}, "volumes":{}}
+        result = backup.central_deployment(deployment, ("icecastd","admin","router"))
+        self.assertEqual(set(result["services"]), {"icecastd","admin","router"})
         self.assertEqual(len(deployment["services"]), 103)
 
     def test_stream_probes_follow_mounts_for_zero_one_three_and_many_sources(self):
@@ -82,7 +100,7 @@ class CentralScopeTests(unittest.TestCase):
                     secrets.append({"source":f"source-{index}","target":f"/run/secrets/source-{index}"})
                 (root/"icecast.toml").write_text(text)
                 (root/"router.toml").write_text('output_mount="/radio.mp3"\n')
-                deployment={"services":{"icecast":{"secrets":secrets},"admin":{},"router":{}}}
+                deployment={"services":{"icecastd":{"secrets":secrets},"admin":{},"router":{}}}
                 backup.add_stream_probes(deployment,root,"test-image")
                 probes=[s for name,s in deployment["services"].items() if name.startswith("restore-probe-")]
                 self.assertEqual(len(probes),count)

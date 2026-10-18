@@ -1,0 +1,3 @@
+[
+  {"plugin":"sd.listener-stats","instance":"default","version":1,"values":{"retention_days":30}}
+]

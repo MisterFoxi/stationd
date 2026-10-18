@@ -1,16 +1,33 @@
 name: stationd-v1-icecast
 services:
-  icecast:
+  icecastd:
     build:
       context: ../..
       dockerfile: docker/icecast/Dockerfile
       target: server
     image: stationd-v1-icecast:dev
+    entrypoint: [python3, /usr/local/lib/stationdeck/icecast-managed.py]
+    labels:
+      stationdeck.configuration.managed: 'true'
+    environment:
+      STATIONDECK_AGENT_CONFIG: /bootstrap/icecast-agent.json
+      STATIONDECK_CONFIG_ENDPOINT: ${STATIONDECK_CONFIG_ENDPOINT:-}
+    networks: [default, configuration]
+    init: true
     ports:
       - "${ICECAST_BIND:-192.168.1.118}:${ICECAST_PORT:-18000}:8000"
     volumes:
       - ../../config/icecast:/etc/stationd:ro
       - ../../data/geoip:/data/geoip:ro
+      - ../../config/stationdeck:/bootstrap:ro
+      - config-icecast-state:/data
+      - config-icecast-effective:/managed
+      - type: volume
+        source: deck-agent-secrets
+        target: /credential
+        read_only: true
+        volume:
+          subpath: icecastd-1
     secrets:
       - admin-password
       - source-a-password
@@ -41,9 +58,9 @@ services:
       dockerfile: docker/icecast/Dockerfile
       target: administration
     image: stationd-v1-admin:dev
-    command: ["--bind", "0.0.0.0:50061", "--settings", "/etc/stationd/admin.toml"]
+    command: ["--bind", "0.0.0.0:50061", "--settings", "/etc/stationd/admin.toml", "--effective-config", "/managed/icecast.toml"]
     depends_on:
-      icecast:
+      icecastd:
         condition: service_healthy
     ports:
       - "127.0.0.1:${STATION_ADMIN_PORT:-50061}:50061"
@@ -51,6 +68,7 @@ services:
       - ../../config/icecast:/etc/stationd:ro
       - ../../data/geoip:/data/geoip:ro
       - admin-state:/var/lib/station-admin
+      - config-icecast-effective:/managed:ro
     secrets:
       - admin-password
       - admin-api-token
@@ -79,12 +97,12 @@ services:
       dockerfile: docker/icecast/Dockerfile
       target: test-tools
     depends_on:
-      icecast:
+      icecastd:
         condition: service_healthy
       admin:
         condition: service_healthy
     environment:
-      ICECAST_URL: http://icecast:8000
+      ICECAST_URL: http://icecastd:8000
       STATION_ADMIN_URL: http://admin:50061
     secrets:
       - admin-password
@@ -104,14 +122,14 @@ services:
     environment:
       SOURCE_LABEL: a
     depends_on:
-      icecast:
+      icecastd:
         condition: service_healthy
     secrets:
       - source-a-password
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
-    restart: "no"
+    restart: unless-stopped
 
   live-b:
     profiles: [live]
@@ -120,14 +138,14 @@ services:
     environment:
       SOURCE_LABEL: b
     depends_on:
-      icecast:
+      icecastd:
         condition: service_healthy
     secrets:
       - source-b-password
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
-    restart: "no"
+    restart: unless-stopped
 
 
   router:
@@ -140,7 +158,7 @@ services:
     entrypoint: ["station-router"]
     command: ["--bind", "0.0.0.0:50062"]
     depends_on:
-      icecast:
+      icecastd:
         condition: service_healthy
     volumes:
       - ../../config/icecast/router.toml:/etc/stationd/router.toml:ro
@@ -212,3 +230,12 @@ volumes:
   admin-state:
   router-state:
   monitor-state:
+  config-icecast-state:
+  config-icecast-effective:
+  deck-agent-secrets:
+    external: true
+    name: ${STATIONDECK_AGENT_SECRETS_VOLUME:-stationdeck_config-agent-secrets}
+networks:
+  configuration:
+    external: true
+    name: ${STATIONDECK_CONFIGURATION_NETWORK:-stationdeck-configuration}

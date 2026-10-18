@@ -170,7 +170,7 @@ icecast-test: ## Deux sources et deux auditeurs synthétiques, sans StationD
 > $(ICECAST_DC) --profile test run --build --rm smoke
 
 icecast-logs: ## Suit les logs du serveur Icecast commun
-> $(ICECAST_DC) logs -f icecast
+> $(ICECAST_DC) logs -f icecastd
 
 icecast-down: ## Arrête uniquement le banc Icecast V1
 > $(ICECAST_DC) down
@@ -195,7 +195,7 @@ icecast-live-down: ## Arrête les deux sources continues, garde Icecast et admin
 
 .PHONY: icecast-switch-up icecast-switch-down
 icecast-switch-up: icecast-init ## Lance A/B et le routeur sur /radio.mp3, sans StationD
-> $(ICECAST_DC) --profile live --profile switch up -d --build icecast admin live-a live-b router
+> $(ICECAST_DC) --profile live --profile switch up -d --build icecastd admin live-a live-b router
 
 icecast-switch-down: ## Arrête le routeur de bascule et les deux sources de test
 > $(ICECAST_DC) --profile live --profile switch stop router live-a live-b
@@ -289,3 +289,71 @@ icecast-dist-test: ## Tests du paquet et de la conservation des configurations V
 icecast-dist-install-test: ## Validation du vrai paquet sans lancer les services (BUNDLE=archive.tar)
 > @test -n "$(BUNDLE)" || { echo "Fournir BUNDLE=dist/stationd-icecast-....tar" >&2; exit 1; }
 > python3 -B tests/icecast-dist-install.py "$(BUNDLE)"
+
+# StationDeck web: WASM frontend and narrow gRPC gateway, all in containers.
+.PHONY: deck-build deck-check deck-smoke deck deck-down deck-token
+DECK_DC = docker compose -f docker/stationdeck/compose.yaml
+
+deck-build: ## Build the WebAssembly frontend and gRPC gateway images
+> $(DECK_DC) build deck gateway control
+
+deck-check: ## Run formatting, Rust/WASM tests, Clippy and gateway checks
+> docker build -f docker/stationdeck/Dockerfile --target checks -t stationdeck-check:dev .
+> docker build -f docker/stationdeck/Dockerfile --target gateway-checks -t stationdeck-gateway-check:dev .
+> docker build -f docker/stationdeck/Dockerfile --target control-checks -t stationdeck-control-check:dev .
+
+deck-smoke: ## Test Chromium against an isolated gRPC fixture; no public ports
+> @set -eu; \
+>   project="stationdeck-test-$$$$"; \
+>   trap 'docker compose -p "$$project" -f docker/stationdeck/compose.yaml -f docker/stationdeck/compose.test.yaml down --volumes --remove-orphans' EXIT; \
+>   docker compose -p "$$project" -f docker/stationdeck/compose.yaml -f docker/stationdeck/compose.test.yaml build; \
+>   docker compose -p "$$project" -f docker/stationdeck/compose.yaml -f docker/stationdeck/compose.test.yaml run --rm browser
+
+deck: ## Start the WebUI on port 18081 (STATIONDECK_PORT=...)
+> $(DECK_DC) up -d --build --wait
+
+deck-down: ## Stop only the StationDeck web project
+> $(DECK_DC) --profile config-demo down
+
+deck-token: ## Show the gateway access token in your own terminal; keep it private
+> $(DECK_DC) exec -T gateway cat /secrets/access-token
+> @echo
+
+
+.PHONY: deck-config-demo deck-author-token deck-reader-token
+deck-config-demo: ## Start the configuration demo agent; no station changes
+> $(DECK_DC) --profile config-demo up -d --build --wait
+
+deck-author-token: ## Show the configuration editor token in your own terminal
+> $(DECK_DC) exec -T control cat /secrets/authors/editor
+> @echo
+
+deck-reader-token: ## Show the read-only configuration token in your own terminal
+> $(DECK_DC) exec -T control cat /secrets/authors/reader
+> @echo
+
+.PHONY: deck-config-smoke
+deck-config-smoke: ## Isolated configuration authoring, discovery, offline cache and recovery
+> sh tests/stationdeck-config-smoke.sh
+
+# Real configuration adapters. Tests are deliberately separate targets.
+.PHONY: deck-daemon-build deck-daemons deck-sd-agent deck-daemons-down
+DECK_DAEMON_DC = $(DECK_DC) -f docker/stationdeck/compose.daemons.yaml
+ICECAST_DECK_DC = docker compose -f docker/icecast/compose.yaml -f docker/icecast/compose.stationdeck.yaml
+export STATIONDECK_SD_ENDPOINT
+
+deck-daemon-build: ## Build the SD adapter and default icecastd image with its configuration agent
+> $(DECK_DC) build control
+> docker compose -f docker/icecast/compose.yaml build icecastd admin
+
+deck-daemons: ## Start StationDeck and icecastd; publication remains explicit
+> $(DECK_DAEMON_DC) up -d --wait config-init control gateway deck
+> $(ICECAST_DECK_DC) up -d --wait icecastd admin
+
+deck-sd-agent: ## Connect an existing SD; requires STATIONDECK_SD_ENDPOINT=FQDN:port
+> @test -n "$(STATIONDECK_SD_ENDPOINT)" || { echo 'Set STATIONDECK_SD_ENDPOINT to the existing StationD gRPC endpoint.' >&2; exit 1; }
+> $(DECK_DAEMON_DC) --profile sd-config up -d --wait config-sd-agent
+
+deck-daemons-down: ## Stop managed Icecast/admin and configuration adapters, retaining volumes
+> $(ICECAST_DECK_DC) stop icecastd admin
+> $(DECK_DAEMON_DC) --profile sd-config --profile config-demo stop

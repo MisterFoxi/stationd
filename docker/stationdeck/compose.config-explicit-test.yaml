@@ -1,0 +1,6 @@
+services:
+  config-demo-agent:
+    environment:
+      STATIONDECK_AGENT_CONFIG: /test/agent-explicit.json
+    volumes:
+      - ../../tests/stationdeck-agent-explicit.json:/test/agent-explicit.json:ro

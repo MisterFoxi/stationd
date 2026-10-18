@@ -20,7 +20,7 @@ LOCAL = ROOT / ".local/icecast"
 DC = ["docker", "compose", "-f", str(ROOT / "docker/icecast/compose.yaml")]
 LIMIT = 1024 * 1024 * 1024
 RECOVERY_IMAGE = "stationd-v1-icecast-recovery:dev"
-CENTRAL_SERVICES = ("icecast", "admin", "router")
+CENTRAL_SERVICES = ("icecastd", "admin", "router")
 
 
 def run(args, **kw):
@@ -86,7 +86,7 @@ def create():
     deployment = json.loads(run([*DC, "--profile", "*", "config", "--format", "json"], text=True))
     owners = {name: container for name in CENTRAL_SERVICES if name in deployment["services"]
             if (container := inspect(name, required=name != "router")) is not None}
-    if not {"icecast", "admin"} <= owners.keys(): raise RuntimeError("central Icecast/admin services are required")
+    if not {"icecastd", "admin"} <= owners.keys(): raise RuntimeError("central Icecast/admin services are required")
     deployment = central_deployment(deployment, owners)
     image = recovery_image()
     with private_work() as temporary:
@@ -222,14 +222,22 @@ def extract(archive_path, destination):
     return manifest
 
 
+def archived_icecast_service(services):
+    names = {"icecast", "icecastd"} & set(services)
+    if len(names) != 1:
+        raise RuntimeError("backup must contain exactly one Icecast service")
+    return names.pop()
+
+
 def rehearsal(archive_path, stream_probes=False):
     project = "stationd-restore-" + uuid.uuid4().hex[:10]
     with private_work() as temporary:
         root = Path(temporary) / "restored"
         manifest = extract(archive_path, root)
         tool_image = manifest.get("tools_image") or recovery_image()
-        images = {name: image for name, image in manifest["images"].items() if name in CENTRAL_SERVICES}
-        if not {"icecast", "admin"} <= images.keys(): raise RuntimeError("central service images missing")
+        icecast_service = archived_icecast_service(manifest["images"])
+        images = {name: image for name, image in manifest["images"].items() if name in {icecast_service, "admin", "router"}}
+        if not {icecast_service, "admin"} <= images.keys(): raise RuntimeError("central service images missing")
         if manifest["format"] == 2 and set(images) != set(manifest["images"]): raise RuntimeError("unsupported central data owner")
         for image in {*images.values(), tool_image}:
             if not re.fullmatch(r"sha256:[0-9a-f]{64}", image):
@@ -325,7 +333,7 @@ print(json.dumps(checks))
 
 STREAM_PROBE = """import os,pathlib,urllib.parse
 secret=pathlib.Path('/run/secrets/probe-password').read_text().strip()
-target='icecast://source:'+urllib.parse.quote(secret,safe='')+'@icecast:8000'+os.environ['MOUNT']
+target='icecast://source:'+urllib.parse.quote(secret,safe='')+'@'+os.environ['ICECAST_HOST']+':8000'+os.environ['MOUNT']
 os.execvp('ffmpeg',['ffmpeg','-nostdin','-hide_banner','-loglevel','quiet','-re','-f','lavfi','-i','sine=frequency=440:sample_rate=44100','-af','volume=0.15','-ac','1','-c:a','libmp3lame','-b:a','64k','-reservoir','0','-content_type','audio/mpeg','-f','mp3',target])
 """
 
@@ -335,16 +343,17 @@ def add_stream_probes(deployment, config_root, image):
     outputs = set()
     if "router" in deployment["services"]:
         outputs.add(tomllib.loads((config_root / "router.toml").read_text())["output_mount"])
-    credentials = {Path(s.get("target", s["source"])).name: s["source"] for s in deployment["services"]["icecast"]["secrets"]}
+    icecast_service = archived_icecast_service(deployment["services"])
+    credentials = {Path(s.get("target", s["source"])).name: s["source"] for s in deployment["services"][icecast_service]["secrets"]}
     for index, mount in enumerate(m for m in config["mounts"] if m["name"] not in outputs):
         secret = credentials.get(mount["password_file"])
         if secret is None:
             raise RuntimeError("mount password is not provisioned in Icecast Compose secrets")
         deployment["services"][f"restore-probe-{index}"] = {
             "image":image,"pull_policy":"never","entrypoint":["python3","-c",STREAM_PROBE],
-            "environment":{"MOUNT":mount["name"]},
+            "environment":{"MOUNT":mount["name"],"ICECAST_HOST":icecast_service},
             "secrets":[{"source":secret,"target":"probe-password"}],
-            "depends_on":{"icecast":{"condition":"service_healthy"}},
+            "depends_on":{icecast_service:{"condition":"service_healthy"}},
             "read_only":True,"cap_drop":["ALL"],"security_opt":["no-new-privileges:true"]}
 
 def main():

@@ -1,0 +1,88 @@
+# Spécification documentaire V1 ; pas encore chargée à exécution.
+manifest_version = 1
+dependencies = []
+requires = []
+
+[module]
+id = "demo"
+version = "0.1.0"
+contract = "^1.0.0"
+entrypoint = "demo"
+
+[[provides]]
+id = "stationdeck.admin.overview"
+version = "1.0.0"
+
+[[capabilities]]
+id = "demo.overview"
+kind = "service"
+resource = "stationdeck.admin.overview"
+operations = ["read", "watch", "command"]
+
+[[permissions]]
+id = "demo.consulter"
+description = "Consulter les informations locales sans secrets."
+resource = "demo.overview"
+actions = ["read"]
+
+[[permissions]]
+id = "demo.simuler"
+description = "Simulation locale ou gestion de connexion ; aucun droit distant implicite."
+resource = "demo.overview"
+actions = ["command"]
+
+[[roles]]
+id = "demo.observateur"
+description = "Lecture locale seule."
+permissions = ["demo.consulter"]
+
+[[roles]]
+id = "demo.operateur"
+description = "Lecture et actions locales."
+permissions = ["demo.consulter", "demo.simuler"]
+
+[[contributions]]
+id = "demo.overview"
+kind = "view"
+title = "Station simulée"
+slot = "navigation"
+order = 100
+services = ["stationdeck.admin.overview"]
+permissions = ["demo.consulter"]
+
+[[contributions]]
+id = "demo.simulate"
+kind = "action"
+title = "Simuler une tâche"
+slot = "toolbar"
+order = 100
+services = ["stationdeck.admin.overview"]
+permissions = ["demo.simuler"]
+
+[[contributions]]
+id = "demo.menu"
+kind = "menu"
+title = "Module"
+slot = "main-menu"
+order = 100
+services = ["stationdeck.admin.overview"]
+permissions = ["demo.simuler"]
+action = "demo.simulate"
+
+[[contributions]]
+id = "demo.status"
+kind = "indicator"
+title = "État du module"
+slot = "status"
+order = 100
+services = ["stationdeck.admin.overview"]
+permissions = ["demo.consulter"]
+
+[[contributions]]
+id = "demo.tasks"
+kind = "view"
+title = "Tâches simulées"
+slot = "navigation"
+order = 100
+services = ["stationdeck.admin.overview"]
+permissions = ["demo.consulter"]
