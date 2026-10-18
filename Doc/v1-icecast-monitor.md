@@ -9,6 +9,12 @@ Les plugins dynamiques et l'administration native Icecast sont conservés.
 
 ## Démarrage et consultation
 
+La supervision fait maintenant partie du démarrage normal : `make icecast-up` et
+`make deck-daemons` lancent aussi `monitor`. Aucun profil supplémentaire requis.
+Icecast attend son démarrage ; le monitor ne dépend pas du démarrage du service admin.
+Le contrôle de santé Docker vérifie une réponse gRPC récente. Des alertes métier
+restent visibles dans le statut sans rendre le container indisponible.
+
 Depuis `/data/dev` :
 
 ```sh
@@ -20,7 +26,7 @@ make icecast-monitor-direct-status # gRPC direct si admin tombe
 make icecast-monitor-logs
 ```
 
-`icecast-monitor-up` construit et démarre **seulement** `monitor`, avec
+`icecast-monitor-up` reste un raccourci pour reconstruire et relancer **seulement** `monitor`, avec
 `--no-deps`. Les autres conteneurs ne sont pas recréés. La configuration est
 `config/icecast/monitor.toml`. Modifier les seuils nécessite de recréer uniquement
 ce conteneur. Les configurations Icecast, plugins et la MMDB sont relues à
@@ -185,3 +191,6 @@ durant la panne d'administration et le cas sans mount d'audience.
   de banc conservés ; sélection B inchangée, collecte complète reprise sans erreur.
 - Aucun StationD ni Liquidsoap lancé. Travail conservé sur `v1-dev`, socle
   `05104af`, sans commit, push ni propagation automatique vers `V1`.
+
+La recette isolée utilise explicitement compose.standalone-test.yaml ; elle ne
+contacte pas le backend StationDeck ni ses volumes de configuration.

@@ -1,6 +1,7 @@
 # Explicit isolated/local compatibility only. Never used by normal icecast-up.
 services:
   icecastd:
+    depends_on: !reset {}
     build:
       target: standalone
     image: stationd-v1-icecast-standalone:dev
@@ -18,6 +19,8 @@ services:
       - ../../config/icecast:/etc/stationd:ro
       - ../../data/geoip:/data/geoip:ro
       - admin-state:/var/lib/station-admin
+  monitor:
+    profiles: [monitor]
 volumes: !override
   admin-state:
   router-state:

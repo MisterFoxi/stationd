@@ -256,7 +256,7 @@ icecast-recovery-image: ## Construit l'auxiliaire de sauvegarde/restauration
 
 .PHONY: icecast-monitor-up icecast-monitor-status icecast-monitor-logs icecast-monitor-test
 icecast-monitor-up: ## Construit et démarre uniquement la supervision centrale
-> $(ICECAST_DC) --profile monitor up -d --build --no-deps monitor
+> $(ICECAST_DC) up -d --build --no-deps monitor
 
 icecast-monitor-status: ## État de supervision via gRPC administratif
 > $(ICECAST_DC) exec -T admin stationctl icecast monitoring
@@ -269,6 +269,7 @@ icecast-monitor-test: ## Tests Rust de temporisation, reprise et seuils, sans da
 
 .PHONY: icecast-monitor-integration-test
 icecast-monitor-integration-test: ## Alertes Docker isolees, sans emetteurs ni ports publies
+> $(ICECAST_DC) -f docker/icecast/compose.standalone-test.yaml build icecastd
 > python3 -B tests/icecast-monitor.py
 
 .PHONY: icecast-monitor-direct-status
@@ -344,7 +345,7 @@ export STATIONDECK_SD_ENDPOINT
 
 deck-daemon-build: ## Build the SD adapter and default icecastd image with its configuration agent
 > $(DECK_DC) build control
-> docker compose -f docker/icecast/compose.yaml build icecastd admin
+> docker compose -f docker/icecast/compose.yaml build icecastd admin monitor
 
 deck-daemons: ## Start StationDeck and icecastd; publication remains explicit
 > $(DECK_DAEMON_DC) up -d --wait config-init control gateway deck
@@ -355,5 +356,5 @@ deck-sd-agent: ## Connect an existing SD; requires STATIONDECK_SD_ENDPOINT=FQDN:
 > $(DECK_DAEMON_DC) --profile sd-config up -d --wait config-sd-agent
 
 deck-daemons-down: ## Stop managed Icecast/admin and configuration adapters, retaining volumes
-> $(ICECAST_DECK_DC) stop icecastd admin
+> $(ICECAST_DECK_DC) stop icecastd admin monitor
 > $(DECK_DAEMON_DC) --profile sd-config --profile config-demo stop

@@ -78,7 +78,7 @@ Renommage appliqué au banc stationdev1 : sources A/B et /radio.mp3 reconnectés
 sélection B conservée. 20 tests ciblés et recette audio/gRPC isolée passent.
 Backend persistant, authoring par schéma, gRPC pull/report et broadcast IPv4 livrés.
 Agent de démo actif sur stationdev1 ; endpoint prioritaire, cache valide et historique.
-SD listener-stats par RPC existantes ; agent icecastd obligatoire au démarrage normal.
+SD listener-stats par RPC existantes ; agent et monitor icecastd au démarrage normal.
 Guide et commandes : [adaptateurs](Doc/stationdeck-daemon-adapters.md).
 Images construites ; démarrage normal et valeurs Icecast vérifiés. Suites de tests à lancer.
 

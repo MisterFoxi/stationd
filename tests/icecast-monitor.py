@@ -11,7 +11,8 @@ import urllib.request
 import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
-DC = ['docker', 'compose', '-f', str(ROOT / 'docker/icecast/compose.yaml')]
+DC = ['docker', 'compose', '-f', str(ROOT / 'docker/icecast/compose.yaml'),
+      '-f', str(ROOT / 'docker/icecast/compose.standalone-test.yaml')]
 
 
 def run(args, **kwargs):

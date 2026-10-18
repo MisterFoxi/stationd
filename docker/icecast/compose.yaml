@@ -6,6 +6,9 @@ services:
       dockerfile: docker/icecast/Dockerfile
       target: server
     image: stationd-v1-icecast:dev
+    depends_on:
+      monitor:
+        condition: service_started
     entrypoint: [python3, /usr/local/lib/stationdeck/icecast-managed.py]
     labels:
       stationdeck.configuration.managed: 'true'
@@ -178,7 +181,6 @@ services:
     stop_grace_period: 5s
 
   monitor:
-    profiles: [monitor]
     build:
       context: ../..
       dockerfile: docker/icecast/Dockerfile
@@ -197,7 +199,7 @@ services:
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     healthcheck:
-      test: ["CMD", "station-watch", "--check"]
+      test: ["CMD", "stationctl", "--addr", "http://127.0.0.1:50063", "monitor-status"]
       interval: 30s
       timeout: 5s
       retries: 2
