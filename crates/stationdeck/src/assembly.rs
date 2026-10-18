@@ -14,7 +14,6 @@ pub fn modules() -> Vec<Box<dyn DeckModule>> {
 
 /// Local deployment policy. These grants convey no server identity or authoring rights.
 /// Change the overview binding to "grpc" to use the same consumer against the gateway.
-
 pub fn policy_with_provider(provider: &str) -> Policy {
     let mut policy = Policy::default();
     for (module, caps, permissions) in [

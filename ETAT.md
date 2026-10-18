@@ -96,3 +96,28 @@ Suite : compléter la tranche 2 (dépendances, services typés, validation compl
 des manifestes et politique), puis les services métier et autorisations serveur.
 Le catalogue actuel et le statut gRPC ne valent pas réalisation intégrale des
 tranches 2 à 4. Autres navigateurs et accessibilité restent à qualifier.
+
+## GUI — espace de fenêtres de plugins (18 octobre 2026)
+
+Direction visuelle validée : pupitre sombre graphite/teal, fenêtres egui par
+plugin, plusieurs plugins visibles simultanément et bandeau permanent des
+informations essentielles. Implémentation dans le shell StationDeck :
+
+- Une fenêtre par module, onglets pour ses contributions, fermeture sans arrêt
+  du module, réouverture et mise au premier plan depuis le lanceur.
+- Déplacement, redimensionnement, repli egui, épinglage de position/taille et
+  réorganisation en colonnes. Modules/Settings restent au-dessus des plugins.
+- Ouverture, onglet, épinglage, position et taille de contenu persistés dans les
+  préférences locales existantes ; migration par défaut des anciennes préférences.
+- Contribution optionnelle `DeckModule::summary` : bandeau permanent des vrais
+  instantanés StationD/Icecast, même lorsque les fenêtres sont fermées. États
+  pending/indisponible distincts ; aucune valeur fictive ni nouveau polling.
+
+Validation effectuée en containers sur stationdev1 : 9 tests Rust ciblés passent,
+Clippy ciblé natif/WASM sans avertissement, construction WASM normale et `ui-test`,
+recette Chromium complète réussie (multi-fenêtrage, fermeture/réouverture,
+épinglage/rechargement, thème, gRPC, perte de fournisseur, annulation, nettoyage
+des jetons et plugin Icecast autonome). Captures `.local/stationdeck-gui-qa/`.
+Le détail des vues métier reste à enrichir progressivement ; aucun contrôle de
+lecture ou chiffre simulé ajouté aux services réels. Guide :
+[espace de plugins](Doc/stationdeck-dev.md#plugin-workspace).

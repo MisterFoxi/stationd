@@ -136,6 +136,31 @@ checks provider binding, required-consumer blocking and credential cleanup.
 
 Compose 2.24.4+ is needed for the `!reset` test override.
 
+## Plugin workspace
+
+The shell displays one floating egui window per available plugin. A plugin with
+multiple contributions uses tabs inside its window. The launcher opens a window,
+selects its view and raises it. Closing a window only hides its UI: the module and
+its in-flight work remain active. Disable the module in Modules to stop it.
+Unavailable or unauthorized contributions are still filtered by the registry.
+
+Windows can be moved, resized, collapsed and pinned (movement/resize lock).
+Arrange windows resets geometry into columns, using one column on smaller
+viewports. Windows stay constrained to the workspace, below the permanent status
+strip and above the footer. Settings and Modules are separate host windows.
+
+Open state, selected tab, pin, position and content size are saved alongside
+existing browser preferences; old V1 preferences migrate through default fields.
+Credentials and remote snapshots are not included. Invalid saved preferences are
+preserved until explicitly replaced, as before.
+
+The permanent status strip calls the optional read-only `DeckModule::summary`
+contribution for running modules, even when their windows are hidden. Station
+overview and Icecast report actual service snapshots (explicitly labelled as
+snapshots), pending reads or unavailability. The strip does not initiate polling
+or turn a failed read into zero listeners. A module's summary must use its usual
+revocable service handles and must not perform network work on the UI thread.
+
 ## Browser behavior
 
 - English is the baseline for UI messages and diagnostics.

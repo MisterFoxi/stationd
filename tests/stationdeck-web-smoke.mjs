@@ -10,7 +10,7 @@ const browser = await chromium.launch({
   headless: true,
   args: ['--no-sandbox', '--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader'],
 });
-const context = await browser.newContext({ viewport: { width: 1120, height: 760 }, deviceScaleFactor: 1 });
+const context = await browser.newContext({ viewport: { width: 1600, height: 1000 }, deviceScaleFactor: 1 });
 context.setDefaultTimeout(15000);
 const page = await context.newPage();
 const errors = [];
@@ -33,23 +33,24 @@ async function animationFrame(target) {
   await target.evaluate(() => new Promise(resolve => requestAnimationFrame(() => resolve())));
 }
 async function controlRect(target, id) {
-  // egui popups have a sizing/placement pass before becoming interactive. A marker
-  // from that first pass is not sufficient evidence that its rectangle is final.
-  await target.waitForFunction(async id => {
-    const read = () => document.getElementById('stationdeck')?.getAttribute(`data-qa-${id}`);
-    const first = read();
-    if (!first) return false;
-    for (let frame = 0; frame < 3; frame++) {
-      await new Promise(resolve => requestAnimationFrame(resolve));
-      if (read() !== first) return false;
-    }
-    return true;
-  }, id);
-  const rect = await target.locator('#stationdeck').evaluate((canvas, id) =>
-    canvas.getAttribute(`data-qa-${id}`).split(',').map(Number), id);
-  assert(rect.length === 4 && rect.every(Number.isFinite), `Invalid geometry: ${id}`);
-  const canvas = await target.locator('#stationdeck').boundingBox();
-  return { x: canvas.x + rect[0], y: canvas.y + rect[1], width: rect[2], height: rect[3] };
+  // Read the same rectangle across completed frames. Keep the Playwright predicate
+  // synchronous: an async predicate can yield a Promise handle before its result.
+  const deadline = Date.now() + 15000;
+  while (Date.now() < deadline) {
+    const handle = await target.waitForFunction(id =>
+      document.getElementById('stationdeck')?.getAttribute(`data-qa-${id}`) || false, id);
+    const first = await handle.jsonValue();
+    await handle.dispose();
+    await animationFrame(target);
+    await animationFrame(target);
+    await animationFrame(target);
+    if (typeof first !== 'string' || await target.locator('#stationdeck').getAttribute(`data-qa-${id}`) !== first) continue;
+    const rect = first.split(',').map(Number);
+    assert(rect.length === 4 && rect.every(Number.isFinite), `Invalid geometry: ${id}`);
+    const canvas = await target.locator('#stationdeck').boundingBox();
+    return { x: canvas.x + rect[0], y: canvas.y + rect[1], width: rect[2], height: rect[3] };
+  }
+  throw new Error(`Unstable canvas control: ${id}`);
 }
 async function clickControl(target, id) {
   let rect = await controlRect(target, id);
@@ -98,7 +99,24 @@ try {
   assert.equal(response.status(), 200);
   assert.equal(await page.title(), 'StationDeck');
   await ready(page);
-  assert(brightness(await capture(page, 'web-home'), 700, 20) < 80, 'default dark theme did not apply');
+  assert(brightness(await capture(page, 'web-home'), 500, 5) < 80, 'default dark theme did not apply');
+  // Plugins coexist. Closing a window keeps its module alive; the launcher reopens it.
+  await controlRect(page, 'window-demo');
+  await controlRect(page, 'window-overview');
+  const demoWindow = await controlRect(page, 'window-demo');
+  await page.mouse.click(demoWindow.x + demoWindow.width - 15, demoWindow.y + 14);
+  await page.waitForFunction(() => JSON.parse(localStorage.getItem('stationdeck.settings.v1')).windows.demo.open === false);
+  await waitState('demo', 'Running');
+  await page.waitForFunction(() => !document.getElementById('stationdeck').hasAttribute('data-qa-window-demo'));
+  await clickControl(page, 'nav-demo.tasks');
+  await controlRect(page, 'demo-run');
+  await clickControl(page, 'pin-demo');
+  await page.waitForFunction(() => JSON.parse(localStorage.getItem('stationdeck.settings.v1')).windows.demo.pinned);
+  await page.reload();
+  await ready(page);
+  await controlRect(page, 'demo-run');
+  assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem('stationdeck.settings.v1')).windows.demo.view), 'demo.tasks');
+  await clickControl(page, 'pin-demo');
   const wasmResponse = await page.request.get(`${base}/pkg/stationdeck_bg.wasm`);
   assert.equal(wasmResponse.status(), 200);
   assert.match(wasmResponse.headers()['content-type'], /application\/wasm/);
@@ -112,11 +130,11 @@ try {
   await clickControl(page, 'theme-light');
   await page.waitForTimeout(200);
   const light = await capture(page, 'web-settings-light');
-  assert(brightness(light, 700, 20) > 200, 'light theme did not apply');
+  assert(brightness(light, 500, 5) > 200, 'light theme did not apply');
   await page.waitForFunction(() => Object.values(localStorage).some(value => value.includes('"theme":"Light"')));
   await page.reload();
   await ready(page);
-  assert(brightness(await capture(page, 'web-reloaded'), 700, 20) > 200, 'theme not restored');
+  assert(brightness(await capture(page, 'web-reloaded'), 500, 5) > 200, 'theme not restored');
   await page.keyboard.press('Control+,');
   await page.waitForTimeout(200);
   await page.keyboard.press('Control+Home');

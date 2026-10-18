@@ -116,12 +116,21 @@ pub struct ModuleDescriptor {
 /// stop must cancel outstanding work and revoke any in-memory credentials.
 pub trait DeckModule {
     fn manifest(&self) -> &str;
-    fn initialize(&mut self, _context: &stationdeck_services::registry::Context) -> Result<(), String> { Ok(()) }
-    fn start(&mut self, _context: &stationdeck_services::registry::Context) -> Result<(), String> { Ok(()) }
+    fn initialize(
+        &mut self,
+        _context: &stationdeck_services::registry::Context,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+    fn start(&mut self, _context: &stationdeck_services::registry::Context) -> Result<(), String> {
+        Ok(())
+    }
     fn dependencies_changed(&mut self, _context: &stationdeck_services::registry::Context) {}
     fn descriptor(&self) -> ModuleDescriptor;
     fn views(&self) -> Vec<ViewDescriptor>;
     fn ui(&mut self, id: &str, ui: &mut Ui);
+    /// Compact, read-only status, rendered even when the plugin window is closed.
+    fn summary(&self, _ui: &mut Ui) {}
     fn stop(&mut self);
 }
 
@@ -145,52 +154,125 @@ pub fn show_station_status(ui: &mut Ui, status: &stationdeck_services::StationSt
 /// The UI adapter delegates lifecycle and dependency resolution to the core registry.
 pub struct UiModule(Box<dyn DeckModule>);
 impl stationdeck_services::registry::Module for UiModule {
-    fn id(&self) -> &str { self.0.descriptor().id }
-    fn manifest(&self) -> &str { self.0.manifest() }
-    fn initialize(&mut self, context: &stationdeck_services::registry::Context) -> Result<(), String> {
+    fn id(&self) -> &str {
+        self.0.descriptor().id
+    }
+    fn manifest(&self) -> &str {
+        self.0.manifest()
+    }
+    fn initialize(
+        &mut self,
+        context: &stationdeck_services::registry::Context,
+    ) -> Result<(), String> {
         let manifest = stationdeck_services::manifest::Manifest::parse(self.0.manifest())?;
         let mut seen = std::collections::BTreeSet::new();
         for view in self.0.views() {
-            if !seen.insert(view.id) || !manifest.contributions.iter().any(|c| c.id == view.id && c.kind == "view") {
+            if !seen.insert(view.id)
+                || !manifest
+                    .contributions
+                    .iter()
+                    .any(|c| c.id == view.id && c.kind == "view")
+            {
                 return Err("Undeclared or duplicate UI view.".into());
             }
         }
         self.0.initialize(context)
     }
-    fn start(&mut self, context: &stationdeck_services::registry::Context) -> Result<(), String> { self.0.start(context) }
-    fn stop(&mut self) { self.0.stop(); }
-    fn dependencies_changed(&mut self, context: &stationdeck_services::registry::Context) { self.0.dependencies_changed(context); }
+    fn start(&mut self, context: &stationdeck_services::registry::Context) -> Result<(), String> {
+        self.0.start(context)
+    }
+    fn stop(&mut self) {
+        self.0.stop();
+    }
+    fn dependencies_changed(&mut self, context: &stationdeck_services::registry::Context) {
+        self.0.dependencies_changed(context);
+    }
 }
 pub struct ModuleCatalog {
     registry: stationdeck_services::registry::Registry<UiModule>,
 }
 impl ModuleCatalog {
-    pub fn new(modules: Vec<Box<dyn DeckModule>>, enabled: &[String], policy: stationdeck_services::registry::Policy) -> Self {
-        Self { registry: stationdeck_services::registry::Registry::new(modules.into_iter().map(UiModule).collect(), enabled, policy) }
+    pub fn summaries(&self, ui: &mut Ui) {
+        for entry in self.registry.entries() {
+            if entry.state == stationdeck_services::registry::State::Running {
+                ui.push_id(entry.module.0.descriptor().id, |ui| {
+                    entry.module.0.summary(ui)
+                });
+            }
+        }
+    }
+    pub fn new(
+        modules: Vec<Box<dyn DeckModule>>,
+        enabled: &[String],
+        policy: stationdeck_services::registry::Policy,
+    ) -> Self {
+        Self {
+            registry: stationdeck_services::registry::Registry::new(
+                modules.into_iter().map(UiModule).collect(),
+                enabled,
+                policy,
+            ),
+        }
     }
     pub fn descriptors(&self) -> Vec<ModuleDescriptor> {
-        self.registry.entries().iter().map(|e| e.module.0.descriptor()).collect()
+        self.registry
+            .entries()
+            .iter()
+            .map(|e| e.module.0.descriptor())
+            .collect()
     }
     pub fn is_enabled(&self, id: &str) -> bool {
-        self.registry.entries().iter().any(|e| e.module.0.descriptor().id == id && e.requested)
+        self.registry
+            .entries()
+            .iter()
+            .any(|e| e.module.0.descriptor().id == id && e.requested)
     }
     pub fn enabled_ids(&self) -> Vec<String> {
-        self.registry.entries().iter().filter(|e| e.requested).map(|e| e.module.0.descriptor().id.into()).collect()
+        self.registry
+            .entries()
+            .iter()
+            .filter(|e| e.requested)
+            .map(|e| e.module.0.descriptor().id.into())
+            .collect()
     }
-    pub fn status(&self, id: &str) -> Option<(stationdeck_services::registry::State, Option<&stationdeck_services::registry::Diagnostic>)> {
-        self.registry.entries().iter().find(|e| e.module.0.descriptor().id == id).map(|e| (e.state, e.diagnostic.as_ref()))
+    pub fn status(
+        &self,
+        id: &str,
+    ) -> Option<(
+        stationdeck_services::registry::State,
+        Option<&stationdeck_services::registry::Diagnostic>,
+    )> {
+        self.registry
+            .entries()
+            .iter()
+            .find(|e| e.module.0.descriptor().id == id)
+            .map(|e| (e.state, e.diagnostic.as_ref()))
     }
-    pub fn set_enabled(&mut self, id: &str, enabled: bool) -> Result<(), String> { self.registry.set_enabled(id, enabled) }
-    pub fn set_binding(&mut self, consumer: &str, service: &str, provider: &str) -> Result<(), String> {
+    pub fn set_enabled(&mut self, id: &str, enabled: bool) -> Result<(), String> {
+        self.registry.set_enabled(id, enabled)
+    }
+    pub fn set_binding(
+        &mut self,
+        consumer: &str,
+        service: &str,
+        provider: &str,
+    ) -> Result<(), String> {
         self.registry.set_binding(consumer, service, provider)
     }
     pub fn views(&self) -> Vec<ViewDescriptor> {
         let mut views = vec![];
         for entry in self.registry.entries() {
-            let Some(manifest) = &entry.manifest else { continue; };
+            let Some(manifest) = &entry.manifest else {
+                continue;
+            };
             for mut view in entry.module.0.views() {
-                if self.registry.contribution_allowed(entry.module.0.descriptor().id, view.id) {
-                    if let Some(c) = manifest.contributions.iter().find(|c| c.id == view.id) { view.order = c.order; }
+                if self
+                    .registry
+                    .contribution_allowed(entry.module.0.descriptor().id, view.id)
+                {
+                    if let Some(c) = manifest.contributions.iter().find(|c| c.id == view.id) {
+                        view.order = c.order;
+                    }
                     views.push(view);
                 }
             }
@@ -199,7 +281,9 @@ impl ModuleCatalog {
         views
     }
     pub fn render(&mut self, id: &str, ui: &mut Ui) -> bool {
-        if !self.views().iter().any(|v| v.id == id) { return false; }
+        if !self.views().iter().any(|v| v.id == id) {
+            return false;
+        }
         let module = id.split('.').next().unwrap_or_default();
         if let Some(module) = self.registry.module_mut(module) {
             ui.push_id(id, |ui| module.0.ui(id, ui));
@@ -272,7 +356,8 @@ mod catalog_tests {
         let stopped = Rc::new(Cell::new(0));
         let mut catalog = ModuleCatalog::new(
             vec![sample("sample", "sample.view", stopped.clone())],
-            &["sample".into()], stationdeck_services::registry::Policy::default(),
+            &["sample".into()],
+            stationdeck_services::registry::Policy::default(),
         );
         assert_eq!(catalog.views().len(), 1);
         catalog.set_enabled("sample", false).unwrap();
@@ -285,16 +370,29 @@ mod catalog_tests {
     #[test]
     fn duplicate_modules_and_foreign_view_ids_are_rejected() {
         let stopped = Rc::new(Cell::new(0));
-        let duplicate = ModuleCatalog::new(vec![
-            sample("sample", "sample.view", stopped.clone()),
-            sample("sample", "sample.other", stopped.clone()),
-        ], &["sample".into()], stationdeck_services::registry::Policy::default());
+        let duplicate = ModuleCatalog::new(
+            vec![
+                sample("sample", "sample.view", stopped.clone()),
+                sample("sample", "sample.other", stopped.clone()),
+            ],
+            &["sample".into()],
+            stationdeck_services::registry::Policy::default(),
+        );
         assert!(duplicate.views().is_empty());
-        assert!(matches!(duplicate.status("sample"), Some((stationdeck_services::registry::State::Failed, Some(_)))));
-        let foreign = ModuleCatalog::new(vec![sample("sample", "foreign.view", stopped)],
-            &["sample".into()], stationdeck_services::registry::Policy::default());
+        assert!(matches!(
+            duplicate.status("sample"),
+            Some((stationdeck_services::registry::State::Failed, Some(_)))
+        ));
+        let foreign = ModuleCatalog::new(
+            vec![sample("sample", "foreign.view", stopped)],
+            &["sample".into()],
+            stationdeck_services::registry::Policy::default(),
+        );
         assert!(foreign.views().is_empty());
-        assert!(matches!(foreign.status("sample"), Some((stationdeck_services::registry::State::Failed, Some(_)))));
+        assert!(matches!(
+            foreign.status("sample"),
+            Some((stationdeck_services::registry::State::Failed, Some(_)))
+        ));
     }
 }
 
