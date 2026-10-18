@@ -1,0 +1,16 @@
+# Optional connection to the existing icecastd administration service, independent of SD.
+services:
+  gateway:
+    environment:
+      STATIONDECK_ICECAST_GRPC_ADDR: ${STATIONDECK_ICECAST_GRPC_ADDR:-http://admin:50061}
+      STATIONDECK_ICECAST_TOKEN_FILE: /run/secrets/icecast-admin-api-token
+    secrets:
+      - icecast-admin-api-token
+    networks: [default, icecast-administration]
+secrets:
+  icecast-admin-api-token:
+    file: ../../.local/icecast/secrets/admin-api-token
+networks:
+  icecast-administration:
+    external: true
+    name: ${STATIONDECK_ICECAST_NETWORK:-stationd-v1-icecast_default}

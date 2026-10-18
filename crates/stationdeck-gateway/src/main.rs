@@ -44,7 +44,12 @@ async fn main() -> Result<(), &'static str> {
     let address = std::env::var("STATIONDECK_GRPC_ADDR")
         .ok()
         .filter(|value| !value.trim().is_empty());
-    let gateway = Gateway::new(token.trim(), address.as_deref())?;
+    let mut gateway = Gateway::new(token.trim(), address.as_deref())?;
+    if let Some(address) = std::env::var("STATIONDECK_ICECAST_GRPC_ADDR").ok().filter(|s| !s.trim().is_empty()) {
+        let path = std::env::var("STATIONDECK_ICECAST_TOKEN_FILE").unwrap_or_else(|_| "/run/secrets/icecast-admin-api-token".into());
+        let admin_token = fs::read_to_string(path).map_err(|_| "Icecast administration credential is unavailable.")?;
+        gateway = gateway.with_icecast(address.trim(), admin_token.trim())?;
+    }
     let listener = tokio::net::TcpListener::bind("0.0.0.0:8080")
         .await
         .map_err(|_| "Cannot bind the gateway listener.")?;

@@ -19,6 +19,7 @@ COPY crates/ crates/
 # Bundled manifests are embedded with include_str! by modules and registry tests.
 COPY Doc/stationdeck/ Doc/stationdeck/
 COPY plugins/station-player/ plugins/station-player/
+COPY plugins/icecastd-deck/ plugins/icecastd-deck/
 COPY proto/ proto/
 COPY migrations/ migrations/
 COPY config/stationdeck/ config/stationdeck/
@@ -35,12 +36,14 @@ RUN --mount=type=cache,id=stationdeck-registry,target=/usr/local/cargo/registry 
 FROM source AS checks
 RUN --mount=type=cache,id=stationdeck-registry,target=/usr/local/cargo/registry \
     --mount=type=cache,id=stationdeck-web-target,target=/build,sharing=locked \
-    cargo fmt -p stationdeck -p stationdeck-ui -p stationdeck-services -p stationdeck-demo -p stationdeck-grpc -p stationdeck-gateway -p stationdeck-config-ui -p stationdeck-control --check \
- && cargo test --locked -p stationdeck -p stationdeck-ui -p stationdeck-services -p stationdeck-demo -p stationdeck-grpc -p stationdeck-config-ui \
- && cargo clippy --locked -p stationdeck -p stationdeck-ui -p stationdeck-services -p stationdeck-demo -p stationdeck-grpc -p stationdeck-config-ui --all-targets -- -D warnings \
+    cargo fmt -p stationdeck -p stationdeck-ui -p stationdeck-services -p stationdeck-demo -p stationdeck-grpc -p stationdeck-gateway -p stationdeck-config-ui -p stationdeck-icecast -p icecastd-deck -p stationdeck-control --check \
+ && cargo test --locked -p stationdeck -p stationdeck-ui -p stationdeck-services -p stationdeck-demo -p stationdeck-grpc -p stationdeck-config-ui -p stationdeck-icecast -p icecastd-deck \
+ && cargo clippy --locked -p stationdeck -p stationdeck-ui -p stationdeck-services -p stationdeck-demo -p stationdeck-grpc -p stationdeck-config-ui -p stationdeck-icecast -p icecastd-deck --all-targets -- -D warnings \
  && cargo clippy --locked -p stationdeck --target wasm32-unknown-unknown -- -D warnings \
  && cargo tree --locked -p stationdeck --target wasm32-unknown-unknown --prefix none > /tmp/stationdeck-dependencies \
- && ! grep -E '^(stationd |tonic |prost |prost-types )' /tmp/stationdeck-dependencies
+ && ! grep -E '^(stationd |tonic |prost |prost-types )' /tmp/stationdeck-dependencies \
+ && cargo tree --locked -p icecastd-deck --target wasm32-unknown-unknown --prefix none > /tmp/icecast-plugin-dependencies \
+ && ! grep -E '^(stationdeck-icecast |gloo-net |tonic |prost |stationd )' /tmp/icecast-plugin-dependencies
 
 FROM source AS gateway-build
 RUN apt-get update && apt-get install -y --no-install-recommends protobuf-compiler libprotobuf-dev && rm -rf /var/lib/apt/lists/*

@@ -8,6 +8,8 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+icecastd-deck = { path = "../../plugins/icecastd-deck" }
+stationdeck-icecast = { path = "../stationdeck-icecast" }
 stationdeck-services = { path = "../stationdeck-services" }
 stationdeck-ui = { path = "../stationdeck-ui" }
 stationdeck-demo = { path = "../stationdeck-demo" }

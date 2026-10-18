@@ -1,0 +1,31 @@
+manifest_version = 1
+dependencies = []
+provides = []
+roles = []
+[module]
+id = "icecastd"
+version = "0.1.0"
+contract = "^1.0.0"
+entrypoint = "icecastd"
+[[requires]]
+id = "stationdeck.icecast.streams"
+version = "^1.0.0"
+optional = false
+[[capabilities]]
+id = "icecastd.streams"
+kind = "service"
+resource = "stationdeck.icecast.streams"
+operations = ["read"]
+[[permissions]]
+id = "icecastd.consulter"
+description = "Consulter les flux Icecast du fournisseur injecté."
+resource = "icecastd.streams"
+actions = ["read"]
+[[contributions]]
+id = "icecastd.streams"
+kind = "view"
+title = "Icecast streams"
+slot = "navigation"
+order = 25
+services = ["stationdeck.icecast.streams"]
+permissions = ["icecastd.consulter"]

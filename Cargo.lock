@@ -2527,6 +2527,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "icecastd-deck"
+version = "0.1.0"
+dependencies = [
+ "egui",
+ "stationdeck-services",
+ "stationdeck-ui",
+]
+
+[[package]]
 name = "icu_collections"
 version = "2.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5779,11 +5788,13 @@ version = "0.1.0"
 dependencies = [
  "eframe",
  "egui",
+ "icecastd-deck",
  "serde",
  "serde_json",
  "stationdeck-config-ui",
  "stationdeck-demo",
  "stationdeck-grpc",
+ "stationdeck-icecast",
  "stationdeck-services",
  "stationdeck-ui",
  "wasm-bindgen",
@@ -5841,6 +5852,7 @@ name = "stationdeck-gateway"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "prost 0.13.5",
  "serde_json",
  "sha2",
  "stationd-proto",
@@ -5849,11 +5861,25 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tonic",
+ "tonic-build",
  "tower 0.5.3",
 ]
 
 [[package]]
 name = "stationdeck-grpc"
+version = "0.1.0"
+dependencies = [
+ "egui",
+ "gloo-net",
+ "gloo-timers",
+ "stationdeck-services",
+ "stationdeck-ui",
+ "wasm-bindgen-futures",
+ "web-sys",
+]
+
+[[package]]
+name = "stationdeck-icecast"
 version = "0.1.0"
 dependencies = [
  "egui",

@@ -175,6 +175,8 @@ mod tests {
             include_str!("../../../Doc/stationdeck/grpc.module.toml"),
             include_str!("../../../Doc/stationdeck/configuration.module.toml"),
             include_str!("../../../Doc/stationdeck/overview.module.toml"),
+            include_str!("../../../crates/stationdeck-icecast/module.toml"),
+            include_str!("../../../plugins/icecastd-deck/module.toml"),
         ] { Manifest::parse(source).unwrap(); }
     }
     #[test]

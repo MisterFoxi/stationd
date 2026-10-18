@@ -1,0 +1,35 @@
+manifest_version = 1
+dependencies = []
+requires = []
+roles = []
+[module]
+id = "icecast-gateway"
+version = "0.1.0"
+contract = "^1.0.0"
+entrypoint = "icecast-gateway"
+[[provides]]
+id = "stationdeck.icecast.streams"
+version = "1.0.0"
+[[capabilities]]
+id = "icecast-gateway.connection"
+kind = "network"
+resource = "connection:icecast"
+operations = ["connect"]
+[[capabilities]]
+id = "icecast-gateway.streams"
+kind = "service"
+resource = "stationdeck.icecast.streams"
+operations = ["read"]
+[[permissions]]
+id = "icecast-gateway.connecter"
+description = "Connecter le fournisseur de supervision Icecast local."
+resource = "icecast-gateway.connection"
+actions = ["read", "connect", "disconnect"]
+[[contributions]]
+id = "icecast-gateway.connection"
+kind = "view"
+title = "Icecast connection"
+slot = "navigation"
+order = 24
+services = []
+permissions = ["icecast-gateway.connecter"]

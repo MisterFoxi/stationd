@@ -1,5 +1,24 @@
 # StationDeck — browser UI and modules
 
+## Icecast stream supervision through an autonomous plugin
+
+The standalone [icecastd-deck plugin](../plugins/icecastd-deck/README.md) consumes
+an injected typed service. Its manifest, grants, binding, lifecycle and view pass
+through the same registry as other modules. The separate `stationdeck-icecast`
+provider connects to the Deck gateway; the gateway calls IcecastAdmin.GetStatus.
+No StationD daemon or StationD status endpoint is used for this workflow.
+
+With the existing Icecast administration stack running, use `make deck-icecast`,
+then enable Icecast provider and Icecast streams plugin in Modules. Connect in
+Icecast connection with the Deck gateway token (`make deck-token`) and open
+Icecast streams. The upstream admin token stays on the server. This does not
+replace configuration authoring; stream supervision and publishing configuration
+are separate contributions.
+
+The current plugin is compiled into the trusted V1 assembly, not dynamically
+loaded code. The isolated `make deck-smoke` recipe includes a real protobuf
+IcecastAdmin fixture and verifies plugin blocking, typed injection, stream data,
+upstream failure and credential cleanup. New cases are written, not executed.
 ## Configuration authority and authoring
 
 StationDeck owns configuration authoring through its modules/plugins. A permanent

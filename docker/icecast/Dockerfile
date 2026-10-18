@@ -85,6 +85,7 @@ COPY Cargo.toml Cargo.lock build.rs ./
 COPY crates/ crates/
 COPY src/ src/
 COPY plugins/station-player/ plugins/station-player/
+COPY plugins/icecastd-deck/ plugins/icecastd-deck/
 COPY proto/ proto/
 COPY migrations/ migrations/
 COPY config/stationdeck/ config/stationdeck/

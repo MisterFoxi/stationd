@@ -1,0 +1,9 @@
+[package]
+name = "icecastd-deck"
+version = "0.1.0"
+edition = "2021"
+publish = false
+[dependencies]
+stationdeck-ui = { path = "../../crates/stationdeck-ui" }
+stationdeck-services = { path = "../../crates/stationdeck-services" }
+egui = { version = "=0.33.3", default-features = false }

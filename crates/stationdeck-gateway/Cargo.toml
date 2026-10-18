@@ -11,6 +11,7 @@ axum = "0.7"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "signal"] }
 tonic = { version = "0.12", features = ["tls-native-roots"] }
 serde_json = "1"
+prost = "0.13"
 sha2 = "0.10"
 subtle = "2"
 
@@ -26,3 +27,6 @@ test-fixture = ["stationd-proto/server"]
 name = "stationdeck-grpc-fixture"
 path = "src/bin/stationdeck-grpc-fixture.rs"
 required-features = ["test-fixture"]
+
+[build-dependencies]
+tonic-build = "0.12"

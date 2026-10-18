@@ -293,7 +293,9 @@ icecast-dist-install-test: ## Validation du vrai paquet sans lancer les services
 
 # StationDeck web: WASM frontend and narrow gRPC gateway, all in containers.
 .PHONY: deck-build deck-check deck-smoke deck deck-down deck-token
-DECK_DC = docker compose -f docker/stationdeck/compose.yaml
+# Preserve the explicitly selected local deployment profile across make deck/down/token.
+DECK_ICECAST_PROFILE = $(if $(wildcard .local/stationdeck/icecast.enabled),-f docker/stationdeck/compose.icecast.yaml)
+DECK_DC = docker compose -f docker/stationdeck/compose.yaml $(DECK_ICECAST_PROFILE)
 
 deck-build: ## Build the WebAssembly frontend and gRPC gateway images
 > $(DECK_DC) build deck gateway control
@@ -358,3 +360,9 @@ deck-sd-agent: ## Connect an existing SD; requires STATIONDECK_SD_ENDPOINT=FQDN:
 deck-daemons-down: ## Stop managed Icecast/admin and configuration adapters, retaining volumes
 > $(ICECAST_DECK_DC) stop icecastd admin monitor
 > $(DECK_DAEMON_DC) --profile sd-config --profile config-demo stop
+
+.PHONY: deck-icecast
+deck-icecast: ## Start Deck connected to the existing icecastd administration service
+> docker compose -f docker/stationdeck/compose.yaml -f docker/stationdeck/compose.icecast.yaml up -d --build --wait
+> @mkdir -p .local/stationdeck
+> @touch .local/stationdeck/icecast.enabled

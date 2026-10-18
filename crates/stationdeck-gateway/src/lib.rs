@@ -1,4 +1,5 @@
-//! Narrow gateway: authenticated Station.Status only; no station mutations.
+//! Authenticated read-only gateway for station and Icecast stream status.
+mod icecast;
 use axum::{
     extract::State,
     http::{HeaderMap, StatusCode},
@@ -16,6 +17,7 @@ use tonic::transport::{ClientTlsConfig, Endpoint};
 pub struct Gateway {
     token_digest: [u8; 32],
     endpoint: Option<Endpoint>,
+    icecast: Option<icecast::IcecastTarget>,
 }
 
 impl Gateway {
@@ -50,13 +52,20 @@ impl Gateway {
         Ok(Self {
             token_digest: Sha256::digest(token.as_bytes()).into(),
             endpoint,
+            icecast: None,
         })
+    }
+
+    pub fn with_icecast(mut self, address: &str, token: &str) -> Result<Self, &'static str> {
+        self.icecast = Some(icecast::IcecastTarget::new(address, token)?);
+        Ok(self)
     }
 
     pub fn router(self) -> Router {
         Router::new()
             .route("/healthz", get(|| async { "ok" }))
             .route("/api/station/status", get(status))
+            .route("/api/icecast/streams", get(icecast_status))
             .with_state(self)
     }
 
@@ -140,6 +149,25 @@ async fn status(
     (StatusCode::OK, Json(response))
 }
 
+async fn icecast_status(State(gateway): State<Gateway>, headers: HeaderMap)
+    -> (StatusCode, Json<stationdeck_services::icecast::IcecastResponse>) {
+    use stationdeck_services::icecast::IcecastResponse;
+    if !gateway.authorized(&headers) {
+        return (StatusCode::UNAUTHORIZED, Json(IcecastResponse::Unavailable {
+            code: "unauthenticated".into(), message: "A valid gateway access token is required.".into(),
+        }));
+    }
+    let result = match &gateway.icecast {
+        None => Err(("not_configured", "Icecast supervision is not connected. Start Deck with the Icecast administration profile.")),
+        Some(target) => tokio::time::timeout(Duration::from_secs(8), target.read()).await
+            .unwrap_or(Err(("timeout", "Icecast supervision timed out."))),
+    };
+    let response = match result {
+        Ok(status) => IcecastResponse::Connected { status },
+        Err((code, message)) => IcecastResponse::Unavailable { code: code.into(), message: message.into() },
+    };
+    (StatusCode::OK, Json(response))
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -221,6 +249,22 @@ mod tests {
             "http://localhost:50051/?token=secret",
         ] {
             assert!(Gateway::new(TOKEN, Some(target)).is_err());
+        }
+    }
+    #[tokio::test]
+    async fn icecast_status_has_independent_configuration_and_no_mutation_routes() {
+        let router = Gateway::new(TOKEN, None).unwrap().router();
+        let denied = router.clone().oneshot(Request::builder().uri("/api/icecast/streams").body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+        let allowed = router.clone().oneshot(Request::builder().uri("/api/icecast/streams").header("Authorization", format!("Bearer {TOKEN}")).body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(allowed.status(), StatusCode::OK);
+        let body = to_bytes(allowed.into_body(), 4096).await.unwrap();
+        let response: stationdeck_services::icecast::IcecastResponse = serde_json::from_slice(&body).unwrap();
+        assert!(matches!(response, stationdeck_services::icecast::IcecastResponse::Unavailable { code, .. } if code == "not_configured"));
+        let mutation = router.oneshot(Request::builder().method("POST").uri("/api/icecast/streams").header("Authorization", format!("Bearer {TOKEN}")).body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(mutation.status(), StatusCode::METHOD_NOT_ALLOWED);
+        for url in ["file:///etc/passwd", "http://user:password@localhost:50061", "http://localhost:50061/path"] {
+            assert!(Gateway::new(TOKEN, None).unwrap().with_icecast(url, TOKEN).is_err());
         }
     }
 }

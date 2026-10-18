@@ -241,6 +241,66 @@ try {
   assert(!(await page.evaluate(() => JSON.stringify(localStorage))).includes(token), 'credentials must not be persisted after cancellation');
   await page.request.post(`${fixture}/ready`);
   assert.deepEqual(errors, [], 'unexpected browser errors during module tests');
+  // Validate the autonomous Icecast plugin with no StationD module enabled.
+  await clickControl(page, 'nav-modules');
+  await clickControl(page, 'module-overview');
+  await waitModules('demo', 'grpc');
+  await clickControl(page, 'module-demo');
+  await waitModules('grpc');
+  await clickControl(page, 'module-grpc');
+  await waitModules();
+  await clickControl(page, 'module-icecastd');
+  await waitModules('icecastd');
+  await waitState('icecastd', 'Blocked');
+  await clickControl(page, 'module-icecast-gateway');
+  await waitModules('icecastd', 'icecast-gateway');
+  await waitState('icecastd', 'Running');
+  await clickControl(page, 'nav-icecast-gateway.connection');
+  await clickControl(page, 'icecast-token');
+  await page.keyboard.insertText(`  ${token}  `);
+  const beforeIcecast = await metrics();
+  assert.equal((await page.request.get(`${base}/api/icecast/streams`)).status(), 401);
+  assert.equal((await page.request.post(`${base}/api/icecast/streams`, { headers: { Authorization: `Bearer ${token}` } })).status(), 405);
+  const icecastReply = page.waitForResponse(r => r.url().endsWith('/api/icecast/streams'));
+  await clickControl(page, 'icecast-connect');
+  const icecastStatus = await (await icecastReply).json();
+  assert.equal(icecastStatus.state, 'connected');
+  assert.equal(icecastStatus.status.server_id, 'Fixture Icecast');
+  assert.equal(await metrics(), beforeIcecast, 'the Icecast plugin unexpectedly called StationD');
+  await clickControl(page, 'nav-icecastd.streams');
+  await page.waitForFunction(() => {
+    const canvas = document.getElementById('stationdeck');
+    return canvas.getAttribute('data-qa-icecast-stream-0-mount') === '/live'
+      && canvas.getAttribute('data-qa-icecast-stream-0-connected') === 'true'
+      && canvas.getAttribute('data-qa-icecast-stream-0-listeners') === '7'
+      && canvas.getAttribute('data-qa-icecast-stream-1-connected') === 'false';
+  });
+  await capture(page, 'icecast-plugin-streams');
+  assert(!(await page.evaluate(() => JSON.stringify(localStorage))).includes(token), 'Icecast provider persisted its credential');
+  await page.request.post(`${fixture}/fail`);
+  const icecastFailure = page.waitForResponse(r => r.url().endsWith('/api/icecast/streams'));
+  await clickControl(page, 'icecast-streams-refresh');
+  const unavailableIcecast = await (await icecastFailure).json();
+  assert.equal(unavailableIcecast.state, 'unavailable');
+  assert(!unavailableIcecast.message.includes('fixture-only'), 'Icecast upstream diagnostics were exposed');
+  await page.waitForFunction(() => !document.getElementById('stationdeck').hasAttribute('data-qa-icecast-stream-0-mount'));
+  await capture(page, 'icecast-plugin-unavailable');
+  await clickControl(page, 'nav-modules');
+  await clickControl(page, 'module-icecast-gateway');
+  await waitModules('icecastd');
+  await waitState('icecastd', 'Blocked');
+  assert.equal(await page.locator('#stationdeck').getAttribute('data-qa-nav-icecastd.streams'), null);
+  await clickControl(page, 'module-icecast-gateway');
+  await waitModules('icecastd', 'icecast-gateway');
+  await waitState('icecastd', 'Running');
+  await clickControl(page, 'nav-icecast-gateway.connection');
+  const icecastCount = (await (await page.request.get(`${fixture}/metrics`)).json()).icecast_requests;
+  await clickControl(page, 'icecast-connect'); // Disabled after stop cleared the token.
+  await animationFrame(page);
+  assert.equal((await (await page.request.get(`${fixture}/metrics`)).json()).icecast_requests, icecastCount);
+  assert.deepEqual(errors, [], 'browser errors in the autonomous Icecast plugin');
+  await page.request.post(`${fixture}/ready`);
+
   const broken = await context.newPage();
   await broken.route('**/*_bg.wasm', route => route.abort());
   await broken.goto(base);
@@ -249,7 +309,7 @@ try {
   await broken.screenshot({ path: `${output}/web-startup-error.png` });
   await broken.close();
   await page.close();
-  console.log('PASS: browser WASM/WebGL, HTTP/MIME, resize, navigation, theme persistence/reload, same-origin assets, startup error, module dependency blocking, provider binding, test module, authenticated real gRPC, upstream failure, cancellation and credential cleanup');
+  console.log('PASS: browser WASM/WebGL, HTTP/MIME, resize, navigation, theme persistence/reload, same-origin assets, startup error, module dependency blocking, provider binding, test module, authenticated real gRPC, upstream failure, cancellation, credential cleanup and autonomous Icecast plugin/service injection');
 } catch (error) {
   await page.screenshot({ path: `${output}/web-failure.png` }).catch(() => {});
   console.error('Browser page errors:', errors);

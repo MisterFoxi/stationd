@@ -1,4 +1,6 @@
 //! Test fixture only. It is excluded from the runtime gateway build.
+#[path = "fixture/icecast.rs"]
+mod icecast;
 use axum::{
     extract::State,
     routing::{get, post},
@@ -18,6 +20,7 @@ use tonic::{Request, Response, Status};
 struct Fixture {
     mode: Arc<AtomicUsize>,
     requests: Arc<AtomicUsize>,
+    icecast_requests: Arc<AtomicUsize>,
 }
 #[tonic::async_trait]
 impl Station for Fixture {
@@ -54,9 +57,14 @@ impl Station for Fixture {
 async fn main() {
     let fixture = Fixture::default();
     let grpc = fixture.clone();
+    let icecast = icecast::IcecastFixture {
+        mode: fixture.mode.clone(), requests: fixture.icecast_requests.clone(),
+        token: Arc::new(std::fs::read_to_string("/secrets/access-token").expect("isolated fixture credential").trim().to_owned()),
+    };
     let task = tokio::spawn(async move {
         tonic::transport::Server::builder()
             .add_service(StationServer::new(grpc))
+            .add_service(icecast::rpc::icecast_admin_server::IcecastAdminServer::new(icecast))
             .serve("0.0.0.0:50051".parse().unwrap())
             .await
             .unwrap();
@@ -65,7 +73,7 @@ async fn main() {
         .route(
             "/metrics",
             get(|State(state): State<Fixture>| async move {
-                Json(serde_json::json!({"requests": state.requests.load(Ordering::SeqCst)}))
+                Json(serde_json::json!({"requests": state.requests.load(Ordering::SeqCst), "icecast_requests": state.icecast_requests.load(Ordering::SeqCst)}))
             }),
         )
         .route(

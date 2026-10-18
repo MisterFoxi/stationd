@@ -7,6 +7,8 @@ pub fn modules() -> Vec<Box<dyn DeckModule>> {
         Box::<stationdeck_grpc::GrpcModule>::default(),
         Box::<stationdeck_config_ui::ConfigModule>::default(),
         Box::<crate::overview::OverviewModule>::default(),
+        Box::<stationdeck_icecast::IcecastProvider>::default(),
+        Box::<icecastd_deck::IcecastPlugin>::default(),
     ]
 }
 
@@ -20,6 +22,8 @@ pub fn policy_with_provider(provider: &str) -> Policy {
         ("grpc", vec![("connection", "network", "connection:station", vec!["connect"]), ("overview", "service", "stationdeck.admin.overview", vec!["read", "watch", "command"])], vec!["consulter", "connecter"]),
         ("configuration", vec![("connection", "network", "connection:configuration", vec!["connect"])], vec!["consulter", "connecter"]),
         ("overview", vec![("status", "service", "stationdeck.admin.overview", vec!["read"])], vec!["consulter"]),
+        ("icecast-gateway", vec![("connection", "network", "connection:icecast", vec!["connect"]), ("streams", "service", "stationdeck.icecast.streams", vec!["read"])], vec!["connecter"]),
+        ("icecastd", vec![("streams", "service", "stationdeck.icecast.streams", vec!["read"])], vec!["consulter"]),
     ] {
         policy.grants.insert(module.into(), Grants {
             capabilities: caps.into_iter().map(|(id, kind, resource, ops)| Capability {
@@ -30,6 +34,7 @@ pub fn policy_with_provider(provider: &str) -> Policy {
         });
     }
     policy.bindings.insert(("overview".into(), "stationdeck.admin.overview".into()), provider.into());
+    policy.bindings.insert(("icecastd".into(), "stationdeck.icecast.streams".into()), "icecast-gateway".into());
     policy
 }
 
@@ -54,5 +59,18 @@ mod tests {
         assert!(matches!(catalog.status("overview"), Some((State::Blocked, Some(_)))));
         assert!(!catalog.views().iter().any(|v| v.id == "overview.station"));
         assert!(catalog.views().iter().any(|v| v.id == "configuration.authoring"));
+    }
+    #[test]
+    fn icecast_plugin_resolves_through_its_provider_without_any_stationd_module() {
+        let mut catalog = ModuleCatalog::new(modules(), &["icecastd".into()], policy_with_provider("demo"));
+        assert!(matches!(catalog.status("icecastd"), Some((State::Blocked, Some(_)))));
+        assert!(!catalog.views().iter().any(|v| v.id == "icecastd.streams"));
+        catalog.set_enabled("icecast-gateway", true).unwrap();
+        assert!(matches!(catalog.status("icecastd"), Some((State::Running, None))));
+        assert!(catalog.views().iter().any(|v| v.id == "icecastd.streams"));
+        assert!(!catalog.is_enabled("grpc"));
+        catalog.set_enabled("icecast-gateway", false).unwrap();
+        assert!(matches!(catalog.status("icecastd"), Some((State::Blocked, Some(_)))));
+        assert!(catalog.views().is_empty());
     }
 }

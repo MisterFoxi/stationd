@@ -3,6 +3,8 @@ services:
   gateway:
     environment:
       STATIONDECK_GRPC_ADDR: http://station-fixture:50051
+      STATIONDECK_ICECAST_GRPC_ADDR: http://station-fixture:50051
+      STATIONDECK_ICECAST_TOKEN_FILE: /secrets/access-token
     depends_on:
       station-fixture:
         condition: service_started
@@ -13,6 +15,10 @@ services:
       dockerfile: docker/stationdeck/Dockerfile
       target: fixture
     image: stationdeck-grpc-fixture:dev
+    volumes: [gateway-secrets:/secrets:ro]
+    depends_on:
+      gateway-init:
+        condition: service_completed_successfully
     init: true
   deck:
     image: stationdeck-web-test:dev

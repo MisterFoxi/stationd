@@ -91,3 +91,5 @@ pub mod config;
 pub mod manifest;
 pub mod registry;
 pub mod overview;
+
+pub mod icecast;
