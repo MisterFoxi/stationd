@@ -1,6 +1,8 @@
 use egui::{Color32, Key, Modifiers, RichText};
 use serde::{Deserialize, Serialize};
-use stationdeck_ui::{show_state, ModuleCatalog, ViewState};
+use stationdeck_ui::{
+    show_state, status_badge, status_dot, vital, ModuleCatalog, StatusTone, ViewState,
+};
 use std::collections::BTreeMap;
 
 #[cfg(target_arch = "wasm32")]
@@ -205,6 +207,15 @@ impl StationDeck {
                 );
             }
         }
+        for descriptor in self.modules.descriptors() {
+            if self.modules.health(descriptor.id).label == "Reading" {
+                ctx.request_repaint_after(std::time::Duration::from_millis(100));
+            }
+            stationdeck_ui::test_ui::value(
+                &format!("health-{}", descriptor.id),
+                self.modules.health(descriptor.id).tone.name(),
+            );
+        }
         if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::Comma)) {
             self.page = Page::Settings;
         }
@@ -233,28 +244,23 @@ impl StationDeck {
         });
         egui::TopBottomPanel::top("stationdeck.telemetry").show(ctx, |ui| {
             ui.horizontal_wrapped(|ui| {
-                ui.set_min_height(30.0);
                 self.modules.summaries(ui);
-                let attention = self
-                    .modules
-                    .descriptors()
-                    .iter()
-                    .filter(|d| {
-                        self.modules.is_enabled(d.id)
-                            && self.modules.status(d.id).is_some_and(|(s, _)| {
-                                matches!(
-                                    s,
-                                    stationdeck_services::registry::State::Blocked
-                                        | stationdeck_services::registry::State::Failed
-                                )
-                            })
-                    })
-                    .count();
-                if attention > 0 {
-                    ui.colored_label(WARNING, format!("{attention} module(s) need attention"));
+                for descriptor in self.modules.descriptors() {
+                    if self.modules.is_enabled(descriptor.id)
+                        && self.modules.status(descriptor.id).is_some_and(|(s, _)| {
+                            matches!(
+                                s,
+                                stationdeck_services::registry::State::Blocked
+                                    | stationdeck_services::registry::State::Failed
+                            )
+                        })
+                    {
+                        let health = self.modules.health(descriptor.id);
+                        vital(ui, descriptor.title, health.label, health.tone);
+                    }
                 }
                 if self.modules.enabled_ids().is_empty() {
-                    ui.weak("No plugins enabled");
+                    vital(ui, "Workspace", "No plugins enabled", StatusTone::Inactive);
                 }
             });
         });
@@ -305,27 +311,33 @@ impl StationDeck {
             }
             ui.separator();
             ui.weak("PLUGINS");
-            egui::ScrollArea::vertical().id_salt("plugin.launcher").show(ui, |ui| {
+            egui::ScrollArea::vertical().id_salt("plugin.launcher").max_height((ui.available_height() - 100.0).max(100.0)).show(ui, |ui| {
                 for descriptor in self.modules.descriptors() {
                     let module_views: Vec<_> = views.iter().filter(|v| v.id.split('.').next() == Some(descriptor.id)).collect();
-                    let Some(first) = module_views.first() else { continue; };
                     ui.push_id(descriptor.id, |ui| {
-                        let open = self.settings.windows.get(descriptor.id).is_some_and(|w| w.open);
-                        let response = ui.selectable_label(open, format!("{}  {}", if open { "●" } else { "○" }, descriptor.title));
-                        if response.clicked() { self.open_view(first.id); }
-                        if module_views.len() == 1 { stationdeck_ui::test_ui::control(&format!("nav-{}", first.id), &response); }
-                        else {
-                            for view in module_views {
-                                let response = ui.small_button(view.title);
-                                stationdeck_ui::test_ui::control(&format!("nav-{}", view.id), &response);
-                                if response.clicked() { self.open_view(view.id); }
+                        let health = self.modules.health(descriptor.id);
+                        let open = !module_views.is_empty() && self.settings.windows.get(descriptor.id).is_some_and(|w| w.open);
+                        let response = ui.horizontal(|ui| {
+                            let led = status_dot(ui, health.tone);
+                            stationdeck_ui::test_ui::control(&format!("plugin-led-{}", descriptor.id), &led);
+                            ui.selectable_label(open, descriptor.title)
+                        }).inner.on_hover_text(format!("{} — {}\n{}", descriptor.title, health.label, descriptor.description));
+                        stationdeck_ui::test_ui::control(&format!("plugin-row-{}", descriptor.id), &response);
+                        if response.clicked() {
+                            if let Some(first) = module_views.first() {
+                                let selected = self.settings.windows.get(descriptor.id)
+                                    .map(|w| w.view.as_str()).filter(|id| module_views.iter().any(|v| v.id == *id))
+                                    .unwrap_or(first.id).to_owned();
+                                self.open_view(&selected);
                             }
+                            else { self.page = Page::Modules; }
                         }
+                        if module_views.len() == 1 { stationdeck_ui::test_ui::control(&format!("nav-{}", module_views[0].id), &response); }
+                        ui.add_space(3.0);
                     });
                 }
             });
-            ui.separator();
-            if ui.button("Arrange windows").clicked() { self.arrange(); }
+            ui.separator();            if ui.button("Arrange windows").clicked() { self.arrange(); }
             ui.weak("Drag title bars to move.\nResize from window edges.\nPin a window to lock its position.");
         });
         let workspace = egui::CentralPanel::default().show(ctx, |ui| {
@@ -440,11 +452,14 @@ impl StationDeck {
                             state.pinned = !state.pinned;
                             self.preferences_dirty = true;
                         }
+                        status_badge(ui, self.modules.health(descriptor.id));
                         for view in &module_views {
                             if module_views.len() > 1
-                                && ui
-                                    .selectable_label(state.view == view.id, view.title)
-                                    .clicked()
+                                && stationdeck_ui::test_ui::response(
+                                    &format!("tab-{}", view.id),
+                                    ui.selectable_label(state.view == view.id, view.title),
+                                )
+                                .clicked()
                             {
                                 state.view = view.id.into();
                                 self.preferences_dirty = true;
@@ -546,7 +561,7 @@ impl StationDeck {
                     .status(descriptor.id)
                     .map(|(state, diagnostic)| (state, diagnostic.cloned()))
                 {
-                    ui.label(format!("{state:?}"));
+                    status_badge(ui, self.modules.health(descriptor.id));
                     if enabled
                         && matches!(
                             state,

@@ -20,10 +20,17 @@ impl GrpcModule {
         self.stop();
         self.token = token;
     }
-    fn can_connect(&self) -> bool { self.context.as_ref().is_some_and(|c| c.authorize("grpc.connection", "grpc.connecter", "connect").is_ok()) }
+    fn can_connect(&self) -> bool {
+        self.context.as_ref().is_some_and(|c| {
+            c.authorize("grpc.connection", "grpc.connecter", "connect")
+                .is_ok()
+        })
+    }
     #[cfg(target_arch = "wasm32")]
     fn connect(&mut self, ctx: egui::Context) {
-        if !self.can_connect() { return; }
+        if !self.can_connect() {
+            return;
+        }
         use gloo_net::http::Request;
         use stationdeck_services::StatusResponse;
         let Some(generation) = self.request.borrow_mut().begin() else {
@@ -75,7 +82,9 @@ impl GrpcModule {
 
     #[cfg(not(target_arch = "wasm32"))]
     fn connect(&mut self, _ctx: egui::Context) {
-        if !self.can_connect() { return; }
+        if !self.can_connect() {
+            return;
+        }
         let generation = self.request.borrow_mut().begin();
         if let Some(generation) = generation {
             self.request.borrow_mut().finish(
@@ -87,11 +96,17 @@ impl GrpcModule {
 }
 
 impl DeckModule for GrpcModule {
-    fn manifest(&self) -> &str { include_str!("../../../Doc/stationdeck/grpc.module.toml") }
+    fn manifest(&self) -> &str {
+        include_str!("../../../Doc/stationdeck/grpc.module.toml")
+    }
     fn start(&mut self, context: &stationdeck_services::registry::Context) -> Result<(), String> {
         self.context = Some(context.clone());
-        context.publish(&stationdeck_services::overview::OVERVIEW,
-            Rc::new(stationdeck_services::overview::SharedOverview(self.request.clone())) as Rc<dyn stationdeck_services::overview::OverviewService>)
+        context.publish(
+            &stationdeck_services::overview::OVERVIEW,
+            Rc::new(stationdeck_services::overview::SharedOverview(
+                self.request.clone(),
+            )) as Rc<dyn stationdeck_services::overview::OverviewService>,
+        )
     }
     fn descriptor(&self) -> ModuleDescriptor {
         ModuleDescriptor {
@@ -107,6 +122,9 @@ impl DeckModule for GrpcModule {
             order: 20,
         }]
     }
+    fn health(&self) -> stationdeck_ui::PluginStatus {
+        stationdeck_ui::PluginStatus::request(&self.request.borrow().state)
+    }
     fn stop(&mut self) {
         #[cfg(target_arch = "wasm32")]
         if let Some(controller) = self.abort.take() {
@@ -121,22 +139,32 @@ impl DeckModule for GrpcModule {
         ui.add_space(12.0);
         ui.label("Gateway access token");
         let pending = matches!(self.request.borrow().state, RequestState::Pending);
-        let edited = stationdeck_ui::test_ui::response("grpc-token", ui.add_enabled(
-            !pending,
-            egui::TextEdit::singleline(&mut self.token)
-                .password(true)
-                .hint_text("Access token")
-                .desired_width(320.0),
-        )).changed();
+        let edited = stationdeck_ui::test_ui::response(
+            "grpc-token",
+            ui.add_enabled(
+                !pending,
+                egui::TextEdit::singleline(&mut self.token)
+                    .password(true)
+                    .hint_text("Access token")
+                    .desired_width(320.0),
+            ),
+        )
+        .changed();
         if edited {
             // A result belongs to the credentials that produced it. Do not retain
             // an old denial or a private status snapshot after credentials change.
             self.credentials_changed();
         }
         ui.horizontal(|ui| {
-            if stationdeck_ui::test_ui::response("grpc-refresh", ui.add_enabled(
-                !pending && !self.token.trim().is_empty(), egui::Button::new("Connect / refresh"),
-            )).clicked() {
+            if stationdeck_ui::test_ui::response(
+                "grpc-refresh",
+                ui.add_enabled(
+                    !pending && !self.token.trim().is_empty(),
+                    egui::Button::new("Connect / refresh"),
+                ),
+            )
+            .clicked()
+            {
                 self.connect(ui.ctx().clone());
             }
             if ui.button("Disconnect").clicked() {
@@ -179,9 +207,15 @@ mod tests {
         module.credentials_changed();
         assert_eq!(module.token.trim(), "replacement-fixture-token-0123456789");
         assert!(matches!(module.request.borrow().state, RequestState::Idle));
-        assert!(!module.request.borrow_mut().finish(generation, Err("late denial".into())));
+        assert!(!module
+            .request
+            .borrow_mut()
+            .finish(generation, Err("late denial".into())));
         let current = module.request.borrow_mut().begin().unwrap();
-        module.request.borrow_mut().finish(current, Err("old token refused".into()));
+        module
+            .request
+            .borrow_mut()
+            .finish(current, Err("old token refused".into()));
         module.credentials_changed();
         assert!(matches!(module.request.borrow().state, RequestState::Idle));
     }

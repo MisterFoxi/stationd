@@ -77,9 +77,21 @@ async function clickControl(target, id) {
     return saved?.enabled_modules.length === ids.length && ids.every(id => saved.enabled_modules.includes(id));
   }, ids);
 }
+async function openView(target, id) {
+  const module = id.split('.')[0];
+  await clickControl(target, `plugin-row-${module}`);
+  await controlRect(target, `window-${module}`);
+  if (await target.locator('#stationdeck').getAttribute(`data-qa-tab-${id}`)) {
+    await clickControl(target, `tab-${id}`);
+  }
+}
 async function waitState(id, state) {
   await page.waitForFunction(({ id, state }) =>
     document.getElementById('stationdeck')?.getAttribute(`data-qa-state-${id}`) === state, { id, state });
+}
+async function waitHealth(id, tone) {
+  await page.waitForFunction(({ id, tone }) =>
+    document.getElementById('stationdeck')?.getAttribute(`data-qa-health-${id}`) === tone, { id, tone });
 }
 async function capture(target, name) {
   const buffer = await target.screenshot({ path: `${output}/${name}.png` });
@@ -100,6 +112,9 @@ try {
   assert.equal(await page.title(), 'StationDeck');
   await ready(page);
   assert(brightness(await capture(page, 'web-home'), 500, 5) < 80, 'default dark theme did not apply');
+  await waitHealth('demo', 'good');
+  await waitHealth('grpc', 'inactive');
+  await controlRect(page, 'plugin-row-grpc');
   // Plugins coexist. Closing a window keeps its module alive; the launcher reopens it.
   await controlRect(page, 'window-demo');
   await controlRect(page, 'window-overview');
@@ -108,7 +123,7 @@ try {
   await page.waitForFunction(() => JSON.parse(localStorage.getItem('stationdeck.settings.v1')).windows.demo.open === false);
   await waitState('demo', 'Running');
   await page.waitForFunction(() => !document.getElementById('stationdeck').hasAttribute('data-qa-window-demo'));
-  await clickControl(page, 'nav-demo.tasks');
+  await openView(page, 'demo.tasks');
   await controlRect(page, 'demo-run');
   await clickControl(page, 'pin-demo');
   await page.waitForFunction(() => JSON.parse(localStorage.getItem('stationdeck.settings.v1')).windows.demo.pinned);
@@ -150,13 +165,13 @@ try {
   await page.keyboard.press('Control+,');
   await clickControl(page, 'theme-dark');
   await page.keyboard.press('Control+Home');
-  await clickControl(page, 'nav-demo.overview');
+  await openView(page, 'demo.overview');
   await capture(page, 'test-station');
-  await clickControl(page, 'nav-demo.tasks');
+  await openView(page, 'demo.tasks');
   await clickControl(page, 'demo-run');
   await capture(page, 'test-task-pending');
   await page.keyboard.press('Control+Home');
-  await clickControl(page, 'nav-demo.tasks');
+  await openView(page, 'demo.tasks');
   await page.waitForTimeout(900);
   await capture(page, 'test-task-completed');
   await clickControl(page, 'demo-read-only');
@@ -186,6 +201,8 @@ try {
   await capture(page, 'modules-enabled');
   // A disconnected provider remains locally available to the same consumer.
   await clickControl(page, 'nav-overview.station');
+  await waitHealth('grpc', 'inactive');
+  await waitHealth('overview', 'inactive');
   await capture(page, 'overview-grpc-disconnected');
   const token = (await readFile(process.env.STATIONDECK_QA_TOKEN_FILE, 'utf8')).trim();
   const fixture = process.env.STATIONDECK_FIXTURE_URL;
@@ -214,6 +231,8 @@ try {
   assert.equal(connected.status.pid, 42);
   assert((await metrics()) > beforeAuth, 'the browser did not reach the real gRPC fixture');
   await page.waitForTimeout(200);
+  await waitHealth('grpc', 'good');
+  await waitHealth('overview', 'good');
   await capture(page, 'grpc-connected');
   assert(!(await page.evaluate(() => JSON.stringify(localStorage))).includes(token), 'credentials must not be persisted');
 
@@ -224,6 +243,8 @@ try {
   assert.equal(failed.state, 'unavailable');
   assert(!failed.message.includes('fixture-only'), 'upstream diagnostics were exposed');
   await page.waitForTimeout(150);
+  await waitHealth('grpc', 'error');
+  await waitHealth('overview', 'error');
   await capture(page, 'grpc-unavailable');
 
   await page.request.post(`${fixture}/delay`);
@@ -270,6 +291,7 @@ try {
   await clickControl(page, 'module-icecastd');
   await waitModules('icecastd');
   await waitState('icecastd', 'Blocked');
+  await waitHealth('icecastd', 'warning');
   await clickControl(page, 'module-icecast-gateway');
   await waitModules('icecastd', 'icecast-gateway');
   await waitState('icecastd', 'Running');
@@ -302,6 +324,15 @@ try {
       && canvas.getAttribute('data-qa-icecast-stream-0-listeners') === '7'
       && canvas.getAttribute('data-qa-icecast-stream-1-connected') === 'false';
   });
+  await waitHealth('icecast-gateway', 'good');
+  await waitHealth('icecastd', 'warning');
+  await page.waitForFunction(() => document.getElementById('stationdeck').getAttribute('data-qa-vital-listeners') === '7');
+  // Vital information remains visible when its plugin window is hidden.
+  const streamsWindow = await controlRect(page, 'window-icecastd');
+  await page.mouse.click(streamsWindow.x + streamsWindow.width - 15, streamsWindow.y + 14);
+  await page.waitForFunction(() => !document.getElementById('stationdeck').hasAttribute('data-qa-window-icecastd'));
+  assert.equal(await page.locator('#stationdeck').getAttribute('data-qa-vital-listeners'), '7');
+  await clickControl(page, 'nav-icecastd.streams');
   await capture(page, 'icecast-plugin-streams');
   assert(!(await page.evaluate(() => JSON.stringify(localStorage))).includes(token), 'Icecast provider persisted its credential');
   await page.request.post(`${fixture}/fail`);
@@ -311,11 +342,14 @@ try {
   assert.equal(unavailableIcecast.state, 'unavailable');
   assert(!unavailableIcecast.message.includes('fixture-only'), 'Icecast upstream diagnostics were exposed');
   await page.waitForFunction(() => !document.getElementById('stationdeck').hasAttribute('data-qa-icecast-stream-0-mount'));
+  await waitHealth('icecastd', 'error');
+  await page.waitForFunction(() => !document.getElementById('stationdeck').hasAttribute('data-qa-vital-listeners'));
   await capture(page, 'icecast-plugin-unavailable');
   await clickControl(page, 'nav-modules');
   await clickControl(page, 'module-icecast-gateway');
   await waitModules('icecastd');
   await waitState('icecastd', 'Blocked');
+  await waitHealth('icecastd', 'warning');
   assert.equal(await page.locator('#stationdeck').getAttribute('data-qa-nav-icecastd.streams'), null);
   await clickControl(page, 'module-icecast-gateway');
   await waitModules('icecastd', 'icecast-gateway');

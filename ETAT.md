@@ -121,3 +121,33 @@ des jetons et plugin Icecast autonome). Captures `.local/stationdeck-gui-qa/`.
 Le détail des vues métier reste à enrichir progressivement ; aucun contrôle de
 lecture ou chiffre simulé ajouté aux services réels. Guide :
 [espace de plugins](Doc/stationdeck-dev.md#plugin-workspace).
+
+### GUI — voyants et informations vitales
+
+Voyants dessinés (sans dépendance à des glyphes Unicode) et libellés communs :
+vert = disponible, orange = lecture/attente, dépendance bloquée ou dégradation,
+rouge = échec, noir bordé = désactivé/arrêté ou pas encore connecté. Tous les
+plugins restent dans le lanceur ; une entrée sans vue ouvre Modules. La couleur
+est également affichée dans les fenêtres et dans la gestion des modules.
+
+`DeckModule::health` distingue le cycle de vie local des résultats de service :
+activer gRPC, Icecast provider ou Configuration ne les rend pas verts avant une
+lecture réussie. Les résumés StationD/Icecast utilisent de petits instruments
+pour le nom de station, l'uptime, l'audience, les sources et les mounts sans source.
+Les instantanés restent explicitement libellés ; une erreur retire les anciennes
+valeurs. Les informations vitales restent présentes quand la fenêtre est masquée.
+
+Validation de cette finition en containers : 15 tests Rust ciblés passent,
+Clippy natif/WASM sans avertissement et recette Chromium complète réussie,
+avec assertions sur les états déconnecté/vert/orange/rouge et sur le bandeau
+Icecast lorsque sa fenêtre est fermée. Captures `.local/stationdeck-colors-qa/`.
+
+### GUI — liste latérale compacte
+
+Le lanceur affiche désormais uniquement le nom et le voyant d'état général de
+chaque plugin. Les libellés détaillés restent au survol et dans les fenêtres ;
+les sous-vues se choisissent dans leurs onglets internes. Un clic sur le plugin
+rouvre sa fenêtre en conservant le dernier onglet choisi.
+
+Validation en containers : tests StationDeck, Clippy natif/WASM et recette
+Chromium complète passent avec la nouvelle navigation par onglets internes.

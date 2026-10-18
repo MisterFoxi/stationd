@@ -247,3 +247,19 @@ storage is checked to exclude credentials. Theme/storage reload, initial WASM
 failure, MIME type and responsive sizing are tested as well.
 Screenshots are inspected and kept under `.local/stationdeck-web-qa/` outside Git.
 A real station target is intentionally not configured by the automated recipe.
+
+### Operational indicators
+
+The launcher includes disabled and blocked plugins, with painted status LEDs and
+text labels. Green means available, amber means pending/blocked/degraded, red
+means failed, and an outlined black LED means inactive/not connected. Window
+visibility and module lifecycle are independent from this operational status.
+`DeckModule::health` defaults to the registry's Running label; transport modules
+and consumers override it with their actual request/service state. No successful
+connection is inferred from enabling a module. The permanent strip uses shared
+compact instruments for snapshots and known values, and removes values after an
+unavailable read instead of presenting a fabricated zero audience.
+
+The sidebar uses one compact entry per plugin: name and overall status LED only.
+Detailed state remains in the tooltip and plugin window; multiple contributions
+are selected using the window's tabs. Reopening preserves the selected tab.

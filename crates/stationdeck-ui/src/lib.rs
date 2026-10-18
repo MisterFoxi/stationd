@@ -1,5 +1,7 @@
 //! UI contributions backed by the transport-free module registry.
+pub mod status;
 use egui::{Color32, RichText, Ui};
+pub use status::{status_badge, status_dot, vital, PluginStatus, StatusTone};
 
 /// A stable, module-qualified id, never derived from a translated title.
 pub struct ViewDescriptor {
@@ -131,6 +133,10 @@ pub trait DeckModule {
     fn ui(&mut self, id: &str, ui: &mut Ui);
     /// Compact, read-only status, rendered even when the plugin window is closed.
     fn summary(&self, _ui: &mut Ui) {}
+    /// Operational state; active code is not proof of a successful remote read.
+    fn health(&self) -> PluginStatus {
+        PluginStatus::lifecycle(stationdeck_services::registry::State::Running)
+    }
     fn stop(&mut self);
 }
 
@@ -192,6 +198,20 @@ pub struct ModuleCatalog {
     registry: stationdeck_services::registry::Registry<UiModule>,
 }
 impl ModuleCatalog {
+    pub fn health(&self, id: &str) -> PluginStatus {
+        match self
+            .registry
+            .entries()
+            .iter()
+            .find(|e| e.module.0.descriptor().id == id)
+        {
+            Some(entry) if entry.state == stationdeck_services::registry::State::Running => {
+                entry.module.0.health()
+            }
+            Some(entry) => PluginStatus::lifecycle(entry.state),
+            None => PluginStatus::new(StatusTone::Inactive, "Unavailable"),
+        }
+    }
     pub fn summaries(&self, ui: &mut Ui) {
         for entry in self.registry.entries() {
             if entry.state == stationdeck_services::registry::State::Running {

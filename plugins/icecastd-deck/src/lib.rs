@@ -49,7 +49,21 @@ impl DeckModule for IcecastPlugin {
             Some(context.service(&ICECAST, "icecastd.streams", "icecastd.consulter", "read")?);
         Ok(())
     }
+    fn health(&self) -> stationdeck_ui::PluginStatus {
+        use stationdeck_ui::{PluginStatus, StatusTone};
+        match self.snapshot() {
+            Ok(RequestState::Ready(status)) if status.streams.is_empty() => {
+                PluginStatus::new(StatusTone::Warning, "No mounts configured")
+            }
+            Ok(RequestState::Ready(status)) if status.streams.iter().any(|s| !s.connected) => {
+                PluginStatus::new(StatusTone::Warning, "Source missing")
+            }
+            Ok(state) => PluginStatus::request(&state),
+            Err(_) => PluginStatus::new(StatusTone::Error, "Service unavailable"),
+        }
+    }
     fn summary(&self, ui: &mut egui::Ui) {
+        use stationdeck_ui::{vital, StatusTone};
         match self.snapshot() {
             Ok(RequestState::Ready(status)) => {
                 let online = status.streams.iter().filter(|s| s.connected).count();
@@ -59,33 +73,37 @@ impl DeckModule for IcecastPlugin {
                     .filter(|s| s.connected)
                     .map(|s| s.listeners)
                     .sum();
-                ui.colored_label(egui::Color32::from_rgb(57, 189, 176), "● Icecast snapshot");
-                ui.strong(format!("{listeners} listeners"));
-                ui.label(format!("{online} / {} mounts online", status.streams.len()));
-                if online < status.streams.len() {
-                    ui.colored_label(
-                        egui::Color32::from_rgb(235, 180, 75),
-                        "Mount without source",
-                    );
-                }
-            }
-            Ok(RequestState::Pending) => {
-                ui.spinner();
-                ui.label("Reading Icecast…");
-                ui.ctx()
-                    .request_repaint_after(std::time::Duration::from_millis(100));
-            }
-            Ok(RequestState::Idle) => {
-                ui.weak("Icecast: connect provider");
+                let missing = status.streams.len() - online;
+                vital(ui, "Icecast · snapshot", "Available", StatusTone::Good);
+                vital(ui, "Listeners", &listeners.to_string(), StatusTone::Good);
+                vital(
+                    ui,
+                    "Sources online",
+                    &format!("{online} / {}", status.streams.len()),
+                    self.health().tone,
+                );
+                vital(
+                    ui,
+                    "Mounts without source",
+                    &missing.to_string(),
+                    if missing == 0 {
+                        StatusTone::Good
+                    } else {
+                        StatusTone::Warning
+                    },
+                );
+                stationdeck_ui::test_ui::value("vital-listeners", &listeners.to_string());
+                stationdeck_ui::test_ui::value("vital-missing-sources", &missing.to_string());
             }
             _ => {
-                ui.colored_label(
-                    egui::Color32::from_rgb(235, 180, 75),
-                    "Icecast: unavailable",
-                );
+                let health = self.health();
+                vital(ui, "Icecast", health.label, health.tone);
+                if health.label == "Reading" {
+                    ui.ctx()
+                        .request_repaint_after(std::time::Duration::from_millis(100));
+                }
             }
         }
-        ui.separator();
     }
     fn stop(&mut self) {
         self.service = None;
@@ -145,11 +163,21 @@ impl DeckModule for IcecastPlugin {
                                     &stream.listeners.to_string(),
                                 );
                                 ui.label(stream.mount);
-                                ui.label(if stream.connected {
-                                    "Connected"
-                                } else {
-                                    "Disconnected"
-                                });
+                                stationdeck_ui::status_badge(
+                                    ui,
+                                    stationdeck_ui::PluginStatus::new(
+                                        if stream.connected {
+                                            stationdeck_ui::StatusTone::Good
+                                        } else {
+                                            stationdeck_ui::StatusTone::Warning
+                                        },
+                                        if stream.connected {
+                                            "Online"
+                                        } else {
+                                            "No source"
+                                        },
+                                    ),
+                                );
                                 ui.label(if stream.connected {
                                     stream.listeners.to_string()
                                 } else {

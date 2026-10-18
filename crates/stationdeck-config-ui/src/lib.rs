@@ -21,6 +21,7 @@ fn report_age(observed_at: u64) -> u64 {
 pub struct ConfigModule {
     context: Option<stationdeck_services::registry::Context>,
     token: String,
+    last_status: stationdeck_ui::PluginStatus,
     catalog: Option<Rc<Catalog>>,
     selected: String,
     current: Option<Rc<TargetView>>,
@@ -32,10 +33,22 @@ pub struct ConfigModule {
     abort: Option<web_sys::AbortController>,
 }
 impl ConfigModule {
-    fn can_connect(&self) -> bool { self.context.as_ref().is_some_and(|c| c.authorize("configuration.connection", "configuration.connecter", "connect").is_ok()) }
+    fn can_connect(&self) -> bool {
+        self.context.as_ref().is_some_and(|c| {
+            c.authorize(
+                "configuration.connection",
+                "configuration.connecter",
+                "connect",
+            )
+            .is_ok()
+        })
+    }
     #[cfg(target_arch = "wasm32")]
     fn send(&mut self, ctx: egui::Context, method: &str, path: String, body: Option<String>) {
-        if !self.can_connect() { self.message = "Local module policy denies this connection.".into(); return; }
+        if !self.can_connect() {
+            self.message = "Local module policy denies this connection.".into();
+            return;
+        }
         let Some(generation) = self.request.borrow_mut().begin() else {
             return;
         };
@@ -116,7 +129,12 @@ impl ConfigModule {
     }
     #[cfg(not(target_arch = "wasm32"))]
     fn send(&mut self, _: egui::Context, _: &str, _: String, _: Option<String>) {
-        self.message = if self.can_connect() { "Web transport requires the browser build." } else { "Local module policy denies this connection." }.into();
+        self.message = if self.can_connect() {
+            "Web transport requires the browser build."
+        } else {
+            "Local module policy denies this connection."
+        }
+        .into();
     }
     fn select(&mut self, target: TargetView) {
         self.selected = target.id.clone();
@@ -133,6 +151,9 @@ impl ConfigModule {
                 None
             }
         };
+        if let Some(state) = &response {
+            self.last_status = stationdeck_ui::PluginStatus::request(state);
+        }
         match response {
             Some(RequestState::Ready(Reply::Catalog(c))) => {
                 if !c.targets.iter().any(|t| t.id == self.selected) {
@@ -173,6 +194,10 @@ impl ConfigModule {
                 if message.starts_with("Access denied.") {
                     self.stop();
                 }
+                self.last_status = stationdeck_ui::PluginStatus::new(
+                    stationdeck_ui::StatusTone::Error,
+                    "Request failed",
+                );
                 self.message = message;
             }
             _ => {}
@@ -180,7 +205,9 @@ impl ConfigModule {
     }
 }
 impl DeckModule for ConfigModule {
-    fn manifest(&self) -> &str { include_str!("../../../Doc/stationdeck/configuration.module.toml") }
+    fn manifest(&self) -> &str {
+        include_str!("../../../Doc/stationdeck/configuration.module.toml")
+    }
     fn start(&mut self, context: &stationdeck_services::registry::Context) -> Result<(), String> {
         self.context = Some(context.clone());
         Ok(())
@@ -200,7 +227,14 @@ impl DeckModule for ConfigModule {
             order: 30,
         }]
     }
+    fn health(&self) -> stationdeck_ui::PluginStatus {
+        match &self.request.borrow().state {
+            RequestState::Idle => self.last_status,
+            state => stationdeck_ui::PluginStatus::request(state),
+        }
+    }
     fn stop(&mut self) {
+        self.last_status = stationdeck_ui::PluginStatus::default();
         #[cfg(target_arch = "wasm32")]
         if let Some(c) = self.abort.take() {
             c.abort();

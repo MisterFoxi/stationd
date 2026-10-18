@@ -34,26 +34,45 @@ impl DeckModule for OverviewModule {
             Some(context.service(&OVERVIEW, "overview.status", "overview.consulter", "read")?);
         Ok(())
     }
+    fn health(&self) -> stationdeck_ui::PluginStatus {
+        match self.service.as_ref().map(|s| s.with(|s| s.snapshot())) {
+            Some(Ok(state)) => stationdeck_ui::PluginStatus::request(&state),
+            _ => stationdeck_ui::PluginStatus::new(
+                stationdeck_ui::StatusTone::Error,
+                "Service unavailable",
+            ),
+        }
+    }
     fn summary(&self, ui: &mut egui::Ui) {
+        use stationdeck_ui::{vital, StatusTone};
         match self.service.as_ref().map(|s| s.with(|s| s.snapshot())) {
             Some(Ok(RequestState::Ready(status))) => {
-                ui.colored_label(
-                    egui::Color32::from_rgb(57, 189, 176),
-                    format!("● {}", status.station_name),
+                vital(
+                    ui,
+                    "Station · snapshot",
+                    &status.station_name,
+                    StatusTone::Good,
                 );
-                ui.weak("Status snapshot");
-            }
-            Some(Ok(RequestState::Pending)) => {
-                ui.spinner();
-                ui.label("Reading station…");
-                ui.ctx()
-                    .request_repaint_after(std::time::Duration::from_millis(100));
+                vital(
+                    ui,
+                    "Uptime",
+                    &format!(
+                        "{} h {:02} min",
+                        status.uptime_seconds / 3600,
+                        (status.uptime_seconds % 3600) / 60
+                    ),
+                    StatusTone::Good,
+                );
             }
             _ => {
-                ui.weak("Station status: unavailable");
+                let health = self.health();
+                vital(ui, "Station", health.label, health.tone);
+                if health.label == "Reading" {
+                    ui.ctx()
+                        .request_repaint_after(std::time::Duration::from_millis(100));
+                }
             }
         }
-        ui.separator();
     }
     fn stop(&mut self) {
         self.service = None;
