@@ -9,6 +9,7 @@ default-run = "station-admin"
 [workspace]
 
 [dependencies]
+stationdeck-discovery = { path = "../stationdeck-discovery" }
 anyhow = "1"
 station-icecast-config = { path = "../../tools/icecast-config" }
 clap = { version = "4", features = ["derive"] }

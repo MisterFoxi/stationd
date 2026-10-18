@@ -3,8 +3,10 @@ services:
   gateway:
     environment:
       STATIONDECK_GRPC_ADDR: http://station-fixture:50051
-      STATIONDECK_ICECAST_GRPC_ADDR: http://station-fixture:50051
-      STATIONDECK_ICECAST_TOKEN_FILE: /secrets/access-token
+      STATIONDECK_ICECAST_GRPC_ADDR: ""
+      STATIONDECK_ICECAST_TOKEN_FILE: ""
+      STATIONDECK_SERVICE_CATALOG: /bootstrap/services-test.json
+    volumes: [gateway-secrets:/service-credentials:ro]
     depends_on:
       station-fixture:
         condition: service_started
@@ -15,7 +17,10 @@ services:
       dockerfile: docker/stationdeck/Dockerfile
       target: fixture
     image: stationdeck-grpc-fixture:dev
-    volumes: [gateway-secrets:/secrets:ro]
+    environment:
+      STATIONDECK_SERVICE_DESCRIPTOR: /bootstrap/services-fixture.json
+      STATIONDECK_DISCOVERY_KEY_FILE: /secrets/access-token
+    volumes: [gateway-secrets:/secrets:ro, ../../config/stationdeck:/bootstrap:ro]
     depends_on:
       gateway-init:
         condition: service_completed_successfully

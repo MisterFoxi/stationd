@@ -1,0 +1,19 @@
+{
+  "authority": "stationdeck-dev",
+  "discovery_address": "255.255.255.255:50072",
+  "trust": [
+    {
+      "instance": "icecastd-1",
+      "key_file": "/run/secrets/icecast-discovery-key"
+    }
+  ],
+  "bindings": [
+    {
+      "interface": "stationdeck.icecast.audio",
+      "version": "^1.0.0",
+      "transport": "http",
+      "instance": "icecastd-1",
+      "allow_plaintext": true
+    }
+  ]
+}

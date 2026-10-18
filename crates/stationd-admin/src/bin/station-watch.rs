@@ -32,6 +32,7 @@ struct Args {
 #[serde(deny_unknown_fields)]
 struct Settings {
     bind: std::net::SocketAddr,
+    #[serde(default)]
     admin_url: String,
     token_file: PathBuf,
     icecast_config: PathBuf,
@@ -259,7 +260,13 @@ async fn observe(settings: &Settings) -> (BTreeMap<String, bool>, Value) {
     let connected = async {
         let token: tonic::metadata::MetadataValue<_> =
             format!("Bearer {}", read_secret(&settings.token_file)?).parse()?;
-        let channel = tonic::transport::Endpoint::from_shared(settings.admin_url.clone())?
+        let origin = stationd_admin::discovery::resolve(
+            &settings.admin_url,
+            "stationdeck.icecast.streams",
+            "grpc",
+        )
+        .await?;
+        let channel = tonic::transport::Endpoint::from_shared(origin.to_string())?
             .connect_timeout(Duration::from_secs(3))
             .timeout(Duration::from_secs(5))
             .connect()
@@ -275,7 +282,9 @@ async fn observe(settings: &Settings) -> (BTreeMap<String, bool>, Value) {
     }
     .await;
     match connected {
-        Err(_) => {
+        Err(error) => {
+            details["admin_connection"] = json!({"code": error.downcast_ref::<stationdeck_discovery::Error>()
+                .map(|e| e.code()).unwrap_or("connection_failed")});
             checks.insert("admin:unavailable".into(), true);
         }
         Ok(mut client) => {
@@ -393,6 +402,7 @@ async fn main() -> Result<()> {
         );
         return Ok(());
     }
+    let _announcer = stationdeck_discovery::start_from_env().await?;
     let snapshot = std::sync::Arc::new(tokio::sync::RwLock::new(None));
     let api = MonitoringApi {
         snapshot: snapshot.clone(),

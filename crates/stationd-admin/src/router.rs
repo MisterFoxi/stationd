@@ -21,6 +21,7 @@ use tonic::{Request, Response, Status};
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RouterConfig {
+    #[serde(default)]
     pub icecast_url: String,
     pub output_mount: String,
     pub output_password_file: String,
@@ -44,16 +45,8 @@ impl RouterConfig {
         let text = std::fs::read_to_string(path)?;
         let cfg: Self =
             toml::from_str(&text).map_err(|_| anyhow::anyhow!("invalid router TOML"))?;
-        let url = reqwest::Url::parse(&cfg.icecast_url)?;
-        if url.scheme() != "http"
-            || url.host_str().is_none()
-            || !url.username().is_empty()
-            || url.password().is_some()
-            || url.path() != "/"
-            || url.query().is_some()
-            || url.fragment().is_some()
-        {
-            bail!("router Icecast URL must be an HTTP origin");
+        if !cfg.icecast_url.trim().is_empty() {
+            crate::discovery::http_origin(cfg.icecast_url.trim())?;
         }
         let valid_mount = |mount: &str| {
             mount.starts_with('/')
@@ -138,6 +131,7 @@ impl FrameBuffer {
     }
 }
 struct Input {
+    origin: reqwest::Url,
     response: reqwest::Response,
     frames: FrameBuffer,
 }
@@ -218,7 +212,13 @@ impl Router {
             .iter()
             .find(|i| i.id == id)
             .context("unknown input")?;
-        let url = reqwest::Url::parse(&self.config.icecast_url)?.join(&cfg.mount)?;
+        let origin = crate::discovery::resolve(
+            &self.config.icecast_url,
+            "stationdeck.icecast.audio",
+            "http",
+        )
+        .await?;
+        let url = origin.join(&cfg.mount)?;
         let response = self
             .client
             .get(url)
@@ -237,6 +237,7 @@ impl Router {
             bail!("input is not MP3");
         }
         let mut input = Input {
+            origin,
             response,
             frames: FrameBuffer::default(),
         };
@@ -246,8 +247,7 @@ impl Router {
         }
         Ok((input, first))
     }
-    async fn output(&self, password: &str, first: &[u8]) -> Result<TcpStream> {
-        let url = reqwest::Url::parse(&self.config.icecast_url)?;
+    async fn output(&self, url: &reqwest::Url, password: &str, first: &[u8]) -> Result<TcpStream> {
         let host = url.host_str().context("missing host")?;
         let port = url.port_or_known_default().context("missing port")?;
         let mut socket = TcpStream::connect((host, port)).await?;
@@ -310,6 +310,18 @@ impl Router {
         pending: Option<Prepared>,
     ) -> Result<()> {
         let (mut current, first, acknowledgement) = if let Some(change) = pending {
+            let origin = crate::discovery::resolve(
+                &self.config.icecast_url,
+                "stationdeck.icecast.audio",
+                "http",
+            )
+            .await?;
+            if origin != change.input.origin {
+                let _ = change
+                    .reply
+                    .send(Err("Icecast endpoint changed; switch refused".into()));
+                bail!("Icecast endpoint changed before reconnect");
+            }
             if let Err(error) = save_selection(state_file, &change.id) {
                 let _ = change
                     .reply
@@ -325,8 +337,11 @@ impl Router {
             (input, first, None)
         };
 
-        let mut output =
-            tokio::time::timeout(Duration::from_secs(5), self.output(password, &first)).await??;
+        let mut output = tokio::time::timeout(
+            Duration::from_secs(5),
+            self.output(&current.origin, password, &first),
+        )
+        .await??;
 
         {
             let mut state = self.state.write().await;
@@ -341,6 +356,12 @@ impl Router {
                 change = receiver.recv() => {
                     let Some(change) = change else { bail!("control channel closed"); };
                     if change.reply.is_closed() { continue; }
+                    // Never mix an input from a newly discovered server with the
+                    // existing output connection to another server.
+                    if change.input.origin != current.origin {
+                        let _ = change.reply.send(Err("Icecast endpoint changed; current input retained until reconnect".into()));
+                        continue;
+                    }
                     if save_selection(state_file, &change.id).is_err() {
                         let _ = change.reply.send(Err("cannot persist selection; switch refused".into()));
                         continue;

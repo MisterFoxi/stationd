@@ -20,20 +20,24 @@ no mutation routes and keeps the upstream administration token server-side.
 
 ## Live validation
 
-Use the existing running icecastd/admin stack. From `/data/dev` on stationdev1:
+Rebuild and start the service stack from `/data/dev` on stationdev1:
 
 ```sh
-make deck-icecast
+make deck-daemon-build
+make deck-daemons
 make deck-token
 ```
 
-The first command starts Deck with `docker/stationdeck/compose.icecast.yaml`.
-It connects the gateway to the existing `stationd-v1-icecast_default` network and
-mounts only `.local/icecast/secrets/admin-api-token`. It remembers this deployment choice in `.local/stationdeck/icecast.enabled`, so
-subsequent `make deck`, `make deck-down` and `make deck-token` keep the same profile.
-It does not start, restart,
-or reconfigure icecastd. For a different deployment use
-`STATIONDECK_ICECAST_NETWORK` and `STATIONDECK_ICECAST_GRPC_ADDR`.
+`deck-daemons` initializes missing credentials before starting containers. The
+admin, monitor and optional router advertise versioned interfaces on the shared
+private discovery network. The gateway verifies each instance with its own key
+and resolves the stream interface through `config/stationdeck/services.json`.
+The upstream API token remains server-side. `make deck-icecast` is a compatibility
+alias for `make deck`; no Icecast-specific overlay is required.
+
+A configured explicit endpoint still takes priority over discovery. Future
+services use the same protocol and policy; their business interface needs its own
+typed adapter. See [service discovery](../../Doc/stationdeck-service-discovery.md).
 
 In Modules, enable **Icecast provider** and **Icecast streams plugin**. In
 **Icecast connection**, enter the Deck gateway token and connect. Then open

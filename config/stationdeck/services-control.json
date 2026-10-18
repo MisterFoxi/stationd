@@ -1,0 +1,23 @@
+{
+  "authority": "stationdeck-dev",
+  "instance": "configuration-1",
+  "lease_seconds": 5,
+  "interfaces": [
+    {
+      "id": "stationdeck.configuration",
+      "version": "1.0.0",
+      "transport": "grpc",
+      "scheme": "http",
+      "port": 50070,
+      "tls": false
+    },
+    {
+      "id": "stationdeck.configuration.authoring",
+      "version": "1.0.0",
+      "transport": "http",
+      "scheme": "http",
+      "port": 8080,
+      "tls": false
+    }
+  ]
+}

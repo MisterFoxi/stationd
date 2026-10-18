@@ -11,6 +11,7 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 WORKDIR /workspace/crates/stationd-admin
 COPY crates/stationd-admin/ ./
+COPY crates/stationdeck-discovery/ /workspace/crates/stationdeck-discovery/
 COPY tools/icecast-config/ /workspace/tools/icecast-config/
 COPY src/geoip.rs src/listener_snapshot.rs src/listener_history.rs src/plugin_db.rs /workspace/src/
 ENV CARGO_BUILD_JOBS=2
@@ -91,8 +92,8 @@ COPY migrations/ migrations/
 COPY config/stationdeck/ config/stationdeck/
 RUN --mount=type=cache,id=stationdeck-registry,target=/usr/local/cargo/registry \
     --mount=type=cache,id=stationdeck-control-target,target=/build,sharing=locked \
-    cargo build --locked --release -p stationdeck-control \
- && mkdir -p /control-out && cp /build/release/stationdeck-control /control-out/
+    cargo build --locked --release -p stationdeck-control -p stationdeck-discovery \
+ && mkdir -p /control-out && cp /build/release/stationdeck-control /build/release/stationdeck-discovery /control-out/
 
 # Normal V1 server always contains and starts its configuration agent.
 FROM standalone AS server
@@ -101,7 +102,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends python3 \
  && rm -rf /var/lib/apt/lists/* \
  && mkdir -p /data /managed /usr/local/lib/stationdeck \
  && chown 1000:1000 /data /managed
-COPY --from=control-build /control-out/stationdeck-control /usr/local/bin/
+COPY --from=control-build /control-out/stationdeck-control /control-out/stationdeck-discovery /usr/local/bin/
 COPY docker/stationdeck/icecast-managed.py /usr/local/lib/stationdeck/
 COPY --chmod=0755 docker/stationdeck/apply-icecast /usr/local/bin/stationdeck-apply-icecast
 USER 1000:1000

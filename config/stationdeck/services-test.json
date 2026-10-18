@@ -1,0 +1,20 @@
+{
+  "authority": "stationdeck-test-services",
+  "discovery_address": "255.255.255.255:50072",
+  "trust": [
+    {
+      "instance": "fixture-1",
+      "key_file": "/service-credentials/access-token"
+    }
+  ],
+  "bindings": [
+    {
+      "interface": "stationdeck.icecast.streams",
+      "version": "^1.0.0",
+      "transport": "grpc",
+      "instance": "fixture-1",
+      "credential_file": "/service-credentials/access-token",
+      "allow_plaintext": true
+    }
+  ]
+}

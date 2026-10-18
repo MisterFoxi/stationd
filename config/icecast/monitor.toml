@@ -1,5 +1,6 @@
 # Independent central monitoring. No station count or source-container names.
-admin_url = "http://admin:50061"
+# Endpoint omitted: signed discovery via STATIONDECK_SERVICE_CATALOG.
+# An explicit admin_url HTTP origin takes priority when configured.
 bind = "0.0.0.0:50063"
 token_file = "/run/secrets/admin-api-token"
 icecast_config = "/etc/stationd/icecast.toml"

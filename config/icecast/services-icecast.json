@@ -1,0 +1,15 @@
+{
+  "authority": "stationdeck-dev",
+  "instance": "icecastd-1",
+  "lease_seconds": 5,
+  "interfaces": [
+    {
+      "id": "stationdeck.icecast.audio",
+      "version": "1.0.0",
+      "transport": "http",
+      "scheme": "http",
+      "port": 8000,
+      "tls": false
+    }
+  ]
+}

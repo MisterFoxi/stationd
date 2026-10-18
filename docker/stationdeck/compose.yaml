@@ -20,9 +20,13 @@ services:
     image: stationdeck-gateway:dev
     environment:
       STATIONDECK_GRPC_ADDR: ${STATIONDECK_GRPC_ADDR:-}
-    volumes: [gateway-secrets:/secrets:ro]
+      STATIONDECK_SERVICE_CATALOG: /bootstrap/services.json
+    volumes: [gateway-secrets:/secrets:ro, ../../config/stationdeck:/bootstrap:ro, ../../.local/stationdeck/service-credentials:/service-credentials:ro, config-discovery-secrets:/configuration-credentials:ro]
+    networks: [default, configuration]
     extra_hosts: [host.docker.internal:host-gateway]
     depends_on:
+      config-init:
+        condition: service_completed_successfully
       gateway-init:
         condition: service_completed_successfully
     init: true
@@ -39,8 +43,9 @@ services:
     image: stationdeck-control:dev
     command: [init]
     environment:
+      STATIONDECK_DISCOVERY_KEY_FILE: /service-credentials/configuration-1.discovery-key
       STATIONDECK_CONTROL_CATALOG: /bootstrap/catalog-daemons.json
-    volumes: [config-author-secrets:/author-secrets, config-agent-secrets:/agent-secrets, ../../config/stationdeck:/bootstrap:ro]
+    volumes: [config-author-secrets:/author-secrets, config-agent-secrets:/agent-secrets, ../../config/stationdeck:/bootstrap:ro, config-discovery-secrets:/service-credentials]
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
@@ -54,9 +59,12 @@ services:
       target: control
     image: stationdeck-control:dev
     environment:
+      STATIONDECK_SERVICE_DESCRIPTOR: /bootstrap/services-control.json
+      STATIONDECK_DISCOVERY_KEY_FILE: /service-credentials/configuration-1.discovery-key
       STATIONDECK_CONTROL_CATALOG: /bootstrap/catalog-daemons.json
     networks: [default, configuration]
     volumes:
+      - config-discovery-secrets:/service-credentials:ro
       - ../../config/stationdeck:/bootstrap:ro
       - config-state:/data
       - config-author-secrets:/secrets/authors:ro
@@ -115,6 +123,7 @@ services:
     restart: unless-stopped
     stop_grace_period: 5s
 volumes:
+  config-discovery-secrets:
   gateway-secrets:
   config-author-secrets:
   config-agent-secrets:

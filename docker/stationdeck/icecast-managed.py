@@ -168,6 +168,7 @@ def serve():
     xml = None
     child = None
     agent = None
+    announcer = None
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
         Path(SOCKET).unlink(missing_ok=True)
         server.bind(SOCKET)
@@ -178,7 +179,9 @@ def serve():
             print('Waiting for StationDeck configuration or a validated agent cache.', flush=True)
             agent = subprocess.Popen(['stationdeck-control', 'agent'])
             while not STOP:
-                if (child is not None and child.poll() is not None) or agent.poll() is not None:
+                if ((child is not None and child.poll() is not None)
+                        or agent.poll() is not None
+                        or (announcer is not None and announcer.poll() is not None)):
                     raise RuntimeError('Managed child stopped; restarting the container is required')
                 try:
                     client, _ = server.accept()
@@ -212,6 +215,8 @@ def serve():
                                     atomic(EFFECTIVE, previous, 0o644)
                                 raise
                             active, xml = text, next_xml
+                            if announcer is None and os.environ.get('STATIONDECK_SERVICE_DESCRIPTOR'):
+                                announcer = subprocess.Popen(['stationdeck-discovery'])
                             print('Confirmed Icecast revision {}.'.format(bundle['revision']), flush=True)
                         try:
                             client.sendall(b'applied\n')
@@ -226,6 +231,7 @@ def serve():
                         except OSError:
                             pass
         finally:
+            stop(announcer)
             stop(agent)
             stop(child)
             Path(SOCKET).unlink(missing_ok=True)

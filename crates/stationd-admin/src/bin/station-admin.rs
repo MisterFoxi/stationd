@@ -49,6 +49,7 @@ async fn shutdown_signal() {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+    let _announcer = stationdeck_discovery::start_from_env().await?;
     let admin = Admin::load(&args.config, &args.secrets_dir, &args.icecast_url)?
         .with_router(
             args.router_addr,

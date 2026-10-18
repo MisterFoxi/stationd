@@ -1,0 +1,15 @@
+{
+  "authority": "stationdeck-dev",
+  "instance": "icecast-router-1",
+  "lease_seconds": 5,
+  "interfaces": [
+    {
+      "id": "stationdeck.icecast.routing",
+      "version": "1.0.0",
+      "transport": "grpc",
+      "scheme": "http",
+      "port": 50062,
+      "tls": false
+    }
+  ]
+}

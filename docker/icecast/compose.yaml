@@ -13,6 +13,8 @@ services:
     labels:
       stationdeck.configuration.managed: 'true'
     environment:
+      STATIONDECK_SERVICE_DESCRIPTOR: /etc/stationd/services-icecast.json
+      STATIONDECK_DISCOVERY_KEY_FILE: /run/secrets/icecast-discovery-key
       STATIONDECK_AGENT_CONFIG: /bootstrap/icecast-agent.json
       STATIONDECK_CONFIG_ENDPOINT: ${STATIONDECK_CONFIG_ENDPOINT:-}
     networks: [default, configuration]
@@ -32,6 +34,7 @@ services:
         volume:
           subpath: icecastd-1
     secrets:
+      - icecast-discovery-key
       - admin-password
       - source-a-password
       - source-b-password
@@ -60,6 +63,10 @@ services:
       context: ../..
       dockerfile: docker/icecast/Dockerfile
       target: administration
+    networks: [default, configuration]
+    environment:
+      STATIONDECK_SERVICE_DESCRIPTOR: /etc/stationd/services-admin.json
+      STATIONDECK_DISCOVERY_KEY_FILE: /run/secrets/icecast-admin-discovery-key
     image: stationd-v1-admin:dev
     command: ["--bind", "0.0.0.0:50061", "--settings", "/etc/stationd/admin.toml", "--effective-config", "/managed/icecast.toml"]
     depends_on:
@@ -73,6 +80,7 @@ services:
       - admin-state:/var/lib/station-admin
       - config-icecast-effective:/managed:ro
     secrets:
+      - icecast-admin-discovery-key
       - admin-password
       - admin-api-token
       - router-api-token
@@ -157,6 +165,11 @@ services:
       context: ../..
       dockerfile: docker/icecast/Dockerfile
       target: administration
+    networks: [default, configuration]
+    environment:
+      STATIONDECK_SERVICE_CATALOG: /etc/stationd/discovery-router.json
+      STATIONDECK_SERVICE_DESCRIPTOR: /etc/stationd/services-router.json
+      STATIONDECK_DISCOVERY_KEY_FILE: /run/secrets/icecast-router-discovery-key
     image: stationd-v1-admin:dev
     entrypoint: ["station-router"]
     command: ["--bind", "0.0.0.0:50062"]
@@ -164,9 +177,13 @@ services:
       icecastd:
         condition: service_healthy
     volumes:
+      - ../../config/icecast/discovery-router.json:/etc/stationd/discovery-router.json:ro
+      - ../../config/icecast/services-router.json:/etc/stationd/services-router.json:ro
       - ../../config/icecast/router.toml:/etc/stationd/router.toml:ro
       - router-state:/var/lib/station-router
     secrets:
+      - icecast-discovery-key
+      - icecast-router-discovery-key
       - source-radio-password
       - router-api-token
     read_only: true
@@ -185,6 +202,11 @@ services:
       context: ../..
       dockerfile: docker/icecast/Dockerfile
       target: monitoring
+    networks: [default, configuration]
+    environment:
+      STATIONDECK_SERVICE_CATALOG: /etc/stationd/discovery-monitor.json
+      STATIONDECK_SERVICE_DESCRIPTOR: /etc/stationd/services-monitor.json
+      STATIONDECK_DISCOVERY_KEY_FILE: /run/secrets/icecast-monitor-discovery-key
     image: stationd-v1-monitor:dev
     volumes:
       - ../../config/icecast:/etc/stationd:ro
@@ -194,6 +216,8 @@ services:
       - router-state:/central-router:ro
       - monitor-state:/var/lib/station-monitor
     secrets:
+      - icecast-admin-discovery-key
+      - icecast-monitor-discovery-key
       - admin-api-token
     read_only: true
     cap_drop: [ALL]
@@ -213,6 +237,14 @@ services:
     stop_grace_period: 10s
 
 secrets:
+  icecast-discovery-key:
+    file: ../../.local/icecast/secrets/icecast-discovery-key
+  icecast-admin-discovery-key:
+    file: ../../.local/icecast/secrets/icecast-admin-discovery-key
+  icecast-monitor-discovery-key:
+    file: ../../.local/icecast/secrets/icecast-monitor-discovery-key
+  icecast-router-discovery-key:
+    file: ../../.local/icecast/secrets/icecast-router-discovery-key
   admin-password:
     file: ../../.local/icecast/secrets/admin-password
   admin-api-token:

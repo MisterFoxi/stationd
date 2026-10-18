@@ -261,6 +261,15 @@ try {
   const beforeIcecast = await metrics();
   assert.equal((await page.request.get(`${base}/api/icecast/streams`)).status(), 401);
   assert.equal((await page.request.post(`${base}/api/icecast/streams`, { headers: { Authorization: `Bearer ${token}` } })).status(), 405);
+  assert.equal((await page.request.get(`${base}/api/services`)).status(), 401);
+  const inventory = await (await page.request.get(`${base}/api/services`, {
+    headers: { Authorization: `Bearer ${token}` },
+  })).json();
+  assert(inventory.services.some(service => service.instance === 'fixture-1'), 'signed fixture was not discovered');
+  assert(inventory.bindings.some(binding => binding.interface === 'stationdeck.icecast.streams'
+    && binding.instance === 'fixture-1' && binding.code === 'discovered'), 'Icecast used no discovered binding');
+  assert(!JSON.stringify(inventory).includes(token), 'inventory exposed a credential');
+  assert(!JSON.stringify(inventory).includes('/service-credentials'), 'inventory exposed a credential path');
   const icecastReply = page.waitForResponse(r => r.url().endsWith('/api/icecast/streams'));
   await clickControl(page, 'icecast-connect');
   const icecastStatus = await (await icecastReply).json();

@@ -5,6 +5,7 @@ use anyhow::{bail, Context, Result};
 use std::path::Path;
 use tonic::{Request, Response, Status};
 
+pub mod discovery;
 pub mod history;
 pub mod router;
 #[rustfmt::skip]

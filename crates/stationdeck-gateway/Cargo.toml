@@ -5,6 +5,7 @@ edition = "2021"
 publish = false
 
 [dependencies]
+stationdeck-discovery = { path = "../stationdeck-discovery" }
 stationdeck-services = { path = "../stationdeck-services" }
 stationd-proto = { path = "../stationd-proto" }
 axum = "0.7"

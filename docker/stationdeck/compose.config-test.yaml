@@ -1,5 +1,7 @@
 # Disposable authority, author credentials and agent state; no published ports.
 services:
+  gateway:
+    volumes: [gateway-secrets:/service-credentials:ro]
   deck:
     ports: !reset []
     restart: "no"

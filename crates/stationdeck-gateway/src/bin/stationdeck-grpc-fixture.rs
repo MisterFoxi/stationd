@@ -55,16 +55,27 @@ impl Station for Fixture {
 
 #[tokio::main]
 async fn main() {
+    let _announcer = stationdeck_discovery::start_from_env()
+        .await
+        .expect("isolated discovery fixture");
     let fixture = Fixture::default();
     let grpc = fixture.clone();
     let icecast = icecast::IcecastFixture {
-        mode: fixture.mode.clone(), requests: fixture.icecast_requests.clone(),
-        token: Arc::new(std::fs::read_to_string("/secrets/access-token").expect("isolated fixture credential").trim().to_owned()),
+        mode: fixture.mode.clone(),
+        requests: fixture.icecast_requests.clone(),
+        token: Arc::new(
+            std::fs::read_to_string("/secrets/access-token")
+                .expect("isolated fixture credential")
+                .trim()
+                .to_owned(),
+        ),
     };
     let task = tokio::spawn(async move {
         tonic::transport::Server::builder()
             .add_service(StationServer::new(grpc))
-            .add_service(icecast::rpc::icecast_admin_server::IcecastAdminServer::new(icecast))
+            .add_service(icecast::rpc::icecast_admin_server::IcecastAdminServer::new(
+                icecast,
+            ))
             .serve("0.0.0.0:50051".parse().unwrap())
             .await
             .unwrap();

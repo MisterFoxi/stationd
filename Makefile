@@ -293,9 +293,12 @@ icecast-dist-install-test: ## Validation du vrai paquet sans lancer les services
 
 # StationDeck web: WASM frontend and narrow gRPC gateway, all in containers.
 .PHONY: deck-build deck-check deck-smoke deck deck-down deck-token
-# Preserve the explicitly selected local deployment profile across make deck/down/token.
-DECK_ICECAST_PROFILE = $(if $(wildcard .local/stationdeck/icecast.enabled),-f docker/stationdeck/compose.icecast.yaml)
-DECK_DC = docker compose -f docker/stationdeck/compose.yaml $(DECK_ICECAST_PROFILE)
+DECK_DC = docker compose -f docker/stationdeck/compose.yaml
+
+.PHONY: deck-bootstrap
+deck-bootstrap: ## Prepare the private host service credential directory
+> @mkdir -p .local/stationdeck/service-credentials
+> @chmod 700 .local/stationdeck/service-credentials
 
 deck-build: ## Build the WebAssembly frontend and gRPC gateway images
 > $(DECK_DC) build deck gateway control
@@ -312,7 +315,7 @@ deck-smoke: ## Test Chromium against an isolated gRPC fixture; no public ports
 >   docker compose -p "$$project" -f docker/stationdeck/compose.yaml -f docker/stationdeck/compose.test.yaml build; \
 >   docker compose -p "$$project" -f docker/stationdeck/compose.yaml -f docker/stationdeck/compose.test.yaml run --rm browser
 
-deck: ## Start the WebUI on port 18081 (STATIONDECK_PORT=...)
+deck: deck-bootstrap ## Start the WebUI on port 18081 (STATIONDECK_PORT=...)
 > $(DECK_DC) up -d --build --wait
 
 deck-down: ## Stop only the StationDeck web project
@@ -324,7 +327,7 @@ deck-token: ## Show the gateway access token in your own terminal; keep it priva
 
 
 .PHONY: deck-config-demo deck-author-token deck-reader-token
-deck-config-demo: ## Start the configuration demo agent; no station changes
+deck-config-demo: deck-bootstrap ## Start the configuration demo agent; no station changes
 > $(DECK_DC) --profile config-demo up -d --build --wait
 
 deck-author-token: ## Show the configuration editor token in your own terminal
@@ -346,10 +349,10 @@ ICECAST_DECK_DC = docker compose -f docker/icecast/compose.yaml -f docker/icecas
 export STATIONDECK_SD_ENDPOINT
 
 deck-daemon-build: ## Build the SD adapter and default icecastd image with its configuration agent
-> $(DECK_DC) build control
+> $(DECK_DC) build deck gateway control
 > docker compose -f docker/icecast/compose.yaml build icecastd admin monitor
 
-deck-daemons: ## Start StationDeck and icecastd; publication remains explicit
+deck-daemons: deck-bootstrap icecast-init ## Start StationDeck and icecastd; publication remains explicit
 > $(DECK_DAEMON_DC) up -d --wait config-init control gateway deck
 > $(ICECAST_DECK_DC) up -d --wait icecastd admin
 
@@ -362,7 +365,4 @@ deck-daemons-down: ## Stop managed Icecast/admin and configuration adapters, ret
 > $(DECK_DAEMON_DC) --profile sd-config --profile config-demo stop
 
 .PHONY: deck-icecast
-deck-icecast: ## Start Deck connected to the existing icecastd administration service
-> docker compose -f docker/stationdeck/compose.yaml -f docker/stationdeck/compose.icecast.yaml up -d --build --wait
-> @mkdir -p .local/stationdeck
-> @touch .local/stationdeck/icecast.enabled
+deck-icecast: deck ## Compatibility alias: all services use generic discovery

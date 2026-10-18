@@ -36,9 +36,9 @@ RUN --mount=type=cache,id=stationdeck-registry,target=/usr/local/cargo/registry 
 FROM source AS checks
 RUN --mount=type=cache,id=stationdeck-registry,target=/usr/local/cargo/registry \
     --mount=type=cache,id=stationdeck-web-target,target=/build,sharing=locked \
-    cargo fmt -p stationdeck -p stationdeck-ui -p stationdeck-services -p stationdeck-demo -p stationdeck-grpc -p stationdeck-gateway -p stationdeck-config-ui -p stationdeck-icecast -p icecastd-deck -p stationdeck-control --check \
- && cargo test --locked -p stationdeck -p stationdeck-ui -p stationdeck-services -p stationdeck-demo -p stationdeck-grpc -p stationdeck-config-ui -p stationdeck-icecast -p icecastd-deck \
- && cargo clippy --locked -p stationdeck -p stationdeck-ui -p stationdeck-services -p stationdeck-demo -p stationdeck-grpc -p stationdeck-config-ui -p stationdeck-icecast -p icecastd-deck --all-targets -- -D warnings \
+    cargo fmt -p stationdeck -p stationdeck-ui -p stationdeck-services -p stationdeck-discovery -p stationdeck-demo -p stationdeck-grpc -p stationdeck-gateway -p stationdeck-config-ui -p stationdeck-icecast -p icecastd-deck -p stationdeck-control --check \
+ && cargo test --locked -p stationdeck -p stationdeck-ui -p stationdeck-services -p stationdeck-discovery -p stationdeck-demo -p stationdeck-grpc -p stationdeck-config-ui -p stationdeck-icecast -p icecastd-deck \
+ && cargo clippy --locked -p stationdeck -p stationdeck-ui -p stationdeck-services -p stationdeck-discovery -p stationdeck-demo -p stationdeck-grpc -p stationdeck-config-ui -p stationdeck-icecast -p icecastd-deck --all-targets -- -D warnings \
  && cargo clippy --locked -p stationdeck --target wasm32-unknown-unknown -- -D warnings \
  && cargo tree --locked -p stationdeck --target wasm32-unknown-unknown --prefix none > /tmp/stationdeck-dependencies \
  && ! grep -E '^(stationd |tonic |prost |prost-types )' /tmp/stationdeck-dependencies \
@@ -68,7 +68,7 @@ FROM debian:bookworm-slim AS gateway
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
  && rm -rf /var/lib/apt/lists/* \
  && groupadd -g 1000 deck && useradd -m -u 1000 -g deck deck \
- && mkdir /secrets && chown deck:deck /secrets
+ && mkdir /secrets /configuration-credentials && chown deck:deck /secrets /configuration-credentials
 COPY --from=gateway-build /gateway-out/stationdeck-gateway /usr/local/bin/stationdeck-gateway
 USER 1000:1000
 HEALTHCHECK --interval=5s --timeout=2s CMD curl -fsS -o /dev/null http://127.0.0.1:8080/healthz || exit 1
@@ -110,7 +110,7 @@ RUN --mount=type=cache,id=stationdeck-registry,target=/usr/local/cargo/registry 
 
 FROM gateway AS control
 USER root
-RUN mkdir -p /data /author-secrets /agent-secrets && chown 1000:1000 /data /author-secrets /agent-secrets
+RUN mkdir -p /data /author-secrets /agent-secrets /service-credentials && chown 1000:1000 /data /author-secrets /agent-secrets /service-credentials
 COPY --from=control-build /control-out/stationdeck-control /usr/local/bin/stationdeck-control
 USER 1000:1000
 ENTRYPOINT ["stationdeck-control"]

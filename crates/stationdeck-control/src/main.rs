@@ -46,6 +46,9 @@ async fn main() -> Result<(), &'static str> {
             )
             .map_err(|_| "Invalid configuration catalog.")?;
             catalog.validate()?;
+            if let Ok(path) = std::env::var("STATIONDECK_DISCOVERY_KEY_FILE") {
+                initialize(Path::new(&path))?;
+            }
             for principal in &catalog.operators {
                 initialize(&Path::new("/author-secrets").join(&principal.token_file))?;
             }
@@ -78,6 +81,9 @@ async fn main() -> Result<(), &'static str> {
         }
         _ => {}
     }
+    let _announcer = stationdeck_discovery::start_from_env()
+        .await
+        .map_err(|e| e.message())?;
     let bootstrap: Bootstrap = serde_json::from_slice(
         &fs::read(env(
             "STATIONDECK_CONTROL_CATALOG",

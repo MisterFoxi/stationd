@@ -24,7 +24,14 @@ struct Args {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
-    let config = RouterConfig::load(&args.config)?;
+    let _announcer = stationdeck_discovery::start_from_env().await?;
+    let mut config = RouterConfig::load(&args.config)?;
+    if let Ok(origin) = std::env::var("STATIONDECK_ICECAST_URL") {
+        if !origin.trim().is_empty() {
+            stationd_admin::discovery::http_origin(origin.trim())?;
+            config.icecast_url = origin.trim().to_owned();
+        }
+    }
     let (router, mut changes) = Router::new(config, &args.state)?;
     let router_token = read_secret(&args.secrets_dir.join("router-api-token"))?;
     let worker_router = router.clone();

@@ -5827,6 +5827,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "stationd-proto",
+ "stationdeck-discovery",
  "stationdeck-services",
  "subtle",
  "tempfile",
@@ -5848,6 +5849,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "stationdeck-discovery"
+version = "0.1.0"
+dependencies = [
+ "hmac",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "url",
+ "uuid",
+]
+
+[[package]]
 name = "stationdeck-gateway"
 version = "0.1.0"
 dependencies = [
@@ -5856,6 +5871,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "stationd-proto",
+ "stationdeck-discovery",
  "stationdeck-services",
  "subtle",
  "tokio",

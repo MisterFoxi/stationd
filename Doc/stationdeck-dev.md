@@ -8,8 +8,9 @@ through the same registry as other modules. The separate `stationdeck-icecast`
 provider connects to the Deck gateway; the gateway calls IcecastAdmin.GetStatus.
 No StationD daemon or StationD status endpoint is used for this workflow.
 
-With the existing Icecast administration stack running, use `make deck-icecast`,
-then enable Icecast provider and Icecast streams plugin in Modules. Connect in
+Rebuild with `make deck-daemon-build`, then start with `make deck-daemons`
+(which initializes missing credentials). Services use the shared
+[discovery protocol](stationdeck-service-discovery.md). Then enable Icecast provider and Icecast streams plugin in Modules. Connect in
 Icecast connection with the Deck gateway token (`make deck-token`) and open
 Icecast streams. The upstream admin token stays on the server. This does not
 replace configuration authoring; stream supervision and publishing configuration

@@ -45,9 +45,19 @@ async fn main() -> Result<(), &'static str> {
         .ok()
         .filter(|value| !value.trim().is_empty());
     let mut gateway = Gateway::new(token.trim(), address.as_deref())?;
-    if let Some(address) = std::env::var("STATIONDECK_ICECAST_GRPC_ADDR").ok().filter(|s| !s.trim().is_empty()) {
-        let path = std::env::var("STATIONDECK_ICECAST_TOKEN_FILE").unwrap_or_else(|_| "/run/secrets/icecast-admin-api-token".into());
-        let admin_token = fs::read_to_string(path).map_err(|_| "Icecast administration credential is unavailable.")?;
+    if let Ok(path) = std::env::var("STATIONDECK_SERVICE_CATALOG") {
+        gateway = gateway.with_services(
+            stationdeck_discovery::Policy::read(Path::new(&path)).map_err(|e| e.message())?,
+        )?;
+    }
+    if let Some(address) = std::env::var("STATIONDECK_ICECAST_GRPC_ADDR")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+    {
+        let path = std::env::var("STATIONDECK_ICECAST_TOKEN_FILE")
+            .unwrap_or_else(|_| "/run/secrets/icecast-admin-api-token".into());
+        let admin_token = fs::read_to_string(path)
+            .map_err(|_| "Icecast administration credential is unavailable.")?;
         gateway = gateway.with_icecast(address.trim(), admin_token.trim())?;
     }
     let listener = tokio::net::TcpListener::bind("0.0.0.0:8080")

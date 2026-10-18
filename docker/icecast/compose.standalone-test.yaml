@@ -14,12 +14,19 @@ services:
       - ../../config/icecast:/etc/stationd:ro
       - ../../data/geoip:/data/geoip:ro
   admin:
+    networks: !override [default]
     command: ["--bind", "0.0.0.0:50061", "--settings", "/etc/stationd/admin.toml"]
     volumes: !override
       - ../../config/icecast:/etc/stationd:ro
       - ../../data/geoip:/data/geoip:ro
       - admin-state:/var/lib/station-admin
+  router:
+    networks: !override [default]
+    environment:
+      # The legacy standalone fixture has no discovery companion. Explicit override.
+      STATIONDECK_ICECAST_URL: http://icecastd:8000
   monitor:
+    networks: !override [default]
     profiles: [monitor]
 volumes: !override
   admin-state:

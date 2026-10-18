@@ -57,6 +57,8 @@ Les préférences de navigateur restent locales, distinctes des configurations m
 
 ## Découverte et amorçage
 
+Extension générique préparée le 18 octobre : [découverte des services](stationdeck-service-discovery.md). Elle couvre les interfaces versionnées de tous les services et les futurs services, avec annonces authentifiées, bindings et diagnostics. Son activation réseau et le provisionnement des clés restent soumis à approbation ; le protocole de configuration historique décrit ci-dessous reste actif et compatible.
+
 Priorité : **endpoint explicite FQDN:port**, sinon découverte automatique.
 La connexion choisit un profil de transport explicite (TLS et autorité de confiance) ;
 le seul nom découvert ne permet pas de faire confiance à un serveur.

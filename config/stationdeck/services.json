@@ -1,0 +1,13 @@
+{
+  "authority": "stationdeck-dev",
+  "discovery_address": "255.255.255.255:50072",
+  "trust": [
+    {"instance":"configuration-1","key_file":"/configuration-credentials/configuration-1.discovery-key"},
+    {"instance":"icecast-admin-1","key_file":"/service-credentials/icecast-admin-1.discovery-key"},
+    {"instance":"icecast-monitor-1","key_file":"/service-credentials/icecast-monitor-1.discovery-key"},
+    {"instance":"icecast-router-1","key_file":"/service-credentials/icecast-router-1.discovery-key"}
+  ],
+  "bindings": [
+    {"interface":"stationdeck.icecast.streams","version":"^1.0.0","transport":"grpc","instance":"icecast-admin-1","endpoint":null,"credential_file":"/service-credentials/icecast-admin-1.token","allow_plaintext":true,"tls_server_name":null}
+  ]
+}
