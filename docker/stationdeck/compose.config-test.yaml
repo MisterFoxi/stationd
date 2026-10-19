@@ -3,6 +3,10 @@ services:
   gateway:
     volumes: [gateway-secrets:/service-credentials:ro]
   deck:
+    image: stationdeck-config-web-test:dev
+    build:
+      args:
+        STATIONDECK_CARGO_FEATURES: ui-test
     ports: !reset []
     restart: "no"
   control:

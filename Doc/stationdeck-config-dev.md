@@ -16,7 +16,7 @@ make deck-author-token
 
 The second command displays the **configuration editor** token in your own
 terminal. Open [StationDeck](http://stationdev1.lan:18081/), enable **Configuration
-authoring** in Modules, open **Configuration**, paste that token and connect.
+authoring** in Modules, save that token in **Tokens → Configuration author**, then open **Configuration** and connect.
 The status gateway token from `make deck-token` grants no configuration rights.
 
 Select `demo-1`, add `demo.settings`, edit its message and interval, then **Save
@@ -28,8 +28,7 @@ both the authority and agent keep running.
 **Published history** can copy an older revision into a new draft. Saving and
 publishing that draft creates a higher revision; previous publications stay intact.
 Conflicting draft/publication versions return HTTP 409: reload before retrying.
-Disconnecting or disabling the module clears credentials and private local edits.
-No configuration document or credential is saved in localStorage.
+Disconnecting or disabling the module clears private runtime data and local edits; the author token remains saved in Tokens. No configuration document is saved in localStorage. **Forget** in Tokens removes the saved author token and invalidates its clients.
 
 `make deck-reader-token` displays a separate read-only credential. Its target and
 permissions are enforced by the backend, including calls made outside the UI.

@@ -7,6 +7,8 @@ use std::collections::BTreeMap;
 
 #[cfg(target_arch = "wasm32")]
 const SETTINGS_KEY: &str = "stationdeck.settings.v1";
+#[cfg(target_arch = "wasm32")]
+const TOKENS_KEY: &str = "stationdeck.tokens.v1";
 const ACCENT: Color32 = Color32::from_rgb(57, 189, 176);
 const WARNING: Color32 = Color32::from_rgb(235, 180, 75);
 
@@ -83,12 +85,38 @@ impl Settings {
                 .all(|(id, w)| id.len() <= 128 && w.valid())
     }
 }
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct SavedTokens {
+    version: u32,
+    deck_gateway: String,
+    configuration_author: String,
+}
+impl SavedTokens {
+    fn valid(&self) -> bool {
+        self.version == 1
+            && self.deck_gateway.len() <= 65536
+            && self.configuration_author.len() <= 65536
+    }
+    fn from_store(store: &stationdeck_ui::TokenStore) -> Self {
+        Self {
+            version: 1,
+            deck_gateway: store.gateway.get(),
+            configuration_author: store.configuration.get(),
+        }
+    }
+    fn restore(&self, store: &stationdeck_ui::TokenStore) {
+        store.gateway.set(&self.deck_gateway);
+        store.configuration.set(&self.configuration_author);
+    }
+}
 #[derive(Default, PartialEq)]
 enum Page {
     #[default]
     Home,
     Modules,
     Settings,
+    Tokens,
 }
 
 pub struct StationDeck {
@@ -101,11 +129,28 @@ pub struct StationDeck {
     modules: ModuleCatalog,
     layout_generation: u64,
     focus: Option<String>,
+    tokens: stationdeck_ui::TokenStore,
+    tokens_dirty: bool,
+    tokens_invalid: bool,
+    tokens_persistence_error: bool,
+    show_tokens: [bool; 2],
 }
 impl StationDeck {
+    #[cfg(test)]
     fn with_settings(settings: Settings, settings_error: bool) -> Self {
+        Self::with_tokens(
+            settings,
+            settings_error,
+            stationdeck_ui::TokenStore::default(),
+        )
+    }
+    fn with_tokens(
+        settings: Settings,
+        settings_error: bool,
+        tokens: stationdeck_ui::TokenStore,
+    ) -> Self {
         let modules = ModuleCatalog::new(
-            crate::assembly::modules(),
+            crate::assembly::modules_with_tokens(&tokens),
             &settings.enabled_modules,
             crate::assembly::policy_with_provider(&settings.overview_provider),
         );
@@ -119,6 +164,11 @@ impl StationDeck {
             modules,
             layout_generation: 0,
             focus: None,
+            tokens,
+            tokens_dirty: false,
+            tokens_invalid: false,
+            tokens_persistence_error: false,
+            show_tokens: [false; 2],
         }
     }
     #[cfg(target_arch = "wasm32")]
@@ -134,8 +184,26 @@ impl StationDeck {
             .as_deref()
             .and_then(|v| serde_json::from_str::<Settings>(v).ok());
         let invalid = stored.is_some() && !parsed.as_ref().is_some_and(Settings::valid);
-        let mut app =
-            Self::with_settings(parsed.filter(Settings::valid).unwrap_or_default(), invalid);
+        let tokens = stationdeck_ui::TokenStore::default();
+        let saved = storage
+            .as_ref()
+            .and_then(|s| s.get_item(TOKENS_KEY).ok())
+            .flatten();
+        let parsed_tokens = saved
+            .as_deref()
+            .and_then(|s| serde_json::from_str::<SavedTokens>(s).ok());
+        let tokens_invalid =
+            saved.is_some() && !parsed_tokens.as_ref().is_some_and(SavedTokens::valid);
+        if let Some(saved) = parsed_tokens.filter(SavedTokens::valid) {
+            saved.restore(&tokens);
+        }
+        let mut app = Self::with_tokens(
+            parsed.filter(Settings::valid).unwrap_or_default(),
+            invalid,
+            tokens,
+        );
+        app.tokens_invalid = tokens_invalid;
+        app.tokens_persistence_error = storage.is_none();
         app.persistence_error = storage.is_none();
         app.apply_style(&cc.egui_ctx);
         app
@@ -150,6 +218,119 @@ impl StationDeck {
         })()
         .is_some();
         self.preferences_dirty = false;
+    }
+    #[cfg(target_arch = "wasm32")]
+    fn persist_tokens(&mut self) {
+        self.tokens_persistence_error = !(|| {
+            let storage = web_sys::window()?.local_storage().ok()??;
+            if self.tokens.gateway.is_empty() && self.tokens.configuration.is_empty() {
+                storage.remove_item(TOKENS_KEY).ok()
+            } else {
+                storage
+                    .set_item(
+                        TOKENS_KEY,
+                        &serde_json::to_string(&SavedTokens::from_store(&self.tokens)).ok()?,
+                    )
+                    .ok()
+            }
+        })()
+        .is_some();
+        self.tokens_dirty = false;
+    }
+    fn token_settings(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        ui.heading("Tokens");
+        ui.label("Connection credentials saved locally in this browser for this site.");
+        ui.weak("Disconnecting or disabling a plugin keeps its saved token. Forget removes it and disconnects its clients.");
+        if self.tokens_invalid {
+            show_state(
+                ui,
+                ViewState::Error(
+                    "Saved tokens are invalid or from a newer version. They have been preserved.",
+                ),
+            );
+            if ui.button("Replace saved tokens").clicked() {
+                self.tokens_invalid = false;
+                self.tokens_dirty = true;
+            }
+            return;
+        }
+        if self.tokens_persistence_error {
+            show_state(
+                ui,
+                ViewState::Error(
+                    "Tokens could not be saved in this browser. Changes are temporary.",
+                ),
+            );
+            if ui.button("Retry saving tokens").clicked() {
+                self.tokens_dirty = true;
+            }
+        } else {
+            ui.weak("Changes are saved automatically.");
+        }
+        for (index, (id, title, detail, slot)) in [
+            (
+                "gateway",
+                "Deck gateway",
+                "Shared by StationD status and Icecast.",
+                self.tokens.gateway.clone(),
+            ),
+            (
+                "configuration",
+                "Configuration author",
+                "Used by configuration authoring only.",
+                self.tokens.configuration.clone(),
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            ui.add_space(18.0);
+            ui.strong(title);
+            ui.weak(detail);
+            let mut value = slot.get();
+            if stationdeck_ui::test_ui::response(
+                &format!("tokens-{id}"),
+                ui.add(
+                    egui::TextEdit::singleline(&mut value)
+                        .password(!self.show_tokens[index])
+                        .char_limit(16384)
+                        .desired_width(380.0),
+                ),
+            )
+            .changed()
+            {
+                slot.set(&value);
+                self.tokens_dirty = true;
+                ctx.request_repaint();
+            }
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut self.show_tokens[index], "Show");
+                if stationdeck_ui::test_ui::response(
+                    &format!("forget-{id}"),
+                    ui.add_enabled(!slot.is_empty(), egui::Button::new("Forget")),
+                )
+                .clicked()
+                {
+                    slot.set("");
+                    self.tokens_dirty = true;
+                    self.show_tokens[index] = false;
+                    ctx.request_repaint();
+                }
+                if slot.is_empty() {
+                    ui.weak("Not set");
+                } else {
+                    ui.weak("Saved locally");
+                }
+            });
+        }
+        ui.add_space(18.0);
+        if ui.button("Forget all tokens").clicked() {
+            self.tokens.gateway.set("");
+            self.tokens.configuration.set("");
+            self.tokens_dirty = true;
+            self.show_tokens = [false; 2];
+            ctx.request_repaint();
+        }
     }
     fn apply_style(&self, ctx: &egui::Context) {
         ctx.set_theme(if self.settings.theme == Theme::Dark {
@@ -199,6 +380,7 @@ impl StationDeck {
     }
     fn render(&mut self, ctx: &egui::Context) {
         stationdeck_ui::test_ui::begin_frame();
+        self.modules.tick();
         for descriptor in self.modules.descriptors() {
             if let Some((state, _)) = self.modules.status(descriptor.id) {
                 stationdeck_ui::test_ui::value(
@@ -232,6 +414,7 @@ impl StationDeck {
                     ("Workspace", Page::Home),
                     ("Modules", Page::Modules),
                     ("Settings", Page::Settings),
+                    ("Tokens", Page::Tokens),
                 ] {
                     if ui.selectable_label(self.page == page, label).clicked() {
                         self.page = page;
@@ -304,7 +487,7 @@ impl StationDeck {
         egui::SidePanel::left("stationdeck.navigation").default_width(190.0).width_range(150.0..=280.0).show(ctx, |ui| {
             ui.add_space(8.0);
             ui.weak("WORKSPACE");
-            for (label, page) in [("Home", Page::Home), ("Modules", Page::Modules), ("Settings", Page::Settings)] {
+            for (label, page) in [("Home", Page::Home), ("Modules", Page::Modules), ("Settings", Page::Settings), ("Tokens", Page::Tokens)] {
                 let response = ui.selectable_label(self.page == page, label);
                 stationdeck_ui::test_ui::control(&format!("nav-{}", label.to_ascii_lowercase()), &response);
                 if response.clicked() { self.page = page; }
@@ -358,14 +541,18 @@ impl StationDeck {
             }
             ui.available_rect_before_wrap()
         }).inner.shrink(8.0);
+        if self.page != Page::Tokens {
+            self.show_tokens = [false; 2];
+        }
         self.plugin_windows(ctx, workspace);
         // Host settings are separate windows; plugins stay visible underneath.
         if self.page != Page::Home {
             let mut open = true;
-            let title = if self.page == Page::Modules {
-                "Modules"
-            } else {
-                "Settings"
+            let title = match self.page {
+                Page::Modules => "Modules",
+                Page::Settings => "Settings",
+                Page::Tokens => "Tokens",
+                Page::Home => unreachable!(),
             };
             egui::Window::new(title)
                 .id(egui::Id::new(("host", title)))
@@ -378,12 +565,10 @@ impl StationDeck {
                 .hscroll(true)
                 .constrain_to(workspace)
                 .vscroll(true)
-                .show(ctx, |ui| {
-                    if self.page == Page::Modules {
-                        self.module_settings(ui);
-                    } else {
-                        self.preferences(ui, ctx);
-                    }
+                .show(ctx, |ui| match self.page {
+                    Page::Modules => self.module_settings(ui),
+                    Page::Tokens => self.token_settings(ui, ctx),
+                    _ => self.preferences(ui, ctx),
                 });
             if !open {
                 self.page = Page::Home;
@@ -586,7 +771,7 @@ impl StationDeck {
                 ui.add_space(12.0);
             });
         }
-        ui.weak("Disabling a module cancels its requests, removes its views and clears its in-memory credentials.");
+        ui.weak("Disabling a module cancels its requests, removes its views and clears its private data. Saved tokens remain in Tokens.");
     }
 
     fn preferences(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
@@ -625,7 +810,7 @@ impl StationDeck {
             }
             ui.add_space(16.0);
             ui.weak(
-                "Preferences are saved locally in this browser. Access tokens are never saved.",
+                "Preferences are saved locally. Connection tokens are managed and saved separately in Tokens.",
             );
         });
         if changed {
@@ -642,12 +827,29 @@ impl eframe::App for StationDeck {
         if self.preferences_dirty && !self.settings_error {
             self.persist_preferences();
         }
+        if self.tokens_dirty && !self.tokens_invalid {
+            self.persist_tokens();
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn saved_tokens_are_separate_versioned_and_restored_to_scoped_slots() {
+        let store = stationdeck_ui::TokenStore::default();
+        store.gateway.set("gateway-fixture");
+        store.configuration.set("author-fixture");
+        let mut saved = SavedTokens::from_store(&store);
+        assert!(saved.valid());
+        let restored = stationdeck_ui::TokenStore::default();
+        saved.restore(&restored);
+        assert_eq!(restored.gateway.get(), "gateway-fixture");
+        assert_eq!(restored.configuration.get(), "author-fixture");
+        saved.version = 2;
+        assert!(!saved.valid());
+    }
     fn frame(app: &mut StationDeck, ctx: &egui::Context, size: egui::Vec2) {
         let _ = ctx.run(
             egui::RawInput {

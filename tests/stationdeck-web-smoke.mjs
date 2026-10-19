@@ -85,6 +85,16 @@ async function openView(target, id) {
     await clickControl(target, `tab-${id}`);
   }
 }
+async function setToken(kind, value) {
+  await clickControl(page, 'nav-tokens');
+  await clickControl(page, `tokens-${kind}`);
+  await page.keyboard.press('Control+A');
+  await page.keyboard.insertText(value);
+  await page.waitForFunction(kind => {
+    const saved = JSON.parse(localStorage.getItem('stationdeck.tokens.v1') || 'null');
+    return !!saved?.[kind === 'gateway' ? 'deck_gateway' : 'configuration_author'];
+  }, kind);
+}
 async function waitState(id, state) {
   await page.waitForFunction(({ id, state }) =>
     document.getElementById('stationdeck')?.getAttribute(`data-qa-state-${id}`) === state, { id, state });
@@ -216,13 +226,15 @@ try {
   assert.equal((await page.request.get(`${base}/api/station/quit`, { headers: { Authorization: `Bearer ${token}` } })).status(), 404);
   assert.equal(await metrics(), beforeAuth, 'unauthorized requests reached gRPC');
 
+  await setToken('gateway', `  ${token}  `);
+  await setToken('configuration', 'author-token-fixture');
+  await capture(page, 'tokens-saved-masked');
+  await page.reload();
+  await ready(page);
+  assert((await page.evaluate(() => localStorage.getItem('stationdeck.tokens.v1'))).includes(token), 'saved gateway token was not restored');
+  assert.equal(await metrics(), beforeAuth, 'reload must not automatically reconnect');
   await clickControl(page, 'nav-grpc.connection');
-  await page.waitForTimeout(150);
-  await clickControl(page, 'grpc-token');
-  await page.waitForTimeout(100);
-  // Terminal copy/paste may include surrounding whitespace.
-  await page.keyboard.insertText(`  ${token}  `);
-  await page.waitForTimeout(100);
+  assert.equal(await page.locator('#stationdeck').getAttribute('data-qa-grpc-token'), null, 'credentials leaked into a plugin window');
   const statusReply = page.waitForResponse(response => response.url().endsWith('/api/station/status'));
   await clickControl(page, 'grpc-refresh');
   const connected = await (await statusReply).json();
@@ -234,7 +246,7 @@ try {
   await waitHealth('grpc', 'good');
   await waitHealth('overview', 'good');
   await capture(page, 'grpc-connected');
-  assert(!(await page.evaluate(() => JSON.stringify(localStorage))).includes(token), 'credentials must not be persisted');
+  assert(!(await page.evaluate(() => localStorage.getItem('stationdeck.settings.v1'))).includes(token), 'tokens belong in their dedicated store, not layout preferences');
 
   await page.request.post(`${fixture}/fail`);
   const failedReply = page.waitForResponse(response => response.url().endsWith('/api/station/status'));
@@ -263,21 +275,27 @@ try {
   await page.waitForTimeout(150);
   await clickControl(page, 'nav-grpc.connection');
   await page.waitForTimeout(150);
-  const cleared = await capture(page, 'grpc-reenabled-empty');
-  const input = await controlRect(page, 'grpc-token');
-  assert(brightness(cleared, Math.floor(input.x + input.width / 2), Math.floor(input.y + input.height / 2)) <= 10, 'the connection input is not visible');
-  let credentialPixels = 0;
-  for (let y = Math.ceil(input.y + 3); y < input.y + input.height - 3; y++) {
-    for (let x = Math.ceil(input.x + 107); x < Math.min(input.x + 257, input.x + input.width - 3); x++) {
-      if (brightness(cleared, x, y) > 100) credentialPixels++;
-    }
-  }
-  assert(credentialPixels < 5, 'the cleared password field still shows credential characters');
+  await capture(page, 'grpc-reenabled-saved');
+  await waitHealth('grpc', 'inactive');
   const countAfterCancellation = await metrics();
+  await animationFrame(page);
+  assert.equal(await metrics(), countAfterCancellation, 're-enabling must not automatically reconnect');
+  await page.request.post(`${fixture}/ready`);
+  const reconnected = page.waitForResponse(r => r.url().endsWith('/api/station/status'));
   await clickControl(page, 'grpc-refresh');
-  await page.waitForTimeout(150);
-  assert.equal(await metrics(), countAfterCancellation, 'disabled module retained its access token');
-  assert(!(await page.evaluate(() => JSON.stringify(localStorage))).includes(token), 'credentials must not be persisted after cancellation');
+  assert.equal((await (await reconnected).json()).state, 'connected', 'saved credentials were not reused');
+  await page.request.post(`${fixture}/delay`);
+  const pendingForget = page.waitForRequest(r => r.url().endsWith('/api/station/status'));
+  await clickControl(page, 'grpc-refresh');
+  await pendingForget;
+  await clickControl(page, 'nav-tokens');
+  await clickControl(page, 'forget-gateway');
+  await waitHealth('grpc', 'inactive');
+  await page.waitForTimeout(2300);
+  await waitHealth('overview', 'inactive');
+  assert(!(await page.evaluate(() => localStorage.getItem('stationdeck.tokens.v1') || '')).includes(token), 'Forget kept the gateway token');
+  assert((await page.evaluate(() => localStorage.getItem('stationdeck.tokens.v1') || '')).includes('author-token-fixture'), 'gateway deletion affected configuration credentials');
+  await setToken('gateway', token);
   await page.request.post(`${fixture}/ready`);
   assert.deepEqual(errors, [], 'unexpected browser errors during module tests');
   // Validate the autonomous Icecast plugin with no StationD module enabled.
@@ -296,8 +314,7 @@ try {
   await waitModules('icecastd', 'icecast-gateway');
   await waitState('icecastd', 'Running');
   await clickControl(page, 'nav-icecast-gateway.connection');
-  await clickControl(page, 'icecast-token');
-  await page.keyboard.insertText(`  ${token}  `);
+
   const beforeIcecast = await metrics();
   assert.equal((await page.request.get(`${base}/api/icecast/streams`)).status(), 401);
   assert.equal((await page.request.post(`${base}/api/icecast/streams`, { headers: { Authorization: `Bearer ${token}` } })).status(), 405);
@@ -334,7 +351,7 @@ try {
   assert.equal(await page.locator('#stationdeck').getAttribute('data-qa-vital-listeners'), '7');
   await clickControl(page, 'nav-icecastd.streams');
   await capture(page, 'icecast-plugin-streams');
-  assert(!(await page.evaluate(() => JSON.stringify(localStorage))).includes(token), 'Icecast provider persisted its credential');
+  assert((await page.evaluate(() => localStorage.getItem('stationdeck.tokens.v1'))).includes(token), 'shared saved token was lost');
   await page.request.post(`${fixture}/fail`);
   const icecastFailure = page.waitForResponse(r => r.url().endsWith('/api/icecast/streams'));
   await clickControl(page, 'icecast-streams-refresh');
@@ -356,9 +373,18 @@ try {
   await waitState('icecastd', 'Running');
   await clickControl(page, 'nav-icecast-gateway.connection');
   const icecastCount = (await (await page.request.get(`${fixture}/metrics`)).json()).icecast_requests;
-  await clickControl(page, 'icecast-connect'); // Disabled after stop cleared the token.
   await animationFrame(page);
-  assert.equal((await (await page.request.get(`${fixture}/metrics`)).json()).icecast_requests, icecastCount);
+  assert.equal((await (await page.request.get(`${fixture}/metrics`)).json()).icecast_requests, icecastCount, 're-enabling must not automatically reconnect');
+  await page.request.post(`${fixture}/ready`);
+  const icecastReconnected = page.waitForResponse(r => r.url().endsWith('/api/icecast/streams'));
+  await clickControl(page, 'icecast-connect');
+  assert.equal((await (await icecastReconnected).json()).state, 'connected');
+  await clickControl(page, 'nav-tokens');
+  await clickControl(page, 'forget-gateway');
+  await waitHealth('icecast-gateway', 'inactive');
+  await waitHealth('icecastd', 'inactive');
+  await clickControl(page, 'forget-configuration');
+  await page.waitForFunction(() => localStorage.getItem('stationdeck.tokens.v1') === null);
   assert.deepEqual(errors, [], 'browser errors in the autonomous Icecast plugin');
   await page.request.post(`${fixture}/ready`);
 

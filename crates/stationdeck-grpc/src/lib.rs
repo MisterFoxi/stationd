@@ -8,17 +8,19 @@ use std::{cell::RefCell, rc::Rc};
 #[derive(Default)]
 pub struct GrpcModule {
     context: Option<stationdeck_services::registry::Context>,
-    token: String,
+    token: stationdeck_ui::TokenSlot,
+    token_revision: u64,
     request: Rc<RefCell<RequestSlot<StationStatus>>>,
     #[cfg(target_arch = "wasm32")]
     abort: Option<web_sys::AbortController>,
 }
 
 impl GrpcModule {
-    fn credentials_changed(&mut self) {
-        let token = std::mem::take(&mut self.token);
-        self.stop();
-        self.token = token;
+    pub fn with_token(token: stationdeck_ui::TokenSlot) -> Self {
+        Self {
+            token,
+            ..Default::default()
+        }
     }
     fn can_connect(&self) -> bool {
         self.context.as_ref().is_some_and(|c| {
@@ -49,7 +51,7 @@ impl GrpcModule {
         let signal = controller.signal();
         let timeout_controller = controller.clone();
         self.abort = Some(controller);
-        let token = self.token.trim().to_owned();
+        let token = self.token.get();
         let slot = self.request.clone();
         wasm_bindgen_futures::spawn_local(async move {
             let _timeout =
@@ -125,41 +127,31 @@ impl DeckModule for GrpcModule {
     fn health(&self) -> stationdeck_ui::PluginStatus {
         stationdeck_ui::PluginStatus::request(&self.request.borrow().state)
     }
+    fn tick(&mut self) {
+        let revision = self.token.revision();
+        if revision != self.token_revision {
+            self.stop();
+            self.token_revision = revision;
+        }
+    }
     fn stop(&mut self) {
         #[cfg(target_arch = "wasm32")]
         if let Some(controller) = self.abort.take() {
             controller.abort();
         }
         self.request.borrow_mut().cancel();
-        self.token.clear();
     }
     fn ui(&mut self, _id: &str, ui: &mut egui::Ui) {
         ui.heading("Station connection");
         ui.label("Read the status of the station configured by your administrator.");
         ui.add_space(12.0);
-        ui.label("Gateway access token");
+        ui.weak("Manage the saved Deck gateway token in Tokens.");
         let pending = matches!(self.request.borrow().state, RequestState::Pending);
-        let edited = stationdeck_ui::test_ui::response(
-            "grpc-token",
-            ui.add_enabled(
-                !pending,
-                egui::TextEdit::singleline(&mut self.token)
-                    .password(true)
-                    .hint_text("Access token")
-                    .desired_width(320.0),
-            ),
-        )
-        .changed();
-        if edited {
-            // A result belongs to the credentials that produced it. Do not retain
-            // an old denial or a private status snapshot after credentials change.
-            self.credentials_changed();
-        }
         ui.horizontal(|ui| {
             if stationdeck_ui::test_ui::response(
                 "grpc-refresh",
                 ui.add_enabled(
-                    !pending && !self.token.trim().is_empty(),
+                    !pending && !self.token.is_empty(),
                     egui::Button::new("Connect / refresh"),
                 ),
             )
@@ -175,7 +167,7 @@ impl DeckModule for GrpcModule {
             RequestState::Idle => show_state(
                 ui,
                 ViewState::Unavailable(
-                    "Not connected. Enter the access token provided by your administrator.",
+                    "Not connected. Set the Deck gateway token in Tokens, then connect.",
                 ),
             ),
             RequestState::Pending => show_state(
@@ -190,7 +182,9 @@ impl DeckModule for GrpcModule {
             RequestState::Failed(error) => show_state(ui, ViewState::Error(error)),
         }
         ui.add_space(16.0);
-        ui.weak("The token stays in memory for this enabled module and is cleared on disconnect or disable.");
+        ui.weak(
+            "Disconnect stops requests and clears station data. The saved token remains in Tokens.",
+        );
     }
 }
 
@@ -198,40 +192,41 @@ impl DeckModule for GrpcModule {
 mod tests {
     use super::*;
     #[test]
-    fn editing_credentials_clears_the_previous_result_and_invalidates_late_replies() {
-        let mut module = GrpcModule {
-            token: "  replacement-fixture-token-0123456789  ".into(),
-            ..Default::default()
-        };
+    fn changing_or_forgetting_a_saved_token_invalidates_late_replies() {
+        let token = stationdeck_ui::TokenSlot::default();
+        token.set("first-fixture");
+        let mut module = GrpcModule::with_token(token.clone());
+        module.tick();
         let generation = module.request.borrow_mut().begin().unwrap();
-        module.credentials_changed();
-        assert_eq!(module.token.trim(), "replacement-fixture-token-0123456789");
+        token.set("replacement-fixture");
+        module.tick();
         assert!(matches!(module.request.borrow().state, RequestState::Idle));
         assert!(!module
             .request
             .borrow_mut()
             .finish(generation, Err("late denial".into())));
-        let current = module.request.borrow_mut().begin().unwrap();
-        module
+        let generation = module.request.borrow_mut().begin().unwrap();
+        token.set("");
+        module.tick();
+        assert!(!module
             .request
             .borrow_mut()
-            .finish(current, Err("old token refused".into()));
-        module.credentials_changed();
-        assert!(matches!(module.request.borrow().state, RequestState::Idle));
+            .finish(generation, Err("late reply".into())));
+        assert!(module.token.is_empty());
     }
     #[test]
-    fn stop_clears_credentials_and_invalidates_the_pending_response() {
-        let mut module = GrpcModule {
-            token: "fixture-only-credential".into(),
-            ..Default::default()
-        };
+    fn stop_cancels_work_and_preserves_the_saved_token() {
+        let token = stationdeck_ui::TokenSlot::default();
+        token.set("saved-fixture");
+        let mut module = GrpcModule::with_token(token.clone());
+        module.tick();
         let generation = module.request.borrow_mut().begin().unwrap();
         module.stop();
-        assert!(module.token.is_empty());
+        assert_eq!(token.get(), "saved-fixture");
         assert!(matches!(module.request.borrow().state, RequestState::Idle));
         assert!(!module
             .request
             .borrow_mut()
-            .finish(generation, Err("late response".into())));
+            .finish(generation, Err("late reply".into())));
     }
 }

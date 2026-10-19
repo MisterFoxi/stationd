@@ -1,4 +1,6 @@
 //! UI contributions backed by the transport-free module registry.
+pub mod tokens;
+pub use tokens::{TokenSlot, TokenStore};
 pub mod status;
 use egui::{Color32, RichText, Ui};
 pub use status::{status_badge, status_dot, vital, PluginStatus, StatusTone};
@@ -137,6 +139,8 @@ pub trait DeckModule {
     fn health(&self) -> PluginStatus {
         PluginStatus::lifecycle(stationdeck_services::registry::State::Running)
     }
+    /// Process credential changes and completed work even when the window is closed.
+    fn tick(&mut self) {}
     fn stop(&mut self);
 }
 
@@ -198,6 +202,20 @@ pub struct ModuleCatalog {
     registry: stationdeck_services::registry::Registry<UiModule>,
 }
 impl ModuleCatalog {
+    pub fn tick(&mut self) {
+        let active: Vec<_> = self
+            .registry
+            .entries()
+            .iter()
+            .filter(|e| e.state == stationdeck_services::registry::State::Running)
+            .map(|e| e.module.0.descriptor().id)
+            .collect();
+        for id in active {
+            if let Some(module) = self.registry.module_mut(id) {
+                module.0.tick();
+            }
+        }
+    }
     pub fn health(&self, id: &str) -> PluginStatus {
         match self
             .registry

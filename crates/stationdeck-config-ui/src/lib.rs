@@ -20,7 +20,8 @@ fn report_age(observed_at: u64) -> u64 {
 #[derive(Default)]
 pub struct ConfigModule {
     context: Option<stationdeck_services::registry::Context>,
-    token: String,
+    token: stationdeck_ui::TokenSlot,
+    token_revision: u64,
     last_status: stationdeck_ui::PluginStatus,
     catalog: Option<Rc<Catalog>>,
     selected: String,
@@ -33,6 +34,12 @@ pub struct ConfigModule {
     abort: Option<web_sys::AbortController>,
 }
 impl ConfigModule {
+    pub fn with_token(token: stationdeck_ui::TokenSlot) -> Self {
+        Self {
+            token,
+            ..Default::default()
+        }
+    }
     fn can_connect(&self) -> bool {
         self.context.as_ref().is_some_and(|c| {
             c.authorize(
@@ -64,7 +71,7 @@ impl ConfigModule {
         let signal = controller.signal();
         let timeout_controller = controller.clone();
         self.abort = Some(controller);
-        let token = self.token.clone();
+        let token = self.token.get();
         let method = method.to_owned();
         let slot = self.request.clone();
         wasm_bindgen_futures::spawn_local(async move {
@@ -233,6 +240,14 @@ impl DeckModule for ConfigModule {
             state => stationdeck_ui::PluginStatus::request(state),
         }
     }
+    fn tick(&mut self) {
+        let revision = self.token.revision();
+        if revision != self.token_revision {
+            self.stop();
+            self.token_revision = revision;
+        }
+        self.receive();
+    }
     fn stop(&mut self) {
         self.last_status = stationdeck_ui::PluginStatus::default();
         #[cfg(target_arch = "wasm32")]
@@ -240,7 +255,7 @@ impl DeckModule for ConfigModule {
             c.abort();
         }
         self.request.borrow_mut().cancel();
-        self.token.clear();
+
         self.catalog = None;
         self.current = None;
         self.documents.clear();
@@ -255,31 +270,25 @@ impl DeckModule for ConfigModule {
         ui.heading("Configuration authoring");
         ui.label("Edit a draft, save it, then publish it for the selected agent.");
         let pending = matches!(self.request.borrow().state, RequestState::Pending);
-        ui.label("Configuration author token");
-        if ui
-            .add_enabled(
-                !pending,
-                egui::TextEdit::singleline(&mut self.token)
-                    .password(true)
-                    .desired_width(320.0),
-            )
-            .changed()
-        {
-            let token = std::mem::take(&mut self.token);
-            self.stop();
-            self.token = token;
-        }
+        ui.weak("Manage the saved configuration author token in Tokens.");
         ui.horizontal(|ui| {
-            if ui
-                .add_enabled(
+            if stationdeck_ui::test_ui::response(
+                "config-connect",
+                ui.add_enabled(
                     !pending && !self.token.is_empty(),
                     egui::Button::new("Connect / refresh configuration"),
-                )
-                .clicked()
+                ),
+            )
+            .clicked()
             {
                 self.send(ui.ctx().clone(), "GET", "/api/config/catalog".into(), None);
             }
-            if ui.button("Disconnect configuration").clicked() {
+            if stationdeck_ui::test_ui::response(
+                "config-disconnect",
+                ui.button("Disconnect configuration"),
+            )
+            .clicked()
+            {
                 self.stop();
             }
             if pending {
@@ -290,7 +299,7 @@ impl DeckModule for ConfigModule {
             ui.label(&self.message);
         }
         let Some(catalog) = self.catalog.clone() else {
-            ui.weak("Credentials and drafts stay in module memory only. The backend owns published configuration.");
+            ui.weak("Drafts stay in module memory. Saved credentials are managed in Tokens. The backend owns published configuration.");
             return;
         };
         let targets = &catalog.targets;
@@ -394,7 +403,12 @@ impl DeckModule for ConfigModule {
                                         "string" => {
                                             let mut v =
                                                 value.as_str().unwrap_or_default().to_owned();
-                                            if ui.text_edit_singleline(&mut v).changed() {
+                                            if stationdeck_ui::test_ui::response(
+                                                &format!("config-field-{index}-{}", field.key),
+                                                ui.text_edit_singleline(&mut v),
+                                            )
+                                            .changed()
+                                            {
                                                 *value = v.into();
                                                 self.dirty = true;
                                             }
@@ -475,12 +489,14 @@ impl DeckModule for ConfigModule {
             }
         });
         ui.horizontal(|ui| {
-            if ui
-                .add_enabled(
+            if stationdeck_ui::test_ui::response(
+                "config-save",
+                ui.add_enabled(
                     editable && self.dirty && !self.documents.is_empty(),
                     egui::Button::new("Save draft"),
-                )
-                .clicked()
+                ),
+            )
+            .clicked()
             {
                 let body = serde_json::to_string(&DraftRequest {
                     base_draft: current.draft_version,
@@ -494,15 +510,17 @@ impl DeckModule for ConfigModule {
                     Some(body),
                 );
             }
-            if ui
-                .add_enabled(
+            if stationdeck_ui::test_ui::response(
+                "config-publish",
+                ui.add_enabled(
                     !pending
                         && !self.dirty
                         && !current.draft.is_empty()
                         && permissions.iter().any(|p| p == "publish"),
                     egui::Button::new("Publish configuration"),
-                )
-                .clicked()
+                ),
+            )
+            .clicked()
             {
                 let body = serde_json::to_string(&PublishRequest {
                     draft_version: current.draft_version,
@@ -537,15 +555,20 @@ impl DeckModule for ConfigModule {
 mod tests {
     use super::*;
     #[test]
-    fn disable_clears_author_credentials_and_private_draft() {
+    fn disable_clears_private_drafts_and_keeps_saved_credentials() {
         let mut module = ConfigModule {
-            token: "private-token".into(),
+            token: {
+                let slot = stationdeck_ui::TokenSlot::default();
+                slot.set("private-token");
+                slot
+            },
             dirty: true,
             ..Default::default()
         };
         let generation = module.request.borrow_mut().begin().unwrap();
         module.stop();
-        assert!(module.token.is_empty() && !module.dirty && module.documents.is_empty());
+        assert_eq!(module.token.get(), "private-token");
+        assert!(!module.dirty && module.documents.is_empty());
         assert!(!module
             .request
             .borrow_mut()

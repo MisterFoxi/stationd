@@ -151,3 +151,24 @@ rouvre sa fenêtre en conservant le dernier onglet choisi.
 
 Validation en containers : tests StationDeck, Clippy natif/WASM et recette
 Chromium complète passent avec la nouvelle navigation par onglets internes.
+
+### GUI — fenêtre Tokens et sauvegarde locale (19 octobre 2026)
+
+À la demande de l'utilisateur, la règle antérieure « jetons en mémoire seulement »
+est remplacée : fenêtre système Tokens disponible sans plugins, deux champs
+masqués, Deck gateway partagé StationD/Icecast et Configuration author séparé.
+Sauvegarde automatique dans `stationdeck.tokens.v1`, distincte des préférences,
+et restauration au rechargement, sans connexion automatique.
+
+Déconnexion/désactivation : annulation et effacement des données privées, mais
+conservation du jeton sauvegardé. Oublier/Oublier tous retire les valeurs et
+invalide les requêtes/snapshots, même fenêtres fermées. Stockage localStorage de
+ce navigateur/origine (pas un coffre chiffré). Erreurs de stockage signalées et
+versions invalides/futures conservées jusqu'au remplacement explicite.
+
+Validation en containers : 17 tests Rust ciblés et Clippy natif/WASM passent.
+Recette Chromium StationD/Icecast réussie (sauvegarde, rechargement, partage,
+oubli pendant une requête et séparation des préférences). Recette Configuration
+réussie : jeton auteur restauré, édition, publication/appli agent, déconnexion
+et oubli explicite. Captures dans .local/stationdeck-tokens-qa/ et
+.local/stationdeck-tokens-config-qa/. WebUI de développement reconstruite.

@@ -10,9 +10,7 @@ No StationD daemon or StationD status endpoint is used for this workflow.
 
 Rebuild with `make deck-daemon-build`, then start with `make deck-daemons`
 (which initializes missing credentials). Services use the shared
-[discovery protocol](stationdeck-service-discovery.md). Then enable Icecast provider and Icecast streams plugin in Modules. Connect in
-Icecast connection with the Deck gateway token (`make deck-token`) and open
-Icecast streams. The upstream admin token stays on the server. This does not
+[discovery protocol](stationdeck-service-discovery.md). Then enable Icecast provider and Icecast streams plugin in Modules. Set the Deck gateway token (`make deck-token`) in **Tokens**, connect in Icecast connection, then open Icecast streams. The upstream admin token stays on the server. This does not
 replace configuration authoring; stream supervision and publishing configuration
 are separate contributions.
 
@@ -69,7 +67,7 @@ simulated status using the same DTO and component as the gRPC module.
 **Test tasks** demonstrates a short, nonblocking simulated task, cancellation
 and a read-only test role. It never contacts or changes a real station.
 Use **Modules** to disable/enable compiled modules. Disabling a module removes
-its views, cancels pending work and clears connection credentials.
+its views, cancels pending work and clears private runtime data. Saved tokens remain in Tokens.
 This is the first compiled-module catalog, not the full dependency resolver.
 
 ## Then: the gRPC module
@@ -91,14 +89,13 @@ The browser cannot choose an arbitrary proxy destination.
 
 The gateway requires its own access token for status reads. An init service
 creates it once in a private Docker volume, without printing it in logs.
-Retrieve it in your own terminal, then paste it into **Gateway access token**:
+Retrieve it in your own terminal, then paste it into **Tokens → Deck gateway**:
 
 ```sh
 make deck-token
 ```
 
-The token stays in browser memory only, and is cleared on Disconnect or module
-disable. It is not saved in localStorage or forwarded as a StationD credential.
+The token is saved for this origin in the separate `stationdeck.tokens.v1` browser localStorage entry and shared by the StationD and Icecast clients. Disconnect/disable cancels requests and clears private runtime data, while retaining the saved token. **Forget** in Tokens removes it and invalidates active clients. It is never forwarded as a StationD credential.
 This authenticates a fixed read-only gateway capability; user accounts,
 station roles, mTLS and per-user authorization are not implemented here.
 Do not equate this token with a StationD administrator identity.
@@ -168,7 +165,7 @@ revocable service handles and must not perform network work on the UI thread.
 - Ctrl+Home: Home; Ctrl+,: Settings while the canvas has focus. Browser-reserved
   shortcuts and tab closure are left to the browser.
 - Dark/light theme, zoom and enabled modules are stored locally per browser
-  origin. Changes are saved immediately. Tokens are never stored there.
+  origin. Changes are saved immediately. Tokens are saved separately in Tokens.
 - Invalid/future preferences are preserved until explicitly replaced. Storage
   denial is reported; the interface remains usable with temporary preferences.
 - Requests are single-flight, bounded by timeout and cancellable. Late responses
@@ -207,7 +204,7 @@ consumer and required dependents; configuration credentials/drafts stay availabl
 Disabling the provider blocks the required consumer and removes its view.
 
 Service handles recheck provider and consumer leases on every call. Policy changes
-revoke old contexts; stopping cancels in-flight operations and clears credentials.
+revoke old contexts; stopping cancels in-flight operations and clears private runtime data. Saved credentials are removed explicitly in Tokens.
 Network grants name fixed logical profiles, not arbitrary URLs. Local grants do
 not confer remote identity, server roles, or authoring permissions: the existing
 configuration backend continues enforcing its own read/edit/publish scopes.
@@ -243,7 +240,7 @@ WASM Clippy pass; gateway linting excludes generated dependency code.
 Chromium tests use the actual protobuf contract over tonic: successful status,
 missing/wrong token denial without reaching gRPC, sanitized upstream failure,
 cancellation and an empty credential field after module reactivation. Browser
-storage is checked to exclude credentials. Theme/storage reload, initial WASM
+layout storage is checked to exclude credentials; dedicated token persistence, restoration and explicit deletion are tested. Theme/storage reload, initial WASM
 failure, MIME type and responsive sizing are tested as well.
 Screenshots are inspected and kept under `.local/stationdeck-web-qa/` outside Git.
 A real station target is intentionally not configured by the automated recipe.
@@ -263,3 +260,19 @@ unavailable read instead of presenting a fabricated zero audience.
 The sidebar uses one compact entry per plugin: name and overall status LED only.
 Detailed state remains in the tooltip and plugin window; multiple contributions
 are selected using the window's tabs. Reopening preserves the selected tab.
+
+## Tokens
+
+The host-owned Tokens window is always available, including with all plugins
+disabled. It owns the masked credential fields, optional Show, automatic saving,
+per-token Forget and Forget all. Deck gateway is shared by StationD and Icecast;
+Configuration author is a separate credential. Storage is local to this browser
+profile and origin, using localStorage; it is not an encrypted vault.
+Layout preferences, drafts and token storage remain separate.
+
+Saved values are versioned and bounded. Invalid/future data is preserved until
+explicit replacement; denied writes/removals are reported with a retry action.
+Disconnecting, disabling or reloading does not delete stored credentials, and no
+network connection is started automatically. Changing/forgetting a token cancels
+pending requests and clears previous snapshots/private drafts on the next host
+tick, including for closed windows. Providers receive only their credential slot.

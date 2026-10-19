@@ -9,7 +9,7 @@ use std::{cell::RefCell, rc::Rc};
 
 #[derive(Default)]
 struct Client {
-    token: RefCell<String>,
+    token: stationdeck_ui::TokenSlot,
     slot: Rc<RefCell<RequestSlot<IcecastStatus>>>,
     #[cfg(target_arch = "wasm32")]
     abort: RefCell<Option<web_sys::AbortController>>,
@@ -21,7 +21,6 @@ impl Client {
             controller.abort();
         }
         self.slot.borrow_mut().cancel();
-        self.token.borrow_mut().clear();
     }
 }
 impl IcecastService for Client {
@@ -32,7 +31,7 @@ impl IcecastService for Client {
     fn refresh(&self) -> Result<(), String> {
         use gloo_net::http::Request;
         use stationdeck_services::icecast::IcecastResponse;
-        let token = self.token.borrow().trim().to_owned();
+        let token = self.token.get();
         if token.is_empty() {
             return Err("Connect the Icecast provider with your Deck gateway token first.".into());
         }
@@ -83,6 +82,18 @@ pub struct IcecastProvider {
     client: Rc<Client>,
     context: Option<Context>,
     message: String,
+    token_revision: u64,
+}
+impl IcecastProvider {
+    pub fn with_token(token: stationdeck_ui::TokenSlot) -> Self {
+        Self {
+            client: Rc::new(Client {
+                token,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
 }
 impl DeckModule for IcecastProvider {
     fn manifest(&self) -> &str {
@@ -105,6 +116,13 @@ impl DeckModule for IcecastProvider {
     fn health(&self) -> stationdeck_ui::PluginStatus {
         stationdeck_ui::PluginStatus::request(&self.client.slot.borrow().state)
     }
+    fn tick(&mut self) {
+        let revision = self.client.token.revision();
+        if revision != self.token_revision {
+            self.stop();
+            self.token_revision = revision;
+        }
+    }
     fn stop(&mut self) {
         self.client.disconnect();
         self.message.clear();
@@ -112,24 +130,8 @@ impl DeckModule for IcecastProvider {
     fn ui(&mut self, _: &str, ui: &mut egui::Ui) {
         ui.heading("Icecast connection");
         ui.label("The Deck gateway connects to the Icecast administration service. No StationD endpoint is used.");
-        ui.label("Deck gateway access token");
+        ui.weak("Manage the shared Deck gateway token in Tokens.");
         let pending = matches!(self.client.slot.borrow().state, RequestState::Pending);
-        let edited = stationdeck_ui::test_ui::response(
-            "icecast-token",
-            ui.add_enabled(
-                !pending,
-                egui::TextEdit::singleline(&mut *self.client.token.borrow_mut())
-                    .password(true)
-                    .desired_width(320.0),
-            ),
-        )
-        .changed();
-        if edited {
-            let token = self.client.token.take();
-            self.client.disconnect();
-            *self.client.token.borrow_mut() = token;
-            self.message.clear();
-        }
         let authorized = self.context.as_ref().is_some_and(|c| {
             c.authorize(
                 "icecast-gateway.connection",
@@ -141,7 +143,7 @@ impl DeckModule for IcecastProvider {
         if stationdeck_ui::test_ui::response(
             "icecast-connect",
             ui.add_enabled(
-                authorized && !pending && !self.client.token.borrow().trim().is_empty(),
+                authorized && !pending && !self.client.token.is_empty(),
                 egui::Button::new("Connect / refresh"),
             ),
         )
@@ -173,7 +175,7 @@ impl DeckModule for IcecastProvider {
             }
             RequestState::Failed(error) => show_state(ui, ViewState::Error(&error)),
         }
-        ui.weak("Only the Deck read token is entered here. Icecast administration credentials stay on the server.");
+        ui.weak("The saved Deck token is managed in Tokens. Icecast administration credentials stay on the server.");
     }
 }
 
@@ -181,12 +183,12 @@ impl DeckModule for IcecastProvider {
 mod tests {
     use super::*;
     #[test]
-    fn stop_revokes_credentials_and_cancels_late_stream_snapshots() {
+    fn stop_cancels_late_stream_snapshots_and_keeps_saved_credentials() {
         let mut provider = IcecastProvider::default();
-        *provider.client.token.borrow_mut() = "fixture-only-token".into();
+        provider.client.token.set("fixture-only-token");
         let old = provider.client.slot.borrow_mut().begin().unwrap();
         provider.stop();
-        assert!(provider.client.token.borrow().is_empty());
+        assert_eq!(provider.client.token.get(), "fixture-only-token");
         assert!(matches!(provider.client.snapshot(), RequestState::Idle));
         assert!(!provider.client.slot.borrow_mut().finish(
             old,

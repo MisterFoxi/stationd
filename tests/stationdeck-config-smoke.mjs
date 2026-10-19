@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFile, mkdir } from 'node:fs/promises';
 import { chromium } from 'playwright';
-import { PNG } from 'pngjs';
+
 const base = process.env.STATIONDECK_URL || 'http://deck:8080';
 const phase = process.env.STATIONDECK_CONFIG_PHASE || 'seed';
 const token = (await readFile('/author-secrets/editor', 'utf8')).trim();
@@ -77,51 +77,53 @@ try {
       console.log('PASS: explicit Docker DNS endpoint works with an invalid discovery destination');
     }
   } else if (phase==='ui') {
-    await context.addInitScript(()=>localStorage.setItem('stationdeck.settings.v1',JSON.stringify({version:1,theme:'Dark',zoom:1,enabled_modules:['configuration']})));
-    await page.goto(base);
-    await page.waitForFunction(()=>document.querySelector('#stationdeck[data-ready="true"]'));
-    await page.waitForTimeout(400);
-    await page.mouse.click(65,278);
-    await page.waitForTimeout(300);
-    await mkdir('/tmp/config-qa',{recursive:true});
-    await page.screenshot({path:'/tmp/config-qa/configuration-empty.png'});
-    // Field coordinates are checked against the rendered fixture screenshot.
-    if (process.env.STATIONDECK_CONFIG_CAPTURE_ONLY!=='1') {
-      await page.mouse.click(300,159);
-      await page.keyboard.insertText(token);
+    await page.setViewportSize({width:1600,height:1400});
+    await context.addInitScript(()=>{
+      if (!localStorage.getItem('stationdeck.settings.v1')) localStorage.setItem('stationdeck.settings.v1',JSON.stringify({version:1,theme:'Dark',zoom:1,enabled_modules:['configuration']}));
+    });
+    async function click(id) {
+      const h=await page.waitForFunction(id=>document.getElementById('stationdeck')?.getAttribute(`data-qa-${id}`)||false,id);
+      const r=(await h.jsonValue()).split(',').map(Number);await h.dispose();
+      await page.mouse.move(r[0]+r[2]/2,r[1]+r[3]/2);
       await page.waitForTimeout(100);
+      await page.mouse.click(r[0]+r[2]/2,r[1]+r[3]/2);
+      await page.waitForTimeout(100);
+    }
+    async function ready() { await page.waitForFunction(()=>document.querySelector('#stationdeck[data-ready="true"]'));await page.locator('#stationdeck').focus();await page.waitForTimeout(300); }
+    await page.goto(base);await ready();
+    await mkdir('/tmp/config-qa',{recursive:true});
+    await click('nav-tokens');await click('tokens-configuration');await page.keyboard.insertText(token);
+    await page.waitForFunction(()=>!!JSON.parse(localStorage.getItem('stationdeck.tokens.v1')||'null')?.configuration_author);
+    await page.screenshot({path:'/tmp/config-qa/tokens-saved.png'});
+    await page.reload();await ready();
+    await click('nav-configuration.authoring');
+    // Expand the actual plugin window so schema fields and publication controls
+    // are visible; markers can also describe content clipped by its scroll area.
+    const windowHandle=await page.waitForFunction(()=>document.getElementById('stationdeck')?.getAttribute('data-qa-window-configuration')||false);
+    const windowRect=(await windowHandle.jsonValue()).split(',').map(Number);await windowHandle.dispose();
+    await page.mouse.move(windowRect[0]+windowRect[2]-4,windowRect[1]+windowRect[3]-4);
+    await page.mouse.down();await page.mouse.move(windowRect[0]+windowRect[2]-4,1250,{steps:12});await page.mouse.up();
+    await page.waitForTimeout(300);
+    await page.screenshot({path:'/tmp/config-qa/configuration-empty.png'});
+    if (process.env.STATIONDECK_CONFIG_CAPTURE_ONLY!=='1') {
       const connected=page.waitForResponse(r=>r.url().endsWith('/api/config/catalog'));
-      await page.mouse.click(280,200);
-      assert.equal((await connected).status(),200);
-      await page.waitForTimeout(300);
+      await click('config-connect');assert.equal((await connected).status(),200);
       await page.screenshot({path:'/tmp/config-qa/configuration-connected.png'});
       const before=await get();
-      await page.mouse.click(375,516);
-      await page.keyboard.press('Control+A');
-      await page.keyboard.insertText('Edited in StationDeck');
-      await page.waitForTimeout(100);
-      const saved=page.waitForResponse(r=>r.url().endsWith('/draft'));
-      await page.mouse.click(225,640);
-      assert.equal((await saved).status(),200);
-      await page.waitForTimeout(200);
-      const publication=page.waitForResponse(r=>r.url().endsWith('/publish'));
-      await page.mouse.click(350,640);
-      assert.equal((await publication).status(),200);
+      await click('config-field-0-message');await page.keyboard.press('Control+A');await page.keyboard.insertText('Edited in StationDeck');
+      const saved=page.waitForResponse(r=>r.url().endsWith('/draft'));await click('config-save');assert.equal((await saved).status(),200);
+      const publication=page.waitForResponse(r=>r.url().endsWith('/publish'));await click('config-publish');assert.equal((await publication).status(),200);
       await waitFor(async()=> (await get()).applied_revision===before.published.revision+1,'UI publication applied by agent');
       assert.equal((await get()).published.documents[0].values.message,'Edited in StationDeck');
-      const refreshed=page.waitForResponse(r=>r.url().endsWith('/api/config/catalog'));
-      await page.mouse.click(280,200);
-      await refreshed;await page.waitForTimeout(200);
+      const refreshed=page.waitForResponse(r=>r.url().endsWith('/api/config/catalog'));await click('config-connect');await refreshed;
       await page.screenshot({path:'/tmp/config-qa/configuration-published.png'});
-      await page.mouse.click(485,200);
-      await page.waitForTimeout(150);
-      const png=PNG.sync.read(await page.screenshot({path:'/tmp/config-qa/configuration-disconnected.png'}));
-      let dots=0;
-      for(let y=158;y<172;y++)for(let x=200;x<500;x++){const offset=(y*png.width+x)*4;if(png.data[offset]>100&&png.data[offset+1]>100&&png.data[offset+2]>100)dots++;}
-      assert(dots<5,'configuration credential was not cleared on disconnect');
-      assert(!(await page.evaluate(()=>JSON.stringify(localStorage))).includes(token));
+      await click('config-disconnect');
+      assert((await page.evaluate(()=>localStorage.getItem('stationdeck.tokens.v1'))).includes(token),'disconnect removed the saved author token');
+      await click('nav-tokens');await click('forget-configuration');
+      await page.waitForFunction(()=>localStorage.getItem('stationdeck.tokens.v1')===null);
+      assert(!(await page.evaluate(()=>JSON.stringify(localStorage))).includes(token),'Forget retained the author token');
       assert.deepEqual(errors,[]);
-      console.log('PASS: WebUI schema editing, draft save, publication, agent application and credential cleanup');
+      console.log('PASS: dedicated Tokens, author token persistence/reload, schema editing, draft save, publication, agent application, disconnect and explicit Forget');
     }
   }
 } finally { await context.close();await browser.close(); }

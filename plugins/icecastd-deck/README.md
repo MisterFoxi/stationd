@@ -39,8 +39,7 @@ A configured explicit endpoint still takes priority over discovery. Future
 services use the same protocol and policy; their business interface needs its own
 typed adapter. See [service discovery](../../Doc/stationdeck-service-discovery.md).
 
-In Modules, enable **Icecast provider** and **Icecast streams plugin**. In
-**Icecast connection**, enter the Deck gateway token and connect. Then open
+In Modules, enable **Icecast provider** and **Icecast streams plugin**. In **Tokens**, save the shared Deck gateway token, then connect in **Icecast connection**. Then open
 **Icecast streams**. Each configured mount shows source presence, listener count,
 title and content type. Refresh obtains another snapshot. Upstream unavailability
 hides the previous snapshot and does not label every stream disconnected.
@@ -51,7 +50,7 @@ Validate registry behavior as well:
 2. Enable the provider: the plugin must become Running, with its view present.
 3. Connect and compare the mounts with `make icecast-ctl A="status"`.
 4. Disable the provider: the plugin must become Blocked and lose its view.
-5. Re-enable the provider: the credential must be empty; the old snapshot must
+5. Re-enable the provider: the saved token remains available, but the old snapshot must
    not return before a new authenticated read.
 6. Leave the StationD gRPC module disabled throughout.
 
