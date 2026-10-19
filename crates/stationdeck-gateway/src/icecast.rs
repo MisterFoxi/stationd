@@ -1,4 +1,4 @@
-//! Read-only adapter to the existing Icecast administration service.
+//! Bounded adapter to the existing Icecast administration service.
 use stationdeck_services::icecast::{IcecastStatus, StreamStatus};
 use std::time::Duration;
 use tonic::transport::{ClientTlsConfig, Endpoint};
@@ -105,5 +105,142 @@ impl IcecastTarget {
             server_id: clean(reply.server_id, 256),
             streams,
         })
+    }
+    pub(crate) async fn control(
+        &self,
+        command: stationdeck_services::icecast::IcecastCommand,
+    ) -> Result<stationdeck_services::icecast::IcecastResult, (&'static str, &'static str)> {
+        use stationdeck_services::icecast::{
+            IcecastCommand as C, IcecastResult as R, Listener, RouteStatus,
+        };
+        command.validate().map_err(|e| ("invalid_request", e))?;
+        let channel = self.endpoint.connect().await.map_err(|_| {
+            (
+                "unavailable",
+                "Icecast administration could not be reached.",
+            )
+        })?;
+        let mut client = rpc::icecast_admin_client::IcecastAdminClient::new(channel)
+            .max_decoding_message_size(512 * 1024);
+        // Each RPC has its own request type; credentials never leave this adapter.
+        macro_rules! req {
+            ($body:expr) => {{
+                let mut r = tonic::Request::new($body);
+                r.metadata_mut().insert(
+                    "authorization",
+                    format!("Bearer {}", self.token)
+                        .parse()
+                        .map_err(|_| ("configuration", "Invalid administration credential."))?,
+                );
+                r.set_timeout(Duration::from_secs(6));
+                r
+            }};
+        }
+
+        let clean = |s: String, max: usize| {
+            s.chars()
+                .filter(|c| !c.is_control())
+                .take(max)
+                .collect::<String>()
+        };
+        let error = |e: tonic::Status| match e.code() {
+            tonic::Code::InvalidArgument | tonic::Code::NotFound => (
+                "invalid_target",
+                "The target is not configured or the request was rejected.",
+            ),
+            tonic::Code::PermissionDenied | tonic::Code::Unauthenticated => (
+                "permission_denied",
+                "Icecast administration denied this operation.",
+            ),
+            tonic::Code::Unimplemented | tonic::Code::FailedPrecondition => (
+                "unavailable",
+                "This operation is unavailable for the current stream or router.",
+            ),
+            _ => (
+                "unavailable",
+                "Operation failed or its outcome is unknown. Refresh before retrying.",
+            ),
+        };
+        match command {
+            C::Route | C::Switch { .. } => {
+                let reply = match command {
+                    C::Switch { input } => {
+                        client
+                            .switch_route(req!(rpc::SwitchRequest { input }))
+                            .await
+                    }
+                    _ => client.get_route(req!(rpc::Empty {})).await,
+                }
+                .map_err(error)?
+                .into_inner();
+                if reply.inputs.len() > 128 {
+                    return Err(("invalid_response", "Too many router inputs."));
+                }
+                Ok(R::Route {
+                    route: RouteStatus {
+                        output_mount: clean(reply.output_mount, 256),
+                        input: clean(reply.input, 128),
+                        connected: reply.connected,
+                        inputs: reply.inputs.into_iter().map(|s| clean(s, 128)).collect(),
+                        problem: clean(reply.problem, 512),
+                    },
+                })
+            }
+            C::Listeners { mount } => {
+                let reply = client
+                    .list_listeners(req!(rpc::MountRequest {
+                        mount: mount.clone()
+                    }))
+                    .await
+                    .map_err(error)?
+                    .into_inner();
+                if reply.listeners.len() > 2048 {
+                    return Err((
+                        "invalid_response",
+                        "Too many listeners; use the administration CLI.",
+                    ));
+                }
+                Ok(R::Listeners {
+                    mount,
+                    listeners: reply
+                        .listeners
+                        .into_iter()
+                        .map(|l| Listener {
+                            id: l.id,
+                            ip: clean(l.ip, 128),
+                            user_agent: clean(l.user_agent, 256),
+                            connected_seconds: l.connected_seconds,
+                        })
+                        .collect(),
+                })
+            }
+            C::Metadata { mount, title } => {
+                client
+                    .set_metadata(req!(rpc::MetadataRequest { mount, title }))
+                    .await
+                    .map_err(error)?;
+                Ok(R::Done {
+                    message: "Metadata updated. Refresh streams to verify.".into(),
+                })
+            }
+            C::KickSource { mount } => {
+                client
+                    .kick_source(req!(rpc::MountRequest { mount }))
+                    .await
+                    .map_err(error)?;
+                Ok(R::Done {
+                    message: "Source disconnected. Its encoder may reconnect automatically.".into(),
+                })
+            }
+            C::KickListener { mount, id } => {
+                client
+                    .kick_listener(req!(rpc::KickListenerRequest { mount, id }))
+                    .await
+                    .map_err(error)?;
+                Ok(R::Done {
+                    message: "Listener disconnected. Refresh listeners to verify.".into(),
+                })
+            }
+        }
     }
 }

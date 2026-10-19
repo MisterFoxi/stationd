@@ -33,3 +33,12 @@ slot = "navigation"
 order = 24
 services = []
 permissions = ["icecast-gateway.connecter"]
+
+[[provides]]
+id = "stationdeck.icecast.control"
+version = "1.0.0"
+[[capabilities]]
+id = "icecast-gateway.control"
+kind = "service"
+resource = "stationdeck.icecast.control"
+operations = ["command"]

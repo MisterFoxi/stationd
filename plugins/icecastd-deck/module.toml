@@ -29,3 +29,18 @@ slot = "navigation"
 order = 25
 services = ["stationdeck.icecast.streams"]
 permissions = ["icecastd.consulter"]
+
+[[requires]]
+id = "stationdeck.icecast.control"
+version = "^1.0.0"
+optional = true
+[[capabilities]]
+id = "icecastd.control"
+kind = "service"
+resource = "stationdeck.icecast.control"
+operations = ["command"]
+[[permissions]]
+id = "icecastd.commander"
+description = "Gérer explicitement les flux et auditeurs Icecast."
+resource = "icecastd.control"
+actions = ["command"]

@@ -1,9 +1,10 @@
 //! Authenticated read-only gateway for station and Icecast stream status.
+mod control;
 mod icecast;
 use axum::{
     extract::State,
     http::{HeaderMap, StatusCode},
-    routing::get,
+    routing::{get, post},
     Json, Router,
 };
 use sha2::{Digest, Sha256};
@@ -16,6 +17,7 @@ use tonic::transport::{ClientTlsConfig, Endpoint};
 #[derive(Clone)]
 pub struct Gateway {
     token_digest: [u8; 32],
+    control_digest: Option<[u8; 32]>,
     endpoint: Option<Endpoint>,
     icecast: Option<icecast::IcecastTarget>,
     services: Option<std::sync::Arc<stationdeck_discovery::Policy>>,
@@ -52,12 +54,41 @@ impl Gateway {
             .transpose()?;
         Ok(Self {
             token_digest: Sha256::digest(token.as_bytes()).into(),
+            control_digest: None,
             endpoint,
             icecast: None,
             services: None,
         })
     }
 
+    pub fn with_control_token(mut self, token: &str) -> Result<Self, &'static str> {
+        if token.len() < 32 || token.len() > 512 || token.chars().any(char::is_control) {
+            return Err("Invalid Icecast control credential.");
+        }
+        let digest: [u8; 32] = Sha256::digest(token.as_bytes()).into();
+        if bool::from(self.token_digest.ct_eq(&digest)) {
+            return Err("Read and control tokens must be distinct.");
+        }
+        self.control_digest = Some(digest);
+        Ok(self)
+    }
+    fn control_authorized(&self, headers: &HeaderMap) -> bool {
+        let Some(expected) = self.control_digest else {
+            return false;
+        };
+        let Some(token) = headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.strip_prefix("Bearer "))
+        else {
+            return false;
+        };
+        if token.len() > 512 {
+            return false;
+        }
+        let digest: [u8; 32] = Sha256::digest(token.as_bytes()).into();
+        bool::from(expected.ct_eq(&digest))
+    }
     pub fn with_icecast(mut self, address: &str, token: &str) -> Result<Self, &'static str> {
         self.icecast = Some(icecast::IcecastTarget::new(address, token)?);
         Ok(self)
@@ -77,6 +108,8 @@ impl Gateway {
             .route("/healthz", get(|| async { "ok" }))
             .route("/api/station/status", get(status))
             .route("/api/icecast/streams", get(icecast_status))
+            .route("/api/icecast/control", post(control::command))
+            .layer(axum::extract::DefaultBodyLimit::max(16 * 1024))
             .route("/api/services", get(service_catalog))
             .with_state(self)
     }
@@ -178,47 +211,11 @@ async fn icecast_status(
             }),
         );
     }
-    let result = match &gateway.icecast {
-        None => match &gateway.services {
-            None => Err((
-                "not_configured",
-                "Service discovery is not configured on the gateway.",
-            )),
-            Some(policy) => match policy.resolve("stationdeck.icecast.streams").await {
-                Err(error) => Err((error.code(), error.message())),
-                Ok(resolved) => {
-                    let credential = resolved
-                        .credential_file
-                        .as_ref()
-                        .and_then(|path| std::fs::read_to_string(path).ok());
-                    match credential {
-                        None => Err((
-                            "credentials_missing",
-                            "The discovered service credential is not provisioned.",
-                        )),
-                        Some(token) => match icecast::IcecastTarget::with_tls_name(
-                            &resolved.endpoint,
-                            token.trim(),
-                            resolved.tls_server_name.as_deref(),
-                        ) {
-                            Err(_) => Err((
-                                "invalid_configuration",
-                                "Invalid service transport or credentials.",
-                            )),
-                            Ok(target) => {
-                                tokio::time::timeout(Duration::from_secs(8), target.read())
-                                    .await
-                                    .unwrap_or(Err(("timeout", "Service status timed out.")))
-                            }
-                        },
-                    }
-                }
-            },
-        },
-        Some(target) => tokio::time::timeout(Duration::from_secs(8), target.read())
-            .await
-            .unwrap_or(Err(("timeout", "Icecast supervision timed out."))),
-    };
+    let result = tokio::time::timeout(Duration::from_secs(8), async {
+        gateway.icecast_target().await?.read().await
+    })
+    .await
+    .unwrap_or(Err(("timeout", "Icecast supervision timed out.")));
     let response = match result {
         Ok(status) => IcecastResponse::Connected { status },
         Err((code, message)) => IcecastResponse::Unavailable {

@@ -32,6 +32,7 @@ impl TokenSlot {
 pub struct TokenStore {
     pub gateway: TokenSlot,
     pub configuration: TokenSlot,
+    pub icecast_control: TokenSlot,
 }
 #[cfg(test)]
 mod tests {

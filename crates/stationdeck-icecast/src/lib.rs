@@ -1,4 +1,5 @@
 //! Transport provider. The Icecast Deck plugin does not depend on this crate.
+mod control;
 use stationdeck_services::{
     icecast::{IcecastService, IcecastStatus, ICECAST},
     registry::Context,
@@ -80,13 +81,19 @@ impl IcecastService for Client {
 #[derive(Default)]
 pub struct IcecastProvider {
     client: Rc<Client>,
+    control: Rc<control::ControlClient>,
+    control_revision: u64,
     context: Option<Context>,
     message: String,
     token_revision: u64,
 }
 impl IcecastProvider {
-    pub fn with_token(token: stationdeck_ui::TokenSlot) -> Self {
+    pub fn with_tokens(
+        token: stationdeck_ui::TokenSlot,
+        control: stationdeck_ui::TokenSlot,
+    ) -> Self {
         Self {
+            control: Rc::new(control::ControlClient::with_token(control)),
             client: Rc::new(Client {
                 token,
                 ..Default::default()
@@ -111,7 +118,11 @@ impl DeckModule for IcecastProvider {
     }
     fn start(&mut self, context: &Context) -> Result<(), String> {
         self.context = Some(context.clone());
-        context.publish(&ICECAST, self.client.clone() as Rc<dyn IcecastService>)
+        context.publish(&ICECAST, self.client.clone() as Rc<dyn IcecastService>)?;
+        context.publish(
+            &stationdeck_services::icecast::ICECAST_CONTROL,
+            self.control.clone() as Rc<dyn stationdeck_services::icecast::IcecastControlService>,
+        )
     }
     fn health(&self) -> stationdeck_ui::PluginStatus {
         stationdeck_ui::PluginStatus::request(&self.client.slot.borrow().state)
@@ -119,11 +130,17 @@ impl DeckModule for IcecastProvider {
     fn tick(&mut self) {
         let revision = self.client.token.revision();
         if revision != self.token_revision {
-            self.stop();
+            self.client.disconnect();
             self.token_revision = revision;
+        }
+        let revision = self.control.token.revision();
+        if revision != self.control_revision {
+            self.control.disconnect();
+            self.control_revision = revision;
         }
     }
     fn stop(&mut self) {
+        self.control.disconnect();
         self.client.disconnect();
         self.message.clear();
     }
@@ -182,6 +199,24 @@ impl DeckModule for IcecastProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn changing_control_credentials_preserves_the_read_snapshot() {
+        let mut provider = IcecastProvider::default();
+        let generation = provider.client.slot.borrow_mut().begin().unwrap();
+        provider.client.slot.borrow_mut().finish(
+            generation,
+            Ok(IcecastStatus {
+                server_id: "fixture".into(),
+                streams: vec![],
+            }),
+        );
+        provider.control.token.set("different-control-token");
+        provider.tick();
+        assert!(matches!(provider.client.snapshot(), RequestState::Ready(_)));
+        provider.control.token.set("");
+        provider.tick();
+        assert!(matches!(provider.client.snapshot(), RequestState::Ready(_)));
+    }
     #[test]
     fn stop_cancels_late_stream_snapshots_and_keeps_saved_credentials() {
         let mut provider = IcecastProvider::default();

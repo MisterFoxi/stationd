@@ -4,7 +4,7 @@ Suivi courant V1. Lire ce fichier au début de session ; consulter
 [etat-v0.5.md](etat-v0.5.md) uniquement pour un détail ciblé de la référence 0.5.
 Les décisions durables sont dans `Doc/`.
 
-Dernière mise à jour : 2026-10-18 (premiers adaptateurs réels câblés ; recette à effectuer).
+Dernière mise à jour : 2026-10-19 (GUI Icecast : gestion des flux livrée et validée).
 
 ## Repères de version
 
@@ -172,3 +172,36 @@ oubli pendant une requête et séparation des préférences). Recette Configurat
 réussie : jeton auteur restauré, édition, publication/appli agent, déconnexion
 et oubli explicite. Captures dans .local/stationdeck-tokens-qa/ et
 .local/stationdeck-tokens-config-qa/. WebUI de développement reconstruite.
+
+### GUI — commandes de gestion Icecast (19 octobre 2026)
+
+Fenêtre Icecast enrichie d'un onglet Management : sélection d'un mount réel,
+édition du titre, liste des auditeurs (ID/IP/client/durée), déconnexion ciblée
+d'un auditeur ou d'une source avec confirmation/annulation, état du routeur et
+bascule entre ses entrées configurées. Rafraîchissement unique du statut après
+mutation ; aucune répétition automatique des commandes en échec/timeout.
+
+Service typé optionnel `stationdeck.icecast.control` v1, capacité dédiée et
+permission `icecastd.commander`. Refus de cette permission : supervision toujours
+accessible. Provider HTTP séparé du plugin ; passerelle vers les RPC IcecastAdmin
+existantes. Admin Icecast et endpoint restent côté serveur. Nouvelle route POST
+fermée/validée ; jeton de lecture systématiquement refusé pour la gestion.
+
+Troisième champ sauvegardé dans Tokens : Icecast control, indépendant du token
+Deck gateway. `make deck-icecast-control-token` affiche cette valeur uniquement
+dans le terminal opérateur. Init ajoute le nouveau secret sans remplacer le
+jeton de lecture ; deux jetons identiques sont rejetés. Oublier le contrôle annule
+ses requêtes et résultats sans retirer les instantanés de lecture.
+
+Validation en containers sur stationdev1 : 24 tests Rust frontend/services et
+6 tests gateway, Clippy ciblé natif/WASM sans avertissement. Recette Chromium
+complète réussie : tous les RPC de gestion, annulation sans appel amont, refus du
+token lecture sans appel gRPC, erreur expurgée et oubli indépendant du contrôle.
+Captures `.local/stationdeck-operations-qa/`, dont `icecast-management.png`.
+
+Images normales reconstruites et gateway/WebUI déployés, containers healthy.
+Sur le vrai banc de dev sans auditeur : lecture, liste des auditeurs et mutation
+métadonnées validées, titre d'origine restauré. Le routeur de ce banc est arrêté
+(actuellement aucun container router) : GetRoute renvoie indisponible ; bascule
+A/B validée sur le serveur protobuf isolé. Sources réelles laissées connectées.
+Guide : [gestion Icecast](Doc/stationdeck-dev.md#icecast-stream-management).

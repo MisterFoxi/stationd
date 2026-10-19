@@ -5901,6 +5901,7 @@ dependencies = [
  "egui",
  "gloo-net",
  "gloo-timers",
+ "serde_json",
  "stationdeck-services",
  "stationdeck-ui",
  "wasm-bindgen-futures",

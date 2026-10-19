@@ -36,8 +36,11 @@ fn initialize_token(path: &Path) -> Result<(), &'static str> {
 async fn main() -> Result<(), &'static str> {
     let token_file = std::env::var("STATIONDECK_ACCESS_TOKEN_FILE")
         .unwrap_or_else(|_| "/secrets/access-token".into());
+    let control_file = std::env::var("STATIONDECK_ICECAST_CONTROL_TOKEN_FILE")
+        .unwrap_or_else(|_| "/secrets/icecast-control-token".into());
     if std::env::args().nth(1).as_deref() == Some("init-token") {
-        return initialize_token(Path::new(&token_file));
+        initialize_token(Path::new(&token_file))?;
+        return initialize_token(Path::new(&control_file));
     }
     let token =
         fs::read_to_string(&token_file).map_err(|_| "Gateway access token is unavailable.")?;
@@ -45,6 +48,11 @@ async fn main() -> Result<(), &'static str> {
         .ok()
         .filter(|value| !value.trim().is_empty());
     let mut gateway = Gateway::new(token.trim(), address.as_deref())?;
+    if Path::new(&control_file).exists() {
+        let control = fs::read_to_string(&control_file)
+            .map_err(|_| "Icecast control credential is unavailable.")?;
+        gateway = gateway.with_control_token(control.trim())?;
+    }
     if let Ok(path) = std::env::var("STATIONDECK_SERVICE_CATALOG") {
         gateway = gateway.with_services(
             stationdeck_discovery::Policy::read(Path::new(&path)).map_err(|e| e.message())?,

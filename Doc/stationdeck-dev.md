@@ -17,7 +17,7 @@ are separate contributions.
 The current plugin is compiled into the trusted V1 assembly, not dynamically
 loaded code. The isolated `make deck-smoke` recipe includes a real protobuf
 IcecastAdmin fixture and verifies plugin blocking, typed injection, stream data,
-upstream failure and credential cleanup. New cases are written, not executed.
+upstream failure, credential cleanup and explicit stream management commands.
 ## Configuration authority and authoring
 
 StationDeck owns configuration authoring through its modules/plugins. A permanent
@@ -266,7 +266,7 @@ are selected using the window's tabs. Reopening preserves the selected tab.
 The host-owned Tokens window is always available, including with all plugins
 disabled. It owns the masked credential fields, optional Show, automatic saving,
 per-token Forget and Forget all. Deck gateway is shared by StationD and Icecast;
-Configuration author is a separate credential. Storage is local to this browser
+Configuration author and Icecast control are separate credentials. Storage is local to this browser
 profile and origin, using localStorage; it is not an encrypted vault.
 Layout preferences, drafts and token storage remain separate.
 
@@ -276,3 +276,35 @@ Disconnecting, disabling or reloading does not delete stored credentials, and no
 network connection is started automatically. Changing/forgetting a token cancels
 pending requests and clears previous snapshots/private drafts on the next host
 tick, including for closed windows. Providers receive only their credential slot.
+## Icecast stream management
+
+Open **Icecast streams → Management** after connecting the provider. Select a
+configured mount to update its title, list its listeners, disconnect one listener
+or disconnect its source. Disconnections have a targeted confirmation and Cancel.
+A source encoder may reconnect automatically. The Stream router section loads
+GetRoute and switches between the inputs returned by the administration service;
+it requires an enabled router. Mounts and inputs come from the service snapshot.
+
+Run `make deck-icecast-control-token` in the operator terminal, then save the
+result in **Tokens → Icecast control**. Initialization creates this additional
+credential once in the gateway secret volume, preserving the existing read token.
+The gateway rejects using the same credential for reading and management. Its
+POST `/api/icecast/control` accepts only the closed, validated command DTO and
+calls the existing IcecastAdmin RPCs with the server-held administration token.
+The shared Deck gateway read token cannot authorize any management operation.
+No browser-supplied endpoint or upstream credential is accepted.
+
+The plugin consumes the optional `stationdeck.icecast.control` v1 service,
+requiring `icecastd.control` and permission `icecastd.commander`. Denying that
+permission leaves stream supervision available. Removing the saved control token
+cancels pending management and clears private operation results without clearing
+the read snapshot. Disabling the provider revokes both services. Operations are
+single-flight and never retried automatically. A timeout/cancellation cannot undo
+an operation already accepted upstream: refresh its status before retrying.
+Completed mutations trigger one stream-status refresh; listener lists remain
+explicit snapshots refreshed with **List listeners**.
+
+The containerized Chromium recipe exercises metadata, route switching, listener
+listing/disconnection, cancellation and source disconnection through the real
+protobuf fixture. It also verifies read-token denial without an upstream call,
+sanitized command failures and independent control-token deletion.

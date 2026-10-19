@@ -21,6 +21,7 @@ struct Fixture {
     mode: Arc<AtomicUsize>,
     requests: Arc<AtomicUsize>,
     icecast_requests: Arc<AtomicUsize>,
+    icecast_commands: Arc<AtomicUsize>,
 }
 #[tonic::async_trait]
 impl Station for Fixture {
@@ -62,6 +63,8 @@ async fn main() {
     let grpc = fixture.clone();
     let icecast = icecast::IcecastFixture {
         mode: fixture.mode.clone(),
+        commands: fixture.icecast_commands.clone(),
+        state: Arc::new(std::sync::Mutex::new(icecast::ControlState::default())),
         requests: fixture.icecast_requests.clone(),
         token: Arc::new(
             std::fs::read_to_string("/secrets/access-token")
@@ -84,7 +87,7 @@ async fn main() {
         .route(
             "/metrics",
             get(|State(state): State<Fixture>| async move {
-                Json(serde_json::json!({"requests": state.requests.load(Ordering::SeqCst), "icecast_requests": state.icecast_requests.load(Ordering::SeqCst)}))
+                Json(serde_json::json!({"requests": state.requests.load(Ordering::SeqCst), "icecast_requests": state.icecast_requests.load(Ordering::SeqCst), "icecast_commands": state.icecast_commands.load(Ordering::SeqCst)}))
             }),
         )
         .route(

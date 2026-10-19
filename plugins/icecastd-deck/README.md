@@ -15,8 +15,8 @@ and removes its navigation view.
 The deployment binds this plugin to `icecast-gateway` from the separate
 `stationdeck-icecast` crate. That provider owns browser authentication, HTTP,
 timeouts, single-flight requests, cancellation and late-response invalidation.
-The server gateway calls the existing `IcecastAdmin.GetStatus` RPC; it exposes
-no mutation routes and keeps the upstream administration token server-side.
+The server gateway calls the existing `IcecastAdmin` RPCs; it exposes
+a separately authenticated management route and keeps the upstream administration token server-side.
 
 ## Live validation
 
@@ -58,4 +58,19 @@ For the isolated browser fixture, `make deck-smoke` now exercises the same plugi
 manifest, policy, binding, HTTP bridge and real IcecastAdmin protobuf contract.
 It verifies connected/offline mounts, audience, upstream failure, service removal
 and credential cleanup, while asserting that no StationD status call is made by
-the Icecast scenario. All new tests are supplied for the operator to run.
+the Icecast scenario. The containerized recipe covers explicit management commands as well.
+
+## Management
+
+The Management tab consumes the optional `stationdeck.icecast.control` v1
+contract via its revocable handle and the `icecastd.commander` permission.
+It supports metadata changes, listener snapshots and targeted disconnections,
+source disconnection, and switching configured router inputs. Missing command
+permission or credential leaves the read view usable. Source/listener disconnects
+require a targeted confirmation inside the window; cancellation sends no command.
+
+Obtain `make deck-icecast-control-token` in an operator terminal and save it in
+Tokens → Icecast control. This additional credential is persisted independently
+from the shared read token; forgetting it cancels pending management without
+clearing read snapshots. Operations are sent once. After an uncertain timeout,
+refresh before retrying. See [the operator guide](../../Doc/stationdeck-dev.md#icecast-stream-management).

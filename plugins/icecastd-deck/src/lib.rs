@@ -1,5 +1,6 @@
-//! Autonomous Deck plugin: consumes only the injected stream-status contract.
+//! Autonomous Deck plugin: consumes injected stream-status and optional management contracts.
 //! No endpoint, network client, protobuf, upstream credential or host dependency.
+mod management;
 use stationdeck_services::{
     icecast::{IcecastService, IcecastStatus, ICECAST},
     registry::{Context, ServiceHandle},
@@ -10,6 +11,15 @@ use stationdeck_ui::{show_state, DeckModule, ModuleDescriptor, ViewDescriptor, V
 pub struct IcecastPlugin {
     service: Option<ServiceHandle<dyn IcecastService>>,
     message: String,
+    control: Option<ServiceHandle<dyn stationdeck_services::icecast::IcecastControlService>>,
+    management: bool,
+    selected_mount: String,
+    title: String,
+    selected_input: String,
+    route: Option<stationdeck_services::icecast::RouteStatus>,
+    listeners: Option<(String, Vec<stationdeck_services::icecast::Listener>)>,
+    confirmation: Option<stationdeck_services::icecast::IcecastCommand>,
+    refresh_after_command: bool,
 }
 impl IcecastPlugin {
     fn snapshot(&self) -> Result<RequestState<IcecastStatus>, String> {
@@ -47,6 +57,14 @@ impl DeckModule for IcecastPlugin {
     fn start(&mut self, context: &Context) -> Result<(), String> {
         self.service =
             Some(context.service(&ICECAST, "icecastd.streams", "icecastd.consulter", "read")?);
+        self.control = context
+            .service(
+                &stationdeck_services::icecast::ICECAST_CONTROL,
+                "icecastd.control",
+                "icecastd.commander",
+                "command",
+            )
+            .ok();
         Ok(())
     }
     fn health(&self) -> stationdeck_ui::PluginStatus {
@@ -105,12 +123,31 @@ impl DeckModule for IcecastPlugin {
             }
         }
     }
+    fn tick(&mut self) {
+        self.control_tick();
+    }
     fn stop(&mut self) {
+        self.control = None;
+        self.route = None;
+        self.listeners = None;
+        self.confirmation = None;
+        self.refresh_after_command = false;
+        self.title.clear();
         self.service = None;
         self.message.clear();
     }
     fn ui(&mut self, _: &str, ui: &mut egui::Ui) {
         ui.heading("Icecast streams");
+        ui.horizontal(|ui| {
+            stationdeck_ui::test_ui::response(
+                "icecast-tab-streams",
+                ui.selectable_value(&mut self.management, false, "Streams"),
+            );
+            stationdeck_ui::test_ui::response(
+                "icecast-tab-management",
+                ui.selectable_value(&mut self.management, true, "Management"),
+            );
+        });
         if stationdeck_ui::test_ui::response(
             "icecast-streams-refresh",
             ui.button("Refresh streams"),
@@ -137,6 +174,10 @@ impl DeckModule for IcecastPlugin {
             }
             Ok(RequestState::Failed(error)) => show_state(ui, ViewState::Unavailable(&error)),
             Ok(RequestState::Ready(status)) => {
+                if self.management {
+                    self.management_ui(ui, &status);
+                    return;
+                }
                 ui.label(format!("Server: {}", status.server_id));
                 if status.streams.is_empty() {
                     show_state(ui, ViewState::Empty("No stream mounts are configured."));

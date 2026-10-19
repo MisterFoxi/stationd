@@ -92,7 +92,7 @@ async function setToken(kind, value) {
   await page.keyboard.insertText(value);
   await page.waitForFunction(kind => {
     const saved = JSON.parse(localStorage.getItem('stationdeck.tokens.v1') || 'null');
-    return !!saved?.[kind === 'gateway' ? 'deck_gateway' : 'configuration_author'];
+    return !!saved?.[kind === 'gateway' ? 'deck_gateway' : kind === 'icecast-control' ? 'icecast_control' : 'configuration_author'];
   }, kind);
 }
 async function waitState(id, state) {
@@ -351,6 +351,54 @@ try {
   assert.equal(await page.locator('#stationdeck').getAttribute('data-qa-vital-listeners'), '7');
   await clickControl(page, 'nav-icecastd.streams');
   await capture(page, 'icecast-plugin-streams');
+  // Real management RPCs against the isolated Icecast fixture.
+  const controlToken = (await readFile('/secrets/icecast-control-token', 'utf8')).trim();
+  const controlMetrics = async () => (await (await page.request.get(`${fixture}/metrics`)).json()).icecast_commands;
+  const beforeControl = await controlMetrics();
+  for (const headers of [{}, {Authorization:`Bearer ${token}`}]) {
+    assert.equal((await page.request.post(`${base}/api/icecast/control`, {headers, data:{action:'route'}})).status(),403);
+  }
+  assert.equal(await controlMetrics(),beforeControl,'read credentials reached management RPCs');
+  const invalidTarget = await page.request.post(`${base}/api/icecast/control`, {headers:{Authorization:`Bearer ${controlToken}`},data:{action:'metadata',mount:'/not-configured',title:'Rejected'}});
+  assert.equal(invalidTarget.status(),502);
+  assert(!(await invalidTarget.text()).includes('fixture-only'),'management leaked upstream diagnostics');
+  await setToken('icecast-control',controlToken);
+  await clickControl(page,'nav-icecastd.streams');
+  let manageWindow=await controlRect(page,'window-icecastd');
+  await page.mouse.move(manageWindow.x+manageWindow.width/2,manageWindow.y+14);
+  await page.mouse.down();await page.mouse.move(manageWindow.x+manageWindow.width/2,140,{steps:12});await page.mouse.up();
+  await animationFrame(page);await animationFrame(page);
+  manageWindow=await controlRect(page,'window-icecastd');
+  await page.mouse.move(manageWindow.x+manageWindow.width-4,manageWindow.y+manageWindow.height-4);
+  await page.mouse.down();await page.mouse.move(manageWindow.x+manageWindow.width-4,950,{steps:12});await page.mouse.up();
+  await clickControl(page,'icecast-tab-management');
+  async function operation(id) {
+    const reply=page.waitForResponse(r=>r.url().endsWith('/api/icecast/control'));
+    await clickControl(page,id);
+    const result=await (await reply).json();
+    assert.equal(result.state,'completed');return result.result;
+  }
+  await clickControl(page,'icecast-title');await page.keyboard.press('Control+A');await page.keyboard.insertText('Managed fixture title');
+  assert.equal((await operation('icecast-set-title')).kind,'done');
+  const route=await operation('icecast-get-route');assert.equal(route.route.input,'a');
+  await clickControl(page,'icecast-route-input');await clickControl(page,'icecast-input-b');
+  assert.equal((await operation('icecast-switch')).route.input,'b');
+  assert.equal((await operation('icecast-listeners')).listeners[0].id,42);
+  const beforeCancel=await controlMetrics();
+  await clickControl(page,'icecast-kick-listener-42');await clickControl(page,'icecast-cancel');
+  assert.equal(await controlMetrics(),beforeCancel,'cancel submitted a disconnect');
+  await clickControl(page,'icecast-kick-listener-42');await operation('icecast-confirm');
+  assert.equal((await operation('icecast-listeners')).listeners.length,0);
+  await capture(page,'icecast-management');
+  await clickControl(page,'icecast-kick-source');await operation('icecast-confirm');
+  await clickControl(page,'icecast-tab-streams');
+  await page.waitForFunction(()=>document.getElementById('stationdeck').getAttribute('data-qa-icecast-stream-0-connected')==='false');
+  const managed=await (await page.request.get(`${base}/api/icecast/streams`,{headers:{Authorization:`Bearer ${token}`}})).json();
+  assert.equal(managed.status.streams[0].title,'Managed fixture title');
+  await clickControl(page,'nav-tokens');await clickControl(page,'forget-icecast-control');
+  await page.waitForFunction(()=>!JSON.parse(localStorage.getItem('stationdeck.tokens.v1')).icecast_control);
+  assert.equal(await page.locator('#stationdeck').getAttribute('data-qa-vital-listeners'),'0','forgetting control credentials interrupted supervision');
+  await clickControl(page,'nav-icecastd.streams');
   assert((await page.evaluate(() => localStorage.getItem('stationdeck.tokens.v1'))).includes(token), 'shared saved token was lost');
   await page.request.post(`${fixture}/fail`);
   const icecastFailure = page.waitForResponse(r => r.url().endsWith('/api/icecast/streams'));

@@ -91,23 +91,28 @@ struct SavedTokens {
     version: u32,
     deck_gateway: String,
     configuration_author: String,
+    #[serde(default)]
+    icecast_control: String,
 }
 impl SavedTokens {
     fn valid(&self) -> bool {
         self.version == 1
             && self.deck_gateway.len() <= 65536
             && self.configuration_author.len() <= 65536
+            && self.icecast_control.len() <= 65536
     }
     fn from_store(store: &stationdeck_ui::TokenStore) -> Self {
         Self {
             version: 1,
             deck_gateway: store.gateway.get(),
             configuration_author: store.configuration.get(),
+            icecast_control: store.icecast_control.get(),
         }
     }
     fn restore(&self, store: &stationdeck_ui::TokenStore) {
         store.gateway.set(&self.deck_gateway);
         store.configuration.set(&self.configuration_author);
+        store.icecast_control.set(&self.icecast_control);
     }
 }
 #[derive(Default, PartialEq)]
@@ -133,7 +138,7 @@ pub struct StationDeck {
     tokens_dirty: bool,
     tokens_invalid: bool,
     tokens_persistence_error: bool,
-    show_tokens: [bool; 2],
+    show_tokens: [bool; 3],
 }
 impl StationDeck {
     #[cfg(test)]
@@ -168,7 +173,7 @@ impl StationDeck {
             tokens_dirty: false,
             tokens_invalid: false,
             tokens_persistence_error: false,
-            show_tokens: [false; 2],
+            show_tokens: [false; 3],
         }
     }
     #[cfg(target_arch = "wasm32")]
@@ -223,7 +228,10 @@ impl StationDeck {
     fn persist_tokens(&mut self) {
         self.tokens_persistence_error = !(|| {
             let storage = web_sys::window()?.local_storage().ok()??;
-            if self.tokens.gateway.is_empty() && self.tokens.configuration.is_empty() {
+            if self.tokens.gateway.is_empty()
+                && self.tokens.configuration.is_empty()
+                && self.tokens.icecast_control.is_empty()
+            {
                 storage.remove_item(TOKENS_KEY).ok()
             } else {
                 storage
@@ -280,6 +288,12 @@ impl StationDeck {
                 "Used by configuration authoring only.",
                 self.tokens.configuration.clone(),
             ),
+            (
+                "icecast-control",
+                "Icecast control",
+                "Allows stream management operations. Obtain with make deck-icecast-control-token.",
+                self.tokens.icecast_control.clone(),
+            ),
         ]
         .into_iter()
         .enumerate()
@@ -327,8 +341,9 @@ impl StationDeck {
         if ui.button("Forget all tokens").clicked() {
             self.tokens.gateway.set("");
             self.tokens.configuration.set("");
+            self.tokens.icecast_control.set("");
             self.tokens_dirty = true;
-            self.show_tokens = [false; 2];
+            self.show_tokens = [false; 3];
             ctx.request_repaint();
         }
     }
@@ -542,7 +557,7 @@ impl StationDeck {
             ui.available_rect_before_wrap()
         }).inner.shrink(8.0);
         if self.page != Page::Tokens {
-            self.show_tokens = [false; 2];
+            self.show_tokens = [false; 3];
         }
         self.plugin_windows(ctx, workspace);
         // Host settings are separate windows; plugins stay visible underneath.

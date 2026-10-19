@@ -19,8 +19,9 @@ pub fn modules_with_tokens(tokens: &stationdeck_ui::TokenStore) -> Vec<Box<dyn D
             tokens.configuration.clone(),
         )),
         Box::<crate::overview::OverviewModule>::default(),
-        Box::new(stationdeck_icecast::IcecastProvider::with_token(
+        Box::new(stationdeck_icecast::IcecastProvider::with_tokens(
             tokens.gateway.clone(),
+            tokens.icecast_control.clone(),
         )),
         Box::<icecastd_deck::IcecastPlugin>::default(),
     ]
@@ -129,6 +130,24 @@ pub fn policy_with_provider(provider: &str) -> Policy {
             },
         );
     }
+    for module in ["icecast-gateway", "icecastd"] {
+        let grants = policy.grants.get_mut(module).expect("assembled module");
+        grants.capabilities.push(Capability {
+            id: format!("{module}.control"),
+            kind: "service".into(),
+            resource: "stationdeck.icecast.control".into(),
+            operations: vec!["command".into()],
+            max_rows: None,
+            timeout_ms: None,
+        });
+        if module == "icecastd" {
+            grants.permissions.insert("icecastd.commander".into());
+        }
+    }
+    policy.bindings.insert(
+        ("icecastd".into(), "stationdeck.icecast.control".into()),
+        "icecast-gateway".into(),
+    );
     policy.bindings.insert(
         ("overview".into(), "stationdeck.admin.overview".into()),
         provider.into(),
@@ -176,6 +195,23 @@ mod tests {
             .views()
             .iter()
             .any(|v| v.id == "configuration.authoring"));
+    }
+    #[test]
+    fn denying_management_keeps_the_read_only_plugin_available() {
+        let mut policy = policy_with_provider("demo");
+        let grants = policy.grants.get_mut("icecastd").unwrap();
+        grants.permissions.remove("icecastd.commander");
+
+        let catalog = ModuleCatalog::new(
+            modules(),
+            &["icecast-gateway".into(), "icecastd".into()],
+            policy,
+        );
+        assert!(matches!(
+            catalog.status("icecastd"),
+            Some((State::Running, None))
+        ));
+        assert!(catalog.views().iter().any(|v| v.id == "icecastd.streams"));
     }
     #[test]
     fn icecast_plugin_resolves_through_its_provider_without_any_stationd_module() {

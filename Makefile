@@ -366,3 +366,8 @@ deck-daemons-down: ## Stop managed Icecast/admin and configuration adapters, ret
 
 .PHONY: deck-icecast
 deck-icecast: deck ## Compatibility alias: all services use generic discovery
+
+.PHONY: deck-icecast-control-token
+deck-icecast-control-token: ## Show the separate Icecast management credential in the operator terminal
+> @$(DECK_DC) exec -T gateway cat /secrets/icecast-control-token
+> @echo
