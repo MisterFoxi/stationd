@@ -1,5 +1,6 @@
 //! Autonomous Deck plugin: consumes injected stream-status and optional management contracts.
 //! No endpoint, network client, protobuf, upstream credential or host dependency.
+mod desk;
 mod management;
 use stationdeck_services::{
     icecast::{IcecastService, IcecastStatus, ICECAST},
@@ -15,7 +16,11 @@ pub struct IcecastPlugin {
     management: bool,
     selected_mount: String,
     title: String,
-    selected_input: String,
+    edit_metadata: bool,
+    show_listeners: bool,
+    last_action: Option<management::Action>,
+    handled_result: Option<stationdeck_services::icecast::IcecastResult>,
+    feedback: String,
     route: Option<stationdeck_services::icecast::RouteStatus>,
     listeners: Option<(String, Vec<stationdeck_services::icecast::Listener>)>,
     confirmation: Option<stationdeck_services::icecast::IcecastCommand>,
@@ -42,7 +47,7 @@ impl DeckModule for IcecastPlugin {
     fn descriptor(&self) -> ModuleDescriptor {
         ModuleDescriptor {
             id: "icecastd",
-            title: "Icecast streams plugin",
+            title: "Icecast",
             description:
                 "Read stream presence, audience and metadata through the injected Icecast service.",
         }
@@ -133,12 +138,19 @@ impl DeckModule for IcecastPlugin {
         self.confirmation = None;
         self.refresh_after_command = false;
         self.title.clear();
+        self.feedback.clear();
+        self.last_action = None;
+        self.handled_result = None;
+        self.edit_metadata = false;
+        self.show_listeners = false;
         self.service = None;
         self.message.clear();
     }
     fn ui(&mut self, _: &str, ui: &mut egui::Ui) {
-        ui.heading("Icecast streams");
-        ui.horizontal(|ui| {
+        if !self.management {
+            ui.heading("Icecast streams");
+        }
+        ui.horizontal_wrapped(|ui| {
             stationdeck_ui::test_ui::response(
                 "icecast-tab-streams",
                 ui.selectable_value(&mut self.management, false, "Streams"),
@@ -147,15 +159,15 @@ impl DeckModule for IcecastPlugin {
                 "icecast-tab-management",
                 ui.selectable_value(&mut self.management, true, "Management"),
             );
+            if stationdeck_ui::test_ui::response(
+                "icecast-streams-refresh",
+                ui.button("Refresh streams"),
+            )
+            .clicked()
+            {
+                self.message = self.refresh().err().unwrap_or_default();
+            }
         });
-        if stationdeck_ui::test_ui::response(
-            "icecast-streams-refresh",
-            ui.button("Refresh streams"),
-        )
-        .clicked()
-        {
-            self.message = self.refresh().err().unwrap_or_default();
-        }
         if !self.message.is_empty() {
             show_state(ui, ViewState::Error(&self.message));
         }

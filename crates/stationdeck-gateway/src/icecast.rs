@@ -143,24 +143,9 @@ impl IcecastTarget {
                 .take(max)
                 .collect::<String>()
         };
-        let error = |e: tonic::Status| match e.code() {
-            tonic::Code::InvalidArgument | tonic::Code::NotFound => (
-                "invalid_target",
-                "The target is not configured or the request was rejected.",
-            ),
-            tonic::Code::PermissionDenied | tonic::Code::Unauthenticated => (
-                "permission_denied",
-                "Icecast administration denied this operation.",
-            ),
-            tonic::Code::Unimplemented | tonic::Code::FailedPrecondition => (
-                "unavailable",
-                "This operation is unavailable for the current stream or router.",
-            ),
-            _ => (
-                "unavailable",
-                "Operation failed or its outcome is unknown. Refresh before retrying.",
-            ),
-        };
+        let changes = command.changes_stream();
+        let router = matches!(&command, C::Route | C::Switch { .. });
+        let error = |e: tonic::Status| operation_error(e.code(), changes, router);
         match command {
             C::Route | C::Switch { .. } => {
                 let reply = match command {
@@ -173,7 +158,7 @@ impl IcecastTarget {
                 }
                 .map_err(error)?
                 .into_inner();
-                if reply.inputs.len() > 128 {
+                if reply.inputs.len() > 128 || reply.input_streams.len() > 128 {
                     return Err(("invalid_response", "Too many router inputs."));
                 }
                 Ok(R::Route {
@@ -183,6 +168,14 @@ impl IcecastTarget {
                         connected: reply.connected,
                         inputs: reply.inputs.into_iter().map(|s| clean(s, 128)).collect(),
                         problem: clean(reply.problem, 512),
+                        input_streams: reply
+                            .input_streams
+                            .into_iter()
+                            .map(|input| stationdeck_services::icecast::RouteInput {
+                                id: clean(input.id, 128),
+                                mount: clean(input.mount, 256),
+                            })
+                            .collect(),
                     },
                 })
             }
@@ -242,5 +235,59 @@ impl IcecastTarget {
                 })
             }
         }
+    }
+}
+
+// Never forward arbitrary upstream diagnostics. Reads cannot have an unknown
+// mutation outcome; router failures should identify the missing dependency.
+fn operation_error(code: tonic::Code, changes: bool, router: bool) -> (&'static str, &'static str) {
+    match code {
+        tonic::Code::InvalidArgument | tonic::Code::NotFound => (
+            "invalid_target", "The target is not configured or the request was rejected.",
+        ),
+        tonic::Code::PermissionDenied | tonic::Code::Unauthenticated => (
+            "permission_denied", "Icecast administration denied this operation.",
+        ),
+        tonic::Code::Unimplemented | tonic::Code::FailedPrecondition => (
+            "unavailable", "This operation is unavailable for the current stream or router.",
+        ),
+        _ if router && !changes => (
+            "router_unavailable", "Stream router unavailable. Check that the router service is running, then load the route again.",
+        ),
+        _ if !changes => (
+            "unavailable", "Listener list unavailable. Check Icecast administration and the selected mount, then refresh listeners.",
+        ),
+        _ if router => (
+            "router_unavailable", "Stream router unavailable or switching failed. The outcome may be unknown; reload the route before retrying.",
+        ),
+        _ => (
+            "unavailable", "Operation failed or its outcome is unknown. Refresh before retrying.",
+        ),
+    }
+}
+
+#[cfg(test)]
+mod control_error_tests {
+    use super::*;
+    #[test]
+    fn unavailable_reads_identify_the_dependency_without_claiming_a_mutation() {
+        let (code, message) = operation_error(tonic::Code::Unavailable, false, true);
+        assert_eq!(code, "router_unavailable");
+        assert!(message.contains("router service is running"));
+        assert!(!message.contains("unknown"));
+        let (_, message) = operation_error(tonic::Code::DeadlineExceeded, false, false);
+        assert!(message.contains("Listener list"));
+        assert!(!message.contains("unknown"));
+    }
+    #[test]
+    fn failed_mutations_keep_the_uncertain_outcome_explicit() {
+        for router in [false, true] {
+            let (_, message) = operation_error(tonic::Code::Unavailable, true, router);
+            assert!(message.contains("unknown"));
+        }
+        assert_eq!(
+            operation_error(tonic::Code::Unauthenticated, false, true).0,
+            "permission_denied"
+        );
     }
 }

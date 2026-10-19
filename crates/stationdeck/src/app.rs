@@ -58,6 +58,8 @@ struct Settings {
     overview_provider: String,
     #[serde(default)]
     windows: BTreeMap<String, PluginWindow>,
+    #[serde(default)]
+    logs_open: bool,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -68,6 +70,7 @@ impl Default for Settings {
             enabled_modules: default_modules(),
             overview_provider: default_provider(),
             windows: BTreeMap::new(),
+            logs_open: false,
         }
     }
 }
@@ -139,6 +142,7 @@ pub struct StationDeck {
     tokens_invalid: bool,
     tokens_persistence_error: bool,
     show_tokens: [bool; 3],
+    diagnostics: crate::diagnostics::Diagnostics,
 }
 impl StationDeck {
     #[cfg(test)]
@@ -154,6 +158,7 @@ impl StationDeck {
         settings_error: bool,
         tokens: stationdeck_ui::TokenStore,
     ) -> Self {
+        let diagnostics = crate::diagnostics::Diagnostics::new();
         let modules = ModuleCatalog::new(
             crate::assembly::modules_with_tokens(&tokens),
             &settings.enabled_modules,
@@ -174,6 +179,7 @@ impl StationDeck {
             tokens_invalid: false,
             tokens_persistence_error: false,
             show_tokens: [false; 3],
+            diagnostics,
         }
     }
     #[cfg(target_arch = "wasm32")]
@@ -370,7 +376,7 @@ impl StationDeck {
         }
         ctx.set_visuals(visuals);
         ctx.set_zoom_factor(self.settings.zoom);
-        ctx.style_mut(|s| {
+        ctx.global_style_mut(|s| {
             s.spacing.item_spacing = egui::vec2(10.0, 8.0);
             s.spacing.button_padding = egui::vec2(10.0, 6.0);
             s.spacing.window_margin = egui::Margin::same(12);
@@ -393,9 +399,12 @@ impl StationDeck {
         self.layout_generation += 1;
         self.preferences_dirty = true;
     }
-    fn render(&mut self, ctx: &egui::Context) {
+    fn render(&mut self, root: &mut egui::Ui) {
+        let context = root.ctx().clone();
+        let ctx = &context;
         stationdeck_ui::test_ui::begin_frame();
         self.modules.tick();
+        self.diagnostics.observe(&self.modules);
         for descriptor in self.modules.descriptors() {
             if let Some((state, _)) = self.modules.status(descriptor.id) {
                 stationdeck_ui::test_ui::value(
@@ -419,7 +428,7 @@ impl StationDeck {
         if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::Home)) {
             self.page = Page::Home;
         }
-        egui::TopBottomPanel::top("stationdeck.header").show(ctx, |ui| {
+        egui::Panel::top("stationdeck.header").show_inside(root, |ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.set_min_height(40.0);
                 ui.label(RichText::new("SD").strong().size(22.0).color(ACCENT));
@@ -435,12 +444,19 @@ impl StationDeck {
                         self.page = page;
                     }
                 }
+                if ui
+                    .selectable_label(self.settings.logs_open, "Logs")
+                    .clicked()
+                {
+                    self.settings.logs_open = !self.settings.logs_open;
+                    self.preferences_dirty = true;
+                }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.weak("V1 · Station workspace");
                 });
             });
         });
-        egui::TopBottomPanel::top("stationdeck.telemetry").show(ctx, |ui| {
+        egui::Panel::top("stationdeck.telemetry").show_inside(root, |ui| {
             ui.horizontal_wrapped(|ui| {
                 self.modules.summaries(ui);
                 for descriptor in self.modules.descriptors() {
@@ -475,7 +491,7 @@ impl StationDeck {
                     ..Default::default()
                 });
         }
-        egui::TopBottomPanel::bottom("stationdeck.status").show(ctx, |ui| {
+        egui::Panel::bottom("stationdeck.status").show_inside(root, |ui| {
             ui.horizontal_wrapped(|ui| {
                 let count = self
                     .settings
@@ -499,7 +515,7 @@ impl StationDeck {
                 ui.weak(format!("StationDeck · v{}", env!("CARGO_PKG_VERSION")));
             });
         });
-        egui::SidePanel::left("stationdeck.navigation").default_width(190.0).width_range(150.0..=280.0).show(ctx, |ui| {
+        egui::Panel::left("stationdeck.navigation").default_size(190.0).size_range(150.0..=280.0).show_inside(root, |ui| {
             ui.add_space(8.0);
             ui.weak("WORKSPACE");
             for (label, page) in [("Home", Page::Home), ("Modules", Page::Modules), ("Settings", Page::Settings), ("Tokens", Page::Tokens)] {
@@ -535,10 +551,14 @@ impl StationDeck {
                     });
                 }
             });
+            if stationdeck_ui::test_ui::response("nav-logs", ui.selectable_label(self.settings.logs_open, "Logs")).clicked() {
+                self.settings.logs_open = !self.settings.logs_open;
+                self.preferences_dirty = true;
+            }
             ui.separator();            if ui.button("Arrange windows").clicked() { self.arrange(); }
             ui.weak("Drag title bars to move.\nResize from window edges.\nPin a window to lock its position.");
         });
-        let workspace = egui::CentralPanel::default().show(ctx, |ui| {
+        let workspace = egui::CentralPanel::default().show_inside(root, |ui| {
             if self.settings_error {
                 show_state(ui, ViewState::Error("Saved preferences are invalid or from a newer version. Temporary defaults are being used."));
                 if ui.button("Replace saved preferences").clicked() { self.settings_error = false; self.preferences_dirty = true; }
@@ -589,6 +609,10 @@ impl StationDeck {
                 self.page = Page::Home;
             }
         }
+        let previous = self.settings.logs_open;
+        self.diagnostics
+            .window(ctx, &mut self.settings.logs_open, workspace);
+        self.preferences_dirty |= previous != self.settings.logs_open;
     }
     fn plugin_windows(&mut self, ctx: &egui::Context, workspace: egui::Rect) {
         let views = self.modules.views();
@@ -837,8 +861,8 @@ impl StationDeck {
 
 #[cfg(target_arch = "wasm32")]
 impl eframe::App for StationDeck {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.render(ctx);
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.render(ui);
         if self.preferences_dirty && !self.settings_error {
             self.persist_preferences();
         }
@@ -866,13 +890,29 @@ mod tests {
         assert!(!saved.valid());
     }
     fn frame(app: &mut StationDeck, ctx: &egui::Context, size: egui::Vec2) {
-        let _ = ctx.run(
+        let _ = ctx.run_ui(
             egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
                 ..Default::default()
             },
-            |ctx| app.render(ctx),
+            |ui| app.render(ui),
         );
+    }
+    #[test]
+    fn logs_window_is_available_with_no_plugins() {
+        let ctx = egui::Context::default();
+        let settings = Settings {
+            enabled_modules: vec![],
+            logs_open: true,
+            ..Default::default()
+        };
+        let mut app = StationDeck::with_settings(settings, false);
+        for _ in 0..3 {
+            frame(&mut app, &ctx, egui::vec2(1440.0, 1000.0));
+        }
+        assert!(app.settings.logs_open);
+        assert!(app.modules.views().is_empty());
+        assert!(app.settings.valid());
     }
     #[test]
     fn preferences_reject_invalid_window_geometry() {
@@ -931,6 +971,6 @@ mod tests {
         ctx.set_theme(egui::ThemePreference::Light);
         let app = StationDeck::with_settings(Settings::default(), false);
         app.apply_style(&ctx);
-        assert!(ctx.style().visuals.dark_mode);
+        assert!(ctx.global_style().visuals.dark_mode);
     }
 }

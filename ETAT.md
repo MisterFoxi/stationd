@@ -4,7 +4,7 @@ Suivi courant V1. Lire ce fichier au début de session ; consulter
 [etat-v0.5.md](etat-v0.5.md) uniquement pour un détail ciblé de la référence 0.5.
 Les décisions durables sont dans `Doc/`.
 
-Dernière mise à jour : 2026-10-19 (GUI Icecast : gestion des flux livrée et validée).
+Dernière mise à jour : 2026-10-19 (GUI : commandes Icecast et fenêtre Logs egui_tracing livrées).
 
 ## Repères de version
 
@@ -205,3 +205,93 @@ métadonnées validées, titre d'origine restauré. Le routeur de ce banc est ar
 (actuellement aucun container router) : GetRoute renvoie indisponible ; bascule
 A/B validée sur le serveur protobuf isolé. Sources réelles laissées connectées.
 Guide : [gestion Icecast](Doc/stationdeck-dev.md#icecast-stream-management).
+
+### GUI — traces de session avec egui_tracing (19 octobre 2026)
+
+Intégration de `egui_tracing` 0.3.0, qui impose egui 0.34 : egui/eframe et toutes
+les crates frontend alignés sur 0.34.3 ; shell migré vers root Ui, Panel et App::ui.
+Fenêtre système Logs indépendante des plugins, ouverte depuis le bandeau ou le
+lanceur, déplaçable/redimensionnable/fermable. Filtres niveau/cible, détails,
+effacement et retour au bas fournis par le widget. Taille bornée à l'espace de
+travail ; fermeture vérifiée sur une vue de 1120 pixels.
+
+Un subscriber tracing par instance WASM, réutilisé si WebRunner est recréé ;
+échec d'installation signalé dans Logs. Derniers 1 000 événements en mémoire,
+vidage du tampon pendant les frames même fenêtre fermée, nouvelle session au
+rechargement. État ouvert/fermé seul sauvegardé avec les préférences.
+
+Premières traces : démarrage navigateur, transitions cycle de vie/état général
+des plugins (sans répétition par frame), soumission et résultat des commandes
+Icecast. Champs limités aux identifiants, états statiques et noms de commandes ;
+aucun token, titre saisi, auditeur, payload ou erreur amont brut enregistré.
+Cibles `stationdeck` uniquement. Les logs des démons restent dans leurs containers ;
+aucune collecte distante ajoutée. Guide :
+[traces de session](Doc/stationdeck-dev.md#session-logs).
+
+Validation en containers : 37 tests Rust ciblés passent, Clippy ciblé natif/WASM
+sans avertissement, graphe frontend sans daemon/tonic/prost. Tests de rétention,
+filtrage des cibles, effacement, absence de répétition et fenêtre sans plugins.
+Recette Chromium générale complète réussie, y compris Logs sans plugin,
+réouverture après reload, fermeture, et commandes Icecast. Recette Configuration
+complète réussie (droits, persistance, découverte, offline/reprise, édition et
+publication UI). Captures `.local/stationdeck-tracing-qa/`. Image WebUI normale
+reconstruite et déployée sur stationdev1 (container healthy) ; aucun changement du daemon.
+
+### Correctif Management — routeur du banc (19 octobre 2026)
+
+Signalement utilisateur : « Operation failed or its outcome is unknown ».
+Reproduit avec GetRoute : container router absent. Router démarré avec son profil
+switch et sa sélection persistée B. Second blocage identifié : découverte audio
+ambiguë (plusieurs adresses pour le même service sur le banc multi-réseaux).
+Le binding audio du routeur utilise désormais l'endpoint Docker explicite
+`http://icecastd:8000` dans `config/icecast/discovery-router.json`, conformément
+à la priorité endpoint explicite du contrat. Aucun choix arbitraire d'adresse
+ni assouplissement de la vérification de découverte.
+
+Route réelle à nouveau connectée sur /radio.mp3. GetRoute et bascule B → A → B
+validés via la passerelle HTTP de la GUI ; B restauré et aucun auditeur sur la
+sortie. Le compteur d'un auditeur sur /test-b.mp3 représente le routeur lui-même.
+
+Passerelle : erreur de lecture de route identifie maintenant le routeur
+indisponible et invite à vérifier son service ; la liste des auditeurs a son
+message propre. Une lecture/son timeout ne prétend plus qu'une mutation a un
+résultat inconnu. L'avertissement d'issue incertaine reste pour les mutations.
+Diagnostics amont bruts toujours expurgés. 8 tests gateway et Clippy passent,
+dont deux régressions lecture/mutation. Gateway redéployé et healthy.
+
+### GUI — pupitre graphique Icecast (19 octobre 2026)
+
+Maquette validée par l'utilisateur transposée dans le plugin : cartes des entrées
+configurées, lettre/nom/mount/titre/type réels, état Ready/ON AIR/déconnecté/inconnu,
+liaisons dessinées vers la carte PROGRAM OUTPUT. Bouton Take on air par entrée,
+sélection active verte seulement si route connectée sans source connue déconnectée.
+Carte sortie avec mount, titre, connexion et audience propre à ce mount.
+Aucune jauge, waveform, valeur de bitrate ou donnée manquante simulée.
+
+Détails et résumé auditeurs sous le diagramme, disposition empilée si fenêtre
+étroite, titre modifiable à la demande avec Save/Cancel, auditeurs détaillés
+repliables. Déconnexion source déplacée dans Advanced actions ; confirmations
+ciblées et annulation conservées. Retours de commande et pending intégrés.
+Le dernier état de route est conservé pendant les commandes sans rapport ;
+échec de commande de route et retrait de credential l'invalident.
+
+Ajout protobuf compatible `RouteStatus.input_streams` (champ 6, RouteInput id/mount)
+alimenté par la configuration du routeur, borné/expurgé dans la passerelle et
+optionnel côté DTO frontend pour les anciens serveurs. Le plugin ne devine pas
+l'association mount/entrée. Pas de nouvelle crate : Frames/contrôles et painter
+egui suffisent. Sidebar/window Icecast renommés simplement « Icecast ».
+
+Validation en containers : 26 tests Rust frontend/services/plugin, 8 tests gateway
+et 3 tests routeur passent ; Clippy ciblé natif/WASM sans avertissement. Rendu
+large/étroit et absence des nouveaux champs sur ancien statut couverts. Recette
+Chromium complète réussie, incluant bascule directe par carte, métadonnées,
+liste auditeurs, annulation et déconnexion via menu ; navigation, Tokens et Logs
+continuent de passer. Images admin/routeur, gateway et WebUI reconstruites et
+déployées, containers healthy. GetRoute et B → A → B réels validés, B restauré.
+Captures de recette dans `.local/stationdeck-desk-qa/` (données de fixture).
+
+Recette supplémentaire contre les vrais services : navigateur Chromium avec les
+mêmes assets instrumentés, gateway réelle et credentials confinés au container.
+Mounts A/B exacts et état ON AIR de B vérifiés dans le canvas ; capture réelle
+`.local/stationdeck-desk-live.png`. Sortie /radio.mp3 à zéro auditeur, B conservé.
+Containers de recette/aperçu retirés, volumes de recette isolés supprimés.

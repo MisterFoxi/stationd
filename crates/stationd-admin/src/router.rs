@@ -188,6 +188,14 @@ impl Router {
             connected: false,
             inputs: config.inputs.iter().map(|i| i.id.clone()).collect(),
             problem: "starting".into(),
+            input_streams: config
+                .inputs
+                .iter()
+                .map(|input| RouteInput {
+                    id: input.id.clone(),
+                    mount: input.mount.clone(),
+                })
+                .collect(),
         };
         Ok((
             Self {
@@ -453,6 +461,12 @@ mod tests {
         save_selection(&path, "b").unwrap();
         let (router, _) = Router::new(cfg.clone(), &path).unwrap();
         assert_eq!(router.state.read().await.input, "b");
+        let mappings = router.state.read().await.input_streams.clone();
+        assert_eq!(mappings.len(), cfg.inputs.len());
+        for (mapping, configured) in mappings.iter().zip(&cfg.inputs) {
+            assert_eq!(mapping.id, configured.id);
+            assert_eq!(mapping.mount, configured.mount);
+        }
         std::fs::write(&path, r#"{"input":"removed-input"}"#).unwrap();
         assert!(Router::new(cfg.clone(), &path).is_err());
         std::fs::write(&path, "{}").unwrap();

@@ -196,6 +196,22 @@ try {
   await waitModules();
   await page.keyboard.press('Control+Home');
   await capture(page, 'no-modules');
+  // Logs is a host window, usable with no plugin enabled, and remains independent.
+  await clickControl(page, 'nav-logs');
+  await controlRect(page, 'window-logs');
+  await controlRect(page, 'logs-view');
+  await page.waitForFunction(() => Number(document.getElementById('stationdeck').getAttribute('data-qa-logs-count')) > 0);
+  await capture(page, 'logs-no-modules');
+  await page.waitForFunction(() => JSON.parse(localStorage.getItem('stationdeck.settings.v1')).logs_open);
+  await page.reload();
+  await ready(page);
+  await controlRect(page, 'window-logs');
+  await page.waitForFunction(() => Number(document.getElementById('stationdeck').getAttribute('data-qa-logs-count')) > 0);
+  const logsWindow = await controlRect(page, 'window-logs');
+  assert(logsWindow.x + logsWindow.width <= page.viewportSize().width, 'Logs window exceeds the viewport');
+  await page.mouse.click(logsWindow.x + logsWindow.width - 15, logsWindow.y + 14);
+  await page.waitForFunction(() => !document.getElementById('stationdeck').hasAttribute('data-qa-window-logs'));
+  await page.waitForFunction(() => JSON.parse(localStorage.getItem('stationdeck.settings.v1')).logs_open === false);
   await clickControl(page, 'nav-modules');
   await clickControl(page, 'module-demo');
   await waitModules('demo');
@@ -372,26 +388,47 @@ try {
   await page.mouse.move(manageWindow.x+manageWindow.width-4,manageWindow.y+manageWindow.height-4);
   await page.mouse.down();await page.mouse.move(manageWindow.x+manageWindow.width-4,950,{steps:12});await page.mouse.up();
   await clickControl(page,'icecast-tab-management');
+  async function clickDeskControl(id) {
+    for (let attempt=0;attempt<4;attempt++) {
+      const rect=await controlRect(page,id);
+      const window=await controlRect(page,'window-icecastd');
+      const top=window.y+48;
+      const bottom=Math.min(window.y+window.height-18,page.viewportSize().height-35);
+      const center=rect.y+rect.height/2;
+      if(center>=top&&center<=bottom) return clickControl(page,id);
+      await page.mouse.move(window.x+window.width-24,Math.max(top+30,bottom-35));
+      await page.mouse.wheel(0,center<top?-400:400);
+      await page.waitForTimeout(150);
+    }
+    throw new Error(`Cannot scroll Icecast control into view: ${id}`);
+  }
   async function operation(id) {
     const reply=page.waitForResponse(r=>r.url().endsWith('/api/icecast/control'));
-    await clickControl(page,id);
+    await clickDeskControl(id);
     const result=await (await reply).json();
     assert.equal(result.state,'completed');return result.result;
   }
-  await clickControl(page,'icecast-title');await page.keyboard.press('Control+A');await page.keyboard.insertText('Managed fixture title');
-  assert.equal((await operation('icecast-set-title')).kind,'done');
   const route=await operation('icecast-get-route');assert.equal(route.route.input,'a');
-  await clickControl(page,'icecast-route-input');await clickControl(page,'icecast-input-b');
-  assert.equal((await operation('icecast-switch')).route.input,'b');
+  assert.equal(route.route.input_streams[0].mount,'/live');
+  await page.waitForFunction(()=>document.getElementById('stationdeck').getAttribute('data-qa-icecast-source-a-state')==='ON AIR');
+  assert.equal(await page.locator('#stationdeck').getAttribute('data-qa-icecast-source-b-state'),'Ready');
+  await capture(page,'icecast-routing-desk-a');
+  assert.equal((await operation('icecast-take-b')).route.input,'b');
+  await page.waitForFunction(()=>document.getElementById('stationdeck').getAttribute('data-qa-icecast-output-input')==='b');
+  await capture(page,'icecast-routing-desk-b');
+  await clickDeskControl('icecast-edit-title');
+  await clickDeskControl('icecast-title');await page.keyboard.press('Control+A');await page.keyboard.insertText('Managed fixture title');
+  assert.equal((await operation('icecast-set-title')).kind,'done');
   assert.equal((await operation('icecast-listeners')).listeners[0].id,42);
   const beforeCancel=await controlMetrics();
-  await clickControl(page,'icecast-kick-listener-42');await clickControl(page,'icecast-cancel');
+  await clickDeskControl('icecast-kick-listener-42');await clickDeskControl('icecast-cancel');
   assert.equal(await controlMetrics(),beforeCancel,'cancel submitted a disconnect');
-  await clickControl(page,'icecast-kick-listener-42');await operation('icecast-confirm');
+  await clickDeskControl('icecast-kick-listener-42');await operation('icecast-confirm');
   assert.equal((await operation('icecast-listeners')).listeners.length,0);
   await capture(page,'icecast-management');
-  await clickControl(page,'icecast-kick-source');await operation('icecast-confirm');
-  await clickControl(page,'icecast-tab-streams');
+  await clickDeskControl('icecast-advanced');
+  await clickDeskControl('icecast-kick-source');await operation('icecast-confirm');
+  await clickDeskControl('icecast-tab-streams');
   await page.waitForFunction(()=>document.getElementById('stationdeck').getAttribute('data-qa-icecast-stream-0-connected')==='false');
   const managed=await (await page.request.get(`${base}/api/icecast/streams`,{headers:{Authorization:`Bearer ${token}`}})).json();
   assert.equal(managed.status.streams[0].title,'Managed fixture title');
@@ -444,7 +481,7 @@ try {
   await broken.screenshot({ path: `${output}/web-startup-error.png` });
   await broken.close();
   await page.close();
-  console.log('PASS: browser WASM/WebGL, HTTP/MIME, resize, navigation, theme persistence/reload, same-origin assets, startup error, module dependency blocking, provider binding, test module, authenticated real gRPC, upstream failure, cancellation, credential cleanup and autonomous Icecast plugin/service injection');
+  console.log('PASS: browser WASM/WebGL, HTTP/MIME, resize, navigation, theme persistence/reload, same-origin assets, startup error, module dependency blocking, provider binding, test module, authenticated real gRPC, upstream failure, cancellation, credential cleanup, autonomous Icecast plugin/service injection and session Logs window');
 } catch (error) {
   await page.screenshot({ path: `${output}/web-failure.png` }).catch(() => {});
   console.error('Browser page errors:', errors);

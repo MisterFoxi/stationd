@@ -80,12 +80,20 @@ impl IcecastCommand {
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
+pub struct RouteInput {
+    pub id: String,
+    pub mount: String,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct RouteStatus {
     pub output_mount: String,
     pub input: String,
     pub connected: bool,
     pub inputs: Vec<String>,
     pub problem: String,
+    #[serde(default)]
+    pub input_streams: Vec<RouteInput>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -125,6 +133,11 @@ pub const ICECAST_CONTROL: ServiceKey<dyn IcecastControlService> =
 #[cfg(test)]
 mod control_tests {
     use super::*;
+    #[test]
+    fn route_mapping_is_optional_for_older_administration_services() {
+        let route: RouteStatus = serde_json::from_str(r#"{"output_mount":"/radio.mp3","input":"b","connected":true,"inputs":["a","b"],"problem":""}"#).unwrap();
+        assert!(route.input_streams.is_empty());
+    }
     #[test]
     fn requests_reject_invalid_targets_and_control_characters() {
         assert!(IcecastCommand::KickSource {

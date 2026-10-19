@@ -13,6 +13,7 @@
       "version": "^1.0.0",
       "transport": "http",
       "instance": "icecastd-1",
+      "endpoint": "http://icecastd:8000",
       "allow_plaintext": true
     }
   ]

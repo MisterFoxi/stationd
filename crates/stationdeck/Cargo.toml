@@ -15,11 +15,14 @@ stationdeck-ui = { path = "../stationdeck-ui" }
 stationdeck-demo = { path = "../stationdeck-demo" }
 stationdeck-grpc = { path = "../stationdeck-grpc" }
 stationdeck-config-ui = { path = "../stationdeck-config-ui" }
-egui = { version = "=0.33.3", default-features = false, features = ["default_fonts"] }
+egui = { version = "=0.34.3", default-features = false, features = ["default_fonts"] }
 serde = { version = "1", features = ["derive"] }
+egui_tracing = { version = "=0.3.0", default-features = false, features = ["wasmbind"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "std"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-eframe = { version = "=0.33.3", default-features = false, features = ["default_fonts", "glow", "persistence"] }
+eframe = { version = "=0.34.3", default-features = false, features = ["default_fonts", "glow", "persistence"] }
 wasm-bindgen = "=0.2.128"
 wasm-bindgen-futures = "0.4"
 web-sys = { version = "0.3", features = ["HtmlCanvasElement", "Window", "Storage"] }

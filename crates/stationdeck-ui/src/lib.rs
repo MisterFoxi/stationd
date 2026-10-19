@@ -92,8 +92,8 @@ mod tests {
             )),
             ..Default::default()
         };
-        let output = ctx.run(input, |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
+        let output = ctx.run_ui(input, |root| {
+            egui::CentralPanel::default().show_inside(root, |ui| {
                 for state in [
                     ViewState::Empty("No module."),
                     ViewState::Loading("Waiting."),

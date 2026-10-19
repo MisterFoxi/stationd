@@ -95,3 +95,13 @@ Icecast (identifiant conservé), avant de revenir à A. Il a vérifié le
 refus d'une cible absente, la récupération manuelle après arrêt de A,
 la continuité pendant l'arrêt/reprise de l'administration et la reprise
 de B après redémarrage du routeur. Icecast n'a pas redémarré pendant ce test.
+
+## Vue graphique StationDeck
+
+Le pupitre Icecast consomme GetRoute/SwitchRoute et les statuts de mounts.
+RouteStatus expose également `repeated RouteInput input_streams = 6`, avec
+`id` et `mount`, renseignés depuis la configuration effective du routeur.
+Ajout protobuf compatible : les champs existants et les identifiants d'entrées
+sont conservés. Un ancien routeur sans ce champ fonctionne encore dans le
+pupitre, avec mount/disponibilité non renseignés plutôt qu'une correspondance
+inventée. Les commandes ne sont jamais relancées automatiquement par l'UI.

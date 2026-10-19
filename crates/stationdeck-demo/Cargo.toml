@@ -7,4 +7,4 @@ publish = false
 [dependencies]
 stationdeck-ui = { path = "../stationdeck-ui" }
 stationdeck-services = { path = "../stationdeck-services" }
-egui = { version = "=0.33.3", default-features = false }
+egui = { version = "=0.34.3", default-features = false }

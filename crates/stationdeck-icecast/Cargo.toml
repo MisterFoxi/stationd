@@ -4,9 +4,10 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 [dependencies]
+tracing = "0.1"
 stationdeck-ui = { path = "../stationdeck-ui" }
 stationdeck-services = { path = "../stationdeck-services" }
-egui = { version = "=0.33.3", default-features = false }
+egui = { version = "=0.34.3", default-features = false }
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 serde_json = "1"
 gloo-net = "0.6"

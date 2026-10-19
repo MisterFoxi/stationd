@@ -67,6 +67,16 @@ impl IcecastFixture {
     fn route(&self) -> RouteStatus {
         RouteStatus {
             output_mount: "/radio.mp3".into(),
+            input_streams: vec![
+                RouteInput {
+                    id: "a".into(),
+                    mount: "/live".into(),
+                },
+                RouteInput {
+                    id: "b".into(),
+                    mount: "/test-b.mp3".into(),
+                },
+            ],
             input: self.state.lock().unwrap().input.clone(),
             connected: true,
             inputs: vec!["a".into(), "b".into()],
@@ -96,6 +106,20 @@ impl icecast_admin_server::IcecastAdmin for IcecastFixture {
         Ok(Response::new(ServerStatus {
             server_id: "Fixture Icecast".into(),
             mounts: vec![
+                MountStatus {
+                    mount: "/radio.mp3".into(),
+                    connected: true,
+                    title: "Fixture output".into(),
+                    content_type: "audio/mpeg".into(),
+                    ..Default::default()
+                },
+                MountStatus {
+                    mount: "/test-b.mp3".into(),
+                    connected: true,
+                    title: "Fixture B".into(),
+                    content_type: "audio/mpeg".into(),
+                    ..Default::default()
+                },
                 MountStatus {
                     mount: "/live".into(),
                     connected: state.source_connected,

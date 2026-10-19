@@ -5,7 +5,7 @@ edition = "2021"
 publish = false
 
 [dependencies]
-egui = { version = "=0.33.3", default-features = false }
+egui = { version = "=0.34.3", default-features = false }
 stationdeck-services = { path = "../stationdeck-services" }
 
 [features]

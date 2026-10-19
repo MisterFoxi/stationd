@@ -59,7 +59,10 @@ message RouteStatus {
   bool connected = 3;
   repeated string inputs = 4;
   string problem = 5;
+  repeated RouteInput input_streams = 6;
 }
+
+message RouteInput { string id = 1; string mount = 2; }
 
 message ConfigDocument { string toml = 1; string revision = 2; }
 message ConfigText { string toml = 1; }

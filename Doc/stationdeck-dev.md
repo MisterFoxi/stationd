@@ -302,9 +302,76 @@ the read snapshot. Disabling the provider revokes both services. Operations are
 single-flight and never retried automatically. A timeout/cancellation cannot undo
 an operation already accepted upstream: refresh its status before retrying.
 Completed mutations trigger one stream-status refresh; listener lists remain
-explicit snapshots refreshed with **List listeners**.
+explicit snapshots refreshed with **Refresh listener list**.
 
 The containerized Chromium recipe exercises metadata, route switching, listener
 listing/disconnection, cancellation and source disconnection through the real
 protobuf fixture. It also verifies read-token denial without an upstream call,
 sanitized command failures and independent control-token deletion.
+
+## Session logs
+
+Open **Logs** from the header or sidebar. This independent host window remains
+available with every plugin disabled. It uses `egui_tracing` 0.3.0 with its native
+level/target filters, row details, clear and scroll-to-bottom controls. Move,
+resize or close it without stopping collection. Open/closed state is saved in
+browser preferences; the events themselves remain in memory and disappear on
+page reload. The latest 1,000 events are retained. Collection is drained during
+normal host frames even when the Logs window is closed.
+
+The browser installs one `tracing_subscriber` and reuses it if the WebRunner is
+recreated. Failed subscriber installation is shown in Logs. This first integration
+records browser startup, plugin lifecycle/health transitions and Icecast operation
+submission/completion/failure. Unchanged frames do not repeat plugin events.
+Only the `stationdeck` tracing target prefix is collected; event fields use
+module IDs, static states and command names. Credentials, submitted metadata,
+listener details, request bodies and raw upstream errors are not logged.
+Frontend plugins can emit `tracing` events under a `stationdeck::...` target;
+never attach secret values or complete request/response objects to these events.
+
+These are browser-session diagnostics. Daemon and gateway container logs are not
+transported into this viewer. The dependency requires egui 0.34: all frontend
+crates now use egui/eframe 0.34.3 with the root-Ui/Panel API. `wasmbind` enables
+timestamps on the WASM target; default logging/font features of egui_tracing are
+disabled because the host owns fonts and intentionally limits collected targets.
+
+### Development router target
+
+The stationdev1 router is started with the `switch` Compose profile. Its audio
+binding in `config/icecast/discovery-router.json` uses the explicit Docker DNS
+origin `http://icecastd:8000` to avoid ambiguous audio discovery across the two
+shared Docker networks. The configured endpoint takes precedence over discovery.
+If **Load route** reports the router unavailable, check that the `router` service
+is running (`make icecast-switch-up`). A listener on the selected input may be
+the router itself; check the output mount separately for its audience.
+
+### Icecast broadcast desk
+
+The Management tab presents configured router inputs as source cards and a
+program-output card, joined by painted routing lines. **Take on air** submits one
+SwitchRoute command for that input. Green **ON AIR** requires a connected route
+and no known disconnected source in the stream snapshot; a selected disconnected
+route is amber. Known disconnected inputs cannot be taken on air. Unreported
+availability remains explicitly unknown and the server validates the switch.
+
+RouteStatus now carries optional `input_streams` (id/mount pairs, protobuf field 6).
+The router supplies these from its actual configuration; the plugin joins them
+with stream snapshots to show real mount names, titles and content types. Older
+routers remain usable with input IDs and unknown mount/availability labels.
+No bitrate, waveform or other missing measurement is fabricated. Output audience
+comes from the output mount specifically; stream totals can include the router's
+own input connection. Every displayed value remains a snapshot, refreshed on demand.
+
+The layout changes to stacked cards in narrower plugin windows. Stream details
+and listener summary sit below the routing diagram. **Edit metadata** opens a
+bounded inline title editor; Save submits once and Cancel closes the editor.
+**Advanced actions** contains source disconnection, followed by a targeted
+confirmation outside the menu. Listener details are shown on request and can be
+collapsed. Cancelling a disconnect sends no command. Feedback/pending/errors are
+shown inside the desk and successful mutations refresh stream status once.
+The last route snapshot survives unrelated metadata/listener commands; an uncertain
+route command failure removes it. Forgetting the control token clears private
+management results and disallows commands as before.
+
+The desk uses egui Frames, ordinary buttons and vector painting, without another
+UI dependency. No network or administration credential enters the plugin.

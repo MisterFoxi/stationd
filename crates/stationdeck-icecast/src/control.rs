@@ -48,6 +48,15 @@ impl IcecastControlService for ControlClient {
         let Some(generation) = self.slot.borrow_mut().begin() else {
             return Err("An Icecast operation is already pending.".into());
         };
+        let action = match &command {
+            IcecastCommand::Route => "route",
+            IcecastCommand::Listeners { .. } => "listeners",
+            IcecastCommand::Metadata { .. } => "metadata",
+            IcecastCommand::KickSource { .. } => "kick_source",
+            IcecastCommand::KickListener { .. } => "kick_listener",
+            IcecastCommand::Switch { .. } => "switch",
+        };
+        tracing::debug!(target: "stationdeck::icecast", action, "Icecast operation submitted");
         let token = self.token.get();
         let slot = self.slot.clone();
         let signal = controller.signal();
@@ -65,7 +74,16 @@ impl IcecastControlService for ControlClient {
                     ControlResponse::Unavailable { message, .. } => Err(message),
                 }
             }.await;
-            slot.borrow_mut().finish(generation, result);
+            let succeeded = result.is_ok();
+            if slot.borrow_mut().finish(generation, result) {
+                if succeeded {
+                    tracing::info!(target: "stationdeck::icecast", action, "Icecast operation completed");
+                } else {
+                    tracing::warn!(target: "stationdeck::icecast", action, "Icecast operation failed; verify status before retrying");
+                }
+            } else {
+                tracing::debug!(target: "stationdeck::icecast", action, "Late Icecast operation result ignored");
+            }
         });
         Ok(())
     }

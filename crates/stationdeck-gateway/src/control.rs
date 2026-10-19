@@ -66,13 +66,18 @@ pub(crate) async fn command(
             }),
         );
     }
+    let changes = command.changes_stream();
     let result = tokio::time::timeout(Duration::from_secs(9), async {
         gateway.icecast_target().await?.control(command).await
     })
     .await
     .unwrap_or(Err((
         "timeout",
-        "Operation timed out; its outcome may be unknown. Refresh before retrying.",
+        if changes {
+            "Operation timed out; its outcome may be unknown. Refresh before retrying."
+        } else {
+            "Icecast administration read timed out. Check the service and refresh."
+        },
     )));
     match result {
         Ok(result) => (StatusCode::OK, Json(ControlResponse::Completed { result })),
