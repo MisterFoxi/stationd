@@ -145,8 +145,74 @@ impl IcecastTarget {
         };
         let changes = command.changes_stream();
         let router = matches!(&command, C::Route | C::Switch { .. });
-        let error = |e: tonic::Status| operation_error(e.code(), changes, router);
+        let migration_command = matches!(
+            &command,
+            C::MigrationPlan { .. }
+                | C::MigrationRun { .. }
+                | C::MigrationReturn { .. }
+                | C::MigrationCancel { .. }
+                | C::Migrations
+        );
+        let error = |e: tonic::Status| {
+            if migration_command {
+                match e.code() {
+                tonic::Code::FailedPrecondition => ("migration_refused","Migration refused. Check stream availability, overlapping cohorts, journal state and Icecast restarts. Refresh the journal."),
+                tonic::Code::ResourceExhausted => ("migration_limit","Migration or journal limit reached."),
+                _ => operation_error(e.code(),changes,router),
+            }
+            } else {
+                operation_error(e.code(), changes, router)
+            }
+        };
         match command {
+            C::MigrationPlan {
+                mount,
+                destination,
+                continuous,
+            } => {
+                let operation = client
+                    .plan_listener_migration(req!(rpc::MigrationPlanRequest {
+                        mount,
+                        destination,
+                        continuous
+                    }))
+                    .await
+                    .map_err(error)?
+                    .into_inner();
+                Ok(R::Migration {
+                    operation: migration(operation)?,
+                })
+            }
+            C::MigrationRun { id } | C::MigrationReturn { id } | C::MigrationCancel { id } => {
+                let request = req!(rpc::MigrationRequest { id });
+                let operation = match command {
+                    C::MigrationReturn { .. } => client.return_listener_migration(request).await,
+                    C::MigrationCancel { .. } => client.cancel_listener_migration(request).await,
+                    _ => client.run_listener_migration(request).await,
+                }
+                .map_err(error)?
+                .into_inner();
+                Ok(R::Migration {
+                    operation: migration(operation)?,
+                })
+            }
+            C::Migrations => {
+                let operations = client
+                    .list_listener_migrations(req!(rpc::Empty {}))
+                    .await
+                    .map_err(error)?
+                    .into_inner()
+                    .operations;
+                if operations.len() > 100 {
+                    return Err(("invalid_response", "Too many migration operations."));
+                }
+                Ok(R::Migrations {
+                    operations: operations
+                        .into_iter()
+                        .map(migration)
+                        .collect::<Result<_, _>>()?,
+                })
+            }
             C::Route | C::Switch { .. } => {
                 let reply = match command {
                     C::Switch { input } => {
@@ -264,6 +330,45 @@ fn operation_error(code: tonic::Code, changes: bool, router: bool) -> (&'static 
             "unavailable", "Operation failed or its outcome is unknown. Refresh before retrying.",
         ),
     }
+}
+
+fn migration(
+    op: rpc::ListenerMigration,
+) -> Result<stationdeck_services::icecast::ListenerMigration, (&'static str, &'static str)> {
+    if op.id == 0
+        || op.total > 2048
+        || [op.moved, op.returned, op.missing, op.uncertain]
+            .iter()
+            .map(|n| *n as u64)
+            .sum::<u64>()
+            > op.total as u64
+        || !matches!(
+            op.state.as_str(),
+            "planned" | "moving" | "away" | "returning" | "complete" | "interrupted" | "expired"
+        )
+    {
+        return Err(("invalid_response", "Invalid migration journal response."));
+    }
+    let clean = |s: String, max| {
+        s.chars()
+            .filter(|c| !c.is_control())
+            .take(max)
+            .collect::<String>()
+    };
+    Ok(stationdeck_services::icecast::ListenerMigration {
+        id: op.id,
+        continuous: op.continuous,
+        mount: clean(op.mount, 256),
+        destination: clean(op.destination, 256),
+        state: op.state,
+        total: op.total,
+        moved: op.moved,
+        returned: op.returned,
+        missing: op.missing,
+        uncertain: op.uncertain,
+        created_at: op.created_at,
+        note: clean(op.note, 512),
+    })
 }
 
 #[cfg(test)]

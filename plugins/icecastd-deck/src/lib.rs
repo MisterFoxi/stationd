@@ -2,6 +2,7 @@
 //! No endpoint, network client, protobuf, upstream credential or host dependency.
 mod desk;
 mod management;
+mod migrations;
 use stationdeck_services::{
     icecast::{IcecastService, IcecastStatus, ICECAST},
     registry::{Context, ServiceHandle},
@@ -14,6 +15,11 @@ pub struct IcecastPlugin {
     message: String,
     control: Option<ServiceHandle<dyn stationdeck_services::icecast::IcecastControlService>>,
     management: bool,
+    migration_source: String,
+    migration_destination: String,
+    migrations: Vec<stationdeck_services::icecast::ListenerMigration>,
+    migration_confirm: Option<stationdeck_services::icecast::IcecastCommand>,
+    migration_poll: f64,
     selected_mount: String,
     title: String,
     edit_metadata: bool,
@@ -143,6 +149,8 @@ impl DeckModule for IcecastPlugin {
         self.handled_result = None;
         self.edit_metadata = false;
         self.show_listeners = false;
+        self.migrations.clear();
+        self.migration_confirm = None;
         self.service = None;
         self.message.clear();
     }
@@ -151,14 +159,27 @@ impl DeckModule for IcecastPlugin {
             ui.heading("Icecast streams");
         }
         ui.horizontal_wrapped(|ui| {
-            stationdeck_ui::test_ui::response(
+            if stationdeck_ui::test_ui::response(
                 "icecast-tab-streams",
-                ui.selectable_value(&mut self.management, false, "Streams"),
-            );
-            stationdeck_ui::test_ui::response(
+                ui.selectable_label(!self.management, "Streams"),
+            )
+            .clicked()
+            {
+                self.management = false;
+            }
+            if stationdeck_ui::test_ui::response(
                 "icecast-tab-management",
-                ui.selectable_value(&mut self.management, true, "Management"),
-            );
+                ui.selectable_label(self.management, "Routing"),
+            )
+            .clicked()
+            {
+                self.management = true;
+                self.migration_poll = 0.0;
+                if self.can_control() && !matches!(self.control_state(), Ok(RequestState::Pending))
+                {
+                    self.submit(stationdeck_services::icecast::IcecastCommand::Migrations);
+                }
+            }
             if stationdeck_ui::test_ui::response(
                 "icecast-streams-refresh",
                 ui.button("Refresh streams"),

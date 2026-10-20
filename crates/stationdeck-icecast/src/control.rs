@@ -50,6 +50,11 @@ impl IcecastControlService for ControlClient {
         };
         let action = match &command {
             IcecastCommand::Route => "route",
+            IcecastCommand::MigrationPlan { .. } => "migration_plan",
+            IcecastCommand::MigrationRun { .. } => "migration_run",
+            IcecastCommand::MigrationReturn { .. } => "migration_return",
+            IcecastCommand::MigrationCancel { .. } => "migration_cancel",
+            IcecastCommand::Migrations => "migrations",
             IcecastCommand::Listeners { .. } => "listeners",
             IcecastCommand::Metadata { .. } => "metadata",
             IcecastCommand::KickSource { .. } => "kick_source",

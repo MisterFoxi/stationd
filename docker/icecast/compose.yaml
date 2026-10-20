@@ -16,17 +16,19 @@ services:
       STATIONDECK_SERVICE_DESCRIPTOR: /etc/stationd/services-icecast.json
       STATIONDECK_DISCOVERY_KEY_FILE: /run/secrets/icecast-discovery-key
       STATIONDECK_AGENT_CONFIG: /bootstrap/icecast-agent.json
+      STATIONDECK_ICECAST_SOCKET: /routing/control.sock
       STATIONDECK_CONFIG_ENDPOINT: ${STATIONDECK_CONFIG_ENDPOINT:-}
     networks: [default, configuration]
     init: true
     ports:
-      - "${ICECAST_BIND:-192.168.1.118}:${ICECAST_PORT:-18000}:8000"
+      - "${ICECAST_BIND:-192.168.1.118}:${ICECAST_PORT:-18000}:8001"
     volumes:
       - ../../config/icecast:/etc/stationd:ro
       - ../../data/geoip:/data/geoip:ro
       - ../../config/stationdeck:/bootstrap:ro
       - config-icecast-state:/data
       - config-icecast-effective:/managed
+      - routing-control:/routing
       - type: volume
         source: deck-agent-secrets
         target: /credential
@@ -67,6 +69,7 @@ services:
     environment:
       STATIONDECK_SERVICE_DESCRIPTOR: /etc/stationd/services-admin.json
       STATIONDECK_DISCOVERY_KEY_FILE: /run/secrets/icecast-admin-discovery-key
+      STATIONDECK_ICECAST_SOCKET: /routing/control.sock
     image: stationd-v1-admin:dev
     command: ["--bind", "0.0.0.0:50061", "--settings", "/etc/stationd/admin.toml", "--effective-config", "/managed/icecast.toml"]
     depends_on:
@@ -79,6 +82,7 @@ services:
       - ../../data/geoip:/data/geoip:ro
       - admin-state:/var/lib/station-admin
       - config-icecast-effective:/managed:ro
+      - routing-control:/routing:ro
     secrets:
       - icecast-admin-discovery-key
       - admin-password
@@ -261,6 +265,7 @@ secrets:
     file: ../../.local/icecast/secrets/router-api-token
 
 volumes:
+  routing-control:
   admin-state:
   router-state:
   monitor-state:

@@ -7,6 +7,7 @@ use tonic::{Request, Response, Status};
 
 pub mod discovery;
 pub mod history;
+pub mod migrations;
 pub mod router;
 #[rustfmt::skip]
 #[path = "../../../src/plugin_db.rs"]
@@ -55,6 +56,8 @@ pub struct Admin {
     router: Option<(String, String)>,
     history: Option<std::sync::Arc<history::History>>,
     monitor: Option<(String, String)>,
+    migrations: Option<std::sync::Arc<migrations::Journal>>,
+    routing_socket: Option<std::path::PathBuf>,
 }
 
 fn child(node: roxmltree::Node<'_, '_>, name: &str) -> String {
@@ -151,6 +154,8 @@ impl Admin {
             router: None,
             history: None,
             monitor: None,
+            migrations: None,
+            routing_socket: std::env::var_os("STATIONDECK_ICECAST_SOCKET").map(Into::into),
         })
     }
 
@@ -171,6 +176,9 @@ impl Admin {
         let mut response = self
             .client
             .get(url)
+            // Icecast 2.5 advertises keep-alive but closes admin connections.
+            // Use a fresh connection; never retry a management action implicitly.
+            .header(reqwest::header::CONNECTION, "close")
             .query(query)
             .basic_auth(&self.config.admin_user, Some(&self.password))
             .send()
@@ -323,7 +331,7 @@ impl IcecastAdmin for Admin {
                     },
                     Some(source) => MountStatus {
                         mount: mount.name.clone(),
-                        connected: true,
+                        connected: !child(source, "server_type").is_empty(),
                         listeners: child(source, "listeners").parse().unwrap_or(0),
                         title: child(source, "title"),
                         content_type: child(source, "server_type"),
@@ -383,6 +391,42 @@ impl IcecastAdmin for Admin {
         .await
     }
 
+    async fn plan_listener_migration(
+        &self,
+        req: Request<MigrationPlanRequest>,
+    ) -> Result<Response<ListenerMigration>, Status> {
+        Ok(Response::new(self.plan_migration(req.into_inner()).await?))
+    }
+    async fn run_listener_migration(
+        &self,
+        req: Request<MigrationRequest>,
+    ) -> Result<Response<ListenerMigration>, Status> {
+        Ok(Response::new(
+            self.schedule_migration(req.into_inner().id, false).await?,
+        ))
+    }
+    async fn return_listener_migration(
+        &self,
+        req: Request<MigrationRequest>,
+    ) -> Result<Response<ListenerMigration>, Status> {
+        Ok(Response::new(
+            self.schedule_migration(req.into_inner().id, true).await?,
+        ))
+    }
+    async fn cancel_listener_migration(
+        &self,
+        req: Request<MigrationRequest>,
+    ) -> Result<Response<ListenerMigration>, Status> {
+        Ok(Response::new(
+            self.cancel_migration(req.into_inner().id).await?,
+        ))
+    }
+    async fn list_listener_migrations(
+        &self,
+        _: Request<Empty>,
+    ) -> Result<Response<ListenerMigrations>, Status> {
+        Ok(Response::new(self.migration_list().await?))
+    }
     async fn kick_source(
         &self,
         req: Request<MountRequest>,

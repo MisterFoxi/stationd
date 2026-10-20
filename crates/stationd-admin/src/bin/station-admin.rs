@@ -59,6 +59,7 @@ async fn main() -> Result<()> {
             args.monitor_addr,
             read_secret(&args.secrets_dir.join("admin-api-token"))?,
         );
+    let admin = admin.with_migration_journal(args.data_dir.join("listener-migrations.sqlite"))?;
     let admin = if let Some(path) = args.effective_config {
         admin.with_effective_config(path)
     } else {
@@ -74,6 +75,7 @@ async fn main() -> Result<()> {
     } else {
         admin
     };
+    let routing = tokio::spawn(admin.clone().run_stream_routes());
     let sampler = admin.clone();
     let collection = tokio::spawn(async move { sampler.collect_history().await });
     let token = read_secret(&args.secrets_dir.join("admin-api-token"))?;
@@ -95,5 +97,6 @@ async fn main() -> Result<()> {
         .serve_with_shutdown(args.bind, shutdown_signal())
         .await?;
     collection.abort();
+    routing.abort();
     Ok(())
 }

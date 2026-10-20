@@ -100,10 +100,10 @@ FROM standalone AS server
 USER root
 RUN apt-get update && apt-get install -y --no-install-recommends python3 \
  && rm -rf /var/lib/apt/lists/* \
- && mkdir -p /data /managed /usr/local/lib/stationdeck \
- && chown 1000:1000 /data /managed
+ && mkdir -p /data /managed /routing /usr/local/lib/stationdeck \
+ && chown 1000:1000 /data /managed /routing
 COPY --from=control-build /control-out/stationdeck-control /control-out/stationdeck-discovery /usr/local/bin/
-COPY docker/stationdeck/icecast-managed.py /usr/local/lib/stationdeck/
+COPY docker/stationdeck/icecast-managed.py docker/stationdeck/icecast_routing_proxy.py /usr/local/lib/stationdeck/
 COPY --chmod=0755 docker/stationdeck/apply-icecast /usr/local/bin/stationdeck-apply-icecast
 USER 1000:1000
 ENTRYPOINT ["python3", "/usr/local/lib/stationdeck/icecast-managed.py"]

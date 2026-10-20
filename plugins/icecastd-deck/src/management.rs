@@ -8,6 +8,7 @@ pub(super) enum Action {
     Listeners,
     Metadata,
     Disconnect,
+    Migration,
 }
 impl IcecastPlugin {
     pub(super) fn control_state(&self) -> Result<RequestState<Reply>, String> {
@@ -29,11 +30,17 @@ impl IcecastPlugin {
         }
         let action = match &command {
             Command::Route => Action::Route,
+            Command::MigrationPlan { .. }
+            | Command::MigrationRun { .. }
+            | Command::MigrationReturn { .. }
+            | Command::MigrationCancel { .. }
+            | Command::Migrations => Action::Migration,
             Command::Switch { .. } => Action::Switch,
             Command::Listeners { .. } => Action::Listeners,
             Command::Metadata { .. } => Action::Metadata,
             _ => Action::Disconnect,
         };
+        let journal_read = matches!(&command, Command::Migrations);
         let changes = command.changes_stream();
         let result = self
             .control
@@ -47,7 +54,10 @@ impl IcecastPlugin {
                 self.feedback.clear();
                 self.last_action = Some(action);
                 self.handled_result = None;
-                self.refresh_after_command = changes;
+                if !journal_read {
+                    self.migration_confirm = None;
+                }
+                self.refresh_after_command = changes && action != Action::Migration;
                 if action != Action::Route {
                     self.listeners = None;
                 }
@@ -68,6 +78,28 @@ impl IcecastPlugin {
                     return;
                 }
                 match &result {
+                    Reply::Migration { operation } => {
+                        self.migrations.retain(|op| op.id != operation.id);
+                        self.migrations.insert(0, operation.clone());
+                        self.feedback = operation.note.clone();
+                        if operation.continuous && operation.state == "planned" {
+                            self.migration_confirm =
+                                Some(Command::MigrationRun { id: operation.id });
+                        }
+                        if matches!(operation.state.as_str(), "away" | "complete") {
+                            let _ = self.refresh();
+                        }
+                    }
+                    Reply::Migrations { operations } => {
+                        if self.migrations != *operations
+                            && !operations
+                                .iter()
+                                .any(|op| matches!(op.state.as_str(), "moving" | "returning"))
+                        {
+                            let _ = self.refresh();
+                        }
+                        self.migrations = operations.clone();
+                    }
                     Reply::Route { route } => {
                         self.feedback = if self.last_action == Some(Action::Switch) {
                             format!("Input {} selected", route.input.to_uppercase())
@@ -109,6 +141,8 @@ impl IcecastPlugin {
                 self.listeners = None;
                 self.confirmation = None;
                 self.handled_result = None;
+                self.migrations.clear();
+                self.migration_confirm = None;
                 self.feedback.clear();
                 self.refresh_after_command = false;
             }
@@ -117,46 +151,27 @@ impl IcecastPlugin {
     pub(super) fn management_ui(&mut self, ui: &mut egui::Ui, status: &IcecastStatus) {
         let pending = matches!(self.control_state(), Ok(RequestState::Pending));
         let enabled = self.can_control() && !pending;
-        ui.add_space(8.0);
-        ui.horizontal_wrapped(|ui| {
-            ui.heading("Stream routing");
-            ui.weak("Snapshot");
-            if stationdeck_ui::test_ui::response(
-                "icecast-get-route",
-                ui.add_enabled(
-                    enabled,
-                    egui::Button::new(if self.route.is_some() {
-                        "Refresh route"
-                    } else {
-                        "Load route"
-                    }),
-                ),
-            )
-            .clicked()
-            {
-                self.submit(Command::Route);
-            }
-        });
-        if !self.can_control() {
-            ui.weak("Enable commands with the Icecast control token in Tokens.");
-        }
-        ui.add_space(8.0);
-        if let Some(route) = self.route.clone() {
-            self.routing_desk(ui, status, &route, enabled);
-        } else {
-            egui::Frame::group(ui.style())
-                .inner_margin(18.0)
-                .show(ui, |ui| {
-                    ui.set_width((ui.available_width() - 36.0).max(120.0));
-                    ui.strong("Sources  >  Program output");
-                    ui.weak(
-                        "Load the route to see configured inputs and select the source on air.",
-                    );
-                });
-        }
+        self.migrations_ui(ui, status);
         ui.add_space(14.0);
-        self.stream_details(ui, status, enabled);
-        self.disconnect_confirmation(ui, enabled);
+        let tools = egui::CollapsingHeader::new("Program feed & stream tools")
+            .id_salt("program-feed")
+            .show(ui, |ui| {
+                ui.weak("Select the source feeding the program output, or inspect a stream.");
+                if stationdeck_ui::test_ui::response(
+                    "icecast-get-route",
+                    ui.add_enabled(enabled, egui::Button::new("Load / refresh program feed")),
+                )
+                .clicked()
+                {
+                    self.submit(Command::Route);
+                }
+                if let Some(route) = self.route.clone() {
+                    self.routing_desk(ui, status, &route, enabled);
+                }
+                self.stream_details(ui, status, enabled);
+                self.disconnect_confirmation(ui, enabled);
+            });
+        stationdeck_ui::test_ui::control("icecast-program-tools", &tools.header_response);
         ui.add_space(12.0);
         match self.control_state() {
             Ok(RequestState::Pending) => {

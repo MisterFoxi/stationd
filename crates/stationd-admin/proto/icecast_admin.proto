@@ -17,6 +17,11 @@ service IcecastAdmin {
   rpc SetMetadata(MetadataRequest) returns (ActionReply);
   rpc KickListener(KickListenerRequest) returns (ActionReply);
   rpc KickSource(MountRequest) returns (ActionReply);
+  rpc PlanListenerMigration(MigrationPlanRequest) returns (ListenerMigration);
+  rpc RunListenerMigration(MigrationRequest) returns (ListenerMigration);
+  rpc ReturnListenerMigration(MigrationRequest) returns (ListenerMigration);
+  rpc CancelListenerMigration(MigrationRequest) returns (ListenerMigration);
+  rpc ListListenerMigrations(Empty) returns (ListenerMigrations);
 }
 // Independent supervision remains queryable when central administration is down.
 service Monitoring {
@@ -94,3 +99,21 @@ message GeographyBucket {
 
 message JsonReply { string json = 1; }
 message HistoryRequest { string plugin = 1; uint64 since = 2; uint64 until = 3; string period = 4; string mount = 5; }
+
+message MigrationPlanRequest { string mount = 1; string destination = 2; bool continuous = 3; }
+message MigrationRequest { uint64 id = 1; }
+message ListenerMigrations { repeated ListenerMigration operations = 1; }
+message ListenerMigration {
+  uint64 id = 1;
+  string mount = 2;
+  string destination = 3;
+  string state = 4;
+  uint32 total = 5;
+  uint32 moved = 6;
+  uint32 returned = 7;
+  uint32 missing = 8;
+  uint32 uncertain = 9;
+  uint64 created_at = 10;
+  string note = 11;
+  bool continuous = 12;
+}

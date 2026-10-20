@@ -4,7 +4,7 @@ Suivi courant V1. Lire ce fichier au début de session ; consulter
 [etat-v0.5.md](etat-v0.5.md) uniquement pour un détail ciblé de la référence 0.5.
 Les décisions durables sont dans `Doc/`.
 
-Dernière mise à jour : 2026-10-19 (GUI : commandes Icecast et fenêtre Logs egui_tracing livrées).
+Dernière mise à jour : 2026-10-19 (Routing unifié et continuité des URL d'écoute).
 
 ## Repères de version
 
@@ -295,3 +295,91 @@ mêmes assets instrumentés, gateway réelle et credentials confinés au contain
 Mounts A/B exacts et état ON AIR de B vérifiés dans le canvas ; capture réelle
 `.local/stationdeck-desk-live.png`. Sortie /radio.mp3 à zéro auditeur, B conservé.
 Containers de recette/aperçu retirés, volumes de recette isolés supprimés.
+
+### GUI — maintenance des groupes d'auditeurs (19 octobre 2026)
+
+Cas demandé : déplacer les connexions de la station VM2 vers le mount de VM3,
+puis rappeler uniquement ce groupe après maintenance, sans toucher à VM1 ni aux
+auditeurs natifs de VM3. Même serveur Icecast partagé ; aucun changement du
+routeur audio, de la sélection programme ou des URLs publiques.
+
+Onglet Icecast « Listener maintenance » : origine/destination parmi les mounts
+réels, préparation sans déplacement, confirmation avant départ et retour,
+annulation d'un plan, journal et compteurs. Le groupe capture les connexions
+présentes à la préparation ; nouveaux arrivants et reconnexions exclus. Les IDs
+Icecast sont des identifiants de connexion, pas des tokens humains durables.
+
+Cinq RPC compatibles ajoutés : Plan/Run/Return/Cancel/ListListenerMigration(s),
+DTO/commandes explicites, passerelle expurgée, token de contrôle séparé, fixture
+et contrôles canvas de recette. IDs individuels conservés uniquement côté admin,
+SQLite dans le volume admin-state (data-dir/plugins du banc). WAL + synchronous
+FULL, journal privé ; transitions persistées avant action, exécution backend
+indépendante du navigateur, commandes sérialisées, aucune répétition automatique.
+Reprise après redémarrage admin : état interrompu, IDs incertains conservés.
+Redémarrage Icecast détecté par son démarrage annoncé et l'origine : anciens IDs
+expirés. Pas de rapprochement par IP/UA. Limites et périmètre détaillés dans
+[Icecast V1](Doc/v1-icecast.md#maintenance-des-auditeurs-depuis-stationdeck).
+
+Correction transport reproduite sur Icecast 2.5 réel : /admin annonce Keep-Alive
+mais ferme la connexion après réponse. Réutilisation immédiatement suivante :
+RemoteDisconnected/reqwest indisponible. Les requêtes admin demandent maintenant
+Connection: close, sans retry implicite d'une mutation. Le mock de régression
+annonce lui aussi Keep-Alive puis ferme, et vérifie ce header client.
+
+Validation en containers : 26 tests frontend/services/plugin, 8 tests gateway,
+32 tests admin passent (1 test préexistant ignoré), Clippy ciblé natif/WASM et
+admin sans avertissement. Cinq tests ciblent le journal, les chevauchements,
+les réponses perdues après effet, le retour sélectif et les IDs invalidés.
+
+Essai réel via la passerelle déployée : deux auditeurs jetables de /test-a.mp3
+vers /test-b.mp3, maintien des IDs et des auditeurs natifs (routeur inclus),
+redémarrage admin pendant le séjour et récupération du journal. Fermeture d'un
+membre puis nouvelle connexion sur B : retour du seul ancien ID encore connecté,
+nouvel ID et natifs préservés ; compteurs returned=1/missing=1. Auditeurs jetables
+fermés en fin de recette ; B reste sélectionné, /radio.mp3 sans auditeur.
+Affichage réel du journal terminé validé dans Chromium ; capture
+`.local/icecast-live-maintenance.png`. Images admin, gateway et WebUI déployées.
+Recette Chromium générale complète réussie, incluant préparation, annulation de
+confirmation sans RPC, déplacement, rechargement du journal depuis le backend,
+retour et état terminé. Routing, métadonnées, déconnexions, Tokens et Logs
+continuent de passer. Captures .local/stationdeck-migration-qa/.
+
+### Correction de périmètre — Routing unifié et continuité des URL (19 octobre 2026)
+
+Correction utilisateur : rerouter le flux même à zéro auditeur, dans un seul
+Routing graphique. Suppression de Listener maintenance. Cartes origine/cible,
+états et compteurs réels, liaison PREVIEW/ACTIVE, activation confirmée, retour
+sur la route et historique repliable. L'ancien pupitre programme reste un outil
+avancé repliable dans le même écran. Frames/painter egui, aucune nouvelle crate.
+
+RPC/DTO continuous rétrocompatible. La règle reste active vide, prend les arrivées
+suivantes et survit au redémarrage admin. Conflits, chaînes et cycles sont refusés
+même sans aucun ID. Anciens groupes conservés pour compatibilité/historique.
+
+Implémentation finale : entrée TCP du container géré sur 8001 publiée au même
+port hôte 18000 ; Icecast 8000 reste privé pour les services/sources internes.
+GET d'origine aiguillés vers la cible même avec source arrêtée, uploads SOURCE/PUT
+inchangés. Marqueur interne aléatoire par règle pour retrouver les connexions ;
+ni IP ni user-agent humain utilisé pour reconnaître une personne. Confiance XFF
+locale explicite et nettoyage des chaînes des pairs non approuvés. Socket Unix
+sur volume routing-control entre admin et superviseur, aucun port de commande
+supplémentaire exposé. Relais audio en flux, ressources bornées. Retour : désarmer
+l'entrée, collecter les dernières arrivées, déplacer les IDs vérifiés seulement.
+
+La tentative de rechargement natif Icecast n'a pas garanti la continuité sur ce
+banc et a été retirée : aucun SIGHUP, max-listeners modifié ou pause de l'agent
+dans l'implémentation finale. L'attachement d'un débogueur mémoire a été refusé
+par la revue automatique ; diagnostic poursuivi par code/tests réseau. Aucun
+débogueur privilégié lancé.
+
+Validation : 35 tests admin (1 ancien ignoré), 26 frontend/services/plugin,
+8 gateway, cinq tests TCP/réécriture/confiance IP/propriété de règle et régression
+de démarrage géré passent. Clippy ciblé natif/WASM et admin passent. Recette
+Chromium générale passée avec Routing unique, confirmations et retour.
+
+Recette réelle : activation A→B à zéro, écoutes suivantes sur URL A ; arrêt de
+la source A puis nouvelle écoute toujours disponible ; redémarrage admin avec
+règle/journal conservés ; retour des trois connexions suivies, natifs B et route
+programme B préservés. Une nouvelle connexion A après retour reste sur A.
+Auditeurs jetables fermés. Images admin, gateway, serveur géré et WebUI déployées.
+Détails/périmètre : Doc/v1-icecast.md, section reroutage.

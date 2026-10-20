@@ -186,3 +186,46 @@ La procédure et les commandes de contrôle sont décrites dans
 Supervision centrale indépendante : voir [v1-icecast-monitor.md](v1-icecast-monitor.md).
 
 Déploiement sur VM : [paquet Icecast V1](v1-icecast-deploy.md), via `make icecast-dist VM=cible`.
+
+## Reroutage de flux depuis StationDeck
+
+La fenêtre Icecast expose un seul onglet **Routing** : cartes origine/destination,
+liaison active, confirmation et **Restore origin**. Une règle reste active sans
+auditeur et prend en charge les arrivées suivantes. Le journal est intégré au
+même écran. Les anciens groupes restent dans l'historique ; le choix de la source
+programme est replié sous « Program feed & stream tools ».
+
+Dans le déploiement géré, l'URL publique conserve son port 18000. L'entrée TCP
+écoute sur 8001 dans le container et relaie vers Icecast privé sur 8000. Une règle
+réécrit seulement le mount des nouveaux GET de son origine : la même URL continue
+de servir la cible quand la VM source est arrêtée. SOURCE/PUT et leurs corps sont
+transmis sans réécriture. Aucun redémarrage ou rechargement Icecast lors d'une
+bascule. Les connexions existantes sont déplacées individuellement par son API.
+Un accès direct au port interne 8000 contourne l'entrée : utiliser les URL
+publiées pour bénéficier de la continuité pendant une panne de source.
+
+L'entrée attribue aux connexions reroutées un marqueur aléatoire propre à la règle,
+distinct de tout credential utilisateur. L'administration retrouve leurs IDs
+Icecast pour le retour, sans rapprochement par IP ou user-agent humain. Les
+marqueurs restent côté serveur. X-Forwarded-For conserve les IP d'écoute avec
+confiance explicite du relais local ; un pair non approuvé ne peut imposer sa
+chaîne XFF. La politique des proxies déjà approuvés est conservée.
+
+Les règles passent par un socket Unix partagé entre superviseur et administration,
+sans nouveau port de commande. Le token Icecast control reste distinct de celui
+de supervision. Le journal SQLite privé `listener-migrations.sqlite` est dans le
+data-dir de station-admin (`/var/lib/station-admin/plugins` du volume admin-state).
+Il conserve IDs, marqueur, endpoints et états, sans IP ni credential d'auditeur.
+Fermer le navigateur n'arrête pas la route ; redémarrer station-admin conserve
+la règle dans l'entrée et le journal. Un redémarrage d'Icecast invalide les anciens
+IDs et remet les règles de l'entrée à zéro : préparer alors une nouvelle route.
+Le mécanisme reste limité aux mounts d'un même serveur Icecast.
+
+Le retour désactive d'abord la règle, laisse finir les connexions déjà engagées
+vers l'amont, puis rappelle les IDs suivis encore connectés. La source d'origine
+doit être revenue ; les types MIME doivent être compatibles. Les déconnexions
+sont signalées, sans les assimiler à des personnes reconnectées avec un autre ID.
+Une interruption ou réponse perdue exige une reprise explicite, sans répétition
+automatique d'action. Limites : 2 048 connexions par opération, 20 opérations
+ouvertes, 1 000 enregistrées et 100 affichées avec priorité aux ouvertes. L'entrée
+borne les connexions simultanées, en-têtes et buffers de transport.

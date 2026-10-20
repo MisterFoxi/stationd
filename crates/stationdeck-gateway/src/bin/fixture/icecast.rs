@@ -12,6 +12,7 @@ use rpc::*;
 #[derive(Clone)]
 pub struct ControlState {
     pub source_connected: bool,
+    pub migrations: Vec<ListenerMigration>,
     pub listener_connected: bool,
     pub title: String,
     pub input: String,
@@ -20,6 +21,7 @@ impl Default for ControlState {
     fn default() -> Self {
         Self {
             source_connected: true,
+            migrations: vec![],
             listener_connected: true,
             title: "Fixture programme".into(),
             input: "a".into(),
@@ -254,6 +256,91 @@ impl icecast_admin_server::IcecastAdmin for IcecastFixture {
         self.state.lock().unwrap().listener_connected = false;
         Ok(Response::new(ActionReply {
             message: "ok".into(),
+        }))
+    }
+    async fn plan_listener_migration(
+        &self,
+        request: Request<MigrationPlanRequest>,
+    ) -> Result<Response<ListenerMigration>, Status> {
+        self.authorize(&request)?;
+        let req = request.into_inner();
+        if req.mount != "/live" || req.destination != "/test-b.mp3" {
+            return Err(Status::invalid_argument("fixture-only migration target"));
+        }
+        let mut state = self.state.lock().unwrap();
+        let op = ListenerMigration {
+            id: state.migrations.len() as u64 + 1,
+            mount: req.mount,
+            continuous: req.continuous,
+            destination: req.destination,
+            state: "planned".into(),
+            total: 1,
+            moved: 0,
+            returned: 0,
+            missing: 0,
+            uncertain: 0,
+            created_at: 1,
+            note: "Current connections only".into(),
+        };
+        state.migrations.push(op.clone());
+        Ok(Response::new(op))
+    }
+    async fn run_listener_migration(
+        &self,
+        request: Request<MigrationRequest>,
+    ) -> Result<Response<ListenerMigration>, Status> {
+        self.authorize(&request)?;
+        let id = request.into_inner().id;
+        let mut state = self.state.lock().unwrap();
+        let op = state
+            .migrations
+            .iter_mut()
+            .find(|op| op.id == id)
+            .ok_or_else(|| Status::not_found("fixture-only operation"))?;
+        op.state = "away".into();
+        op.moved = op.total;
+        Ok(Response::new(op.clone()))
+    }
+    async fn return_listener_migration(
+        &self,
+        request: Request<MigrationRequest>,
+    ) -> Result<Response<ListenerMigration>, Status> {
+        self.authorize(&request)?;
+        let id = request.into_inner().id;
+        let mut state = self.state.lock().unwrap();
+        let op = state
+            .migrations
+            .iter_mut()
+            .find(|op| op.id == id)
+            .ok_or_else(|| Status::not_found("fixture-only operation"))?;
+        op.state = "complete".into();
+        op.moved = 0;
+        op.returned = op.total;
+        Ok(Response::new(op.clone()))
+    }
+    async fn cancel_listener_migration(
+        &self,
+        request: Request<MigrationRequest>,
+    ) -> Result<Response<ListenerMigration>, Status> {
+        self.authorize(&request)?;
+        let id = request.into_inner().id;
+        let mut state = self.state.lock().unwrap();
+        let op = state
+            .migrations
+            .iter_mut()
+            .find(|op| op.id == id && op.state == "planned")
+            .ok_or_else(|| Status::not_found("fixture-only operation"))?;
+        op.state = "complete".into();
+        op.missing = op.total;
+        Ok(Response::new(op.clone()))
+    }
+    async fn list_listener_migrations(
+        &self,
+        request: Request<Empty>,
+    ) -> Result<Response<ListenerMigrations>, Status> {
+        self.authorize(&request)?;
+        Ok(Response::new(ListenerMigrations {
+            operations: self.state.lock().unwrap().migrations.clone(),
         }))
     }
     async fn kick_source(

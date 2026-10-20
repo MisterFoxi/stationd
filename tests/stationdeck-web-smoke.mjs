@@ -389,7 +389,7 @@ try {
   await page.mouse.down();await page.mouse.move(manageWindow.x+manageWindow.width-4,950,{steps:12});await page.mouse.up();
   await clickControl(page,'icecast-tab-management');
   async function clickDeskControl(id) {
-    for (let attempt=0;attempt<4;attempt++) {
+    for (let attempt=0;attempt<8;attempt++) {
       const rect=await controlRect(page,id);
       const window=await controlRect(page,'window-icecastd');
       const top=window.y+48;
@@ -403,11 +403,13 @@ try {
     throw new Error(`Cannot scroll Icecast control into view: ${id}`);
   }
   async function operation(id) {
-    const reply=page.waitForResponse(r=>r.url().endsWith('/api/icecast/control'));
+    await page.waitForFunction(()=>document.getElementById('stationdeck').getAttribute('data-qa-routing-controls-ready')==='true');
+    const reply=page.waitForResponse(r=>r.url().endsWith('/api/icecast/control') && (id==='migration-refresh' ? r.request().postDataJSON().action==='migrations' : r.request().postDataJSON().action!=='migrations'));
     await clickDeskControl(id);
     const result=await (await reply).json();
     assert.equal(result.state,'completed');return result.result;
   }
+  await clickDeskControl('icecast-program-tools');
   const route=await operation('icecast-get-route');assert.equal(route.route.input,'a');
   assert.equal(route.route.input_streams[0].mount,'/live');
   await page.waitForFunction(()=>document.getElementById('stationdeck').getAttribute('data-qa-icecast-source-a-state')==='ON AIR');
@@ -419,6 +421,25 @@ try {
   await clickDeskControl('icecast-edit-title');
   await clickDeskControl('icecast-title');await page.keyboard.press('Control+A');await page.keyboard.insertText('Managed fixture title');
   assert.equal((await operation('icecast-set-title')).kind,'done');
+  // Cohort planning, explicit confirmation, backend journal reload and selective return.
+  await operation('migration-refresh');
+  await page.waitForTimeout(400);
+  await clickDeskControl('migration-destination');
+  await clickDeskControl('migration-destination-_test-b.mp3');
+  assert.equal((await operation('migration-plan')).operation.state,'planned');
+  await page.waitForFunction(()=>document.getElementById('stationdeck').getAttribute('data-qa-migration-1-state')==='planned');
+  const beforeMigrationCancel=await controlMetrics();
+  await clickDeskControl('migration-run-1');await clickDeskControl('migration-dismiss');
+  assert.equal(await controlMetrics(),beforeMigrationCancel,'dismissing migration submitted a command');
+  await clickDeskControl('migration-run-1');
+  assert.equal((await operation('migration-confirm')).operation.state,'away');
+  await operation('migration-refresh');
+  await page.waitForTimeout(400);
+  await page.waitForFunction(()=>document.getElementById('stationdeck').getAttribute('data-qa-migration-1-state')==='away');
+  await capture(page,'icecast-listener-maintenance');
+  await clickDeskControl('migration-return-1');
+  assert.equal((await operation('migration-confirm')).operation.returned,1);
+  await page.waitForFunction(()=>document.getElementById('stationdeck').getAttribute('data-qa-migration-1-state')==='complete');
   assert.equal((await operation('icecast-listeners')).listeners[0].id,42);
   const beforeCancel=await controlMetrics();
   await clickDeskControl('icecast-kick-listener-42');await clickDeskControl('icecast-cancel');

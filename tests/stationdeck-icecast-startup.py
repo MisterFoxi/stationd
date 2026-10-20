@@ -23,7 +23,7 @@ class StartupTest(unittest.TestCase):
             server.accept.side_effect = KeyboardInterrupt
             agent = MagicMock()
             agent.poll.return_value = None
-            with patch.object(managed, 'STOP', False), \
+            with patch.object(managed, 'STOP', False), patch.object(managed, 'RoutingProxy'), \
                  patch.object(managed, 'EFFECTIVE', effective), \
                  patch.object(managed, 'SOCKET', str(Path(directory) / 'agent.sock')), \
                  patch.object(managed.signal, 'signal'), \

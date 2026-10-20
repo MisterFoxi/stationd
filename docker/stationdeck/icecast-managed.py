@@ -14,11 +14,13 @@ import time
 import tomllib
 import urllib.request
 import xml.etree.ElementTree as ET
+sys.path.insert(0, str(Path(__file__).parent))
+from icecast_routing_proxy import RoutingProxy, add_local_proxy_trust
 
 BASE = Path('/etc/stationd/icecast.toml')
 EFFECTIVE = Path('/managed/icecast.toml')
 XML = Path('/tmp/icecast.xml')
-SOCKET = '/tmp/stationdeck-icecast.sock'
+SOCKET = os.environ.get('STATIONDECK_ICECAST_SOCKET', '/tmp/stationdeck-icecast.sock')
 MAX_BYTES = 128 * 1024 + 8192
 FIELDS = {'location': str, 'hostname': str, 'admin_email': str, 'max_clients': int}
 STOP = False
@@ -117,7 +119,7 @@ def healthy(process, text):
 
 
 def start(xml, text):
-    atomic(XML, xml)
+    atomic(XML, add_local_proxy_trust(xml))
     child = subprocess.Popen(['icecast2', '-c', str(XML)], stdin=subprocess.DEVNULL)
     deadline = time.monotonic() + 3
     while time.monotonic() < deadline and not STOP:
@@ -169,17 +171,19 @@ def serve():
     child = None
     agent = None
     announcer = None
+    proxy = RoutingProxy(('0.0.0.0', 8001), ('127.0.0.1', 8000))
+    proxy.start()
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
         Path(SOCKET).unlink(missing_ok=True)
         server.bind(SOCKET)
-        os.chmod(SOCKET, 0o600)
+        os.chmod(SOCKET, 0o666 if os.environ.get('STATIONDECK_ICECAST_SOCKET') else 0o600)
         server.listen(1)
         server.settimeout(0.25)
         try:
             print('Waiting for StationDeck configuration or a validated agent cache.', flush=True)
             agent = subprocess.Popen(['stationdeck-control', 'agent'])
             while not STOP:
-                if ((child is not None and child.poll() is not None)
+                if (not proxy.thread.is_alive() or (child is not None and child.poll() is not None)
                         or agent.poll() is not None
                         or (announcer is not None and announcer.poll() is not None)):
                     raise RuntimeError('Managed child stopped; restarting the container is required')
@@ -199,10 +203,17 @@ def serve():
                             if len(payload) > MAX_BYTES:
                                 raise ValueError('Candidate exceeds the size limit')
                         bundle = json.loads(payload)
+                        if set(bundle) == {'route'}:
+                            if child is None or child.poll() is not None:
+                                raise RuntimeError('Icecast is not running')
+                            proxy.apply(bundle['route'])
+                            client.sendall(b'applied\n')
+                            continue
                         text = candidate_text(bundle)
                         next_xml = render(text)  # Validate before stopping the running process.
                         if child is None or text != active or not healthy(child, active):
                             previous, previous_xml = active, xml
+                            proxy.configure(tomllib.loads(text.decode()))
                             stop(child)
                             try:
                                 child = start(next_xml, text)
@@ -211,6 +222,7 @@ def serve():
                                 stop(child)
                                 child = None
                                 if previous is not None:
+                                    proxy.configure(tomllib.loads(previous.decode()))
                                     child = start(previous_xml, previous)
                                     atomic(EFFECTIVE, previous, 0o644)
                                 raise
@@ -231,6 +243,7 @@ def serve():
                         except OSError:
                             pass
         finally:
+            proxy.close()
             stop(announcer)
             stop(agent)
             stop(child)
