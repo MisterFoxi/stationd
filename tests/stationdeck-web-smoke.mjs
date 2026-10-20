@@ -125,6 +125,23 @@ try {
   await waitHealth('demo', 'good');
   await waitHealth('grpc', 'inactive');
   await controlRect(page, 'plugin-row-grpc');
+  // Selection must raise existing windows above Logs and still receive real clicks.
+  for (const module of ['demo', 'overview']) {
+    await clickControl(page, 'nav-logs');
+    await controlRect(page, 'window-logs');
+    await clickControl(page, `plugin-row-${module}`);
+    await clickControl(page, `pin-${module}`);
+    await page.waitForFunction(module => JSON.parse(localStorage.getItem('stationdeck.settings.v1')).windows[module].pinned, module);
+    await clickControl(page, 'nav-logs');
+    assert((await page.evaluate(() => JSON.parse(localStorage.getItem('stationdeck.settings.v1')).logs_open)), 'selecting open Logs must raise it, not close it');
+    await clickControl(page, `plugin-row-${module}`);
+    await clickControl(page, `pin-${module}`);
+    await page.waitForFunction(module => !JSON.parse(localStorage.getItem('stationdeck.settings.v1')).windows[module].pinned, module);
+  }
+  await clickControl(page, 'nav-logs');
+  const raisedLogs = await controlRect(page, 'window-logs');
+  await page.mouse.click(raisedLogs.x + raisedLogs.width - 15, raisedLogs.y + 14);
+  await page.waitForFunction(() => !document.getElementById('stationdeck').hasAttribute('data-qa-window-logs'));
   // Plugins coexist. Closing a window keeps its module alive; the launcher reopens it.
   await controlRect(page, 'window-demo');
   await controlRect(page, 'window-overview');

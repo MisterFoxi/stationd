@@ -144,7 +144,7 @@ Unavailable or unauthorized contributions are still filtered by the registry.
 Windows can be moved, resized, collapsed and pinned (movement/resize lock).
 Arrange windows resets geometry into columns, using one column on smaller
 viewports. Windows stay constrained to the workspace, below the permanent status
-strip and above the footer. Settings and Modules are separate host windows.
+strip and above the footer. Settings and Modules are separate host windows. Selecting any plugin or host window raises it after all windows have rendered; Logs shares the normal window layer rather than remaining permanently on top. Selecting an already open Logs window raises it; use its close button to hide it. Module activation keeps Modules accessible while new plugin windows appear.
 
 Open state, selected tab, pin, position and content size are saved alongside
 existing browser preferences; old V1 preferences migrate through default fields.

@@ -383,3 +383,23 @@ règle/journal conservés ; retour des trois connexions suivies, natifs B et rou
 programme B préservés. Une nouvelle connexion A après retour reste sur A.
 Auditeurs jetables fermés. Images admin, gateway, serveur géré et WebUI déployées.
 Détails/périmètre : Doc/v1-icecast.md, section reroutage.
+
+### GUI — correction du premier plan des fenêtres (20 octobre 2026)
+
+Logs et les fenêtres système n'imposent plus une couche supérieure aux plugins.
+La sélection d'une fenêtre est résolue après le rendu de toutes les fenêtres,
+avec un identifiant stable ; une fenêtre existante revient bien devant les autres.
+Sélectionner Logs déjà ouvert le remonte, sa croix le ferme. L'ouverture/réactivation
+via Modules conserve le gestionnaire accessible au frame créant les fenêtres.
+Les positions, tailles, onglets et jetons sauvegardés ne sont pas modifiés.
+
+Deux tests de recouvrement vérifient la vraie couche egui à l'intersection des
+fenêtres : plugins face à Logs, puis Settings/Tokens/Modules et activation.
+La recette Chromium sélectionne alternativement Logs et deux plugins et vérifie
+que leurs vrais boutons reçoivent les clics malgré le recouvrement.
+
+Validation en containers : 13 tests StationDeck et Clippy natif/WASM passent.
+Le test de recouvrement échouait avant correction ; la recette Chromium complète
+passe avec sélection alternée Logs/plugins et activation depuis Modules.
+La demande de premier plan est renouvelée au passage suivant pour résoudre les
+demandes simultanées d'egui. Captures : .local/stationdeck-focus-qa/.

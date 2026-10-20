@@ -77,7 +77,7 @@ impl Diagnostics {
         }
         let response = egui::Window::new("Logs")
             .id(egui::Id::new("stationdeck.logs"))
-            .order(egui::Order::Foreground)
+            .order(egui::Order::Middle)
             .open(open)
             .default_pos(workspace.min + egui::vec2(20.0, 16.0))
             .default_size(egui::vec2(900.0, 460.0))

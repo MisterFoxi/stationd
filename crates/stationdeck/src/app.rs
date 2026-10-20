@@ -136,7 +136,8 @@ pub struct StationDeck {
     module_error: Option<String>,
     modules: ModuleCatalog,
     layout_generation: u64,
-    focus: Option<String>,
+    focus: Option<egui::Id>,
+    focus_passes: u8,
     tokens: stationdeck_ui::TokenStore,
     tokens_dirty: bool,
     tokens_invalid: bool,
@@ -174,6 +175,7 @@ impl StationDeck {
             modules,
             layout_generation: 0,
             focus: None,
+            focus_passes: 0,
             tokens,
             tokens_dirty: false,
             tokens_invalid: false,
@@ -388,10 +390,33 @@ impl StationDeck {
         let window = self.settings.windows.entry(module.into()).or_default();
         window.open = true;
         window.view = id.into();
-        self.focus = Some(module.into());
+        self.focus = Some(egui::Id::new((
+            "plugin.window",
+            module,
+            self.layout_generation,
+        )));
+        self.focus_passes = 2;
+        self.preferences_dirty = true;
+    }
+    fn select_page(&mut self, page: Page) {
+        self.focus = match page {
+            Page::Modules => Some(egui::Id::new(("host", "Modules"))),
+            Page::Settings => Some(egui::Id::new(("host", "Settings"))),
+            Page::Tokens => Some(egui::Id::new(("host", "Tokens"))),
+            Page::Home => None,
+        };
+        self.focus_passes = if self.focus.is_some() { 2 } else { 0 };
+        self.page = page;
+    }
+    fn open_logs(&mut self) {
+        self.settings.logs_open = true;
+        self.focus = Some(egui::Id::new("stationdeck.logs"));
+        self.focus_passes = 2;
         self.preferences_dirty = true;
     }
     fn arrange(&mut self) {
+        self.focus = None;
+        self.focus_passes = 0;
         for window in self.settings.windows.values_mut() {
             window.position = None;
             window.size = None;
@@ -423,10 +448,10 @@ impl StationDeck {
             );
         }
         if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::Comma)) {
-            self.page = Page::Settings;
+            self.select_page(Page::Settings);
         }
         if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::Home)) {
-            self.page = Page::Home;
+            self.select_page(Page::Home);
         }
         egui::Panel::top("stationdeck.header").show_inside(root, |ui| {
             ui.horizontal_wrapped(|ui| {
@@ -441,15 +466,14 @@ impl StationDeck {
                     ("Tokens", Page::Tokens),
                 ] {
                     if ui.selectable_label(self.page == page, label).clicked() {
-                        self.page = page;
+                        self.select_page(page);
                     }
                 }
                 if ui
                     .selectable_label(self.settings.logs_open, "Logs")
                     .clicked()
                 {
-                    self.settings.logs_open = !self.settings.logs_open;
-                    self.preferences_dirty = true;
+                    self.open_logs();
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.weak("V1 · Station workspace");
@@ -521,7 +545,7 @@ impl StationDeck {
             for (label, page) in [("Home", Page::Home), ("Modules", Page::Modules), ("Settings", Page::Settings), ("Tokens", Page::Tokens)] {
                 let response = ui.selectable_label(self.page == page, label);
                 stationdeck_ui::test_ui::control(&format!("nav-{}", label.to_ascii_lowercase()), &response);
-                if response.clicked() { self.page = page; }
+                if response.clicked() { self.select_page(page); }
             }
             ui.separator();
             ui.weak("PLUGINS");
@@ -544,7 +568,7 @@ impl StationDeck {
                                     .unwrap_or(first.id).to_owned();
                                 self.open_view(&selected);
                             }
-                            else { self.page = Page::Modules; }
+                            else { self.select_page(Page::Modules); }
                         }
                         if module_views.len() == 1 { stationdeck_ui::test_ui::control(&format!("nav-{}", module_views[0].id), &response); }
                         ui.add_space(3.0);
@@ -552,8 +576,7 @@ impl StationDeck {
                 }
             });
             if stationdeck_ui::test_ui::response("nav-logs", ui.selectable_label(self.settings.logs_open, "Logs")).clicked() {
-                self.settings.logs_open = !self.settings.logs_open;
-                self.preferences_dirty = true;
+                self.open_logs();
             }
             ui.separator();            if ui.button("Arrange windows").clicked() { self.arrange(); }
             ui.weak("Drag title bars to move.\nResize from window edges.\nPin a window to lock its position.");
@@ -572,7 +595,7 @@ impl StationDeck {
                 ui.add_space(24.0);
                 ui.heading("Your station workspace");
                 ui.label("Enable a plugin in Modules to open its window.");
-                if ui.button("Manage modules").clicked() { self.page = Page::Modules; }
+                if ui.button("Manage modules").clicked() { self.select_page(Page::Modules); }
             }
             ui.available_rect_before_wrap()
         }).inner.shrink(8.0);
@@ -591,7 +614,7 @@ impl StationDeck {
             };
             egui::Window::new(title)
                 .id(egui::Id::new(("host", title)))
-                .order(egui::Order::Foreground)
+                .order(egui::Order::Middle)
                 .open(&mut open)
                 .default_pos(workspace.min + egui::vec2(12.0, 8.0))
                 .default_width(600.0)
@@ -606,13 +629,42 @@ impl StationDeck {
                     _ => self.preferences(ui, ctx),
                 });
             if !open {
-                self.page = Page::Home;
+                self.select_page(Page::Home);
             }
         }
         let previous = self.settings.logs_open;
         self.diagnostics
             .window(ctx, &mut self.settings.logs_open, workspace);
         self.preferences_dirty |= previous != self.settings.logs_open;
+        // Resolve selection after every window has had a chance to reorder itself.
+        if self.focus == Some(egui::Id::new("stationdeck.logs")) && !self.settings.logs_open {
+            self.focus = None;
+        }
+        // egui groups move-to-top requests without preserving call order. Repeat
+        // on the next pass so newly shown windows cannot win the same-frame tie.
+        if let Some(id) = self.focus {
+            ctx.move_to_top(egui::LayerId::new(egui::Order::Middle, id));
+            self.focus_passes = self.focus_passes.saturating_sub(1);
+            if self.focus_passes == 0 {
+                self.focus = None;
+            }
+            ctx.request_repaint();
+        }
+        // Module settings run after plugin rendering. If they add/remove views,
+        // preserve the host selection for the frame that creates those windows.
+        if self.page != Page::Home
+            && views
+                .iter()
+                .map(|v| v.id)
+                .ne(self.modules.views().iter().map(|v| v.id))
+        {
+            self.select_page(match self.page {
+                Page::Modules => Page::Modules,
+                Page::Tokens => Page::Tokens,
+                _ => Page::Settings,
+            });
+            ctx.request_repaint();
+        }
     }
     fn plugin_windows(&mut self, ctx: &egui::Context, workspace: egui::Rect) {
         let views = self.modules.views();
@@ -641,6 +693,20 @@ impl StationDeck {
                 state.view = module_views[0].id.into();
             }
             let id = egui::Id::new(("plugin.window", descriptor.id, self.layout_generation));
+            // Newly enabled windows must not cover the module manager that opened them.
+            if self.page != Page::Home
+                && self.focus.is_none()
+                && !ctx.memory(|m| {
+                    m.areas()
+                        .visible_last_frame(&egui::LayerId::new(egui::Order::Middle, id))
+                })
+            {
+                self.select_page(match self.page {
+                    Page::Modules => Page::Modules,
+                    Page::Tokens => Page::Tokens,
+                    _ => Page::Settings,
+                });
+            }
             let default_pos = workspace.min
                 + egui::vec2(
                     (index % columns) as f32 * (width + 28.0),
@@ -704,10 +770,7 @@ impl StationDeck {
                     &format!("window-{}", descriptor.id),
                     &response.response,
                 );
-                if self.focus.as_deref() == Some(descriptor.id) {
-                    ctx.move_to_top(response.response.layer_id);
-                    self.focus = None;
-                }
+
                 if !ctx.input(|i| i.pointer.any_down()) {
                     let pos = [response.response.rect.min.x, response.response.rect.min.y];
                     if state.position != Some(pos) {
@@ -896,6 +959,112 @@ mod tests {
                 ..Default::default()
             },
             |ui| app.render(ui),
+        );
+    }
+    #[test]
+    fn selected_plugin_is_above_overlapping_plugins_and_logs() {
+        let ctx = egui::Context::default();
+        let mut settings = Settings {
+            logs_open: true,
+            ..Default::default()
+        };
+        for (module, view) in [("demo", "demo.overview"), ("overview", "overview.station")] {
+            settings.windows.insert(
+                module.into(),
+                PluginWindow {
+                    open: true,
+                    view: view.into(),
+                    position: Some([300.0, 200.0]),
+                    size: Some([400.0, 280.0]),
+                    ..Default::default()
+                },
+            );
+        }
+        let mut app = StationDeck::with_settings(settings, false);
+        for _ in 0..3 {
+            frame(&mut app, &ctx, egui::vec2(1440.0, 1000.0));
+        }
+        for (module, view) in [
+            ("demo", "demo.overview"),
+            ("overview", "overview.station"),
+            ("demo", "demo.tasks"),
+        ] {
+            app.open_view(view);
+            for _ in 0..3 {
+                frame(&mut app, &ctx, egui::vec2(1440.0, 1000.0));
+            }
+            let expected = egui::LayerId::new(
+                egui::Order::Middle,
+                egui::Id::new(("plugin.window", module, app.layout_generation)),
+            );
+            let plugin_rect = ctx.memory(|m| m.area_rect(expected.id)).unwrap();
+            let logs_rect = ctx
+                .memory(|m| m.area_rect(egui::Id::new("stationdeck.logs")))
+                .unwrap();
+            let overlap = plugin_rect.intersect(logs_rect);
+            assert!(
+                overlap.is_positive(),
+                "Windows must overlap: {plugin_rect:?}, {logs_rect:?}"
+            );
+            assert_eq!(ctx.layer_id_at(overlap.center()), Some(expected));
+            assert!(app.settings.logs_open);
+        }
+    }
+    #[test]
+    fn system_window_selection_raises_existing_windows_and_keeps_modules_accessible() {
+        let ctx = egui::Context::default();
+        let mut app = StationDeck::with_settings(
+            Settings {
+                logs_open: true,
+                ..Default::default()
+            },
+            false,
+        );
+        let size = egui::vec2(1440.0, 1000.0);
+        for _ in 0..3 {
+            frame(&mut app, &ctx, size);
+        }
+        for page in [Page::Settings, Page::Tokens, Page::Modules] {
+            app.select_page(page);
+            let selected = app.focus.unwrap();
+            for _ in 0..3 {
+                frame(&mut app, &ctx, size);
+            }
+            let rect = ctx.memory(|m| m.area_rect(selected)).unwrap();
+            let logs = ctx
+                .memory(|m| m.area_rect(egui::Id::new("stationdeck.logs")))
+                .unwrap();
+            let overlap = rect.intersect(logs);
+            assert!(overlap.is_positive());
+            assert_eq!(
+                ctx.layer_id_at(overlap.center()),
+                Some(egui::LayerId::new(egui::Order::Middle, selected))
+            );
+            app.open_logs();
+            for _ in 0..3 {
+                frame(&mut app, &ctx, size);
+            }
+            assert_eq!(
+                ctx.layer_id_at(overlap.center()),
+                Some(egui::LayerId::new(
+                    egui::Order::Middle,
+                    egui::Id::new("stationdeck.logs")
+                ))
+            );
+        }
+        app.select_page(Page::Modules);
+        for _ in 0..3 {
+            frame(&mut app, &ctx, size);
+        }
+        app.modules.set_enabled("grpc", true).unwrap();
+        for _ in 0..3 {
+            frame(&mut app, &ctx, size);
+        }
+        let modules = egui::Id::new(("host", "Modules"));
+        let rect = ctx.memory(|m| m.area_rect(modules)).unwrap();
+        assert_eq!(
+            ctx.layer_id_at(rect.center()),
+            Some(egui::LayerId::new(egui::Order::Middle, modules))
         );
     }
     #[test]
